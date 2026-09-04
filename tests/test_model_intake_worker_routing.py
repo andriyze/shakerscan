@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
 import yaml
+from pydantic import ValidationError
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -129,3 +131,19 @@ def test_no_model_intake_request_model_accepts_a_placement():
         obj = getattr(router, name)
         if isinstance(obj, type) and issubclass(obj, BaseModel) and name.startswith("ModelIntake"):
             assert "placement" not in obj.model_fields, name
+
+
+@pytest.mark.parametrize(
+    "placement_payload",
+    [
+        {"placement": {"node_id": "remote-node-7"}},
+        {"options": {"placement": {"node_id": "remote-node-7"}}},
+    ],
+)
+def test_explicit_model_intake_placement_is_refused_with_a_stable_reason(placement_payload):
+    router = _router_module()
+    with pytest.raises(ValidationError, match=router.MODEL_INTAKE_PLACEMENT_REJECTED_REASON):
+        router.ModelIntakeScanRequest(
+            artifact_url="https://models.example/model.safetensors",
+            **placement_payload,
+        )

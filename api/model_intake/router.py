@@ -3428,6 +3428,16 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
 class ModelIntakeScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_remote_placement(cls, value: Any) -> Any:
+        """Model Intake is a control-plane-only workload, never a fleet-routed request."""
+        if isinstance(value, dict):
+            options = value.get("options")
+            if "placement" in value or (isinstance(options, dict) and "placement" in options):
+                raise ValueError(MODEL_INTAKE_PLACEMENT_REJECTED_REASON)
+        return value
+
     artifact_url: str
     name: Optional[str] = None
     intake_mode: Literal["admission", "preflight"] = Field(
