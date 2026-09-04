@@ -1,0 +1,110 @@
+name: Start approved 2.2.0 candidate
+
+# One-shot release operations branch only. This workflow cannot merge a PR,
+# publish a release, change stable/latest, or waive certification checks.
+on:
+  push:
+    branches: [ops/start-2.2.0-audit-candidate]
+    paths: [.github/workflows/start-approved-candidate.yml]
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: start-approved-2.2.0-audit-candidate
+  cancel-in-progress: false
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: andriyze/shakerscan
+      EXPECTED_PR_HEAD: 4b5b3a267676636631f4eaa27be1122eb6a6ca27
+    steps:
+      - name: Require protected merge of the tested audit PR
+        id: approved
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            pr="$(gh api "repos/$GH_REPO/pulls/80")"
+            jq -e --arg head "$EXPECTED_PR_HEAD" '.head.sha == $head and .head.ref == "fix/post-2.0-audit-release" and .base.ref == "main"' <<< "$pr" >/dev/null
+            if [[ "$(jq -r .merged <<< "$pr")" == true ]]; then
+              sha="$(jq -r .merge_commit_sha <<< "$pr")"
+              [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+              echo "candidate_sha=$sha" >> "$GITHUB_OUTPUT"
+              echo "Protected PR #80 merged as $sha." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            [[ "$(jq -r .state <<< "$pr")" == open ]]
+            echo 'PR #80 is not merged; no candidate dispatch is permitted.'
+            sleep 20
+          done
+          echo 'Protected merge was not observed within this preparation run.' >&2
+          exit 1
+
+      - name: Locate the exact-SHA main build and checks
+        id: runs
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.approved.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            runs="$(gh api "repos/$GH_REPO/actions/runs?head_sha=$CANDIDATE_SHA&event=push&per_page=100")"
+            build="$(jq -r '[.workflow_runs[] | select(.name == "Build candidate on main" and .head_branch == "main")][0].id // empty' <<< "$runs")"
+            codeql="$(jq -r '[.workflow_runs[] | select(.name == "CodeQL analysis" and .head_branch == "main")][0].id // empty' <<< "$runs")"
+            python="$(jq -r '[.workflow_runs[] | select(.name == "Python suite" and .head_branch == "main")][0].id // empty' <<< "$runs")"
+            if [[ "$build" =~ ^[0-9]+$ && "$codeql" =~ ^[0-9]+$ && "$python" =~ ^[0-9]+$ ]]; then
+              printf 'build=%s\ncodeql=%s\npython=%s\n' "$build" "$codeql" "$python" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Exact-SHA main build or required checks were not found.' >&2
+          exit 1
+
+      - name: Require the immutable build and exact-SHA checks to pass
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.approved.outputs.candidate_sha }}
+          BUILD_RUN: ${{ steps.runs.outputs.build }}
+          CODEQL_RUN: ${{ steps.runs.outputs.codeql }}
+          PYTHON_RUN: ${{ steps.runs.outputs.python }}
+        run: |
+          set -euo pipefail
+          for run in "$BUILD_RUN" "$CODEQL_RUN" "$PYTHON_RUN"; do
+            gh api "repos/$GH_REPO/actions/runs/$run" | jq -e --arg sha "$CANDIDATE_SHA" '.head_sha == $sha and .head_branch == "main" and .event == "push"' >/dev/null
+            gh run watch "$run" --repo "$GH_REPO" --exit-status --interval 30
+          done
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" | jq -e '.name == "Build candidate on main" and .conclusion == "success"' >/dev/null
+          gh api "repos/$GH_REPO/actions/runs/$CODEQL_RUN" | jq -e '.name == "CodeQL analysis" and .path == ".github/workflows/codeql.yml" and .conclusion == "success"' >/dev/null
+          gh api "repos/$GH_REPO/actions/runs/$PYTHON_RUN" | jq -e '.name == "Python suite" and .conclusion == "success"' >/dev/null
+
+      - name: Start existing certification without waivers or publication
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.approved.outputs.candidate_sha }}
+          CODEQL_RUN: ${{ steps.runs.outputs.codeql }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)" == "$CANDIDATE_SHA" ]]
+          version="$(gh api "repos/$GH_REPO/contents/VERSION?ref=$CANDIDATE_SHA" --jq .content | base64 --decode | tr -d '[:space:]')"
+          [[ "$version" == 2.2.0 ]]
+          existing="$(gh api "repos/$GH_REPO/actions/workflows/330570868/runs?head_sha=$CANDIDATE_SHA&event=workflow_dispatch&per_page=100" --jq '.workflow_runs[0].id // empty')"
+          if [[ -n "$existing" ]]; then
+            echo "Candidate already exists: https://github.com/$GH_REPO/actions/runs/$existing" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh workflow run release-candidate.yml --repo "$GH_REPO" --ref main \
+            -f version=2.2.0 -f candidate_sha="$CANDIDATE_SHA" -f codeql_run_id="$CODEQL_RUN"
+          echo "Dispatched 2.2.0 certification for $CANDIDATE_SHA. Both waiver inputs remain false. No publication or stable-channel change was requested." >> "$GITHUB_STEP_SUMMARY"
+          for attempt in $(seq 1 30); do
+            run="$(gh api "repos/$GH_REPO/actions/workflows/330570868/runs?head_sha=$CANDIDATE_SHA&event=workflow_dispatch&per_page=100" --jq '.workflow_runs[0].id // empty')"
+            if [[ "$run" =~ ^[0-9]+$ ]]; then
+              echo "Certification: https://github.com/$GH_REPO/actions/runs/$run" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Dispatch accepted; run listing has not converged yet.' >> "$GITHUB_STEP_SUMMARY"
