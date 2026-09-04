@@ -42,6 +42,8 @@ required_files=(
   db/configure-model-intake-signer-role.sh
   VERSION
   release-image-lock.env
+  install/release-images.json
+  install/release-images.sh
   README.md
   AGENTS.md
   CLAUDE.md

@@ -1426,6 +1426,12 @@ configure_runtime_mode() {
 
     release_version="$(get_release_version)"
 
+    if [ -f "$SCRIPT_DIR/install/release-images.sh" ]; then
+        # Generated from install/release-images.json. Curl installs ship this projection too, so
+        # source and installed lifecycle paths derive repository names from the same inventory.
+        . "$SCRIPT_DIR/install/release-images.sh"
+    fi
+
     if [ -n "${SCANNER_USE_PREBUILT:-}" ]; then
         RUNTIME_MODE_EXPLICIT=1
         if is_truthy "${SCANNER_USE_PREBUILT}"; then
@@ -1451,11 +1457,11 @@ configure_runtime_mode() {
 
     # The five release images. Every lifecycle path (pull, cache fallback, status, identity
     # checks) derives from this one list; keep it in step with install/release-images.json.
-    export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
-    export API_IMAGE_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
-    export UI_IMAGE_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
-    export MODEL_INTAKE_SIGNER_IMAGE_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}"
-    export MODEL_INTAKE_IMAGE_REPO="${MODEL_INTAKE_IMAGE_REPO:-shakerscan/shakerscan-model-intake}"
+    export SCANNER_IMAGE_REPO="${SCANNER_IMAGE_REPO:-${SCANNER_IMAGE_REPO_DEFAULT:-shakerscan/shakerscan-scanner}}"
+    export API_IMAGE_REPO="${API_IMAGE_REPO:-${API_IMAGE_REPO_DEFAULT:-shakerscan/shakerscan-api}}"
+    export UI_IMAGE_REPO="${UI_IMAGE_REPO:-${UI_IMAGE_REPO_DEFAULT:-shakerscan/shakerscan-ui}}"
+    export MODEL_INTAKE_SIGNER_IMAGE_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-${SIGNER_IMAGE_REPO_DEFAULT:-shakerscan/shakerscan-model-intake-signer}}"
+    export MODEL_INTAKE_IMAGE_REPO="${MODEL_INTAKE_IMAGE_REPO:-${MODEL_INTAKE_IMAGE_REPO_DEFAULT:-shakerscan/shakerscan-model-intake}}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shakerscan}"
     # The source Compose file consumes this exact image identity. Keeping the
     # build and sandbox retag on one explicit contract avoids guessing a tag

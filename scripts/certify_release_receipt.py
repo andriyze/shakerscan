@@ -11,6 +11,11 @@ import re
 import sys
 from typing import Any, Mapping, Sequence
 
+try:
+    from release_image_inventory import IMAGE_KEYS
+except ModuleNotFoundError:
+    from scripts.release_image_inventory import IMAGE_KEYS
+
 
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -97,7 +102,7 @@ def certify_receipt(
     if candidate.get("candidate_sha") != source_sha:
         raise CertificationError("candidate receipt does not bind the requested source SHA")
     images = candidate.get("images")
-    if not isinstance(images, Mapping) or set(images) != {"scanner", "api", "ui", "signer", "model_intake"}:
+    if not isinstance(images, Mapping) or set(images) != set(IMAGE_KEYS):
         raise CertificationError("candidate receipt must contain the five release images")
     if not all(SHA256.fullmatch(str(value)) for value in images.values()):
         raise CertificationError("candidate receipt contains a non-exact image digest")
