@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from api.scan.action_plan import _BATCH_PROFILES
-from api.scan.contracts import resolve_scan_contract
+from api.scan.action_plan import _BATCH_PROFILES, batch_profile_shape
+from api.scan.contracts import BUDGET_PROFILES, resolve_scan_contract
 from api.scan.external_process import (
     BATCH_ATTEMPT_BODY_FLOORS,
     BATCH_ATTEMPT_FLOORS,
@@ -110,7 +110,9 @@ def test_a_slice_can_fund_at_least_one_body_attempt(profile, capability):
     a body attempt would collapse breadth, and the manifest is ranked, so the expensive work that
     does run is the work most likely to matter. Anything beyond that is reported unattempted.
     """
-    slice_size, budget = _BATCH_PROFILES[profile][capability]
+    slice_size, budget = batch_profile_shape(
+        profile, capability, allow_state_changing_http=True,
+    )
     query_floor = BATCH_ATTEMPT_FLOORS[capability]
     body_floor = BATCH_ATTEMPT_BODY_FLOORS[capability]
     for dimension, body_amount in body_floor.items():
@@ -129,8 +131,6 @@ def test_lighter_batch_shapes_are_deliberately_unable_to_fund_a_body_attempt():
     alone: the attempt floor refuses the work and the candidate is reported unattempted, which the
     coverage accounting now surfaces.
     """
-    from api.scan.contracts import BUDGET_PROFILES
-
     body_wall = BATCH_ATTEMPT_BODY_FLOORS["sqli.verify_batch"]["tool_wall_seconds"]
     assert _BATCH_PROFILES["fast"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
     assert _BATCH_PROFILES["balanced"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
@@ -141,10 +141,43 @@ def test_lighter_batch_shapes_are_deliberately_unable_to_fund_a_body_attempt():
 def test_every_raised_batch_still_fits_its_profile_wall():
     # Raising a batch budget past what the plan can hold would fail admission outright, which is
     # how "reserved_budget exceeds the plan budget" is produced.
-    from api.scan.contracts import BUDGET_PROFILES
-
     for profile in ("balanced", "thorough", "deep"):
         ceiling = BUDGET_PROFILES[profile].max_tool_wall_seconds
         for capability in ("sqli.verify_batch", "xss.verify_batch"):
             _size, budget = _BATCH_PROFILES[profile][capability]
             assert budget["tool_wall_seconds"] <= ceiling, (profile, capability)
+
+
+def test_batch_reservations_preserve_the_fast_reference_share_of_each_ceiling():
+    reference_limits = BUDGET_PROFILES["fast"].ledger_limits()
+    for profile, shapes in _BATCH_PROFILES.items():
+        limits = BUDGET_PROFILES[profile].ledger_limits()
+        for capability, (_size, budget) in shapes.items():
+            reference_budget = _BATCH_PROFILES["fast"][capability][1]
+            for dimension, amount in budget.items():
+                expected = (
+                    int(reference_budget[dimension]) * int(limits[dimension])
+                    + int(reference_limits[dimension]) - 1
+                ) // int(reference_limits[dimension])
+                assert amount == expected, (profile, capability, dimension)
+
+
+def test_larger_profiles_fund_more_external_verifier_candidates_and_wall():
+    for capability in ("xss.verify_batch", "sqli.verify_batch"):
+        shapes = [_BATCH_PROFILES[name][capability] for name in BUDGET_PROFILES]
+        assert [shape[0] for shape in shapes] == sorted(shape[0] for shape in shapes)
+        assert [shape[1]["tool_wall_seconds"] for shape in shapes] == sorted(
+            shape[1]["tool_wall_seconds"] for shape in shapes
+        )
+
+
+def test_abundant_work_catalog_can_reserve_at_least_eighty_percent_of_profile_wall():
+    """One batch per capability plus a second active sweep represents abundant work."""
+    for profile, shapes in _BATCH_PROFILES.items():
+        wall = sum(
+            int(budget.get("tool_wall_seconds", 0))
+            for _size, budget in shapes.values()
+        ) + int(shapes["templates.active_batch"][1]["tool_wall_seconds"])
+        ceiling = BUDGET_PROFILES[profile].max_tool_wall_seconds
+        assert wall * 100 >= ceiling * 80, (profile, wall, ceiling)
+        assert wall <= ceiling, (profile, wall, ceiling)

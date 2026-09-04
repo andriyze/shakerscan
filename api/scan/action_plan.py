@@ -29,7 +29,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..runtime.models import TargetBinding
 
-from .contracts import SCAN_V2_INTERACTIVE_AUTH_KINDS
+from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
@@ -73,80 +73,94 @@ _BATCH_CAPABILITIES = frozenset({
 # it could pay for -- thorough declared 50 XSS candidates on a budget for 8, fast
 # declared 5 on a budget for 1 -- so a required verifier always left most of its
 # slice unattempted, reported its family partial, and marked the grade unreliable
-# on every scan of every profile. The sizes below are what each reservation
-# actually funds, and the reservations shrank to match, which lowers wall
-# pressure and lets the plan afford more batches over the same ceiling.
-_BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
-    "fast": {
-        "xss.verify_batch": (1, {"http_requests": 120, "tool_wall_seconds": 30}),
-        "sqli.verify_batch": (2, {"http_requests": 320, "tool_wall_seconds": 60}),
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
-        "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
-        "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
-        "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
-        "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
-        "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
-        "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
-        # The NoSQL verifier spends four requests per declared body field, so the
-        # earlier 8/candidate funded only two fields and marked ordinary larger
-        # bodies partial. Fund four fields per candidate (16 requests); the value
-        # sits far under the 1,000/200 fast ceiling.
-        "nosqli.verify_batch": (5, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
-        "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
-    },
-    "balanced": {
-        "xss.verify_batch": (3, {"http_requests": 360, "tool_wall_seconds": 90}),
-        "sqli.verify_batch": (5, {"http_requests": 800, "tool_wall_seconds": 150}),
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
-        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 300}),
-        "xss.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
-        "sqli.request_verify_batch": (10, {"http_requests": 20, "state_changing_requests": 20, "tool_wall_seconds": 120}),
-        "sqli.prove_batch": (10, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
-        "xss.browser_prove_batch": (10, {"browser_actions": 20, "http_requests": 500, "tool_wall_seconds": 240}),
-        "exposure.verify_batch": (60, {"http_requests": 400, "tool_wall_seconds": 180}),
-        # Four requests per field, four fields per candidate (see fast), under the 5,000/800 ceiling.
-        "nosqli.verify_batch": (10, {"http_requests": 160, "state_changing_requests": 160, "tool_wall_seconds": 150}),
-        "authz_surface.verify_batch": (20, {"http_requests": 200, "tool_wall_seconds": 150}),
-    },
-    "thorough": {
-        # 8 candidates in 240 seconds is 30 each, and dalfox paced to its request floor
-        # needs about 200 -- so every attempt was wall-killed and the family proved
-        # nothing while the plan left wall unused. Reservations already claim 2,882 of the
-        # 3,600 ceiling, so the fix is fewer candidates with enough time each, not more
-        # time for all of them: the manifest is ranked, so the attempts that do run are
-        # the ones most likely to matter.
-        "xss.verify_batch": (4, {"http_requests": 600, "tool_wall_seconds": 480}),
-        # The 2,000-unit active ceiling admits multiple required batches while
-        # retaining a conservative one-body-attempt hold in each slice.
-        # 10 candidates in 690 seconds is 69 each against sqlmap's measured ~150 to reach a
-        # verdict, so verify.sqli timed out on every run. Six at 130 each fits the same
-        # ceiling and still funds one body attempt beside five query attempts.
-        "sqli.verify_batch": (6, {
-            "http_requests": 1_280, "state_changing_requests": 480,
-            "tool_wall_seconds": 780,
-        }),
-        # Raised from 60 to 120 when every passive batch hit its slice exactly, and
-        # measured again at 120: the sweep still consumed 350/350 requests and
-        # 120/120 seconds and timed out, so 120 was the ceiling and not the cost.
-        # 240 lets a 50-template sweep finish; breadth still ranks below proof.
-        "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 240}),
-        # Same measurement: 3,392 of 4,000 requests but 300 of 300 seconds, so this
-        # batch was wall-bound rather than traffic-bound and left templates unrun.
-        "templates.active_batch": (50, {"http_requests": 4_000, "tool_wall_seconds": 600}),
-        "xss.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
-        "sqli.request_verify_batch": (20, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 180}),
-        "sqli.prove_batch": (25, {"http_requests": 200, "state_changing_requests": 200, "tool_wall_seconds": 180}),
-        "xss.browser_prove_batch": (25, {"browser_actions": 50, "http_requests": 1_250, "tool_wall_seconds": 600}),
-        "exposure.verify_batch": (80, {"http_requests": 600, "tool_wall_seconds": 240}),
-        # Four requests per field, four fields per candidate (see fast), under the 20,000/2,000 ceiling.
-        "nosqli.verify_batch": (25, {"http_requests": 400, "state_changing_requests": 400, "tool_wall_seconds": 240}),
-        "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
-    },
+# on every scan of every profile. The fast reference below is fundable; every
+# larger profile derives the same request/wall/browser share from its ceiling.
+_BATCH_REFERENCE_PROFILE: Mapping[str, tuple[int, Mapping[str, int]]] = {
+    "xss.verify_batch": (1, {"http_requests": 120, "tool_wall_seconds": 30}),
+    "sqli.verify_batch": (2, {"http_requests": 320, "tool_wall_seconds": 60}),
+    "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
+    "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
+    "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
+    "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
+    "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
+    "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
+    "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
+    # The NoSQL verifier spends four requests per declared body field, so the
+    # earlier 8/candidate funded only two fields and marked ordinary larger
+    # bodies partial. Fund four fields per candidate (16 requests).
+    "nosqli.verify_batch": (5, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
+    "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
 }
-# DAST-3 replaces these absolute shapes with ceiling shares. Until then the new
-# opt-in profile uses the known-safe thorough shapes under its larger ledger.
-_BATCH_PROFILES = {**_BATCH_PROFILES, "deep": _BATCH_PROFILES["thorough"]}
+
+_BATCH_PER_CANDIDATE: Mapping[str, Mapping[str, int]] = {
+    "xss.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2},
+    "sqli.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2},
+    "sqli.prove_batch": {"http_requests": 8, "state_changing_requests": 8},
+    "xss.browser_prove_batch": {"browser_actions": 2, "http_requests": 50},
+    "exposure.verify_batch": {"http_requests": 5},
+    "nosqli.verify_batch": {"http_requests": 16, "state_changing_requests": 16},
+    "authz_surface.verify_batch": {"http_requests": 8},
+}
+
+
+def _scaled_batch_profiles() -> Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]]:
+    """Scale every batch reservation as the same share of its profile ceiling."""
+    reference = _BATCH_REFERENCE_PROFILE
+    reference_limits = BUDGET_PROFILES["fast"].ledger_limits()
+    profiles: dict[str, dict[str, tuple[int, Mapping[str, int]]]] = {}
+    for profile_name, profile_budget in BUDGET_PROFILES.items():
+        limits = profile_budget.ledger_limits()
+        shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+        for capability_name, (reference_size, reference_budget) in reference.items():
+            budget = {
+                dimension: max(
+                    1,
+                    (
+                        int(amount) * int(limits[dimension])
+                        + int(reference_limits[dimension]) - 1
+                    ) // int(reference_limits[dimension]),
+                )
+                for dimension, amount in reference_budget.items()
+            }
+            floor = batch_attempt_floor(capability_name)
+            costs = floor or _BATCH_PER_CANDIDATE.get(capability_name) or {}
+            capacities = [
+                int(budget.get(dimension, 0)) // int(amount)
+                for dimension, amount in costs.items() if int(amount) > 0
+            ]
+            size = min(50, min(capacities)) if capacities else reference_size
+            shapes[capability_name] = (max(1, size), MappingProxyType(budget))
+        profiles[profile_name] = shapes
+    return MappingProxyType({name: MappingProxyType(value) for name, value in profiles.items()})
+
+
+_BATCH_PROFILES = _scaled_batch_profiles()
 _BATCH_TIER_ORDER: tuple[str, ...] = ("deep", "thorough", "balanced", "fast")
+
+
+def batch_profile_shape(
+    profile_name: str,
+    capability_name: str,
+    *,
+    allow_state_changing_http: bool = False,
+) -> tuple[int, Mapping[str, int]]:
+    profile = _BATCH_PROFILES.get(profile_name, _BATCH_PROFILES["balanced"])
+    size, raw_budget = profile[capability_name]
+    budget = dict(raw_budget)
+    if allow_state_changing_http and capability_name in {
+        "xss.verify_batch", "sqli.verify_batch",
+    }:
+        query_floor = batch_attempt_floor(capability_name)
+        body_floor = batch_attempt_floor(capability_name, body_candidate=True)
+        for dimension, amount in body_floor.items():
+            budget[dimension] = max(int(budget.get(dimension, 0)), int(amount))
+        mixed_capacities = [
+            1 + max(0, int(budget.get(dimension, 0)) - int(body_amount)) // int(query_floor[dimension])
+            for dimension, body_amount in body_floor.items()
+            if int(query_floor.get(dimension, 0)) > 0
+        ]
+        size = min(size, min(mixed_capacities)) if mixed_capacities else size
+    return max(1, size), MappingProxyType(budget)
 
 
 def _affordable_batch_tier(
@@ -154,28 +168,21 @@ def _affordable_batch_tier(
     *,
     budget_profile: str,
     limits: Mapping[str, int],
+    allow_state_changing_http: bool = False,
 ) -> tuple[int, Mapping[str, int]]:
-    """Pick the largest published batch shape this ledger can actually reserve.
+    """Pick the largest ceiling-scaled batch shape this ledger can reserve.
 
-    Batch reservations are absolute per-profile numbers, but a parallel endpoint
-    child carries the parent's profile NAME over a divided ledger. thorough
-    reserves 600 requests for one XSS slice; a child holding roughly a fifth of
-    the parent ceiling cannot pay that, and a required verifier then failed the
-    whole Scan closed -- "required Scan action verify.xss exceeds the plan
-    budget: {'http_requests': 483, 'tool_wall_seconds': 145}".
-
-    Step down through the published tiers instead of inventing a scale factor:
-    each one is already calibrated so its reservation funds its slice size, and
-    fast's single-candidate slice is the smallest shape that still verifies.
-    A child too small even for that keeps fast's shape and fails admission
-    honestly rather than silently planning work it cannot run.
+    Parallel children inherit the parent profile name but own a divided ledger,
+    so they may step down to a smaller published share. A child too small for the
+    fast floor fails admission rather than silently planning unfundable work.
     """
     tiers = _BATCH_TIER_ORDER
     start = tiers.index(budget_profile) if budget_profile in tiers else tiers.index("balanced")
     for name in tiers[start:]:
-        candidate = _BATCH_PROFILES[name].get(capability_name)
-        if candidate is None:
-            continue
+        candidate = batch_profile_shape(
+            name, capability_name,
+            allow_state_changing_http=allow_state_changing_http,
+        )
         _, reservation = candidate
         if all(
             int(limits.get(dimension, 0)) >= int(amount)
@@ -183,8 +190,10 @@ def _affordable_batch_tier(
             if int(amount) > 0
         ):
             return candidate
-    smallest = _BATCH_PROFILES[tiers[-1]].get(capability_name)
-    return smallest if smallest is not None else _BATCH_PROFILES["balanced"][capability_name]
+    return batch_profile_shape(
+        tiers[-1], capability_name,
+        allow_state_changing_http=allow_state_changing_http,
+    )
 
 
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -1148,10 +1157,11 @@ class ScanActionPlanCompiler:
             if override is not None:
                 return override
             if blueprint.capability_name in _BATCH_CAPABILITIES:
-                profile = _BATCH_PROFILES.get(
-                    execution_plan.budget_profile, _BATCH_PROFILES["balanced"],
+                batch_size, maximum = batch_profile_shape(
+                    execution_plan.budget_profile,
+                    blueprint.capability_name,
+                    allow_state_changing_http=policy.allow_state_changing_http,
                 )
-                batch_size, maximum = profile[blueprint.capability_name]
                 raw_slice = blueprint.capability_args.get("slice")
                 slice_count = (
                     int(raw_slice.get("count") or 0)
@@ -1185,22 +1195,6 @@ class ScanActionPlanCompiler:
                     )
                     for name, amount in maximum.items()
                 }
-                if (
-                    policy.allow_state_changing_http
-                    and blueprint.capability_name in {
-                        "xss.verify_batch", "sqli.verify_batch",
-                    }
-                ):
-                    # A discovered candidate manifest can mix query and body entries,
-                    # while its public reference intentionally reveals only a count.
-                    # Reserve enough for at least one body-class attempt in every
-                    # slice; the adapter then settles zero mutation units for a query
-                    # entry and the conservative hold for an executed POST entry.
-                    body_floor = batch_attempt_floor(
-                        blueprint.capability_name, body_candidate=True,
-                    )
-                    for name, amount in body_floor.items():
-                        budget[name] = max(int(budget.get(name, 0)), int(amount))
                 if (
                     policy.allow_state_changing_http
                     and blueprint.capability_name == "xss.browser_prove_batch"
@@ -1396,6 +1390,7 @@ class ScanActionPlanCompiler:
             batch_size, batch_budget = _affordable_batch_tier(
                 capability_name,
                 budget_profile=execution_plan.budget_profile,
+                allow_state_changing_http=policy.allow_state_changing_http,
                 limits={
                     name: max(0, int(limit) - int(reserved.get(name, 0)))
                     for name, limit in limits.items()

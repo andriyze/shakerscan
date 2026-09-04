@@ -40,8 +40,8 @@ _BUDGET_DIMENSIONS = frozenset({
 # at which point the wall kills it mid-scan (exit -9) and the attempt proves
 # nothing. The declared figure is therefore still short of what the tool really
 # costs, and raising it is a product decision: at 1400 requests per candidate the
-# fast profile's 1000-request ledger affords no XSS verification at all,
-# balanced affords 3 candidates and thorough 15.
+# fast profile's 5,000-request ledger affords 3 full-cost candidates,
+# balanced affords 14, thorough 42, and opt-in deep 107.
 #
 # Bounding the tool instead was tried and rejected on evidence. Against a
 # deliberately vulnerable reflector, unbounded dalfox reports a verified finding
@@ -63,12 +63,9 @@ BATCH_ATTEMPT_FLOORS: dict[str, dict[str, int]] = {
 # grants 30 seconds, which is why every body attempt in a real scan returned unproven while the
 # execution chain itself worked.
 #
-# These floors are deliberately set to what the work costs, not to what current profiles can
-# afford: `thorough` grants its sqli batch 1,600 requests and 300 seconds per ten-candidate slice,
-# so one body attempt exceeds an entire slice's wall budget. The consequence is that a body
-# candidate is reported as unattempted rather than run in a way that cannot reach a verdict --
-# which is the same principle the batch adapter already applies to query candidates. Making these
-# land needs a profile-ceiling decision, not a smaller floor.
+# These floors are deliberately set to what the work costs. The action planner scales query
+# reservations with the profile ceiling and, when state-changing HTTP is authorized, expands and
+# resizes a slice so it can fund at least one body attempt without diluting the measured cost.
 # Every request a body attempt sends is a mutation, so its state-changing cost equals its
 # request cost. These floors omitted the dimension entirely, which meant a body attempt
 # consumed nothing from `max_state_changing_requests` -- the ceiling that exists to bound
