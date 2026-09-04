@@ -1490,6 +1490,10 @@ class ScanActionPlanCompiler:
             entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
             manifest_offset = min(entry_count, offsets.get(base_action_id, 0))
             remaining_entries = max(0, entry_count - manifest_offset)
+            if continuation_round > 0 and manifest_ref and entry_count == 0:
+                # A materialized empty worklist is exhaustion, not the unknown
+                # admission surface. Do not append eight placeholder attempts.
+                return
             if entry_count:
                 total_batches = (
                     (remaining_entries + batch_size - 1) // batch_size

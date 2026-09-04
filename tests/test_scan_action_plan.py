@@ -155,15 +155,11 @@ def test_static_credentials_allocate_no_auth_input_action():
 
 
 def test_allocation_and_compilation_share_one_rule():
-    """The two must not drift: that drift is what broke authenticated scans."""
-    from api.scan.action_plan import interactive_auth_input_action_ids
+    """Both transports delegate credential allocation to the one round compiler."""
     import pathlib
-
-    # The worker delegates continuation compilation to scan.continuation_rounds.
-    for module in ("api/scan/continuation_rounds.py", "api/fleet_routes/router.py"):
-        source = (
-            pathlib.Path(__file__).resolve().parent.parent / module
-        ).read_text(encoding="utf-8")
-        assert "interactive_auth_input_action_ids(credential_refs)" in source, module
-        # The hand-rolled lane comprehension must be gone from both callers.
-        assert 'f"inputs.auth_{str(item.get(' not in source, module
+    root = pathlib.Path(__file__).resolve().parent.parent
+    shared = (root / "api/scan/continuation_rounds.py").read_text(encoding="utf-8")
+    broker = (root / "api/fleet_routes/router.py").read_text(encoding="utf-8")
+    assert "interactive_auth_input_action_ids(credential_refs)" in shared
+    assert "prepared = compile_next_continuation(" in broker
+    assert 'f"inputs.auth_{str(item.get(' not in shared + broker

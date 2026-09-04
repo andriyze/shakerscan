@@ -131,16 +131,8 @@ def _canonical_proof_contract_v2(
     }
 
 
-# CVSS 3.1 for cross-site scripting whose execution a deterministic verifier observed in the
-# target origin (a real browser proof or a structured alert). Script running in the victim
-# origin reads the DOM, storage tokens, and same-origin responses (C:H), can alter the page and
-# issue same-origin requests (I:L), needs the victim to open a link (UI:R), and lands in the
-# user's browser rather than the vulnerable server (S:C). The generic reflected-XSS vector
-# (C:L/I:L, 6.1) describes an unproven reflection; a proven execution is not capped at medium.
-XSS_EXECUTION_CVSS_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
-XSS_EXECUTION_CVSS_SCORE = 8.2
-
-
+# Execution proof establishes exploitability, not a universal CVSS impact vector.
+# Keep proof, qualitative severity, and a context-supported CVSS assessment independent.
 def _apply_xss_execution_evidence(
     finding: dict[str, Any],
     *,
@@ -150,13 +142,12 @@ def _apply_xss_execution_evidence(
     verifier: Any,
     dom_marker_executed: Any = None,
 ) -> None:
-    """Record the explicit CVSS and the execution sink of a proven cross-site scripting."""
-    finding["cvss_score"] = XSS_EXECUTION_CVSS_SCORE
-    finding["evidence"]["cvss"] = {
-        "score": XSS_EXECUTION_CVSS_SCORE,
-        "vector": XSS_EXECUTION_CVSS_VECTOR,
-        "basis": "script execution observed in the target origin by a deterministic verifier",
-    }
+    """Attach the execution sink without replacing a finding's impact assessment."""
+    finding["evidence"].setdefault("cvss", {
+        "status": "not_assessed",
+        "basis": "Execution proof alone does not establish privileges or confidentiality/integrity impact",
+        "required_context": ["attacker_privileges", "victim_context", "confidentiality_impact", "integrity_impact"],
+    })
     finding["evidence"]["execution_sink"] = {
         "location": str(location or "") or None,
         "parameter": str(parameter or "") or None,
@@ -179,7 +170,9 @@ def _base_finding(
         "title": title,
         "description": title,
         "severity": severity,
-        "cvss_score": {
+        # CWE-79 has no universal score: the deterministic proof does not establish
+        # a particular impact vector. The qualitative severity remains independent.
+        "cvss_score": None if cwe == "CWE-79" else {
             "critical": 9.5, "high": 8.0, "medium": 5.5, "low": 3.0,
         }.get(severity),
         "tool": tool,

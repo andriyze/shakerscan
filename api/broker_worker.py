@@ -36,6 +36,8 @@ from runtime.sealed_inputs import (
 from scan.action_adapter import DatabaseNeutralScanActionDispatcher
 from scan.activity import scan_action_activity_event
 from scan.action_plan import ScanActionPlan, ScanActionPlanError
+from scan.continuation import MAX_SCAN_PLAN_REVISION
+from scan.continuation_rounds import round_progress_window
 from scan.continuation import ScanContinuationError, ScanPlanRevision
 from scan.broker_backend import (
     BrokerActionHTTPError,
@@ -648,15 +650,17 @@ async def _execute_broker_action_plan(
         event_callback=action_activity_callback(
             plan,
             progress_start=5,
-            progress_end=95 if initial_has_finalizer else 45,
+            progress_end=95 if initial_has_finalizer else 40,
         ),
     ).run(plan)
-    if not initial_has_finalizer:
+    while not any(action.action_id == "finalize.report" for action in plan.actions):
+        if plan_revision.revision >= MAX_SCAN_PLAN_REVISION:
+            raise BrokerWorkerError("broker continuation exceeded its round bound")
         if any(
             result.status.value == "cancelled"
             for result in orchestration.action_results.values()
         ):
-            raise BrokerWorkerError("broker Scan was cancelled during discovery")
+            raise BrokerWorkerError("broker Scan was cancelled during execution")
         allocation_digest = str(
             options.get("scan_continuation_allocation_digest") or ""
         ).strip()
@@ -664,7 +668,9 @@ async def _execute_broker_action_plan(
             raise BrokerWorkerError(
                 "active broker Scan has no continuation allocation"
             )
+        parent_plan = plan
         parent_plan_digest = plan.plan_digest
+        parent_revision_number = plan_revision.revision
         response = await request(
             "POST",
             f"{base_path}/continuation",
@@ -697,9 +703,12 @@ async def _execute_broker_action_plan(
             ) from exc
         if (
             plan.scan_id != scan_id
-            or plan.actions[-1].action_id != "finalize.report"
+            or plan.execution_plan_digest != parent_plan.execution_plan_digest
+            or plan.target_binding_digest != parent_plan.target_binding_digest
+            or tuple(plan.actions[:len(parent_plan.actions)]) != parent_plan.actions
+            or len(plan.actions) <= len(parent_plan.actions)
             or plan_revision.scan_id != scan_id
-            or plan_revision.revision != 1
+            or plan_revision.revision != parent_revision_number + 1
             or plan_revision.plan_digest != plan.plan_digest
             or plan_revision.parent_plan_digest != parent_plan_digest
             or plan_revision.continuation_allocation_digest
@@ -738,13 +747,15 @@ async def _execute_broker_action_plan(
             scope_receipt_id=target.scope_receipt_id,
             approval_receipt_id=dispatcher.policy.approval_receipt_id,
         )
+        terminal = plan.actions[-1].action_id == "finalize.report"
+        progress_start, progress_end = (90, 95) if terminal else round_progress_window(plan_revision.revision)
         orchestration = await ScanOrchestrator(
             backend=backend,
             executor=executor,
             event_callback=action_activity_callback(
                 plan,
-                progress_start=45,
-                progress_end=95,
+                progress_start=progress_start,
+                progress_end=progress_end,
             ),
         ).run(plan)
     final = orchestration.action_results.get("finalize.report")

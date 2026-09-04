@@ -718,3 +718,34 @@ def test_path_candidate_identity_and_field_tampering_are_rejected():
             target_binding_digest=TARGET_DIGEST, source_action_ids=("x",),
             entries=(tampered,), status="complete", reason_code=None,
         )
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "HEAD"])
+def test_path_injection_never_invents_get_for_other_methods(method):
+    surface = _surface(query_keys=())
+    surface["endpoints"][0]["method"] = method
+    endpoint = build_endpoint_manifest(scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
+                                       surface_manifest=surface, source_action_ids=("discover.spec",))
+    candidates = build_candidate_manifest(endpoint, source_action_ids=("discover.spec",), maximum=100,
+                                           allow_state_changing_http=True)
+    assert not candidates.entries
+    assert candidates.status == "partial"
+    assert candidates.reason_code == "path_operation_not_supported"
+
+
+def test_legacy_non_get_path_candidate_is_rejected_at_execution():
+    from dataclasses import replace
+    surface = _surface(query_keys=())
+    endpoint = build_endpoint_manifest(scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
+                                       surface_manifest=surface, source_action_ids=("discover.spec",))
+    candidates = build_candidate_manifest(endpoint, source_action_ids=("discover.spec",), maximum=100)
+    # An old persisted candidate's method cannot silently become GET at either resolver.
+    candidate = {**dict(candidates.entries[0]), "method": "POST"}
+    legacy = object.__new__(ScanWorkManifest)
+    for name, value in candidates.__dict__.items():
+        object.__setattr__(legacy, name, value)
+    object.__setattr__(legacy, "entries", (candidate,))
+    with pytest.raises(ScanWorkManifestError, match="GET"):
+        execution_request_for_manifest_candidate(endpoint, legacy, 0)
+    with pytest.raises(ScanWorkManifestError, match="identity"):
+        execution_url_for_manifest_candidate(endpoint, legacy, 0)

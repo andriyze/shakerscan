@@ -211,47 +211,43 @@ def _continuation_option_patch(
     }
 
 
-async def materialize_local_scan_continuation(
-    runtime: ContinuationRuntime,
-    *,
-    parent_plan: ScanActionPlan,
-    allocation: ScanContinuationAllocation,
-    parent_results: Mapping[str, CapabilityResultReference],
-    revision_number: int = 1,
-    include_finalizer: bool = True,
-    finalize_only: bool = False,
-) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
-    """Compile, admit, and persist one continuation revision; ``None`` when nothing was admitted."""
+@dataclass(frozen=True)
+class PreparedContinuation:
+    plan: ScanActionPlan
+    revision: ScanPlanRevision
+    manifests: tuple[ScanWorkManifest, ...]
+    options: dict[str, Any]
+
+
+def compile_continuation_round(
+    *, parent_plan: ScanActionPlan, allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference], execution_plan: Any,
+    target: Any, target_url: str, options: Mapping[str, Any],
+    observations: Mapping[str, Any], request_manifests: tuple[ScanWorkManifest, ...],
+    revision_number: int, include_finalizer: bool, finalize_only: bool,
+) -> PreparedContinuation | None:
+    """The one pure round compiler used by both local and broker persistence paths.
+
+    Only root discovery observations define the immutable worklists. Every settled
+    action contributes to cumulative consumption; later rounds never get a new budget.
+    """
     if not 1 <= revision_number <= MAX_SCAN_CONTINUATION_ROUNDS + 1:
         raise ScanContinuationError("continuation revision is outside its bound")
     if finalize_only and not include_finalizer:
         raise ScanContinuationError("a finalizer-only revision must include the finalizer")
-    dispatcher = runtime.dispatcher
-    root_action_count = len(allocation.parent_action_ids)
-    root_actions = parent_plan.actions[:root_action_count]
-    root_results = {
-        action_id: parent_results[action_id]
-        for action_id in allocation.parent_action_ids
-        if action_id in parent_results
-    }
-    if set(root_results) != set(allocation.parent_action_ids):
-        raise ScanContinuationError(
-            "continuation is missing a terminal root action receipt"
-        )
-    observations = {
-        action.action_id: await dispatcher._observations(action.action_id)
-        for action in root_actions
-    }
-    request_manifests = await runtime.load_request_manifests(
-        scan_id=dispatcher.scan_id,
-        target_binding_digest=dispatcher.target.digest,
-        options=dispatcher.options,
-    )
+    if any(action.action_id == "finalize.report" for action in parent_plan.actions):
+        raise ScanContinuationError("cannot append work after the finalizer")
+    if not set(action.action_id for action in parent_plan.actions) <= set(parent_results):
+        raise ScanContinuationError("continuation is missing a terminal parent action receipt")
+    if any(result.status.value == "cancelled" for result in parent_results.values()):
+        raise ScanContinuationError("cancelled Scan cannot continue")
+    root_results = {key: parent_results[key] for key in allocation.parent_action_ids}
+    observations = {key: observations.get(key, ()) for key in allocation.parent_action_ids}
     endpoints, candidates = build_discovery_continuation_manifests(
         allocation=allocation,
-        target_url=dispatcher.target_url,
-        target=dispatcher.target,
-        options=dispatcher.options,
+        target_url=target_url,
+        target=target,
+        options=options,
         action_results=root_results,
         observations=observations,
         request_manifests=request_manifests,
@@ -275,16 +271,16 @@ async def materialize_local_scan_continuation(
     )
     credential_refs = [
         dict(item)
-        for item in dispatcher.options.get("credential_profile_refs") or ()
+        for item in options.get("credential_profile_refs") or ()
         if isinstance(item, Mapping)
     ]
     collection_refs = [
         dict(item)
-        for item in dispatcher.options.get("request_collections") or ()
+        for item in options.get("request_collections") or ()
         if isinstance(item, Mapping)
     ]
-    request_refs = dispatcher.options.get("request_manifest_refs")
-    template_ref = dispatcher.options.get("template_manifest_ref")
+    request_refs = options.get("request_manifest_refs")
+    template_ref = options.get("template_manifest_ref")
     # Derived from the compiler's own rule: only an interactive credential gets
     # an inputs.auth_* action, so allocating one per credential named actions
     # that were never created and the plan was rejected outright.
@@ -297,9 +293,9 @@ async def materialize_local_scan_continuation(
         for index, _item in enumerate(collection_refs)
     })
     continuation_raw = ScanActionPlanCompiler().compile(
-        scan_id=dispatcher.scan_id,
-        execution_plan=runtime.execution_plan,
-        target_binding=dispatcher.target,
+        scan_id=parent_plan.scan_id,
+        execution_plan=execution_plan,
+        target_binding=target,
         credential_profile_refs=credential_profile_action_refs(credential_refs),
         request_collection_refs=request_collection_action_refs(collection_refs),
         request_manifest_refs=(
@@ -371,32 +367,70 @@ async def materialize_local_scan_continuation(
     option_patch = _continuation_option_patch(
         endpoints, candidates, request_candidates, amended, revision,
     )
+    return PreparedContinuation(
+        plan=amended, revision=revision,
+        manifests=(endpoints, candidates, *((request_candidates,) if request_candidates is not None else ())),
+        options=option_patch,
+    )
+
+
+def compile_next_continuation(**kwargs: Any) -> PreparedContinuation:
+    """Admit one work round or exactly one terminal revision at exhaustion/the bound."""
+    prepared = None
+    if kwargs["revision_number"] <= MAX_SCAN_CONTINUATION_ROUNDS:
+        prepared = compile_continuation_round(**kwargs, include_finalizer=False, finalize_only=False)
+    if prepared is None:
+        prepared = compile_continuation_round(**kwargs, include_finalizer=True, finalize_only=True)
+    if prepared is None:
+        raise ScanContinuationError("terminal Scan continuation produced no finalizer")
+    return prepared
+
+
+async def materialize_local_scan_continuation(
+    runtime: ContinuationRuntime, *, parent_plan: ScanActionPlan,
+    allocation: ScanContinuationAllocation,
+    parent_results: Mapping[str, CapabilityResultReference],
+    revision_number: int = 1, include_finalizer: bool = True, finalize_only: bool = False,
+) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+    """Compile with the shared planner and persist one local continuation transaction."""
+    dispatcher = runtime.dispatcher
+    observations = {
+        action_id: await dispatcher._observations(action_id)
+        for action_id in allocation.parent_action_ids
+    }
+    request_manifests = await runtime.load_request_manifests(
+        scan_id=dispatcher.scan_id, target_binding_digest=dispatcher.target.digest,
+        options=dispatcher.options,
+    )
+    prepared = compile_continuation_round(
+        parent_plan=parent_plan, allocation=allocation, parent_results=parent_results,
+        execution_plan=runtime.execution_plan, target=dispatcher.target,
+        target_url=dispatcher.target_url, options=dispatcher.options,
+        observations=observations, request_manifests=request_manifests,
+        revision_number=revision_number, include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
+    )
+    if prepared is None:
+        return None
     async with runtime.db_pool.acquire() as conn:
         async with conn.transaction():
-            manifest_store = runtime.manifest_store_factory()
-            await manifest_store.persist(conn, manifest=endpoints)
-            await manifest_store.persist(conn, manifest=candidates)
-            if request_candidates is not None:
-                await manifest_store.persist(conn, manifest=request_candidates)
+            store = runtime.manifest_store_factory()
+            for manifest in prepared.manifests:
+                await store.persist(conn, manifest=manifest)
             await runtime.action_store_factory().amend_plan(
-                conn,
-                parent_plan=parent_plan,
-                amended_plan=amended,
-                allocation=allocation,
-                revision=revision,
+                conn, parent_plan=parent_plan, amended_plan=prepared.plan,
+                allocation=allocation, revision=prepared.revision,
             )
             await conn.execute(
                 """
-                UPDATE scans
-                SET options=options || $2::jsonb
+                UPDATE scans SET options=options || $2::jsonb
                 WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
                 """,
-                uuid.UUID(dispatcher.scan_id),
-                json.dumps(option_patch),
+                uuid.UUID(dispatcher.scan_id), json.dumps(prepared.options),
             )
-    dispatcher.options.update(option_patch)
+    dispatcher.options.update(prepared.options)
     runtime.record_event("continuation_compiled")
-    return amended, revision
+    return prepared.plan, prepared.revision
 
 
 def _cancelled(orchestration: Any) -> bool:
@@ -487,6 +521,9 @@ async def run_continuation_rounds(
 
 __all__ = [
     "ContinuationRuntime",
+    "PreparedContinuation",
+    "compile_continuation_round",
+    "compile_next_continuation",
     "load_continuation_request_manifests",
     "materialize_local_scan_continuation",
     "round_progress_window",

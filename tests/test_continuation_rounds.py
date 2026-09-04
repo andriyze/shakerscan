@@ -151,3 +151,126 @@ def test_selection_keeps_admitted_work_and_reports_an_empty_round():
     assert select_continuation_actions(
         skipped, parent_action_count=10, include_finalizer=False, finalize_only=False,
     ) is None
+
+
+def _shared_round_fixture(endpoint_count=16):
+    from api.scan.contracts import resolve_scan_contract
+    from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
+    from tests.test_scan_continuation import _target
+
+    parent, _, allocation = _plans()
+    target = _target()
+    template = build_canonical_scan_nuclei_template_manifest(
+        scan_id=parent.scan_id, target_binding_digest=target.digest, include_active=False,
+    )
+    return dict(
+        parent_plan=parent, allocation=allocation, parent_results={},
+        execution_plan=resolve_scan_contract(
+            budget_profile="balanced", policy={"active_testing": True, "include_families": ["xss"]},
+        ).execution_plan,
+        target=target, target_url="https://app.example.test", observations={}, request_manifests=(),
+        options={"template_manifest_ref": template.reference().canonical_dict(), "custom_endpoints": [
+            f"GET /route_{chr(97 + i // 26)}{chr(97 + i % 26)}?q=1" for i in range(endpoint_count)
+        ]},
+    )
+
+
+def _settle_round_fixture(fixture):
+    from api.scan.capability_result import CapabilityResultStatus
+    from tests.test_scan_orchestrator import _result
+    for action in fixture["parent_plan"].actions:
+        if action.action_id not in fixture["parent_results"]:
+            fixture["parent_results"][action.action_id] = replace(
+                _result(action, status=CapabilityResultStatus.SUCCESS),
+                budget_consumed={name: min(1, value) for name, value in action.requested_budget.items()},
+                result_digest=None,
+            )
+
+
+def test_real_local_and_broker_rounds_match_offsets_budgets_and_finalization():
+    from api.scan.continuation import reconciled_continuation_ceiling
+    from api.scan.continuation_rounds import compile_continuation_round, compile_next_continuation
+
+    fixture = _shared_round_fixture()
+    original_ceiling = None
+    seen = set()
+    rounds = []
+    for number in range(1, MAX_SCAN_CONTINUATION_ROUNDS + 2):
+        _settle_round_fixture(fixture)
+        ceiling = reconciled_continuation_ceiling(fixture["allocation"], fixture["parent_results"])
+        original_ceiling = original_ceiling or ceiling.copy()
+        assert all(value <= original_ceiling[key] for key, value in ceiling.items())
+        parent = fixture["parent_plan"]
+        broker = compile_next_continuation(**fixture, revision_number=number)
+        local = compile_continuation_round(
+            **fixture, revision_number=number, include_finalizer=False, finalize_only=False,
+        )
+        if local is None:
+            local = compile_continuation_round(
+                **fixture, revision_number=number, include_finalizer=True, finalize_only=True,
+            )
+        assert broker == local
+        assert broker.plan.actions[:len(parent.actions)] == parent.actions
+        assert broker.revision.parent_plan_digest == parent.plan_digest
+        appended = broker.plan.actions[len(parent.actions):]
+        for name, limit in ceiling.items():
+            assert sum(action.requested_budget.get(name, 0) for action in appended) <= limit
+        for action in appended:
+            lane = action.capability_args.get("continuation_work_key")
+            work = action.capability_args.get("slice")
+            if lane and work:
+                for index in range(work["start"], work["start"] + work["count"]):
+                    assert (lane, index) not in seen
+                    seen.add((lane, index))
+        rounds.append(broker)
+        fixture["parent_plan"] = broker.plan
+        if appended[-1].action_id == "finalize.report":
+            break
+    assert len(rounds) > 2
+    assert sum(action.action_id == "finalize.report" for action in rounds[-1].plan.actions) == 1
+    assert {index for lane, index in seen if lane == "verify.xss"} == set(range(16))
+    _settle_round_fixture(fixture)
+    with pytest.raises(ScanContinuationError, match="after the finalizer"):
+        compile_next_continuation(**fixture, revision_number=rounds[-1].revision.revision + 1)
+
+
+def test_real_round_compiler_requires_all_settlements_and_refuses_cancellation():
+    from api.scan.capability_result import CapabilityResultStatus, CapabilityResultReason
+    from api.scan.continuation_rounds import compile_next_continuation
+    from tests.test_scan_orchestrator import _result
+
+    fixture = _shared_round_fixture()
+    with pytest.raises(ScanContinuationError, match="terminal parent"):
+        compile_next_continuation(**fixture, revision_number=1)
+    _settle_round_fixture(fixture)
+    action = fixture["parent_plan"].actions[0]
+    fixture["parent_results"][action.action_id] = _result(
+        action, status=CapabilityResultStatus.CANCELLED, reason=CapabilityResultReason.CANCELLED,
+    )
+    with pytest.raises(ScanContinuationError, match="cancelled"):
+        compile_next_continuation(**fixture, revision_number=1)
+
+
+def test_materialized_empty_candidate_lane_stops_instead_of_replanning_placeholder_work():
+    from api.scan.continuation_rounds import compile_next_continuation
+    fixture = _shared_round_fixture(endpoint_count=0)
+    _settle_round_fixture(fixture)
+    first = compile_next_continuation(**fixture, revision_number=1)
+    assert not any(action.capability_name == "xss.verify_batch" for action in first.plan.actions)
+    fixture["parent_plan"] = first.plan
+    _settle_round_fixture(fixture)
+    last = compile_next_continuation(**fixture, revision_number=2)
+    assert last.plan.actions[-1].action_id == "finalize.report"
+
+
+def test_shared_compiler_accepts_static_principal_without_inventing_an_auth_action():
+    from api.scan.continuation_rounds import compile_next_continuation
+    fixture = _shared_round_fixture()
+    fixture["options"]["credential_profile_refs"] = [{
+        "profile_id": "90000000-0000-4000-8000-000000000001",
+        "version": 1, "digest": "a" * 64, "lane": "primary", "auth_kind": "bearer_token",
+    }]
+    _settle_round_fixture(fixture)
+    prepared = compile_next_continuation(**fixture, revision_number=1)
+    assert prepared is not None
+    assert not any(action.action_id.startswith("inputs.auth_") for action in prepared.plan.actions)

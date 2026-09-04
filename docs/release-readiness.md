@@ -24,6 +24,16 @@ This is the live release checklist. Source, migrations, generated inventories, i
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
 useful regression evidence, but do not qualify the frozen 2.2.0 candidate.
 
+## Post-2.0 audit correction pass
+
+The follow-up correction pass addresses spec base paths and references, local/broker continuation
+parity, GET-only path verification, and the separation of XSS execution proof from CVSS impact.
+Behavioral tests cover actual loopback path routing, equivalent inline/referenced definitions,
+method preservation, multiple continuation rounds, shared cumulative budgets, duplicate requests,
+cancellation, and terminal finalization. The exact corrected SHA still requires the complete
+Python/PR smoke checks and candidate certification. No historical measurement above qualifies
+this changed source, and the stable pointer must not move before public smoke.
+
 ## 2.2.0 decision record
 
 | Control | Decision | Owner | Date | Release consequence |

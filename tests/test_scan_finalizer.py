@@ -731,8 +731,8 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
     # A proven execution carries an explicit CVSS (not the generic 6.1 reflection vector that
     # capped browser-proven XSS at medium) and names the sink the verifier observed.
     assert finding["severity"] == "high"
-    assert finding["cvss_score"] == 8.2
-    assert finding["evidence"]["cvss"]["vector"] == "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
+    assert finding["cvss_score"] is None
+    assert finding["evidence"]["cvss"]["status"] == "not_assessed"
     assert finding["evidence"]["execution_sink"] == {
         "location": "fragment",
         "parameter": "q",
@@ -1039,3 +1039,20 @@ def test_finalizer_verified_findings_carry_the_universal_proof_envelope():
     reasons = report["result"]["score_reasons"]
     assert "proven_critical:1" in reasons, reasons
     assert not any(reason.startswith("suspected_critical") for reason in reasons), reasons
+
+
+def test_xss_execution_preserves_distinct_existing_impact_assessments():
+    vectors = [
+        (5.4, "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N"),
+        (8.2, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"),
+    ]
+    for score, vector in vectors:
+        assessment = {"score": score, "vector": vector, "basis": "separate impact assessment"}
+        finding = {"cvss_score": score, "proof_state": "verified", "evidence": {"cvss": assessment.copy()}}
+        finalizer_module._apply_xss_execution_evidence(
+            finding, location="request_parameter", parameter="q", signal="dialog", verifier="browser",
+        )
+        assert finding["cvss_score"] == score
+        assert finding["evidence"]["cvss"] == assessment
+        assert finding["proof_state"] == "verified"
+        assert finding["evidence"]["execution_sink"]["signal"] == "dialog"

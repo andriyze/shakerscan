@@ -231,7 +231,8 @@ def test_broker_worker_opens_only_lease_bound_private_scan_inputs():
             private_input_key=private_key,
         )
 
-def test_broker_action_plan_requests_and_executes_control_plane_continuation(monkeypatch):
+@pytest.mark.parametrize("work_rounds", [0, 2, 4])
+def test_broker_action_plan_requests_and_executes_control_plane_continuation(monkeypatch, work_rounds):
     job, lease, parent = _canonical_broker_action_lease()
     job.update({
         "target": "https://app.example.test",
@@ -297,13 +298,41 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
         },),
         continuation_plan_digest="c" * 64,
     )
+    # More than one work round must run before the finalizer, with each
+    # request naming its immediate parent, not the root allocation digest.
+    successors = []
+    previous = parent
+    for number in range(1, work_rounds + 2):
+        terminal = number == work_rounds + 1
+        action = replace(
+            finalizer if terminal else parent.actions[0],
+            action_id="finalize.report" if terminal else f"work.r{number:02d}",
+            ordinal=len(previous.actions),
+            dependencies=tuple(item.action_id for item in previous.actions),
+            action_digest=None,
+        )
+        next_plan = ScanActionPlan(
+            scan_id=parent.scan_id, execution_plan_digest=parent.execution_plan_digest,
+            target_binding_digest=parent.target_binding_digest,
+            actions=(*previous.actions, action),
+        )
+        next_revision = replace(
+            revision, revision=number, plan_digest=next_plan.plan_digest,
+            parent_plan_digest=previous.plan_digest, revision_digest=None,
+        )
+        successors.append((next_plan, next_revision))
+        previous = next_plan
+    amended, revision = successors[-1]
     calls = []
 
     def fake_api_request(_state, method, path, payload, **_kwargs):
+        index = len(calls)
+        assert payload["plan_digest"] == (parent if index == 0 else successors[index - 1][0]).plan_digest
         calls.append((method, path, payload))
+        next_plan, next_revision = successors[index]
         return {
-            "plan": amended.canonical_dict(),
-            "plan_revision": revision.canonical_dict(),
+            "plan": next_plan.canonical_dict(),
+            "plan_revision": next_revision.canonical_dict(),
             "options": {"candidate_manifest_ref": {"kind": "candidate"}},
             "allocation_digest": "d" * 64,
         }
@@ -340,7 +369,7 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
 
         async def run(self, plan):
             runs.append(plan.plan_digest)
-            if plan.plan_digest == parent.plan_digest:
+            if plan.actions[-1].action_id != "finalize.report":
                 return types.SimpleNamespace(
                     action_results={
                         parent.actions[0].action_id: types.SimpleNamespace(
@@ -376,13 +405,35 @@ def test_broker_action_plan_requests_and_executes_control_plane_continuation(mon
         worker_id="broker:node-1:container-a",
     ))
 
-    assert runs == [parent.plan_digest, amended.plan_digest]
+    assert runs == [parent.plan_digest, *(plan.plan_digest for plan, _ in successors)]
     assert calls[0][0] == "POST"
     assert calls[0][1].endswith("/continuation")
     assert calls[0][2]["plan_digest"] == parent.plan_digest
     assert report["canonical_action_execution"]["status_matrix"] == {
         "finalize.report": "success",
     }
+
+    if work_rounds >= 2:
+        calls.clear()
+        original_run = Orchestrator.run
+
+        async def cancel_second_round(self, plan):
+            result = await original_run(self, plan)
+            if plan.plan_digest == successors[1][0].plan_digest:
+                result.action_results = {"work.r02": types.SimpleNamespace(
+                    status=types.SimpleNamespace(value="cancelled"),
+                )}
+            return result
+
+        monkeypatch.setattr(Orchestrator, "run", cancel_second_round)
+        with pytest.raises(broker_worker.BrokerWorkerError, match="cancelled"):
+            asyncio.run(broker_worker._execute_broker_action_plan(
+                {"node_id": NODE_ID}, {"lease_id": "lease-1", "lease_token": "token-1"}, job,
+                plan=parent, plan_revision=root_scan_plan_revision(parent),
+                worker_id="broker:node-1:container-a",
+            ))
+        assert len(calls) == 2
+        monkeypatch.setattr(Orchestrator, "run", original_run)
 
     def stale_revision_response(_state, _method, _path, _payload, **_kwargs):
         return {
