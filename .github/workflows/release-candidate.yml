@@ -335,7 +335,7 @@ jobs:
               fi
             done
           '
-          test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10001:10001"
+          test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10002:10002"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
           test "$(docker run --rm --entrypoint sh shakerscan-api:release-candidate -c 'python3 -c '\''import json; print(json.load(open("/opt/shakerscan/release-manifest.json"))["version"])'\'')" = "${{ needs.meta.outputs.version }}"
 

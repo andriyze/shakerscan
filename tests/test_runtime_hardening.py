@@ -217,11 +217,11 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "pg_restore" in script
     assert "run_scenario scanner_dirty rollback" in script
     assert 'STABLE_VERSION="$(tr -d' in script
-    assert 'BASELINE_REF:-v${STABLE_VERSION}' in script
+    assert 'BASELINE_REF:-v${BASELINE_VERSION}' in script
     assert "previous-stable API/UI did not become healthy" in script
     # The previous-stable images are read from the RELEASES.md ledger row for the stable channel,
     # never hardcoded, so advancing install/STABLE_VERSION cannot leave the smoke on stale digests.
-    assert 'BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image scanner)}"' in script
+    assert 'BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image scanner)}"' in script
     ledger = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "release_ledger.py"), "--version",
          (ROOT / "install" / "STABLE_VERSION").read_text(encoding="utf-8").strip(), "--image", "scanner"],
@@ -774,6 +774,9 @@ UI_IMAGE_REPO=release-ui
 SCANNER_IMAGE_TAG=release-tag
 prepare_runtime_files() { :; }
 persist_remote_access_env() { :; }
+warn_if_ui_port_has_foreign_listener() { :; }
+resolve_docker_socket_gid() { printf '0\n'; }
+write_dotenv_value() { :; }
 resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
@@ -1134,6 +1137,9 @@ UI_IMAGE_REPO=release-ui
 SCANNER_IMAGE_TAG=release-tag
 prepare_runtime_files() { printf 'prepare\n'; }
 persist_remote_access_env() { :; }
+warn_if_ui_port_has_foreign_listener() { :; }
+resolve_docker_socket_gid() { printf '0\n'; }
+write_dotenv_value() { :; }
 resolve_start_workers() { printf '1\n'; }
 restart_worker_count() { printf '3\n'; }
 set_build_env() { :; }

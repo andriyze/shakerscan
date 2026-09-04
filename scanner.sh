@@ -550,6 +550,36 @@ finally:
 raise SystemExit(1)' "$host" "$port" 2>/dev/null
 }
 
+host_docker_socket_gid() {
+    local gid
+    gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || true)"
+    if [[ "$gid" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$gid"
+    else
+        printf '0\n'
+    fi
+}
+
+# The non-root API reaches the Docker socket through a supplementary group, and the group that
+# owns the socket INSIDE a container is not the host's: Docker Desktop mounts it root:root 0660
+# while the macOS host reports gid 1, so the host stat handed the API a useless group and
+# /workers and Model Intake staging failed with permission denied. Ask a container what it sees,
+# using an image the runtime already holds; fall back to the host view, then to root.
+resolve_docker_socket_gid() {
+    local image gid
+    for image in "${API_IMAGE:-}" "${SCANNER_IMAGE:-}"; do
+        [ -n "$image" ] || continue
+        docker image inspect "$image" >/dev/null 2>&1 || continue
+        gid="$(docker run --rm --entrypoint sh -v /var/run/docker.sock:/var/run/docker.sock "$image" \
+            -c 'stat -c %g /var/run/docker.sock' 2>/dev/null | tr -d '[:space:]')"
+        if [[ "$gid" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$gid"
+            return 0
+        fi
+    done
+    host_docker_socket_gid
+}
+
 warn_if_ui_port_has_foreign_listener() {
     local host="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"
     local port="${SHAKERSCAN_UI_PORT:-3000}"
@@ -1780,20 +1810,19 @@ prepare_runtime_files() {
     export MODEL_INTAKE_SANDBOX_GID="$sandbox_gid"
     write_dotenv_value MODEL_INTAKE_SANDBOX_UID "$MODEL_INTAKE_SANDBOX_UID"
     write_dotenv_value MODEL_INTAKE_SANDBOX_GID "$MODEL_INTAKE_SANDBOX_GID"
-    local api_uid api_gid docker_gid
+    local api_uid api_gid
     api_uid="$(id -u)"
     api_gid="$(id -g)"
     if [ "$api_uid" = "0" ]; then
-        api_uid=10001
-        api_gid=10001
-    fi
-    docker_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || true)"
-    if ! [[ "$docker_gid" =~ ^[0-9]+$ ]]; then
-        docker_gid=0
+        # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
+        api_uid=10002
+        api_gid=10002
     fi
     export SHAKERSCAN_API_UID="$api_uid"
     export SHAKERSCAN_API_GID="$api_gid"
-    export SHAKERSCAN_DOCKER_GID="$docker_gid"
+    # Provisional socket group for Compose calls that run before the API image exists;
+    # start_services resolves the real one from inside a container before compose_up.
+    export SHAKERSCAN_DOCKER_GID="${SHAKERSCAN_DOCKER_GID:-$(host_docker_socket_gid)}"
     write_dotenv_value SHAKERSCAN_API_UID "$SHAKERSCAN_API_UID"
     write_dotenv_value SHAKERSCAN_API_GID "$SHAKERSCAN_API_GID"
     write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
@@ -2154,6 +2183,10 @@ start_services() {
             build_local_images
             record_runtime_mode local
         fi
+    fi
+    if [ "$USE_PREBUILT" -eq 1 ]; then
+        export SHAKERSCAN_DOCKER_GID="$(resolve_docker_socket_gid)"
+        write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
     fi
     compose_up -d --scale worker=$start_workers
     if [ "$restore_device_workers" -gt 0 ]; then

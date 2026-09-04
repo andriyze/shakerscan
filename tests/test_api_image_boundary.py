@@ -84,15 +84,18 @@ def test_api_image_omits_worker_executables_and_defaults_to_non_root():
     assert "FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:" in dockerfile
     assert "COPY --from=scanner-runtime /opt/tools" not in dockerfile
     assert "test ! -e /opt/tools" in dockerfile
-    assert "USER 10001:10001" in dockerfile
+    assert "USER 10002:10002" in dockerfile
 
 
 def test_release_api_uses_host_identity_and_socket_supplementary_group():
     compose = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
-    assert 'user: "${SHAKERSCAN_API_UID:-10001}:${SHAKERSCAN_API_GID:-10001}"' in compose
+    assert 'user: "${SHAKERSCAN_API_UID:-10002}:${SHAKERSCAN_API_GID:-10002}"' in compose
+    # The sandbox keeps 10001; the API identity must differ from it by default.
+    assert 'user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"' in compose
     assert '"${SHAKERSCAN_DOCKER_GID:-0}"' in compose
     launcher = (ROOT / "scanner.sh").read_text(encoding="utf-8")
-    assert "stat -c '%g' /var/run/docker.sock" in launcher
+    assert "resolve_docker_socket_gid" in launcher
+    assert "-v /var/run/docker.sock:/var/run/docker.sock" in launcher
     assert "write_dotenv_value SHAKERSCAN_DOCKER_GID" in launcher
 
 

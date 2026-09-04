@@ -112,8 +112,8 @@ services:
           if [ -e "$$secret" ]; then chown "$$api_uid:$$api_gid" "$$secret"; fi
         done
     environment:
-      - SHAKERSCAN_API_UID=${SHAKERSCAN_API_UID:-10001}
-      - SHAKERSCAN_API_GID=${SHAKERSCAN_API_GID:-10001}
+      - SHAKERSCAN_API_UID=${SHAKERSCAN_API_UID:-10002}
+      - SHAKERSCAN_API_GID=${SHAKERSCAN_API_GID:-10002}
     volumes:
       - ./results:/results
       - ./.shakerscan-model-intake-runner-stage:/runner-stage
@@ -135,7 +135,9 @@ services:
     # the fixed Model Intake Firecracker guest through the mounted socket.
     # Workers continue to use SCANNER_IMAGE_REPO and carry no Docker client.
     image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
-    user: "${SHAKERSCAN_API_UID:-10001}:${SHAKERSCAN_API_GID:-10001}"
+    # 10002 by default: the Model Intake sandbox runs as 10001, and the web-facing API
+    # must never share an identity with the process that parses untrusted artifacts.
+    user: "${SHAKERSCAN_API_UID:-10002}:${SHAKERSCAN_API_GID:-10002}"
     group_add:
       - "${SHAKERSCAN_DOCKER_GID:-0}"
     # Resolve host-published services (e2e fixtures / honey targets) from inside

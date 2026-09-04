@@ -64,7 +64,7 @@ RUN set -eux; \
     test -n "$chrome_path"; \
     ln -sf "$chrome_path" /usr/bin/chromium; \
     ln -sf "$chrome_path" /usr/bin/google-chrome; \
-    useradd --uid 10001 --user-group --no-create-home --home-dir /tmp shakerscan-api; \
+    useradd --uid 10002 --user-group --no-create-home --home-dir /tmp shakerscan-api; \
     test ! -e /opt/tools; \
     for binary in nmap masscan hydra medusa nikto dirb gobuster dnsrecon; do \
         if command -v "$binary" >/dev/null 2>&1; then \
@@ -111,5 +111,5 @@ RUN chmod 0755 /app/api-entrypoint.sh && \
     python3 -c 'import asyncpg, fastapi, playwright, redis' && \
     python3 /app/release_identity.py --verify
 
-USER 10001:10001
+USER 10002:10002
 ENTRYPOINT ["/app/api-entrypoint.sh"]
