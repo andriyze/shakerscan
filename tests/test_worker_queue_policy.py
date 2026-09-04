@@ -19,7 +19,7 @@ def test_worker_roles_have_distinct_public_kinds_and_build_registries():
     assert worker_role(device_only=False, agent_tool_only=True) == (
         "agent_tool", "shakerscan:agent_tool_worker_build",
     )
-    with pytest.raises(ValueError, match="both device-only and agent-tool-only"):
+    with pytest.raises(ValueError, match="at most one dedicated role"):
         worker_role(device_only=True, agent_tool_only=True)
 
 
@@ -74,5 +74,48 @@ def test_worker_roles_are_mutually_exclusive():
             device_only=True,
             agent_tool_only=True,
             device_queue_enabled=False,
+            **QUEUES,
+        )
+
+
+def test_model_intake_worker_is_a_distinct_isolated_role():
+    assert worker_role(
+        device_only=False, agent_tool_only=False, model_intake_only=True
+    ) == ("model_intake", "shakerscan:model_intake_worker_build")
+
+
+def test_model_intake_worker_consumes_only_its_dedicated_queue():
+    assert base_worker_queue_keys(
+        device_only=False,
+        agent_tool_only=False,
+        model_intake_only=True,
+        device_queue_enabled=True,
+        model_intake_queue="model_intake_jobs",
+        **QUEUES,
+    ) == ["model_intake_jobs"]
+
+
+def test_web_dast_worker_never_consumes_the_model_intake_queue():
+    # A Web DAST worker must not pick up Model Intake work, so the Model Intake toolchain never has
+    # to live in the general scanner runtime once the image split lands.
+    queues = base_worker_queue_keys(
+        device_only=False,
+        agent_tool_only=False,
+        model_intake_only=False,
+        device_queue_enabled=True,
+        model_intake_queue="model_intake_jobs",
+        **QUEUES,
+    )
+    assert "model_intake_jobs" not in queues
+
+
+def test_a_worker_cannot_hold_two_dedicated_roles():
+    with pytest.raises(ValueError):
+        base_worker_queue_keys(
+            device_only=False,
+            agent_tool_only=True,
+            model_intake_only=True,
+            device_queue_enabled=False,
+            model_intake_queue="model_intake_jobs",
             **QUEUES,
         )

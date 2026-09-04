@@ -288,6 +288,10 @@ import logging
 
 logger = logging.getLogger("shakerscan.api.model_intake")
 QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
+# Model Intake scans run their own toolchain, so they route to a dedicated queue consumed only
+# by the isolated Model Intake worker -- never by a Web DAST worker. Keep this default aligned
+# with worker.py's MODEL_INTAKE_QUEUE_NAME.
+MODEL_INTAKE_QUEUE_NAME = os.environ.get("MODEL_INTAKE_QUEUE_NAME", "model_intake_jobs")
 
 @router.get("/model-intake/trust-anchors")
 async def list_model_intake_trust_anchors(active_only: bool = True):
@@ -2987,7 +2991,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    enqueue_job(r, QUEUE_NAME, job_data)
+    enqueue_job(r, MODEL_INTAKE_QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     response = {
@@ -3286,7 +3290,7 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    enqueue_job(r, QUEUE_NAME, job_data)
+    enqueue_job(r, MODEL_INTAKE_QUEUE_NAME, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     return {
