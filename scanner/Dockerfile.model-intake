@@ -19,9 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Model-intake evidence adapters live in separate, hash-locked virtual
 # environments. Their dependency graphs cannot alter the API/worker runtime.
-# Debian's venv seed may install setuptools even though the hash-locked pip-audit
-# graph does not depend on it. Remove that build tool after installation and
-# prove it is absent so it cannot require a runtime vulnerability waiver.
+# The installer (pip, which vendors msgpack) and any seeded setuptools are removed
+# from every environment after installation and proven absent, so no build tool can
+# require a runtime vulnerability waiver.
 COPY scanner/model_intake_tools /opt/model-intake-locks
 COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
@@ -36,9 +36,30 @@ RUN set -eu; \
         ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
       fi; \
     done; \
-    "/opt/model-intake-tools/pip-audit/bin/pip" uninstall -y setuptools; \
-    /opt/model-intake-tools/pip-audit/bin/python -c \
-      'import importlib.util; assert importlib.util.find_spec("setuptools") is None'; \
+    # Strip the installer from every tool environment once its hash-locked graph is in
+    # place. pip vendors msgpack 1.1.2 and setuptools 70.3.0 (its vendor.txt is what the
+    # release image scan reads), and those two were the only findings the release ever
+    # waived. No adapter needs pip at runtime, so the four tool environments lose it
+    # entirely. pip-audit's pip-api needs pip itself, so that environment keeps pip but
+    # loses the two vendored packages: the offline wrapper runs with --disable-pip, pip's
+    # HTTP cache (the only msgpack user) never runs, and the cache build two steps below
+    # proves the stripped pip still serves pip-api.
+    for tool in modelscan fickling semgrep safetensors; do \
+      "/opt/model-intake-tools/${tool}/bin/python" -m pip uninstall -y pip setuptools >/dev/null 2>&1 || \
+        "/opt/model-intake-tools/${tool}/bin/python" -m pip uninstall -y pip; \
+      "/opt/model-intake-tools/${tool}/bin/python" -c \
+        'import importlib.util as u; assert u.find_spec("pip") is None and u.find_spec("setuptools") is None'; \
+    done; \
+    "/opt/model-intake-tools/pip-audit/bin/python" -m pip uninstall -y setuptools >/dev/null 2>&1 || true; \
+    vendor="/opt/model-intake-tools/pip-audit/lib/python3.12/site-packages/pip/_vendor"; \
+    rm -rf "$vendor/msgpack" "$vendor/pkg_resources"; \
+    sed -i '/^msgpack==/d; /^setuptools==/d' "$vendor/vendor.txt"; \
+    "/opt/model-intake-tools/pip-audit/bin/python" -c \
+      'import importlib.util as u; assert u.find_spec("setuptools") is None; assert u.find_spec("pip._vendor.msgpack") is None; assert u.find_spec("pip._vendor.pkg_resources") is None'; \
+    ! grep -Eq "^(msgpack|setuptools)==" "$vendor/vendor.txt"; \
+    "/opt/model-intake-tools/pip-audit/bin/python" -m pip --version >/dev/null; \
+    "/opt/model-intake-tools/pip-audit/bin/pip-audit" --version >/dev/null; \
+    find /opt/model-intake-tools -depth -type d \( -name "setuptools" -o -name "setuptools-*.dist-info" -o -name "_distutils_hack" \) -exec rm -rf {} +; \
     install -m 0755 /opt/model-intake-locks/pip_audit_offline.py /opt/tools/pip-audit-offline; \
     mkdir -p /opt/pip-audit-cache; \
     /opt/tools/pip-audit-offline --build-cache \

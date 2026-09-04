@@ -62,7 +62,11 @@ def test_the_release_images_have_no_vulnerability_waivers():
     waivers = json.loads((ROOT / "security" / "image-vulnerability-waivers.json").read_text())["waivers"]
     assert waivers == []
     validator = (ROOT / "scripts" / "validate_vulnerability_waivers.py").read_text()
-    assert '"model-intake"' in validator
+    # The validator derives its image set from the canonical inventory, so the Model Intake
+    # image is a known waiver target without a literal copy of the name.
+    assert "release_image_inventory" in validator
+    inventory = json.loads((ROOT / "install" / "release-images.json").read_text())
+    assert "model_intake" in {item["key"] for item in inventory["images"]}
 
 
 def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
@@ -73,8 +77,17 @@ def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
     assert "msgpack==1.2.0" not in lock
     # setuptools is seeded by some distro venv implementations but is not in the
     # hash-locked runtime graph. Remove it and prove it is absent during the build.
-    assert 'pip-audit/bin/pip" uninstall -y setuptools' in MI
-    assert 'find_spec("setuptools") is None' in MI
+    # The four tool venvs lose pip (whose vendor.txt names msgpack 1.1.2 and setuptools 70.3.0)
+    # and setuptools outright. pip-audit keeps pip for pip-api but loses the two vendored
+    # packages; the build proves the stripped pip still serves pip-audit and its cache build.
+    assert 'for tool in modelscan fickling semgrep safetensors; do' in MI
+    assert '-m pip uninstall -y pip setuptools' in MI
+    assert 'rm -rf "$vendor/msgpack" "$vendor/pkg_resources"' in MI
+    assert "sed -i '/^msgpack==/d; /^setuptools==/d' \"$vendor/vendor.txt\"" in MI
+    assert 'find_spec("pip._vendor.msgpack") is None' in MI
+    assert MI.index('rm -rf "$vendor/msgpack"') < MI.index("/opt/tools/pip-audit-offline --build-cache")
+    offline = (ROOT / "scanner" / "model_intake_tools" / "pip_audit_offline.py").read_text()
+    assert "--disable-pip" in offline
 
 
 def _service(compose_path, name):
