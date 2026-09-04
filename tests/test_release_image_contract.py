@@ -197,7 +197,7 @@ def test_scanner_image_bakes_release_identity_for_broker_workers():
     for service in ("fleet-edge", "worker", "gungnir-worker"):
         assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" in _service_block(compose, service)
     assert "SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" in _service_block(compose, "api")
-    for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
+    for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox", "model-intake-worker"):
         assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" not in _service_block(compose, service)
     assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 2
     assert "Verify baked scanner release identity" in workflow

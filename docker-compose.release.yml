@@ -450,6 +450,49 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Model Intake artifact scanning runs its own toolchain in a dedicated worker, isolated from Web
+  # DAST slots. On the scanner image for now; the Model Intake image split points this at
+  # ${MODEL_INTAKE_IMAGE}.
+  model-intake-worker:
+    init: true
+    hostname: shakerscan-model-intake-worker
+    image: ${SCANNER_IMAGE:-shakerscan/shakerscan-scanner:latest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "shakerscan-fixtures.internal:host-gateway"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
+      - RESULTS_DIR=/results
+      - SCANNER_VERSION=${SCANNER_VERSION:-latest}
+      - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
+      - GIT_COMMIT=${GIT_COMMIT:-image:latest}
+      - MODEL_INTAKE_ONLY_WORKER=true
+      - MODEL_INTAKE_QUEUE_NAME=${MODEL_INTAKE_QUEUE_NAME:-model_intake_jobs}
+      - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
+      - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS:-30}
+      - SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS=${SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS:-5}
+      - SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT=${SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT:-3}
+    volumes:
+      - ./results:/results
+    command: ["python3", "/app/worker.py"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Opt-in connected-device capacity. It uses a separate queue and health
   # registry so enabling it cannot change Web DAST fleet freshness or slots.
   device-worker:

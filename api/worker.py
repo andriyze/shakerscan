@@ -399,13 +399,14 @@ QUEUE_NAME = 'scan_jobs'
 DEVICE_QUEUE_NAME = os.environ.get("DEVICE_QUEUE_NAME", "device_scan_jobs")
 DEVICE_ONLY_WORKER = str(os.environ.get("DEVICE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
 AGENT_TOOL_ONLY_WORKER = str(os.environ.get("AGENT_TOOL_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
-WORKER_BUILD_REGISTRY_KEY = worker_role(
-    device_only=DEVICE_ONLY_WORKER,
-    agent_tool_only=AGENT_TOOL_ONLY_WORKER,
-)[1]
+# A Model Intake worker runs the artifact toolchain isolated from Web DAST, so that toolchain can
+# live in a separate image no Web DAST worker needs. Flags are read live so a test can patch one.
+MODEL_INTAKE_ONLY_WORKER = str(os.environ.get("MODEL_INTAKE_ONLY_WORKER", "false")).strip().lower() in {"1", "true", "yes", "on"}
+WORKER_BUILD_REGISTRY_KEY = worker_role(device_only=DEVICE_ONLY_WORKER, agent_tool_only=AGENT_TOOL_ONLY_WORKER, model_intake_only=MODEL_INTAKE_ONLY_WORKER)[1]
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")
 BROKER_INGEST_QUEUE_NAME = os.environ.get("BROKER_INGEST_QUEUE_NAME", "broker_ingest_jobs")
 AGENT_TOOL_QUEUE_NAME = os.environ.get("AGENT_TOOL_QUEUE_NAME", "agent_tool_jobs")
+MODEL_INTAKE_QUEUE_NAME = os.environ.get("MODEL_INTAKE_QUEUE_NAME", "model_intake_jobs")
 ASM_RECON_RUN_KINDS = {"asm_recon"}
 ASM_BATCH_RUN_KINDS = {"asm_batch", "asm_dynamic_batch"}
 _RESEARCH_DISPATCH_CORRELATION_KEY = "research_dispatch_correlation"
@@ -23246,12 +23247,14 @@ async def async_main():
     base_queue_keys = base_worker_queue_keys(
         device_only=DEVICE_ONLY_WORKER,
         agent_tool_only=AGENT_TOOL_ONLY_WORKER,
+        model_intake_only=MODEL_INTAKE_ONLY_WORKER,
         device_queue_enabled=device_queue_enabled,
         scan_queue=QUEUE_NAME,
         retest_queue=RETEST_QUEUE_NAME,
         broker_queue=BROKER_INGEST_QUEUE_NAME,
         device_queue=DEVICE_QUEUE_NAME,
         agent_tool_queue=AGENT_TOOL_QUEUE_NAME,
+        model_intake_queue=MODEL_INTAKE_QUEUE_NAME,
     )
     queue_keys = list(base_queue_keys)
     print(
@@ -23447,10 +23450,7 @@ def _worker_build_report_payload() -> tuple[str, str]:
         "build_fingerprint": _worker_build_fingerprint(),
         "scanner_version": published_scanner_version(_published_scanner_version()),
         "node_id": os.environ.get("SHAKERSCAN_NODE_ID") or os.environ.get("FLEET_NODE_ID") or None,
-        "worker_kind": worker_role(
-            device_only=DEVICE_ONLY_WORKER,
-            agent_tool_only=AGENT_TOOL_ONLY_WORKER,
-        )[0],
+        "worker_kind": worker_role(device_only=DEVICE_ONLY_WORKER, agent_tool_only=AGENT_TOOL_ONLY_WORKER, model_intake_only=MODEL_INTAKE_ONLY_WORKER)[0],
         "tools": sorted(
             tool for tool, command in tool_commands.items() if shutil.which(command)
         ),
