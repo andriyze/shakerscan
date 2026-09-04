@@ -59,13 +59,14 @@ try:
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
     from runtime.scan_credentials import ScanCredentialError, bind_resolved_scan_credential, scan_credential_resolution_capability
     from runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
-    from scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
+    from scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from scan.action_store import PostgresScanActionStore
     from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
+    from scan.continuation_rounds import compile_next_continuation
     from scan.contracts import SCAN_AUTHENTICATION_KEYS
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from scan.executor import build_native_scan_execution
@@ -103,13 +104,14 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
     from ..runtime.scan_credentials import ScanCredentialError, bind_resolved_scan_credential, scan_credential_resolution_capability
     from ..runtime.sealed_inputs import SealedInputError, seal_private_input, validate_sealed_input_public_key
-    from ..scan.action_plan import ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
+    from ..scan.action_plan import ScanActionPlan, ScanActionPlanCompiler, ScanActionPlanError, credential_profile_action_refs, request_collection_action_refs, interactive_auth_input_action_ids
     from ..scan.action_store import PostgresScanActionStore
     from ..scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
     from ..scan.broker_execution import BrokerScanExecutionError, heartbeat_broker_scan_execution, settle_broker_scan_execution
     from ..scan.budget_allocator import ScanBudgetAllocationError, allocate_scan_action_plan
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
+    from ..scan.continuation_rounds import compile_next_continuation
     from ..scan.contracts import SCAN_AUTHENTICATION_KEYS
     from ..scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from ..scan.executor import build_native_scan_execution
@@ -1457,7 +1459,7 @@ async def continue_broker_scan_action_plan(
     body: BrokerScanContinuationRequest,
     request: Request,
 ):
-    """Apply the one preallocated discovery-derived Scan continuation."""
+    """Append the next preallocated round; retries return the same immutable successor."""
     await _broker_authenticated_node(node_id, request)
     async with _pool().acquire() as conn, conn.transaction():
         lease_row = await _broker_lease_row(
@@ -1484,6 +1486,14 @@ async def continue_broker_scan_action_plan(
         scan_id = str(lease_row.get("scan_id") or "")
         if not scan_id:
             raise HTTPException(status_code=409, detail="broker job has no Scan owner")
+        scan_row = await conn.fetchrow(
+            """
+            SELECT status, target_id, target_url, options, scan_job_payload,
+                   scan_continuation_applied_at
+            FROM scans WHERE id=$1 FOR UPDATE
+            """,
+            uuid.UUID(scan_id),
+        )
         action_store = PostgresScanActionStore()
         allocation = await action_store.load_continuation_allocation(
             conn, scan_id=scan_id,
@@ -1491,7 +1501,6 @@ async def continue_broker_scan_action_plan(
         if (
             allocation is None
             or allocation.allocation_digest != body.allocation_digest
-            or allocation.parent_plan_digest != body.plan_digest
         ):
             raise HTTPException(
                 status_code=409,
@@ -1502,14 +1511,6 @@ async def continue_broker_scan_action_plan(
             raise HTTPException(
                 status_code=409, detail="broker Scan action plan is unavailable",
             )
-        scan_row = await conn.fetchrow(
-            """
-            SELECT status, target_id, target_url, options, scan_job_payload,
-                   scan_continuation_applied_at
-            FROM scans WHERE id=$1
-            """,
-            uuid.UUID(scan_id),
-        )
         if not scan_row or str(scan_row.get("status") or "") in {
             "cancelled", "cancelling",
         }:
@@ -1533,57 +1534,45 @@ async def continue_broker_scan_action_plan(
             )
         options = parse_json_field(scan_row.get("options")) or {}
         options["_continuation_target_url"] = str(scan_row.get("target_url") or "")
-        if current_plan.plan_digest == allocation.parent_plan_digest:
+        revision = await action_store.load_plan_revision(conn, scan_id=scan_id)
+        if (
+            revision is None or revision.plan_digest != current_plan.plan_digest
+            or revision.scan_id != scan_id
+            or (revision.revision > 0 and revision.continuation_allocation_digest != allocation.allocation_digest)
+        ):
+            raise HTTPException(status_code=409, detail="broker Scan continuation revision is unavailable")
+        root_prefix = ScanActionPlan(
+            scan_id=current_plan.scan_id, execution_plan_digest=current_plan.execution_plan_digest,
+            target_binding_digest=current_plan.target_binding_digest,
+            actions=current_plan.actions[:len(allocation.parent_action_ids)],
+        )
+        if root_prefix.plan_digest != allocation.parent_plan_digest:
+            raise HTTPException(status_code=409, detail="broker continuation root authority changed")
+        continuation_options = {
+            key: options[key] for key in (
+                "endpoint_manifest_id", "endpoint_manifest_ref", "candidate_manifest_ref",
+                "request_candidate_manifest_ref", "scan_continuation_plan_digest", "scan_plan_revision",
+            ) if key in options
+        }
+        if body.plan_digest != current_plan.plan_digest:
+            # A lost response retries the parent digest. Do not append another round,
+            # even if the returned successor has already finished in the meantime.
+            if (revision.parent_plan_digest != body.plan_digest
+                    or revision.continuation_allocation_digest != allocation.allocation_digest):
+                raise HTTPException(status_code=409, detail="broker continuation input revision is stale")
+            amended = current_plan
+        elif any(action.action_id == "finalize.report" for action in current_plan.actions):
+            amended = current_plan
+        else:
             target_active = await conn.fetchval(
-                "SELECT is_active FROM targets WHERE id=$1",
-                uuid.UUID(str(canonical_job.target.target_id)),
+                "SELECT is_active FROM targets WHERE id=$1", uuid.UUID(str(canonical_job.target.target_id)),
             )
             if target_active is not True:
-                raise HTTPException(
-                    status_code=409, detail="broker Scan target is inactive",
-                )
-            amended, revision, continuation_options = (
-                await _materialize_broker_scan_continuation(
-                    conn,
-                    parent_plan=current_plan,
-                    canonical_job=canonical_job,
-                    options=options,
-                    allocation=allocation,
-                    worker_id=body.worker_id,
-                )
+                raise HTTPException(status_code=409, detail="broker Scan target is inactive")
+            amended, revision, continuation_options = await _materialize_broker_scan_continuation(
+                conn, parent_plan=current_plan, canonical_job=canonical_job, options=options,
+                allocation=allocation, worker_id=body.worker_id, revision_number=revision.revision + 1,
             )
-        else:
-            if (
-                scan_row.get("scan_continuation_applied_at") is None
-                or tuple(
-                    action.action_id
-                    for action in current_plan.actions[:len(allocation.parent_action_ids)]
-                ) != allocation.parent_action_ids
-                or current_plan.actions[-1].action_id != "finalize.report"
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="broker Scan plan changed outside continuation authority",
-                )
-            amended = current_plan
-            revision = await action_store.load_plan_revision(
-                conn, scan_id=scan_id,
-            )
-            if revision is None or revision.plan_digest != amended.plan_digest:
-                raise HTTPException(
-                    status_code=409,
-                    detail="broker Scan continuation revision is unavailable",
-                )
-            continuation_options = {
-                key: options[key]
-                for key in (
-                    "endpoint_manifest_id", "endpoint_manifest_ref",
-                    "candidate_manifest_ref", "request_candidate_manifest_ref",
-                    "scan_continuation_plan_digest",
-                    "scan_plan_revision",
-                )
-                if key in options
-            }
     return {
         "plan": amended.canonical_dict(),
         "options": continuation_options,
@@ -2985,6 +2974,7 @@ async def _materialize_broker_scan_continuation(
     options: Mapping[str, Any],
     allocation: ScanContinuationAllocation,
     worker_id: str,
+    revision_number: int = 1,
 ) -> tuple[ScanActionPlan, ScanPlanRevision, dict[str, Any]]:
     """Compile the broker continuation only from control-plane receipts."""
     backend = PostgresScanExecutionBackend(
@@ -3005,9 +2995,11 @@ async def _materialize_broker_scan_continuation(
         if result is None:
             raise HTTPException(
                 status_code=409,
-                detail="broker continuation requires every discovery action receipt",
+                detail="broker continuation requires every parent action receipt",
             )
         results[action.action_id] = result
+        if action.action_id not in allocation.parent_action_ids:
+            continue
         if result.observation_manifest_ref is None:
             observations[action.action_id] = ()
             continue
@@ -3061,110 +3053,13 @@ async def _materialize_broker_scan_continuation(
             request_manifests.append(manifest)
 
     try:
-        endpoints, candidates = build_discovery_continuation_manifests(
-            allocation=allocation,
+        prepared = compile_next_continuation(
+            parent_plan=parent_plan, allocation=allocation, parent_results=results,
+            execution_plan=canonical_job.execution_plan, target=canonical_job.target,
             target_url=str(options.get("_continuation_target_url") or "")
             or canonical_job.target.allowed_origins[0],
-            target=canonical_job.target,
-            options=options,
-            action_results=results,
-            observations=observations,
-            request_manifests=tuple(request_manifests),
-        )
-        request_candidates = (
-            build_request_candidate_manifest(
-                tuple(request_manifests),
-                source_action_ids=tuple(dict.fromkeys(
-                    action_id
-                    for manifest in request_manifests
-                    for action_id in manifest.source_action_ids
-                )),
-                maximum=max(
-                    1,
-                    min(2_000, allocation.budget_ceiling.get(
-                        "state_changing_requests", 0,
-                    )),
-                ),
-            )
-            if request_manifests else None
-        )
-        credential_refs = [
-            dict(item)
-            for item in options.get("credential_profile_refs") or ()
-            if isinstance(item, Mapping)
-        ]
-        collection_refs = [
-            dict(item)
-            for item in options.get("request_collections") or ()
-            if isinstance(item, Mapping)
-        ]
-        # Derived from the compiler's own rule: only an interactive credential
-        # gets an inputs.auth_* action, so allocating one per credential named
-        # actions that were never created and the plan was rejected outright.
-        zero_cost_existing_inputs = {
-            action_id: {}
-            for action_id in interactive_auth_input_action_ids(credential_refs)
-        }
-        zero_cost_existing_inputs.update({
-            f"inputs.collection_{index:02d}": {}
-            for index, _item in enumerate(collection_refs)
-        })
-        continuation_raw = ScanActionPlanCompiler().compile(
-            scan_id=parent_plan.scan_id,
-            execution_plan=canonical_job.execution_plan,
-            target_binding=canonical_job.target,
-            credential_profile_refs=credential_profile_action_refs(
-                credential_refs
-            ),
-            request_collection_refs=request_collection_action_refs(
-                collection_refs
-            ),
-            request_manifest_refs=(
-                {
-                    str(key): dict(value)
-                    for key, value in raw_request_refs.items()
-                    if isinstance(value, Mapping)
-                }
-                if isinstance(raw_request_refs, Mapping) else None
-            ),
-            endpoint_manifest_ref=endpoints.reference().canonical_dict(),
-            candidate_manifest_ref=candidates.reference().canonical_dict(),
-            request_candidate_manifest_ref=(
-                request_candidates.reference().canonical_dict()
-                if request_candidates is not None and request_candidates.entries
-                else None
-            ),
-            template_manifest_ref=(
-                dict(options["template_manifest_ref"])
-                if isinstance(options.get("template_manifest_ref"), Mapping)
-                else None
-            ),
-            action_scope="endpoint",
-            action_budgets=zero_cost_existing_inputs,
-        )
-        continuation_plan = allocate_scan_action_plan(
-            continuation_raw,
-            # Admit against what the settled root actions actually left, not the
-            # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
-            ContinuationBudgetCeiling(
-                reconciled_continuation_ceiling(allocation, results),
-            ),
-        ).plan
-        amended = merge_scan_action_continuation(
-            parent_plan=parent_plan,
-            continuation_plan=continuation_plan,
-            allocation=allocation,
-            parent_results=results,
-        )
-        revision = amended_scan_plan_revision(
-            parent_plan=parent_plan,
-            continuation_plan=continuation_plan,
-            amended_plan=amended,
-            allocation=allocation,
-            discovery_results=results,
-            work_manifest_references=unique_work_manifest_reference_dicts(
-                action.capability_args for action in continuation_plan.actions
-            ),
+            options=options, observations=observations,
+            request_manifests=tuple(request_manifests), revision_number=revision_number,
         )
     except (
         ScanActionPlanError,
@@ -3176,39 +3071,21 @@ async def _materialize_broker_scan_continuation(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     manifest_store = PostgresScanManifestStore()
-    await manifest_store.persist(conn, manifest=endpoints)
-    await manifest_store.persist(conn, manifest=candidates)
-    if request_candidates is not None:
-        await manifest_store.persist(conn, manifest=request_candidates)
+    for manifest in prepared.manifests:
+        await manifest_store.persist(conn, manifest=manifest)
     await PostgresScanActionStore().amend_plan(
-        conn,
-        parent_plan=parent_plan,
-        amended_plan=amended,
-        allocation=allocation,
-        revision=revision,
+        conn, parent_plan=parent_plan, amended_plan=prepared.plan,
+        allocation=allocation, revision=prepared.revision,
     )
-    continuation_options = {
-        "endpoint_manifest_id": str(endpoints.manifest_id),
-        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-        "candidate_manifest_ref": candidates.reference().canonical_dict(),
-        "request_candidate_manifest_ref": (
-            request_candidates.reference().canonical_dict()
-            if request_candidates is not None and request_candidates.entries
-            else None
-        ),
-        "scan_continuation_plan_digest": amended.plan_digest,
-        "scan_plan_revision": revision.canonical_dict(),
-    }
     await conn.execute(
         """
         UPDATE scans SET options=options || $2::jsonb
         WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
         """,
-        uuid.UUID(parent_plan.scan_id),
-        json.dumps(continuation_options),
+        uuid.UUID(parent_plan.scan_id), json.dumps(prepared.options),
     )
     record_operational_event(get_redis(), "continuation_compiled")
-    return amended, revision, continuation_options
+    return prepared.plan, prepared.revision, prepared.options
 
 
 def _broker_submitted_action_lease(

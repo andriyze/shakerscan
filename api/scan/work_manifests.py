@@ -1207,6 +1207,7 @@ def build_candidate_manifest(
     # content-addressed candidate ID better.  Observation order is irrelevant.
     selected: list[tuple[tuple[int, int], dict[str, Any]]] = []
     candidate_count = 0
+    unsupported_path_operations = False
     for endpoint in endpoint_manifest.entries:
         # A non-GET endpoint used to be skipped outright, so an application whose injectable
         # surface is a JSON body produced no candidates at all. Query parameters and declared body
@@ -1220,9 +1221,14 @@ def build_candidate_manifest(
                 for name in endpoint.get("browser_fragment_query_parameter_names") or ()
             )
         # A templated path segment (/api/orders/{int}) is an injectable value the query never names.
-        # It is read with a GET regardless of the endpoint's own method, so it needs no
-        # state-changing authority; the anchor name records the segment position.
-        path_segments = _templated_path_segments(str(endpoint["canonical_path"]))
+        # The URL-only sqlmap path adapter can only test GET operations. Do not invent a
+        # GET handler for a POST/PUT/DELETE route, even when mutation is authorized.
+        path_segments = (
+            _templated_path_segments(str(endpoint["canonical_path"]))
+            if endpoint["method"] == "GET" else []
+        )
+        if endpoint["method"] != "GET" and _templated_path_segments(str(endpoint["canonical_path"])):
+            unsupported_path_operations = True
         if endpoint["method"] != "GET":
             # ONE candidate for the whole declared body, not one per field. The verifier tests
             # every field in a single run and stops at the first vulnerable one, so per-field
@@ -1274,9 +1280,10 @@ def build_candidate_manifest(
         target_binding_digest=endpoint_manifest.target_binding_digest,
         source_action_ids=tuple(source_action_ids),
         entries=tuple(entries),
-        status="partial" if truncated or endpoint_manifest.status != "complete" else "complete",
+        status="partial" if truncated or unsupported_path_operations or endpoint_manifest.status != "complete" else "complete",
         reason_code=(
             "candidate_limit_reached" if truncated
+            else "path_operation_not_supported" if unsupported_path_operations
             else "endpoint_manifest_partial" if endpoint_manifest.status != "complete"
             else None
         ),
@@ -1825,7 +1832,7 @@ def execution_url_for_manifest_candidate(
     if candidate.get("parameter_location") == "path":
         segment_index = int(candidate.get("path_segment_index") or 0)
         if (
-            endpoint["method"] != candidate["method"]
+            endpoint["method"] != "GET" or candidate["method"] != "GET"
             or endpoint["canonical_path"] != candidate["canonical_path"]
             or segment_index not in _templated_path_segments(
                 str(endpoint["canonical_path"])
@@ -1904,6 +1911,8 @@ def execution_request_for_manifest_candidate(
             "candidate manifest index is outside immutable content"
         ) from exc
     if candidate.get("parameter_location") == "path":
+        if candidate.get("method") != "GET":
+            raise ScanWorkManifestError("path injection requires a GET operation")
         # A path candidate is a GET whose URL carries the sqlmap ``*`` marker at the segment; it
         # has no body and needs no state-changing authority.
         return {

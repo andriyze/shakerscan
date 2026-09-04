@@ -57,8 +57,12 @@ def test_path_templates_become_addressable_and_url_uses_the_bound_origin():
     spec = {"openapi": "3.0.0", "paths": {
         "/rest/products/{id}/reviews": {"get": {}},
     }, "servers": [{"url": "https://elsewhere.example"}]}
+    issues = []
+    assert discovered_route_records(spec, origin="https://app.example.test", issues=issues) == []
+    assert issues == ["spec_off_origin_server"]
+    spec["servers"] = [{"url": "https://app.example.test/api/v1"}]
     records = discovered_route_records(spec, origin="https://app.example.test")
-    assert records[0]["url"] == "https://app.example.test/rest/products/1/reviews"
+    assert records[0]["url"] == "https://app.example.test/api/v1/rest/products/1/reviews"
 
 
 def test_non_spec_documents_yield_nothing():

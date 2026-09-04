@@ -1865,7 +1865,9 @@ class DatabaseNeutralScanActionDispatcher:
                     or result.response_headers.get("Content-Type") or ""
                 ) or None
                 documents.append((spec_url, result.response_body, content_type))
-        routes = ingest_spec_bodies(documents, origin=base_origin)
+        ingestion_issues: list[str] = []
+        routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
+        errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
         consumed = {
@@ -1877,17 +1879,19 @@ class DatabaseNeutralScanActionDispatcher:
             consumed["tool_wall_seconds"] = min(wall_ceiling, max(1, attempted))
         return self._receipt(
             action,
-            status="success",
+            status="partial" if ingestion_issues else "success",
             parser_version="spec-ingest/v1",
             started_at=started_at,
             observations=observations,
             errors=tuple(errors[:20]),
             consumed=consumed,
+            partial=bool(ingestion_issues),
             redacted_execution={
                 "action_id": action.action_id,
                 "specs_probed": attempted,
                 "specs_parsed": len(documents),
                 "routes_declared": len(routes),
+                "ingestion_limitations": ingestion_issues,
                 "authenticated": bool(header_items),
             },
         )
