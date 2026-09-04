@@ -1,6 +1,6 @@
 name: Build release images
 
-# Reusable image build: construct the four release images for both platforms, push each by
+# Reusable image build: construct the five release images for both platforms, push each by
 # digest, assemble multi-arch manifest lists tagged candidate-<sha>-<run-id>, attest their
 # provenance, and upload the uncertified candidate receipt. It publishes no version tag, no
 # `latest`, no Git tag, and no GitHub Release -- exactly like the candidate build's own build and

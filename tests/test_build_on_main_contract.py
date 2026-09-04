@@ -1,6 +1,6 @@
 """`build-on-main` must produce the same certifiable candidate a release build does, and nothing more.
 
-Workstream 2 of the post-2.0.1 plan builds the four release images once per main commit so cutting a
+Workstream 2 of the post-2.0.1 plan builds the five release images once per image-affecting main commit so cutting a
 release is a certify-only step. This is additive: the release candidate still owns certification and
 the promotion workflows still own publication. These tests pin the safety envelope of the new
 producer -- it validates its own SHA, publishes no version tag or `latest`, and shares the exact
@@ -28,13 +28,18 @@ def _on(document):
     return document.get("on", document.get(True))
 
 
-def test_build_on_main_runs_on_main_pushes_and_skips_docs_only_changes():
+def test_build_on_main_runs_only_for_image_affecting_main_changes():
     on = _on(_doc(BUILD_ON_MAIN))
     assert on["push"]["branches"] == ["main"]
-    ignored = on["push"]["paths-ignore"]
-    # Docs, the license, and the ruleset cannot change any image, so they must not trigger a build.
-    for path in ("**/*.md", "docs/**", "LICENSE"):
-        assert path in ignored
+    paths = on["push"]["paths"]
+    for path in ("!**/*.md", "!docs/**", "!tests/**", "!.github/**", "!LICENSE"):
+        assert path in paths
+    for path in (
+        ".github/workflows/_build-images.yml",
+        ".github/workflows/build-on-main.yml",
+        ".github/workflows/release-candidate.yml",
+    ):
+        assert paths.index(path) > paths.index("!.github/**")
     # A manual re-build is available for a specific SHA.
     assert "sha" in on["workflow_dispatch"]["inputs"]
 
