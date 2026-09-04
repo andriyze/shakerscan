@@ -52,11 +52,16 @@ SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "standard_active": ("recon", "nuclei_passive", "xss", "sqli"),
     "custom": (),
 }
+# The minimum candidates a profile's ROOT plan executes per family when the target
+# offers them. These are what the profile can actually run at the measured cost of
+# an attempt (an external XSS candidate holds 200 s, a SQLi candidate 180 s), not a
+# breadth promise: the old quotas assumed 30-second candidates and were met only by
+# wall-killing every attempt. Continuation rounds add breadth beyond these floors.
 SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
-    "fast": {"xss": 5, "sqli": 5, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5},
-    "balanced": {"xss": 20, "sqli": 10, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10},
-    "thorough": {"xss": 100, "sqli": 50, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20},
-    "deep": {"xss": 250, "sqli": 125, "sensitive_exposure": 50, "nosqli": 60, "authz_surface": 50},
+    "fast": {"xss": 1, "sqli": 1, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5},
+    "balanced": {"xss": 4, "sqli": 4, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10},
+    "thorough": {"xss": 12, "sqli": 16, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20},
+    "deep": {"xss": 24, "sqli": 32, "sensitive_exposure": 50, "nosqli": 50, "authz_surface": 50},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": (

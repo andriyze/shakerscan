@@ -8,6 +8,7 @@ from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
 from api.scan.action_plan import (
     _affordable_batch_tier,
+    batch_profile_shape,
     ScanActionPlacementError,
     ScanActionPlanCompiler,
     ScanActionPlanError,
@@ -23,7 +24,7 @@ from api.scan.work_manifests import (
     build_canonical_passive_nuclei_template_manifest,
     build_canonical_scan_nuclei_template_manifest,
 )
-from api.scan.contracts import BUDGET_PROFILES
+from api.scan.contracts import BUDGET_PROFILES, SCAN_MINIMUM_FAMILY_QUOTAS
 from api.scan.execution import ScanExecutionPlan
 
 
@@ -31,7 +32,9 @@ SCAN_ID = str(uuid.UUID("10000000-0000-0000-0000-000000000001"))
 
 
 def _budget() -> ScanBudget:
-    return ScanBudget(1_200, 20_000, 2_000, 200, 5_000, 900, 4)
+    # The balanced profile as published; a fixture frozen at the 2.1.0 ceilings would size
+    # every batch below what an attempt is now funded to hold.
+    return BUDGET_PROFILES["balanced"]
 
 
 def _target() -> TargetBinding:
@@ -678,9 +681,11 @@ def test_explicit_xss_family_compiles_its_minimum_executable_quota():
     planned = sum(
         int(action.capability_args["slice"]["count"]) for action in actions
     )
-    assert planned >= 20, f"xss planned only {planned} candidates"
+    quota = SCAN_MINIMUM_FAMILY_QUOTAS["balanced"]["xss"]
+    assert planned >= quota, f"xss planned only {planned} candidates against a quota of {quota}"
+    slice_size = batch_profile_shape("balanced", "xss.verify_batch")[0]
     assert all(
-        int(action.capability_args["slice"]["count"]) <= 3 for action in actions
+        int(action.capability_args["slice"]["count"]) <= slice_size for action in actions
     ), "a balanced XSS slice must stay within what its reservation funds"
     allocation = allocate_scan_action_plan(plan, _budget())
     allocated_actions = [
@@ -1121,9 +1126,12 @@ def test_batch_shape_steps_down_when_siblings_have_claimed_the_ledger():
         "http_requests": 20_000, "tool_wall_seconds": 7_200,
         "state_changing_requests": 2_000, "browser_actions": 1_000,
     }
+    thorough_shape = batch_profile_shape("thorough", "xss.verify_batch")
     assert _affordable_batch_tier(
         "xss.verify_batch", budget_profile="thorough", limits=plenty,
-    ) == (4, {"http_requests": 600, "tool_wall_seconds": 480})
+    ) == thorough_shape
+    # Every candidate in the published shape holds its full measured time.
+    assert thorough_shape[1]["tool_wall_seconds"] // thorough_shape[0] >= 200
 
     # Left with less than thorough's slice: take the largest tier that fits.
     squeezed = {
@@ -1148,7 +1156,7 @@ def test_batch_shape_steps_down_when_siblings_have_claimed_the_ledger():
     # A profile never steps UP: fast stays fast on a large ledger.
     assert _affordable_batch_tier(
         "xss.verify_batch", budget_profile="fast", limits=plenty,
-    ) == (1, {"http_requests": 120, "tool_wall_seconds": 30})
+    ) == batch_profile_shape("fast", "xss.verify_batch")
 
 
 def test_a_plan_is_sized_by_the_ledger_that_will_reserve_it():
@@ -1224,7 +1232,9 @@ def test_a_plan_is_sized_by_the_ledger_that_will_reserve_it():
         ]
 
     # The parent ledger keeps thorough's published shape.
-    assert max(http_for(parent_sized, "xss.verify_batch")) == 600
+    assert max(http_for(parent_sized, "xss.verify_batch")) == (
+        batch_profile_shape("thorough", "xss.verify_batch")[1]["http_requests"]
+    )
     # The shard ledger still plans the family it was asked for.
     assert http_for(child_sized, "xss.verify_batch"), (
         "an explicitly requested family must still plan a verifier"

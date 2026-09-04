@@ -97,9 +97,9 @@ def test_batch_occurrences_project_to_the_action_the_parent_authorised():
 # could not fund a single body attempt, so the scanner planned body candidates it could never run
 # and reported them unattempted forever.
 
-# Only `thorough` and `deep` are sized for a body attempt. Their acceptance batches retain the
-# measured body floor; the lighter batch shapes intentionally do not.
-_BODY_CASES = [(profile, "sqli.verify_batch") for profile in ("thorough", "deep")]
+# Every profile from `balanced` up is sized for a body attempt; only `fast` (a 25-minute tool
+# wall) deliberately is not.
+_BODY_CASES = [(profile, "sqli.verify_batch") for profile in ("balanced", "thorough", "deep")]
 
 
 @pytest.mark.parametrize("profile,capability", _BODY_CASES, ids=lambda v: str(v))
@@ -123,19 +123,20 @@ def test_a_slice_can_fund_at_least_one_body_attempt(profile, capability):
         )
 
 
-def test_lighter_batch_shapes_are_deliberately_unable_to_fund_a_body_attempt():
-    """Fast and balanced keep short verifier slices despite their restored profile ceilings.
-
-    No slice sizing makes that fit, and raising `balanced` broke coverage-family sharding, where a
-    shard holds only a fraction of the plan budget. Rather than pretend, those profiles are left
-    alone: the attempt floor refuses the work and the candidate is reported unattempted, which the
-    coverage accounting now surfaces.
+def test_body_attempts_are_funded_once_mutation_is_authorized():
+    """A verifier slice never pre-holds a body attempt: `fast` stays a short query slice, and no
+    profile carries the 420-second body cost in its base shape. Once state-changing HTTP is
+    authorized the slice is expanded to fund at least one body attempt on every profile, so a
+    ranked login body is attempted instead of reported unattempted forever.
     """
     body_wall = BATCH_ATTEMPT_BODY_FLOORS["sqli.verify_batch"]["tool_wall_seconds"]
     assert _BATCH_PROFILES["fast"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
-    assert _BATCH_PROFILES["balanced"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
-    # thorough is the acceptance profile and must be able to fund one.
-    assert _BATCH_PROFILES["thorough"]["sqli.verify_batch"][1]["tool_wall_seconds"] >= body_wall
+    for profile in sorted(_BATCH_PROFILES):
+        _size, budget = batch_profile_shape(
+            profile, "sqli.verify_batch", allow_state_changing_http=True,
+        )
+        assert budget["tool_wall_seconds"] >= body_wall, profile
+        assert budget["state_changing_requests"] >= BATCH_ATTEMPT_BODY_FLOORS["sqli.verify_batch"]["state_changing_requests"], profile
 
 
 def test_every_raised_batch_still_fits_its_profile_wall():
@@ -148,18 +149,21 @@ def test_every_raised_batch_still_fits_its_profile_wall():
             assert budget["tool_wall_seconds"] <= ceiling, (profile, capability)
 
 
-def test_batch_reservations_preserve_the_fast_reference_share_of_each_ceiling():
-    reference_limits = BUDGET_PROFILES["fast"].ledger_limits()
+def test_every_candidate_holds_its_measured_time_on_every_profile():
+    """Bigger profiles buy more candidates, never less time per candidate."""
+    from api.scan.action_plan import _BATCH_ATTEMPT_COSTS
+
     for profile, shapes in _BATCH_PROFILES.items():
-        limits = BUDGET_PROFILES[profile].ledger_limits()
-        for capability, (_size, budget) in shapes.items():
-            reference_budget = _BATCH_PROFILES["fast"][capability][1]
-            for dimension, amount in budget.items():
-                expected = (
-                    int(reference_budget[dimension]) * int(limits[dimension])
-                    + int(reference_limits[dimension]) - 1
-                ) // int(reference_limits[dimension])
-                assert amount == expected, (profile, capability, dimension)
+        for capability, (size, budget) in shapes.items():
+            cost = _BATCH_ATTEMPT_COSTS[capability]
+            for dimension, per_attempt in cost.items():
+                assert budget[dimension] >= size * per_attempt, (profile, capability, dimension)
+    # The external verifiers hold what the tools were measured to need, not the 30 s floor.
+    for profile in _BATCH_PROFILES:
+        size, budget = _BATCH_PROFILES[profile]["xss.verify_batch"]
+        assert budget["tool_wall_seconds"] // size >= 200, profile
+        size, budget = _BATCH_PROFILES[profile]["sqli.verify_batch"]
+        assert budget["tool_wall_seconds"] // size >= 180, profile
 
 
 def test_larger_profiles_fund_more_external_verifier_candidates_and_wall():
@@ -169,15 +173,23 @@ def test_larger_profiles_fund_more_external_verifier_candidates_and_wall():
         assert [shape[1]["tool_wall_seconds"] for shape in shapes] == sorted(
             shape[1]["tool_wall_seconds"] for shape in shapes
         )
+    assert _BATCH_PROFILES["thorough"]["xss.verify_batch"][0] > _BATCH_PROFILES["balanced"]["xss.verify_batch"][0]
+    assert _BATCH_PROFILES["deep"]["sqli.verify_batch"][0] > _BATCH_PROFILES["thorough"]["sqli.verify_batch"][0]
 
 
-def test_abundant_work_catalog_can_reserve_at_least_eighty_percent_of_profile_wall():
-    """One batch per capability plus a second active sweep represents abundant work."""
+def test_one_batch_of_everything_fits_and_leaves_the_rounds_something_to_spend():
+    """One batch per capability plus a second active sweep never exceeds the ceiling.
+
+    The root plan is deliberately not sized to consume the whole wall in one pass: the
+    bounded continuation rounds keep planning further slices until the reconciled
+    residual cannot fund a fast-tier batch, so a large profile spends its ceiling on
+    breadth across rounds instead of front-loading one oversized slice per lane.
+    """
     for profile, shapes in _BATCH_PROFILES.items():
         wall = sum(
             int(budget.get("tool_wall_seconds", 0))
             for _size, budget in shapes.values()
         ) + int(shapes["templates.active_batch"][1]["tool_wall_seconds"])
         ceiling = BUDGET_PROFILES[profile].max_tool_wall_seconds
-        assert wall * 100 >= ceiling * 80, (profile, wall, ceiling)
         assert wall <= ceiling, (profile, wall, ceiling)
+        assert wall * 100 >= ceiling * 50, (profile, wall, ceiling)

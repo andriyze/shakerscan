@@ -65,76 +65,106 @@ _BATCH_CAPABILITIES = frozenset({
     "nosqli.verify_batch",
     "authz_surface.verify_batch",
 })
-# (slice_size, reservation) per capability. For any capability with a declared
-# per-attempt floor the reservation MUST fund the whole slice:
-# reservation[dim] >= slice_size * BATCH_ATTEMPT_FLOORS[capability][dim].
+# (slice_size, reservation) per capability, derived per profile from two measured
+# tables rather than hand-tuned absolutes.
 #
-# These were previously sized independently and every profile promised more than
-# it could pay for -- thorough declared 50 XSS candidates on a budget for 8, fast
-# declared 5 on a budget for 1 -- so a required verifier always left most of its
-# slice unattempted, reported its family partial, and marked the grade unreliable
-# on every scan of every profile. The fast reference below is fundable; every
-# larger profile derives the same request/wall/browser share from its ceiling.
-_BATCH_REFERENCE_PROFILE: Mapping[str, tuple[int, Mapping[str, int]]] = {
-    "xss.verify_batch": (1, {"http_requests": 120, "tool_wall_seconds": 30}),
-    "sqli.verify_batch": (2, {"http_requests": 320, "tool_wall_seconds": 60}),
-    "templates.passive_batch": (50, {"http_requests": 350, "tool_wall_seconds": 60}),
-    "templates.active_batch": (25, {"http_requests": 2_000, "tool_wall_seconds": 180}),
-    "xss.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
-    "sqli.request_verify_batch": (5, {"http_requests": 10, "state_changing_requests": 10, "tool_wall_seconds": 60}),
-    "sqli.prove_batch": (5, {"http_requests": 40, "state_changing_requests": 40, "tool_wall_seconds": 90}),
-    "xss.browser_prove_batch": (5, {"browser_actions": 10, "http_requests": 250, "tool_wall_seconds": 150}),
-    "exposure.verify_batch": (40, {"http_requests": 200, "tool_wall_seconds": 120}),
-    # The NoSQL verifier spends four requests per declared body field, so the
-    # earlier 8/candidate funded only two fields and marked ordinary larger
-    # bodies partial. Fund four fields per candidate (16 requests).
-    "nosqli.verify_batch": (5, {"http_requests": 80, "state_changing_requests": 80, "tool_wall_seconds": 120}),
-    "authz_surface.verify_batch": (10, {"http_requests": 80, "tool_wall_seconds": 90}),
+# _BATCH_ATTEMPT_COSTS is what ONE attempt really costs, on every dimension it
+# spends. These are the measured figures the adapters' floors were written from:
+# dalfox needs roughly 200 seconds per candidate when paced to its request floor
+# (700 requests funds it well past the 120-request floor it was starved at, and
+# leaves parallel shards able to fund more than one candidate); sqlmap reaches a verdict on an
+# obvious injection in about a hundred requests but blind techniques run to ~150
+# seconds. An earlier calibration sized slices to the 30-second attempt FLOOR
+# instead, so every profile promised candidates it could only wall-kill.
+#
+# _BATCH_WALL_SHARE is the fraction of the profile's tool wall one batch of a
+# capability may hold. A bigger profile therefore funds MORE candidates per slice
+# at the SAME per-candidate time, never less time per candidate. One batch of
+# every capability plus a second active sweep fits under the ceiling, and the
+# bounded continuation rounds keep planning further slices from each lane's next
+# unplanned index until the reconciled residual cannot fund a fast-tier batch.
+_BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
+    "xss.verify_batch": {"http_requests": 700, "tool_wall_seconds": 200},
+    "sqli.verify_batch": {"http_requests": 400, "tool_wall_seconds": 180},
+    # Per template. Measured: a 50-template passive sweep needs ~240 s; the active
+    # sweep was wall-bound at 300 s for 3,392 requests, so 18 s and 80 requests
+    # per template let it finish.
+    "templates.passive_batch": {"http_requests": 7, "tool_wall_seconds": 5},
+    "templates.active_batch": {"http_requests": 80, "tool_wall_seconds": 18},
+    "xss.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
+    "sqli.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
+    "sqli.prove_batch": {"http_requests": 8, "state_changing_requests": 8, "tool_wall_seconds": 12},
+    "xss.browser_prove_batch": {"browser_actions": 2, "http_requests": 50, "tool_wall_seconds": 45},
+    "exposure.verify_batch": {"http_requests": 5, "tool_wall_seconds": 3},
+    # The NoSQL verifier spends four requests per declared body field; fund four
+    # fields per candidate (16 requests).
+    "nosqli.verify_batch": {"http_requests": 16, "state_changing_requests": 16, "tool_wall_seconds": 12},
+    "authz_surface.verify_batch": {"http_requests": 8, "tool_wall_seconds": 6},
 }
-
-_BATCH_PER_CANDIDATE: Mapping[str, Mapping[str, int]] = {
-    "xss.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2},
-    "sqli.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2},
-    "sqli.prove_batch": {"http_requests": 8, "state_changing_requests": 8},
-    "xss.browser_prove_batch": {"browser_actions": 2, "http_requests": 50},
-    "exposure.verify_batch": {"http_requests": 5},
-    "nosqli.verify_batch": {"http_requests": 16, "state_changing_requests": 16},
-    "authz_surface.verify_batch": {"http_requests": 8},
+_BATCH_WALL_SHARE: Mapping[str, float] = {
+    "xss.verify_batch": 0.12,
+    "sqli.verify_batch": 0.14,
+    "templates.passive_batch": 0.06,
+    "templates.active_batch": 0.14,
+    "xss.request_verify_batch": 0.03,
+    "sqli.request_verify_batch": 0.03,
+    "sqli.prove_batch": 0.04,
+    "xss.browser_prove_batch": 0.10,
+    "exposure.verify_batch": 0.05,
+    "nosqli.verify_batch": 0.05,
+    "authz_surface.verify_batch": 0.05,
 }
+# A discovered candidate manifest can mix query and body entries while its public
+# reference reveals only a count. Every verifier slice therefore carries one
+# conservative body-attempt hold on the state-changing dimension -- the adapter
+# settles zero mutation units for a query entry and the hold for an executed POST
+# entry -- once the profile's mutation ceiling can pay for it beside the other
+# families (fast cannot).
+_BATCH_BODY_HOLD: Mapping[str, int] = {
+    "xss.verify_batch": 240,
+    "sqli.verify_batch": 480,
+}
+_BATCH_BODY_HOLD_MIN_CEILING = 2_000
+_BATCH_MAX_SLICE = 50
+# No single lane may hold more than this share of the tool wall in one compile:
+# a verifier that could afford the whole wall used to starve the proof stage the
+# Scan exists to reach. The later slices come back through continuation rounds.
+_LANE_WALL_SHARE = 0.25
+# Continuation rounds namespace every lane id with .rNN; slice shapes are keyed without it.
+_ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
 
 
-def _scaled_batch_profiles() -> Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]]:
-    """Scale every batch reservation as the same share of its profile ceiling."""
-    reference = _BATCH_REFERENCE_PROFILE
-    reference_limits = BUDGET_PROFILES["fast"].ledger_limits()
-    profiles: dict[str, dict[str, tuple[int, Mapping[str, int]]]] = {}
-    for profile_name, profile_budget in BUDGET_PROFILES.items():
-        limits = profile_budget.ledger_limits()
-        shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
-        for capability_name, (reference_size, reference_budget) in reference.items():
-            budget = {
-                dimension: max(
-                    1,
-                    (
-                        int(amount) * int(limits[dimension])
-                        + int(reference_limits[dimension]) - 1
-                    ) // int(reference_limits[dimension]),
-                )
-                for dimension, amount in reference_budget.items()
-            }
-            floor = batch_attempt_floor(capability_name)
-            costs = floor or _BATCH_PER_CANDIDATE.get(capability_name) or {}
-            capacities = [
-                int(budget.get(dimension, 0)) // int(amount)
-                for dimension, amount in costs.items() if int(amount) > 0
-            ]
-            size = min(50, min(capacities)) if capacities else reference_size
-            shapes[capability_name] = (max(1, size), MappingProxyType(budget))
-        profiles[profile_name] = shapes
-    return MappingProxyType({name: MappingProxyType(value) for name, value in profiles.items()})
+def _profile_batch_shapes(
+    limits: Mapping[str, int],
+) -> Mapping[str, tuple[int, Mapping[str, int]]]:
+    """Size every batch for one ledger: share of the wall at the measured cost."""
+    wall = int(limits.get("tool_wall_seconds") or 0)
+    requests = int(limits.get("http_requests") or 0)
+    state_changing = int(limits.get("state_changing_requests") or 0)
+    shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+    for capability_name, cost in _BATCH_ATTEMPT_COSTS.items():
+        share = _BATCH_WALL_SHARE[capability_name]
+        size = int((wall * share) // max(1, int(cost["tool_wall_seconds"])))
+        # Requests bound the slice too: no batch may hold more than the same
+        # share (plus headroom) of the request ceiling.
+        request_cost = int(cost.get("http_requests") or 0)
+        if request_cost:
+            size = min(size, int((requests * (share + 0.05)) // request_cost))
+        size = max(1, min(_BATCH_MAX_SLICE, size))
+        budget = {name: int(amount) * size for name, amount in cost.items()}
+        hold = _BATCH_BODY_HOLD.get(capability_name)
+        if hold and state_changing >= _BATCH_BODY_HOLD_MIN_CEILING:
+            budget["state_changing_requests"] = max(
+                int(budget.get("state_changing_requests", 0)), hold,
+            )
+        shapes[capability_name] = (size, MappingProxyType(budget))
+    return MappingProxyType(shapes)
 
 
-_BATCH_PROFILES = _scaled_batch_profiles()
+_BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = MappingProxyType({
+    name: _profile_batch_shapes(profile.ledger_limits())
+    for name, profile in BUDGET_PROFILES.items()
+})
 _BATCH_TIER_ORDER: tuple[str, ...] = ("deep", "thorough", "balanced", "fast")
 
 
@@ -169,15 +199,19 @@ def _affordable_batch_tier(
     budget_profile: str,
     limits: Mapping[str, int],
     allow_state_changing_http: bool = False,
+    batches: int = 1,
 ) -> tuple[int, Mapping[str, int]]:
     """Pick the largest ceiling-scaled batch shape this ledger can reserve.
 
     Parallel children inherit the parent profile name but own a divided ledger,
-    so they may step down to a smaller published share. A child too small for the
-    fast floor fails admission rather than silently planning unfundable work.
+    so they may step down to a smaller published share. ``batches`` is how many
+    slices the lane must fund together (a profile's published minimum): a shape
+    whose single slice fits but whose required second slice does not would fail
+    the Scan closed at admission, so the tier is chosen for the whole minimum.
     """
     tiers = _BATCH_TIER_ORDER
     start = tiers.index(budget_profile) if budget_profile in tiers else tiers.index("balanced")
+    needed = max(1, int(batches))
     for name in tiers[start:]:
         candidate = batch_profile_shape(
             name, capability_name,
@@ -185,15 +219,24 @@ def _affordable_batch_tier(
         )
         _, reservation = candidate
         if all(
-            int(limits.get(dimension, 0)) >= int(amount)
+            int(limits.get(dimension, 0)) >= int(amount) * needed
             for dimension, amount in reservation.items()
             if int(amount) > 0
         ):
             return candidate
-    return batch_profile_shape(
-        tiers[-1], capability_name,
-        allow_state_changing_http=allow_state_changing_http,
-    )
+    # The smallest shape that still verifies: one attempt at the declared floor. A
+    # parallel shard holding a sliver of the parent ledger keeps covering its
+    # candidates at the floor rather than skipping them; a ledger too small even for
+    # that keeps the floor shape and fails admission honestly.
+    return _floor_batch_shape(capability_name)
+
+
+def _floor_batch_shape(capability_name: str) -> tuple[int, Mapping[str, int]]:
+    floor = batch_attempt_floor(capability_name)
+    if floor:
+        return 1, MappingProxyType({name: int(amount) for name, amount in floor.items()})
+    cost = _BATCH_ATTEMPT_COSTS[capability_name]
+    return 1, MappingProxyType({name: int(amount) for name, amount in cost.items()})
 
 
 _FORBIDDEN_ACTION_KEYS = frozenset({
@@ -1183,16 +1226,27 @@ class ScanActionPlanCompiler:
             *primary_dependency, *candidate_dependencies,
         )))
 
+        # The shape each compiled slice was admitted at. A lane that stepped down to a
+        # smaller tier (a parallel shard, a starved continuation round) must request that
+        # tier's reservation, not the profile's: re-deriving the cost from the profile
+        # shape used to hand a floor-tier slice the full per-candidate cost and fail the
+        # child closed at allocation.
+        slice_shapes: dict[str, tuple[int, Mapping[str, int]]] = {}
+
         def blueprint_budget(blueprint: _ActionBlueprint) -> Mapping[str, int]:
             override = dict(action_budgets or {}).get(blueprint.action_id)
             if override is not None:
                 return override
             if blueprint.capability_name in _BATCH_CAPABILITIES:
-                batch_size, maximum = batch_profile_shape(
-                    execution_plan.budget_profile,
-                    blueprint.capability_name,
-                    allow_state_changing_http=policy.allow_state_changing_http,
-                )
+                shaped = slice_shapes.get(_ROUND_SUFFIX.sub("", blueprint.action_id))
+                if shaped is not None:
+                    batch_size, maximum = shaped
+                else:
+                    batch_size, maximum = batch_profile_shape(
+                        execution_plan.budget_profile,
+                        blueprint.capability_name,
+                        allow_state_changing_http=policy.allow_state_changing_http,
+                    )
                 raw_slice = blueprint.capability_args.get("slice")
                 slice_count = (
                     int(raw_slice.get("count") or 0)
@@ -1424,6 +1478,7 @@ class ScanActionPlanCompiler:
                 capability_name,
                 budget_profile=execution_plan.budget_profile,
                 allow_state_changing_http=policy.allow_state_changing_http,
+                batches=minimum_batches if required else 1,
                 limits={
                     name: max(0, int(limit) - int(reserved.get(name, 0)))
                     for name, limit in limits.items()
@@ -1466,6 +1521,13 @@ class ScanActionPlanCompiler:
             # authority over a budget; ``total_batches`` below still reserves it when
             # the candidate manifest is not yet materialized.
             count = max(1, affordable)
+            # One lane never holds more than its share of the wall in one compile,
+            # so verifiers cannot starve the proof stage; the remaining slices are
+            # picked up from this lane's next index by the continuation rounds.
+            lane_wall = int(batch_budget.get("tool_wall_seconds") or 0)
+            if lane_wall > 0:
+                lane_cap = int((int(limits.get("tool_wall_seconds", 0)) * _LANE_WALL_SHARE) // lane_wall)
+                count = min(count, max(minimum_batches, 1, lane_cap))
             count = min(
                 total_batches,
                 count,
@@ -1492,8 +1554,12 @@ class ScanActionPlanCompiler:
                     min(batch_size, max(0, entry_count - start))
                     if entry_count else 1
                 )
+                slice_id = (
+                    base_action_id if batch_index == 0 else f"{base_action_id}.{batch_index:03d}"
+                )
+                slice_shapes[slice_id] = (batch_size, batch_budget)
                 add(
-                    base_action_id if batch_index == 0 else f"{base_action_id}.{batch_index:03d}",
+                    slice_id,
                     stage,
                     capability_name,
                     {

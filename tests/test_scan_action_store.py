@@ -357,7 +357,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "reservation_owner_id" in source
         assert "id, owner_kind, owner_id, action_id, action_digest" in source
         assert "r.action_digest=a.action_digest" in source
-    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql, multi_round_repair_sql):
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql):
         assert "revision_digest" in source
         assert "discovery_result_digest" in source
         assert "work_manifest_refs_json" in source

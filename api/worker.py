@@ -232,6 +232,12 @@ from scan.continuation import (
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.continuation_rounds import (
+    ContinuationRuntime,
+    load_continuation_request_manifests,
+    materialize_local_scan_continuation,
+    run_continuation_rounds,
+)
 from scan.parallel_inputs import (
     ParallelScanInputError,
 )
@@ -11567,38 +11573,14 @@ async def _load_scan_continuation_request_manifests(
     target_binding_digest: str,
     options: Mapping[str, Any],
 ) -> tuple[ScanWorkManifest, ...]:
-    raw_refs = options.get("request_manifest_refs")
-    if not isinstance(raw_refs, Mapping):
-        return ()
-    references: list[ScanWorkManifestReference] = []
-    for raw in raw_refs.values():
-        if not isinstance(raw, Mapping):
-            continue
-        reference = ScanWorkManifestReference.from_dict(raw)
-        if reference.kind is not ScanWorkManifestKind.REQUEST:
-            raise ScanCapabilityContractError(
-                "continuation request manifest has the wrong kind"
-            )
-        references.append(reference)
-    manifests: list[ScanWorkManifest] = []
-    async with db_pool.acquire() as conn:
-        store = PostgresScanManifestStore()
-        for reference in references:
-            manifest = await store.load(
-                conn,
-                manifest_id=reference.manifest_id,
-                scan_id=scan_id,
-                expected_kind=reference.kind,
-                expected_digest=reference.manifest_digest,
-                expected_target_binding_digest=target_binding_digest,
-            )
-            if manifest is None or manifest.reference() != reference:
-                record_operational_event(get_redis(), "manifest_download_failure")
-                raise ScanCapabilityContractError(
-                    "continuation request manifest is unavailable"
-                )
-            manifests.append(manifest)
-    return tuple(manifests)
+    return await load_continuation_request_manifests(
+        db_pool=db_pool,
+        scan_id=scan_id,
+        target_binding_digest=target_binding_digest,
+        options=options,
+        on_missing=lambda: record_operational_event(get_redis(), "manifest_download_failure"),
+        manifest_store_factory=lambda: PostgresScanManifestStore(),
+    )
 
 
 async def _materialize_local_scan_continuation(
@@ -11612,250 +11594,24 @@ async def _materialize_local_scan_continuation(
     include_finalizer: bool = True,
     finalize_only: bool = False,
 ) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
-    if not 1 <= revision_number <= MAX_SCAN_CONTINUATION_ROUNDS + 1:
-        raise ScanContinuationError("continuation revision is outside its bound")
-    if finalize_only and not include_finalizer:
-        raise ScanContinuationError("a finalizer-only revision must include the finalizer")
-    root_action_count = len(allocation.parent_action_ids)
-    root_actions = parent_plan.actions[:root_action_count]
-    root_results = {
-        action_id: parent_results[action_id]
-        for action_id in allocation.parent_action_ids
-        if action_id in parent_results
-    }
-    if set(root_results) != set(allocation.parent_action_ids):
-        raise ScanContinuationError(
-            "continuation is missing a terminal root action receipt"
-        )
-    observations = {
-        action.action_id: await dispatcher._observations(action.action_id)
-        for action in root_actions
-    }
-    request_manifests = await _load_scan_continuation_request_manifests(
-        scan_id=dispatcher.scan_id,
-        target_binding_digest=dispatcher.target.digest,
-        options=dispatcher.options,
-    )
-    endpoints, candidates = build_discovery_continuation_manifests(
-        allocation=allocation,
-        target_url=dispatcher.target_url,
-        target=dispatcher.target,
-        options=dispatcher.options,
-        action_results=root_results,
-        observations=observations,
-        request_manifests=request_manifests,
-    )
-    request_candidates = (
-        build_request_candidate_manifest(
-            request_manifests,
-            source_action_ids=tuple(dict.fromkeys(
-                action_id
-                for manifest in request_manifests
-                for action_id in manifest.source_action_ids
-            )),
-            maximum=max(
-                1,
-                min(2_000, allocation.budget_ceiling.get(
-                    "state_changing_requests", 0,
-                )),
-            ),
-        )
-        if request_manifests else None
-    )
-    credential_refs = [
-        dict(item)
-        for item in dispatcher.options.get("credential_profile_refs") or ()
-        if isinstance(item, Mapping)
-    ]
-    collection_refs = [
-        dict(item)
-        for item in dispatcher.options.get("request_collections") or ()
-        if isinstance(item, Mapping)
-    ]
-    request_refs = dispatcher.options.get("request_manifest_refs")
-    template_ref = dispatcher.options.get("template_manifest_ref")
-    # Derived from the compiler's own rule: only an interactive credential gets
-    # an inputs.auth_* action, so allocating one per credential named actions
-    # that were never created and the plan was rejected outright.
-    zero_cost_existing_inputs = {
-        action_id: {}
-        for action_id in interactive_auth_input_action_ids(credential_refs)
-    }
-    zero_cost_existing_inputs.update({
-        f"inputs.collection_{index:02d}": {}
-        for index, _item in enumerate(collection_refs)
-    })
-    continuation_raw = ScanActionPlanCompiler().compile(
-        scan_id=dispatcher.scan_id,
-        execution_plan=execution_plan,
-        target_binding=dispatcher.target,
-        credential_profile_refs=credential_profile_action_refs(credential_refs),
-        request_collection_refs=request_collection_action_refs(collection_refs),
-        request_manifest_refs=(
-            {
-                str(key): dict(value)
-                for key, value in request_refs.items()
-                if isinstance(value, Mapping)
-            }
-            if isinstance(request_refs, Mapping) else None
+    """Compile and persist one continuation revision (see scan.continuation_rounds)."""
+    return await materialize_local_scan_continuation(
+        ContinuationRuntime(
+            db_pool=db_pool,
+            dispatcher=dispatcher,
+            execution_plan=execution_plan,
+            load_request_manifests=_load_scan_continuation_request_manifests,
+            record_event=lambda name: record_operational_event(get_redis(), name),
+            manifest_store_factory=lambda: PostgresScanManifestStore(),
+            action_store_factory=lambda: PostgresScanActionStore(),
         ),
-        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
-        candidate_manifest_ref=candidates.reference().canonical_dict(),
-        request_candidate_manifest_ref=(
-            request_candidates.reference().canonical_dict()
-            if request_candidates is not None and request_candidates.entries
-            else None
-        ),
-        template_manifest_ref=(
-            dict(template_ref) if isinstance(template_ref, Mapping) else None
-        ),
-        action_scope="endpoint",
-        action_budgets=zero_cost_existing_inputs,
-        # Every work revision receives a unique action namespace. The ninth
-        # revision is terminal-only and reuses round eight only while compiling
-        # the finalizer reservation; no round-eight work is appended twice.
-        continuation_round=min(revision_number, MAX_SCAN_CONTINUATION_ROUNDS),
-        manifest_offsets=continuation_manifest_offsets(parent_plan),
-        # The first continuation satisfies explicit family floors. Later rounds
-        # are opportunistic breadth and must stop cleanly when the residual can
-        # no longer fund a fast-tier batch.
-        require_family_minimums=revision_number == 1,
-    )
-    allocated_plan = allocate_scan_action_plan(
-        continuation_raw,
-        # Admit against what the settled root actions actually left, not the
-        # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
-        ContinuationBudgetCeiling(
-            reconciled_continuation_ceiling(allocation, parent_results),
-        ),
-    ).plan
-
-    # Keep the continuation plan independently valid while selecting only work
-    # that was actually admitted. Optional actions whose dependencies were
-    # skipped are omitted rather than appended as terminal noise. One graph slot
-    # is always retained for the finalizer, including during work-only rounds.
-    selected: list[ScanAction] = []
-    selected_ids: set[str] = set()
-    append_slots = max(0, 511 - len(parent_plan.actions))
-    appended_work = 0
-    for action in allocated_plan.actions:
-        is_input = action.action_id.startswith((
-            "inputs.auth_", "inputs.collection_",
-        ))
-        if is_input:
-            selected.append(action)
-            selected_ids.add(action.action_id)
-            continue
-        if action.action_id == "finalize.report":
-            continue
-        if finalize_only or action.admission_status != "planned":
-            continue
-        if any(dependency not in selected_ids for dependency in action.dependencies):
-            continue
-        if appended_work >= append_slots:
-            continue
-        selected.append(action)
-        selected_ids.add(action.action_id)
-        appended_work += 1
-
-    if not finalize_only and appended_work == 0:
-        return None
-    if include_finalizer:
-        finalizer = next(
-            action for action in allocated_plan.actions
-            if action.action_id == "finalize.report"
-        )
-        selected.append(replace(
-            finalizer,
-            dependencies=tuple(action.action_id for action in selected),
-            action_digest=None,
-        ))
-    continuation_plan = ScanActionPlan(
-        scan_id=allocated_plan.scan_id,
-        execution_plan_digest=allocated_plan.execution_plan_digest,
-        target_binding_digest=allocated_plan.target_binding_digest,
-        actions=tuple(
-            replace(action, ordinal=index, action_digest=None)
-            for index, action in enumerate(selected)
-        ),
-    )
-    amended = merge_scan_action_continuation(
         parent_plan=parent_plan,
-        continuation_plan=continuation_plan,
         allocation=allocation,
         parent_results=parent_results,
+        revision_number=revision_number,
         include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
     )
-    manifest_reference_values: list[Mapping[str, Any]] = [
-        endpoints.reference().canonical_dict(),
-        candidates.reference().canonical_dict(),
-        *(manifest.reference().canonical_dict() for manifest in request_manifests),
-    ]
-    if request_candidates is not None:
-        manifest_reference_values.append(
-            request_candidates.reference().canonical_dict()
-        )
-    if isinstance(template_ref, Mapping):
-        manifest_reference_values.append(dict(template_ref))
-    revision = amended_scan_plan_revision(
-        parent_plan=parent_plan,
-        continuation_plan=continuation_plan,
-        amended_plan=amended,
-        allocation=allocation,
-        discovery_results=parent_results,
-        work_manifest_references=unique_work_manifest_reference_dicts(
-            manifest_reference_values
-        ),
-        revision=revision_number,
-    )
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            manifest_store = PostgresScanManifestStore()
-            await manifest_store.persist(conn, manifest=endpoints)
-            await manifest_store.persist(conn, manifest=candidates)
-            if request_candidates is not None:
-                await manifest_store.persist(conn, manifest=request_candidates)
-            await PostgresScanActionStore().amend_plan(
-                conn,
-                parent_plan=parent_plan,
-                amended_plan=amended,
-                allocation=allocation,
-                revision=revision,
-            )
-            await conn.execute(
-                """
-                UPDATE scans
-                SET options=options || $2::jsonb
-                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
-                """,
-                uuid.UUID(dispatcher.scan_id),
-                json.dumps({
-                    "endpoint_manifest_id": str(endpoints.manifest_id),
-                    "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-                    "candidate_manifest_ref": candidates.reference().canonical_dict(),
-                    "request_candidate_manifest_ref": (
-                        request_candidates.reference().canonical_dict()
-                        if request_candidates is not None and request_candidates.entries
-                        else None
-                    ),
-                    "scan_continuation_plan_digest": amended.plan_digest,
-                    "scan_plan_revision": revision.canonical_dict(),
-                }),
-            )
-    dispatcher.options.update({
-        "endpoint_manifest_id": str(endpoints.manifest_id),
-        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-        "candidate_manifest_ref": candidates.reference().canonical_dict(),
-        "request_candidate_manifest_ref": (
-            request_candidates.reference().canonical_dict()
-            if request_candidates is not None and request_candidates.entries
-            else None
-        ),
-        "scan_continuation_plan_digest": amended.plan_digest,
-        "scan_plan_revision": revision.canonical_dict(),
-    })
-    record_operational_event(get_redis(), "continuation_compiled")
-    return amended, revision
 
 
 async def _execute_reserved_deterministic_scan(
@@ -11995,11 +11751,6 @@ async def _execute_reserved_deterministic_scan(
             raise ScanCapabilityContractError(
                 "active Scan has no upfront continuation allocation"
             )
-        all_results = dict(orchestration.action_results)
-        next_revision = (
-            int(plan_revision.revision) + 1 if plan_revision is not None else 1
-        )
-
         async def run_amended_plan(
             amended_plan: ScanActionPlan,
             amended_revision: ScanPlanRevision,
@@ -12029,7 +11780,7 @@ async def _execute_reserved_deterministic_scan(
                 scope_receipt_id=execution.target_binding.scope_receipt_id,
                 approval_receipt_id=admission.plan.policy.approval_receipt_id,
             )
-            amended_result = await ScanOrchestrator(
+            return await ScanOrchestrator(
                 backend=backend,
                 executor=amended_executor,
                 event_callback=_local_scan_action_activity_callback(
@@ -12041,64 +11792,22 @@ async def _execute_reserved_deterministic_scan(
                     backend=backend,
                 ),
             ).run(amended_plan)
-            return amended_result
 
-        try:
-            # Append one digest-bound work revision at a time. Recompilation
-            # starts each manifest lane at its first unplanned index and admits
-            # only what the cumulatively reconciled residual can still fund.
-            while next_revision <= MAX_SCAN_CONTINUATION_ROUNDS:
-                materialized = await _materialize_local_scan_continuation(
-                    parent_plan=plan,
-                    allocation=continuation_allocation,
-                    parent_results=all_results,
-                    dispatcher=dispatcher,
-                    execution_plan=execution.execution_plan,
-                    revision_number=next_revision,
-                    include_finalizer=False,
-                )
-                if materialized is None:
-                    break
-                plan, plan_revision = materialized
-                round_start = 40 + ((next_revision - 1) * 50 // MAX_SCAN_CONTINUATION_ROUNDS)
-                round_end = 40 + (next_revision * 50 // MAX_SCAN_CONTINUATION_ROUNDS)
-                orchestration = await run_amended_plan(
-                    plan,
-                    plan_revision,
-                    progress_start=round_start,
-                    progress_end=round_end,
-                )
-                all_results.update(orchestration.action_results)
-                if any(
-                    result.status.value == "cancelled"
-                    for result in orchestration.action_results.values()
-                ):
-                    raise ValueError("Cancelled by user")
-                next_revision += 1
-
-            # Finalization is its own immutable revision. This preserves a
-            # terminal report even when all eight work rounds were consumed and
-            # prevents an early finalizer from making later amendments invalid.
-            finalized = await _materialize_local_scan_continuation(
-                parent_plan=plan,
+        async def materialize_round(**kwargs: Any) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+            return await _materialize_local_scan_continuation(
                 allocation=continuation_allocation,
-                parent_results=all_results,
                 dispatcher=dispatcher,
                 execution_plan=execution.execution_plan,
-                revision_number=next_revision,
-                include_finalizer=True,
-                finalize_only=True,
+                **kwargs,
             )
-            if finalized is None:
-                raise ScanContinuationError(
-                    "terminal Scan continuation produced no finalizer"
-                )
-            plan, plan_revision = finalized
-            orchestration = await run_amended_plan(
-                plan,
-                plan_revision,
-                progress_start=90,
-                progress_end=95,
+
+        try:
+            plan, plan_revision, orchestration = await run_continuation_rounds(
+                plan=plan,
+                plan_revision=plan_revision,
+                initial_results=orchestration.action_results,
+                materialize=materialize_round,
+                run_round=run_amended_plan,
             )
         except ScanContinuationError as exc:
             record_operational_event(get_redis(), "continuation_rejected")
