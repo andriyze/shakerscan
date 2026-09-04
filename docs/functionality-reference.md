@@ -2421,15 +2421,15 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_QUEUE_DIR` | `scanner/scanner_tools/model_intake.py`, `scanner/scanner_tools/model_intake_providers.py` |
 | `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
-| `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
-| `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_UID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_UID` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |

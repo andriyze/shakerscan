@@ -98,3 +98,14 @@ def test_the_scanner_image_removes_the_base_images_virtualenv_remnants():
     assert 'find_spec("virtualenv") is None' in SCANNER
     # The removal happens in the scanner base, which the API and Model Intake images build from.
     assert SCANNER.index("uninstall -y --break-system-packages virtualenv") < SCANNER.index("uninstall -y --break-system-packages pip")
+
+
+def test_fleet_overlays_carry_no_model_intake_service():
+    """Fleet workers never consume the Model Intake queue (worker_queue_policy), and after the
+    split the fleet worker image has no toolchain, so a Model Intake sandbox on a fleet node
+    would only fail on start. The overlays must not define one."""
+    for name in ("docker-compose.worker.yml", "docker-compose.broker-worker.yml"):
+        overlay = yaml.safe_load((ROOT / name).read_text(encoding="utf-8"))
+        services = set((overlay.get("services") or {}).keys())
+        assert not {s for s in services if "model-intake" in s}, (name, sorted(services))
+        assert "model_intake_sandbox.py" not in (ROOT / name).read_text(encoding="utf-8")

@@ -972,14 +972,14 @@ def test_model_intake_sandbox_queue_is_private_and_runs_as_its_owner():
     assert "MODEL_INTAKE_SANDBOX_GID" in prepare_body
     assert "ensure_directory_mode results/model-intake-sandbox 700" in prepare_body
     assert "ensure_directory_mode results/model-intake-sandbox 777" not in prepare_body
-    for compose_name in (
-        "docker-compose.yml",
-        "docker-compose.release.yml",
-        "docker-compose.worker.yml",
-        "docker-compose.broker-worker.yml",
-    ):
+    # The sandbox exists only on the control plane: fleet overlays carry no Model Intake
+    # service (its toolchain lives in the dedicated image, and fleet workers never consume
+    # the Model Intake queue), so only the two main Compose files pin the sandbox user.
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         assert 'user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"' in compose
+    for compose_name in ("docker-compose.worker.yml", "docker-compose.broker-worker.yml"):
+        assert "model-intake-sandbox" not in (ROOT / compose_name).read_text()
 
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     assert "useradd --uid 10001 --user-group --create-home scanner" in dockerfile
