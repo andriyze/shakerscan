@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavioral acceptance for the single-pass scanner/API image architecture.
+# Behavioral acceptance for the scanner-derived, slim API image architecture.
 
 set -euo pipefail
 
@@ -30,13 +30,6 @@ else
         "$ROOT_DIR"
 fi
 
-worker_layers="$(docker image inspect "$WORKER_IMAGE" --format '{{json .RootFS.Layers}}')"
-api_layers="$(docker image inspect "$API_IMAGE" --format '{{json .RootFS.Layers}}')"
-jq -en --argjson worker "$worker_layers" --argjson api "$api_layers" '
-    ($api | length) == (($worker | length) + 1) and
-    $api[0:($worker | length)] == $worker
-' >/dev/null
-
 worker_manifest="$(docker run --rm --entrypoint sh "$WORKER_IMAGE" -ceu 'cat /opt/shakerscan/release-manifest.json')"
 api_manifest="$(docker run --rm --entrypoint sh "$API_IMAGE" -ceu 'cat /opt/shakerscan/release-manifest.json')"
 if [ "$worker_manifest" != "$api_manifest" ]; then
@@ -52,19 +45,27 @@ docker run --rm --entrypoint sh "$WORKER_IMAGE" -ceu '
 '
 docker run --rm --entrypoint docker "$API_IMAGE" --version | grep -F 'Docker version 27.5.1, build 9f9e405'
 docker run --rm --entrypoint sh "$API_IMAGE" -ceu '
+    test "$(id -u)" != 0
+    test ! -e /opt/tools
     if docker buildx version >/dev/null 2>&1; then
         echo "runtime API must not carry Buildx" >&2
         exit 1
     fi
+    for binary in nmap masscan hydra medusa nikto dirb gobuster dnsrecon; do
+        if command -v "$binary" >/dev/null 2>&1; then
+            echo "runtime API unexpectedly contains $binary" >&2
+            exit 1
+        fi
+    done
 '
 
 worker_size="$(docker image inspect "$WORKER_IMAGE" --format '{{.Size}}')"
 api_size="$(docker image inspect "$API_IMAGE" --format '{{.Size}}')"
-delta_bytes=$((api_size - worker_size))
-if [ "$delta_bytes" -le 0 ] || [ "$delta_bytes" -gt $((64 * 1024 * 1024)) ]; then
-    echo "API overlay size delta ${delta_bytes} is outside the expected 1-64 MiB boundary" >&2
+saved_bytes=$((worker_size - api_size))
+if [ "$saved_bytes" -le 0 ]; then
+    echo "slim API image (${api_size}) is not smaller than worker (${worker_size})" >&2
     exit 1
 fi
 
-printf '{"schema_version":"shakerscan-api-overlay-smoke/v1","status":"PASS","worker_image":"%s","api_image":"%s","overlay_bytes":%s}\n' \
-    "$WORKER_IMAGE" "$API_IMAGE" "$delta_bytes"
+printf '{"schema_version":"shakerscan-api-boundary-smoke/v1","status":"PASS","worker_image":"%s","api_image":"%s","saved_bytes":%s}\n' \
+    "$WORKER_IMAGE" "$API_IMAGE" "$saved_bytes"

@@ -27,6 +27,9 @@ def test_release_images_keep_docker_client_at_control_plane_boundary():
     assert "DOCKER_CLI_SHA256" not in dockerfile
     assert "ARG SCANNER_RUNTIME_IMAGE=" in api_dockerfile
     assert "FROM ${SCANNER_RUNTIME_IMAGE}" in api_dockerfile
+    assert "AS scanner-runtime" in api_dockerfile
+    assert "USER 10001:10001" in api_dockerfile
+    assert "COPY --from=scanner-runtime /opt/tools" not in api_dockerfile
     assert "DOCKER_CLI_SHA256_X86_64" in api_dockerfile
     assert "DOCKER_CLI_SHA256_AARCH64" in api_dockerfile
     assert "BUILDX_VERSION" not in dockerfile

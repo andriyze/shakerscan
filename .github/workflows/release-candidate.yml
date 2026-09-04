@@ -326,8 +326,18 @@ jobs:
           docker run --rm --entrypoint docker shakerscan-api:release-candidate --version
           docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu \
             'if docker buildx version >/dev/null 2>&1; then echo "runtime API must not carry Buildx" >&2; exit 1; fi'
+          docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu '
+            test ! -e /opt/tools
+            for binary in nmap masscan hydra medusa nikto dirb gobuster dnsrecon; do
+              if command -v "$binary" >/dev/null 2>&1; then
+                echo "runtime API unexpectedly contains $binary" >&2
+                exit 1
+              fi
+            done
+          '
+          test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10001:10001"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
-          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
+          test "$(docker run --rm --entrypoint sh shakerscan-api:release-candidate -c 'python3 -c '\''import json; print(json.load(open("/opt/shakerscan/release-manifest.json"))["version"])'\'')" = "${{ needs.meta.outputs.version }}"
 
       - name: Enforce candidate-image external wire ceilings
         env:

@@ -1780,6 +1780,23 @@ prepare_runtime_files() {
     export MODEL_INTAKE_SANDBOX_GID="$sandbox_gid"
     write_dotenv_value MODEL_INTAKE_SANDBOX_UID "$MODEL_INTAKE_SANDBOX_UID"
     write_dotenv_value MODEL_INTAKE_SANDBOX_GID "$MODEL_INTAKE_SANDBOX_GID"
+    local api_uid api_gid docker_gid
+    api_uid="$(id -u)"
+    api_gid="$(id -g)"
+    if [ "$api_uid" = "0" ]; then
+        api_uid=10001
+        api_gid=10001
+    fi
+    docker_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || true)"
+    if ! [[ "$docker_gid" =~ ^[0-9]+$ ]]; then
+        docker_gid=0
+    fi
+    export SHAKERSCAN_API_UID="$api_uid"
+    export SHAKERSCAN_API_GID="$api_gid"
+    export SHAKERSCAN_DOCKER_GID="$docker_gid"
+    write_dotenv_value SHAKERSCAN_API_UID "$SHAKERSCAN_API_UID"
+    write_dotenv_value SHAKERSCAN_API_GID "$SHAKERSCAN_API_GID"
+    write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
     mkdir -p results
     mkdir -p results/model-intake-quarantine results/model-intake-sandbox
     mkdir -p .shakerscan-model-intake-runner-stage
@@ -2633,10 +2650,8 @@ build_local_scanner_family() {
     local worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"
     local sandbox_image="${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}"
 
-    # The worker, Model Intake sandbox, and API share one scanner runtime.
-    # Build it once, bind the sandbox tag to that exact image, then build the
-    # API's thin Docker-client overlay. Even --no-cache must never compile the
-    # scanner/toolchain a second time.
+    # Build the scanner runtime once. Model Intake and the slim API image use it
+    # as a content-addressed source stage; neither recompiles the toolchain.
     run_build_step scanner_runtime compose build $no_cache worker
     # The source Compose service builds and tags this exact explicit image.
     # Querying a running worker here can return the retired pre-build ID.

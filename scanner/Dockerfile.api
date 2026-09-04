@@ -1,10 +1,80 @@
-# The API control plane is the scanner runtime plus one narrowly scoped
-# capability: a checksum-pinned Docker client used to stage Model Intake guest
-# images through the host socket. Keep this as a thin derivative image so a
-# clean source build never recompiles the scanner/toolchain twice.
+# The API consumes the scanner image as a content-addressed source stage so its
+# Python dependency graph, application files, release identity, and build
+# fingerprint inputs stay identical to the workers. The final image starts
+# again from Playwright: scanner executables and network packages do not cross.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
-FROM ${SCANNER_RUNTIME_IMAGE}
+FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime
 
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# /app includes API modules and the shared policy/evidence code. Small static
+# fingerprint inputs remain so the API can compute the expected worker build;
+# executable scanners and Nuclei templates are deliberately absent.
+COPY --from=scanner-runtime /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=scanner-runtime /app/*.py /app/
+COPY --from=scanner-runtime /app/ai_gate /app/ai_gate
+COPY --from=scanner-runtime /app/ai_targets /app/ai_targets
+COPY --from=scanner-runtime /app/arsenal_routes /app/arsenal_routes
+COPY --from=scanner-runtime /app/evidence_routes /app/evidence_routes
+COPY --from=scanner-runtime /app/local_agent_routes /app/local_agent_routes
+COPY --from=scanner-runtime /app/agent_routes /app/agent_routes
+COPY --from=scanner-runtime /app/investigation_routes /app/investigation_routes
+COPY --from=scanner-runtime /app/retest_routes /app/retest_routes
+COPY --from=scanner-runtime /app/research_routes /app/research_routes
+COPY --from=scanner-runtime /app/capabilities /app/capabilities
+COPY --from=scanner-runtime /app/devices /app/devices
+COPY --from=scanner-runtime /app/exposure /app/exposure
+COPY --from=scanner-runtime /app/finding_exceptions /app/finding_exceptions
+COPY --from=scanner-runtime /app/finding_routes /app/finding_routes
+COPY --from=scanner-runtime /app/fleet_routes /app/fleet_routes
+COPY --from=scanner-runtime /app/hunt /app/hunt
+COPY --from=scanner-runtime /app/model_intake /app/model_intake
+COPY --from=scanner-runtime /app/operations /app/operations
+COPY --from=scanner-runtime /app/interactive /app/interactive
+COPY --from=scanner-runtime /app/policy_profiles /app/policy_profiles
+COPY --from=scanner-runtime /app/runtime /app/runtime
+COPY --from=scanner-runtime /app/schedules /app/schedules
+COPY --from=scanner-runtime /app/settings_routes /app/settings_routes
+COPY --from=scanner-runtime /app/targets /app/targets
+COPY --from=scanner-runtime /app/scan /app/scan
+COPY --from=scanner-runtime /app/worker_handlers /app/worker_handlers
+COPY --from=scanner-runtime /app/scanner_tools /app/scanner_tools
+COPY --from=scanner-runtime /app/wordlists /app/wordlists
+COPY --from=scanner-runtime /app/payloads /app/payloads
+COPY --from=scanner-runtime /app/data /app/data
+COPY --from=scanner-runtime /app/skills /app/skills
+COPY --from=scanner-runtime /app/requirements.lock /app/requirements.lock
+COPY --from=scanner-runtime /app/entrypoint.sh /app/entrypoint.sh
+COPY --from=scanner-runtime /opt/model-intake-locks /opt/model-intake-locks
+COPY --from=scanner-runtime /opt/build-inputs/scanner.Dockerfile /opt/build-inputs/scanner.Dockerfile
+COPY --from=scanner-runtime /opt/shakerscan/release-manifest.json /opt/shakerscan/release-manifest.json
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV HOME=/tmp
+ENV PATH="/usr/local/bin:${PATH}"
+
+RUN set -eux; \
+    chrome_path="$(find /ms-playwright -name chrome -type f 2>/dev/null | head -1)"; \
+    test -n "$chrome_path"; \
+    ln -sf "$chrome_path" /usr/bin/chromium; \
+    ln -sf "$chrome_path" /usr/bin/google-chrome; \
+    useradd --uid 10001 --user-group --no-create-home --home-dir /tmp shakerscan-api; \
+    test ! -e /opt/tools; \
+    for binary in nmap masscan hydra medusa nikto dirb gobuster dnsrecon; do \
+        if command -v "$binary" >/dev/null 2>&1; then \
+            echo "runtime API unexpectedly contains $binary" >&2; \
+            exit 1; \
+        fi; \
+    done
+
+# The API alone receives the pinned Docker client for Model Intake guest
+# staging and bounded worker inventory. Buildx remains absent.
 ARG DOCKER_CLI_VERSION=27.5.1
 ARG DOCKER_CLI_SHA256_X86_64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
 ARG DOCKER_CLI_SHA256_AARCH64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
@@ -15,9 +85,6 @@ RUN set -eux; \
         arm64) docker_arch=aarch64; expected="$DOCKER_CLI_SHA256_AARCH64" ;; \
         *) echo "unsupported architecture for the Docker CLI" >&2; exit 1 ;; \
     esac; \
-    # The Docker CDN can close a long ARM64 transfer early (curl exit 18).
-    # Retry transport failures only; the pinned checksum below still fails closed
-    # if any completed response is truncated or serves different bytes.
     curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 \
         --max-time 300 -fsSLo /tmp/docker.tgz \
         "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz"; \
@@ -30,3 +97,19 @@ RUN set -eux; \
         echo "runtime API must not carry Buildx" >&2; \
         exit 1; \
     fi
+
+# Match the worker's runtime-only Python surface. The Playwright base carries
+# packaging tools that are useful for building images but are not API runtime
+# capabilities and have repeatedly produced false deployed-component findings.
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv msgpack setuptools pip && \
+    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
+    rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("virtualenv") is None'
+
+COPY scanner/api-entrypoint.sh /app/api-entrypoint.sh
+RUN chmod 0755 /app/api-entrypoint.sh && \
+    python3 -c 'import asyncpg, fastapi, playwright, redis' && \
+    python3 /app/release_identity.py --verify
+
+USER 10001:10001
+ENTRYPOINT ["/app/api-entrypoint.sh"]

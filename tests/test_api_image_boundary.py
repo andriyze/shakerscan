@@ -76,3 +76,34 @@ def test_api_process_execution_reasons_remain_narrow_and_named():
     assert "version probe" in arsenal
     assert 'shutil.which("docker")' in model_intake
     assert "subprocess.Popen" in model_intake
+
+
+def test_api_image_omits_worker_executables_and_defaults_to_non_root():
+    dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text(encoding="utf-8")
+    assert "FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime" in dockerfile
+    assert "FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:" in dockerfile
+    assert "COPY --from=scanner-runtime /opt/tools" not in dockerfile
+    assert "test ! -e /opt/tools" in dockerfile
+    assert "USER 10001:10001" in dockerfile
+
+
+def test_release_api_uses_host_identity_and_socket_supplementary_group():
+    compose = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
+    assert 'user: "${SHAKERSCAN_API_UID:-10001}:${SHAKERSCAN_API_GID:-10001}"' in compose
+    assert '"${SHAKERSCAN_DOCKER_GID:-0}"' in compose
+    launcher = (ROOT / "scanner.sh").read_text(encoding="utf-8")
+    assert "stat -c '%g' /var/run/docker.sock" in launcher
+    assert "write_dotenv_value SHAKERSCAN_DOCKER_GID" in launcher
+
+
+def test_release_api_storage_init_preserves_private_sandbox_and_shares_worker_dirs():
+    compose = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
+    assert "api-storage-init:" in compose
+    assert "condition: service_completed_successfully" in compose
+    assert "-path /results/model-intake-sandbox -prune" in compose
+    assert "chmod g+rws" in compose
+    assert "network_mode: none" in compose
+    worker_entrypoint = (ROOT / "scanner" / "entrypoint.sh").read_text(encoding="utf-8")
+    api_entrypoint = (ROOT / "scanner" / "api-entrypoint.sh").read_text(encoding="utf-8")
+    assert "umask 0002" in worker_entrypoint
+    assert "umask 0002" in api_entrypoint

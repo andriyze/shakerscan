@@ -92,12 +92,52 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  api-storage-init:
+    image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ceu"]
+    command:
+      - |
+        api_uid="$${SHAKERSCAN_API_UID}"
+        api_gid="$${SHAKERSCAN_API_GID}"
+        case "$$api_uid:$$api_gid" in
+          *[!0-9:]*|:*|*:) echo "invalid API storage identity" >&2; exit 2 ;;
+        esac
+        chown "$$api_uid:$$api_gid" /results /runner-stage
+        chmod 2770 /results /runner-stage
+        find /results \
+          -path /results/model-intake-sandbox -prune -o \
+          -type d -exec chgrp "$$api_gid" {} + -exec chmod g+rws {} +
+        for secret in /results/.credential_enc.key /results/.credential_enc.key.lock; do
+          if [ -e "$$secret" ]; then chown "$$api_uid:$$api_gid" "$$secret"; fi
+        done
+    environment:
+      - SHAKERSCAN_API_UID=${SHAKERSCAN_API_UID:-10001}
+      - SHAKERSCAN_API_GID=${SHAKERSCAN_API_GID:-10001}
+    volumes:
+      - ./results:/results
+      - ./.shakerscan-model-intake-runner-stage:/runner-stage
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   api:
     # The API/control-plane image is deliberately distinct from the worker
     # image. It contains the checksum-pinned Docker client required to stage
     # the fixed Model Intake Firecracker guest through the mounted socket.
     # Workers continue to use SCANNER_IMAGE_REPO and carry no Docker client.
     image: ${API_IMAGE:-shakerscan/shakerscan-api:latest}
+    user: "${SHAKERSCAN_API_UID:-10001}:${SHAKERSCAN_API_GID:-10001}"
+    group_add:
+      - "${SHAKERSCAN_DOCKER_GID:-0}"
     # Resolve host-published services (e2e fixtures / honey targets) from inside
     # the container on Linux CI too, matching docker-compose.yml. No-op on Docker
     # Desktop. Without this the exact-manifest E2E cannot reach the fixtures
@@ -212,6 +252,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: ["python3", "/app/api.py"]
     depends_on:
+      api-storage-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
