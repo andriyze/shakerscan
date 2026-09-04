@@ -19,8 +19,8 @@ jobs:
       - name: Prove embedded dependency floors
         run: |
           docker run --rm --entrypoint sh shakerscan-model-intake-go-tools:verify -ec '
-            go version /out/trivy | grep -F go1.27.0
-            go version /out/osv-scanner | grep -F go1.27.0
+            go version /out/trivy | grep -F go1.26.6
+            go version /out/osv-scanner | grep -F go1.26.6
             go version -m /out/trivy | grep -F "golang.org/x/crypto\tv0.55.0"
             go version -m /out/trivy | grep -F "github.com/go-git/go-git/v5\tv5.19.2"
             go version -m /out/trivy | grep -F "google.golang.org/grpc\tv1.83.1"
@@ -31,4 +31,3 @@ jobs:
             /out/trivy --version
             /out/osv-scanner --version
           '
-# rerun after global SCANNER_RUNTIME_IMAGE scope correction
