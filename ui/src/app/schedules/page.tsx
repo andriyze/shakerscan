@@ -120,7 +120,7 @@ function SchedulesContent() {
   const [formFrequency, setFormFrequency] = useState<'daily' | 'weekly'>('daily')
   const [formDayOfWeek, setFormDayOfWeek] = useState(0)
   const [formTime, setFormTime] = useState('02:00')
-  const [formBudgetProfile, setFormBudgetProfile] = useState<'fast' | 'balanced' | 'thorough'>('balanced')
+  const [formBudgetProfile, setFormBudgetProfile] = useState<'fast' | 'balanced' | 'thorough' | 'deep'>('balanced')
   const [formKind, setFormKind] = useState<ScheduleKind>('normal_scan')
   const [formAsmBatchSize, setFormAsmBatchSize] = useState(100)
   const [formAsmStaleDays, setFormAsmStaleDays] = useState(30)
@@ -244,7 +244,7 @@ function SchedulesContent() {
     setFormFrequency(schedule.frequency)
     setFormDayOfWeek(schedule.day_of_week ?? 0)
     setFormTime((schedule.time_of_day || '02:00').slice(0, 5))
-    setFormBudgetProfile((options.budget_profile as 'fast' | 'balanced' | 'thorough') || 'balanced')
+    setFormBudgetProfile((options.budget_profile as 'fast' | 'balanced' | 'thorough' | 'deep') || 'balanced')
     setFormKind(getScheduleKind(schedule))
     setFormAsmBatchSize(asmOptions.batchSize)
     setFormAsmStaleDays(asmOptions.staleDays)
@@ -776,12 +776,13 @@ function SchedulesContent() {
                 <select
                   id="schedule-budget-profile"
                   value={formBudgetProfile}
-                  onChange={(e) => setFormBudgetProfile(e.target.value as 'fast' | 'balanced' | 'thorough')}
+                  onChange={(e) => setFormBudgetProfile(e.target.value as 'fast' | 'balanced' | 'thorough' | 'deep')}
                   className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                 >
-                  <option value="fast">Fast — 5 minutes / 1,000 requests</option>
-                  <option value="balanced">Balanced — 20 minutes / 5,000 requests</option>
-                  <option value="thorough">Thorough — 60 minutes / 20,000 requests</option>
+                  <option value="fast">Fast — 30 minutes / 5,000 requests</option>
+                  <option value="balanced">Balanced — 60 minutes / 20,000 requests</option>
+                  <option value="thorough">Thorough — 180 minutes / 60,000 requests</option>
+                  <option value="deep">Deep — 360 minutes / 150,000 requests</option>
                 </select>
                 </div>
               )}

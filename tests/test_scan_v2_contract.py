@@ -208,7 +208,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
 
     assert contract["schema_version"] == "scan-public-contract/v1"
     assert contract["engine"] == "scan"
-    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
+    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough", "deep"]
     assert [item["name"] for item in contract["families"]] == [
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
         "sensitive_exposure", "nosqli", "authz_surface",

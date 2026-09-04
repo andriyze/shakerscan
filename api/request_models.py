@@ -179,7 +179,7 @@ class ScanOptions(BaseModel):
     no_early_stop: bool = False
     thorough_params: bool = False                  # Test more parameters (50x10 vs 25x5)
     oob_callback_url: Optional[str] = None         # OOB callback URL for blind SQLi
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = Field(
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = Field(
         default=None,
         description=(
             "Resource ceiling for the deterministic Scan pipeline; it does not "
@@ -314,7 +314,7 @@ class _ScanRequestBase(BaseModel):
     target: str
     name: Optional[str] = None
     target_kind: Literal["web", "api"] = "web"
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
@@ -377,7 +377,7 @@ class ScanPublicPlacement(BaseModel):
     region: Optional[str] = Field(default=None, min_length=1, max_length=120)
     egress_group: Optional[str] = Field(default=None, min_length=1, max_length=120)
     network: Optional[str] = Field(default=None, min_length=1, max_length=120)
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
     data_residency: Optional[str] = Field(default=None, min_length=1, max_length=120)
     node_id: Optional[str] = Field(default=None, min_length=1, max_length=160)
     node_scope: Optional[Literal["local", "remote"]] = None

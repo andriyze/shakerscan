@@ -29,19 +29,15 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 from .execution import ScanExecutionPlan
-# A profile must be able to fund the plan it compiles. Measured on a thorough
-# single-worker Scan of the benchmark application: reservations totalled 3,514
-# tool-wall seconds against a 3,600 ceiling, so the plan spent 98% of its wall
-# allowance before reaching its own tail and skipped five actions --
-# passive.templates.001/.002, active.templates.001/.002, and prove.xss -- as
-# insufficient_plan_budget while holding 10,256 unused HTTP requests. Wall, not
-# traffic, is the binding dimension for thorough, and the profile was starving
-# the proof stage it exists to reach. test_thorough_profile_funds_its_own_plan
-# keeps the two in step.
+
+# These are hard ceilings, not target runtimes. Batch planning and continuation
+# decide how much can be spent, while advanced limits may only lower these values.
+# Tool wall never exceeds total wall, so every advertised dimension is reachable.
 BUDGET_PROFILES: Mapping[str, ScanBudget] = {
-    "fast": ScanBudget(300, 1_000, 500, 50, 1_000, 180, 2, 200, 25),
-    "balanced": ScanBudget(1_200, 5_000, 2_000, 200, 5_000, 900, 4, 800, 100),
-    "thorough": ScanBudget(5_400, 20_000, 10_000, 1_000, 20_000, 7_200, 8, 2_000, 500),
+    "fast": ScanBudget(1_800, 5_000, 2_500, 250, 5_000, 1_500, 2, 500, 50),
+    "balanced": ScanBudget(3_600, 20_000, 10_000, 1_000, 20_000, 3_600, 4, 2_000, 200),
+    "thorough": ScanBudget(10_800, 60_000, 30_000, 3_000, 60_000, 10_800, 8, 6_000, 1_000),
+    "deep": ScanBudget(21_600, 150_000, 75_000, 7_500, 150_000, 21_600, 16, 15_000, 2_500),
 }
 
 # These are the only family names with concrete canonical action-graph semantics.
@@ -60,6 +56,7 @@ SCAN_MINIMUM_FAMILY_QUOTAS: Mapping[str, Mapping[str, int]] = {
     "fast": {"xss": 5, "sqli": 5, "sensitive_exposure": 5, "nosqli": 5, "authz_surface": 5},
     "balanced": {"xss": 20, "sqli": 10, "sensitive_exposure": 10, "nosqli": 10, "authz_surface": 10},
     "thorough": {"xss": 100, "sqli": 50, "sensitive_exposure": 20, "nosqli": 25, "authz_surface": 20},
+    "deep": {"xss": 250, "sqli": 125, "sensitive_exposure": 50, "nosqli": 60, "authz_surface": 50},
 }
 _SCAN_V2_FAMILY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
     "recon": (
@@ -292,7 +289,7 @@ def _resolve_budget(
     try:
         base = asdict(BUDGET_PROFILES[profile])
     except KeyError as exc:
-        raise ValueError("budget_profile must be fast, balanced, or thorough") from exc
+        raise ValueError("budget_profile must be fast, balanced, thorough, or deep") from exc
     advanced = advanced if isinstance(advanced, Mapping) else {}
     unknown = set(advanced) - set(_BUDGET_CEILINGS) - {
         "include_families", "exclude_families", "force_single_worker"

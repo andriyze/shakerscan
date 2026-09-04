@@ -163,8 +163,8 @@ def _profile(value: Any) -> str:
     if not isinstance(value, str):
         raise WorkerScanContractError("budget_profile must be a string")
     result = value.strip().lower()
-    if value != result or result not in {"fast", "balanced", "thorough"}:
-        raise WorkerScanContractError("budget_profile must be fast, balanced, or thorough")
+    if value != result or result not in {"fast", "balanced", "thorough", "deep"}:
+        raise WorkerScanContractError("budget_profile must be fast, balanced, thorough, or deep")
     return result
 
 

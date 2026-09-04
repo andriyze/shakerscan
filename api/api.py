@@ -7351,7 +7351,7 @@ class _BatchRequestBase(BaseModel):
 
     targets: list[str] = Field(min_length=1, max_length=50)
     target_kind: Literal["web", "api"] = "web"
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)

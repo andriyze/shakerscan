@@ -143,7 +143,10 @@ _BATCH_PROFILES: Mapping[str, Mapping[str, tuple[int, Mapping[str, int]]]] = {
         "authz_surface.verify_batch": (40, {"http_requests": 400, "tool_wall_seconds": 180}),
     },
 }
-_BATCH_TIER_ORDER: tuple[str, ...] = ("thorough", "balanced", "fast")
+# DAST-3 replaces these absolute shapes with ceiling shares. Until then the new
+# opt-in profile uses the known-safe thorough shapes under its larger ledger.
+_BATCH_PROFILES = {**_BATCH_PROFILES, "deep": _BATCH_PROFILES["thorough"]}
+_BATCH_TIER_ORDER: tuple[str, ...] = ("deep", "thorough", "balanced", "fast")
 
 
 def _affordable_batch_tier(
@@ -1543,7 +1546,7 @@ class ScanActionPlanCompiler:
                 dependencies=active_dependencies,
                 required="xss" in explicitly_requested,
                 minimum_batches=(
-                    2 if execution_plan.budget_profile == "thorough" else 1
+                    2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
                 ),
                 reserve_dependency_slots=(
                     int(has_manifest_work(sqli, candidate_ref))
@@ -1593,7 +1596,7 @@ class ScanActionPlanCompiler:
                 dependencies=active_dependencies,
                 required="sqli" in explicitly_requested,
                 minimum_batches=(
-                    2 if execution_plan.budget_profile == "thorough" else 1
+                    2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
                 ),
                 reserve_dependency_slots=int(authz_will_run) + 1,
             )

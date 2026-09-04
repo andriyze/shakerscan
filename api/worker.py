@@ -456,7 +456,7 @@ TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 DEVICE_SSH_AUTH_COOLDOWN_SECONDS = max(60, int(os.environ.get("DEVICE_SSH_AUTH_COOLDOWN_SECONDS", "1800")))
 DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_DAILY_FAILURE_CAP", "3")))
 
-SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough"}
+SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough", "deep"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",

@@ -525,9 +525,9 @@ def _plan_from_payload(value: Any, supplied_digest: Any) -> ScanExecutionPlan:
         )
 
     profile = str(raw["budget_profile"] or "").strip().lower()
-    if profile not in {"fast", "balanced", "thorough"} or profile != raw["budget_profile"]:
+    if profile not in {"fast", "balanced", "thorough", "deep"} or profile != raw["budget_profile"]:
         raise CanonicalScanJobError(
-            "execution_plan.budget_profile must be fast, balanced, or thorough"
+            "execution_plan.budget_profile must be fast, balanced, thorough, or deep"
         )
     plan = ScanExecutionPlan(
         policy=policy,

@@ -361,7 +361,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--dast-target", default="https://honey.shakerscan.com/")
-    parser.add_argument("--dast-budget-profile", default="fast", choices=["fast", "balanced", "thorough"])
+    parser.add_argument("--dast-budget-profile", default="fast", choices=["fast", "balanced", "thorough", "deep"])
     parser.add_argument("--dast-active-testing", action="store_true", help="Authorize active DAST for Honey scenarios.")
     parser.add_argument("--ai-profile", default="smoke", choices=["smoke", "trace", "standard", "deep"])
     parser.add_argument("--ai-request-budget", type=int, default=1)

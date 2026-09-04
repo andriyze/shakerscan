@@ -144,7 +144,8 @@ V2 has exactly one deterministic engine: `scan`. Three independent inputs shape 
 
 - **Policy** grants permission: passive-only versus active testing, state-changing HTTP, network or
   subdomain discovery, and family include/exclude constraints.
-- **Budget profile** selects hard ceilings: `fast`, `balanced`, or `thorough`.
+- **Budget profile** selects hard ceilings: `fast` (30 minutes), `balanced` (60 minutes),
+  `thorough` (180 minutes), or opt-in `deep` (360 minutes).
 - **Opaque references** select exact-target credential profiles and request-collection selections.
 
 The typed budget covers duration, HTTP requests, state-changing requests, endpoints, hosts, browser
@@ -1507,11 +1508,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 31 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
-| Make targets | 18 | `Makefile` |
+| Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 370 | Python sources + Compose manifests |
+| Runtime environment keys | 374 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 119 | `scanner/scanner_tools/` |
-| UI pages | 37 | `ui/src/app/` |
+| UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2225,7 +2226,7 @@ opaque profile, and collection-reference fields.
 | Surface | Names |
 |---|---|
 | Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory
@@ -2586,8 +2587,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
+| `SHAKERSCAN_TRIVY_CACHE_DIR` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
@@ -2646,6 +2651,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
 | `/timeline` | `ui/src/app/timeline/page.tsx` |
+| `/workers` | `ui/src/app/workers/page.tsx` |
 
 ### Skills, Slash Commands, And Subagents
 

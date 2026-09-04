@@ -875,7 +875,7 @@ def test_every_budget_profile_compiles_an_explicitly_requested_active_family():
         ],
     }
     batches_by_profile = {}
-    for profile in ("fast", "balanced", "thorough"):
+    for profile in ("fast", "balanced", "thorough", "deep"):
         contract = resolve_scan_contract(
             budget_profile=profile, policy=policy, approval_receipt_id=approval,
         )

@@ -36,7 +36,7 @@ Agents must preserve these distinctions:
 | User phrase | Route |
 |---|---|
 | “scan example.com” | DAST Scan with the default resource budget |
-| “fast/balanced/thorough scan” | Scan with the named resource ceiling |
+| “fast/balanced/thorough/deep scan” | Scan with the named resource ceiling |
 | “investigate autonomously”, “hunt this target” | Hunt |
 | “investigate/hunt this TV, camera, printer, router, or device” | Hunt with `target_kind=device` |
 | “verify this finding” | Deterministic finding verifier/retest |

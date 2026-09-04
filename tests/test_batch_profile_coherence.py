@@ -97,10 +97,9 @@ def test_batch_occurrences_project_to_the_action_the_parent_authorised():
 # could not fund a single body attempt, so the scanner planned body candidates it could never run
 # and reported them unattempted forever.
 
-# Only `thorough` is sized for a body attempt. `balanced` and `fast` hold too little wall for one,
-# and raising them pushed a coverage-family shard's fraction of the plan budget past what the
-# allocator could fund -- the profile is the acceptance profile, not every profile.
-_BODY_CASES = [("thorough", "sqli.verify_batch")]
+# Only `thorough` and `deep` are sized for a body attempt. Their acceptance batches retain the
+# measured body floor; the lighter batch shapes intentionally do not.
+_BODY_CASES = [(profile, "sqli.verify_batch") for profile in ("thorough", "deep")]
 
 
 @pytest.mark.parametrize("profile,capability", _BODY_CASES, ids=lambda v: str(v))
@@ -122,8 +121,8 @@ def test_a_slice_can_fund_at_least_one_body_attempt(profile, capability):
         )
 
 
-def test_lighter_profiles_are_deliberately_left_unable_to_fund_a_body_attempt():
-    """`fast` grants 180 seconds for the entire plan against a 420-second body attempt.
+def test_lighter_batch_shapes_are_deliberately_unable_to_fund_a_body_attempt():
+    """Fast and balanced keep short verifier slices despite their restored profile ceilings.
 
     No slice sizing makes that fit, and raising `balanced` broke coverage-family sharding, where a
     shard holds only a fraction of the plan budget. Rather than pretend, those profiles are left
@@ -133,7 +132,7 @@ def test_lighter_profiles_are_deliberately_left_unable_to_fund_a_body_attempt():
     from api.scan.contracts import BUDGET_PROFILES
 
     body_wall = BATCH_ATTEMPT_BODY_FLOORS["sqli.verify_batch"]["tool_wall_seconds"]
-    assert BUDGET_PROFILES["fast"].max_tool_wall_seconds < body_wall
+    assert _BATCH_PROFILES["fast"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
     assert _BATCH_PROFILES["balanced"]["sqli.verify_batch"][1]["tool_wall_seconds"] < body_wall
     # thorough is the acceptance profile and must be able to fund one.
     assert _BATCH_PROFILES["thorough"]["sqli.verify_batch"][1]["tool_wall_seconds"] >= body_wall
@@ -144,7 +143,7 @@ def test_every_raised_batch_still_fits_its_profile_wall():
     # how "reserved_budget exceeds the plan budget" is produced.
     from api.scan.contracts import BUDGET_PROFILES
 
-    for profile in ("balanced", "thorough"):
+    for profile in ("balanced", "thorough", "deep"):
         ceiling = BUDGET_PROFILES[profile].max_tool_wall_seconds
         for capability in ("sqli.verify_batch", "xss.verify_batch"):
             _size, budget = _BATCH_PROFILES[profile][capability]

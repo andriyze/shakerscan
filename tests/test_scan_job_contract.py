@@ -319,7 +319,7 @@ def test_shard_materialization_rejects_durable_option_or_parent_drift():
 
 
 @pytest.mark.parametrize(("profile", "active"), [
-    ("fast", False), ("balanced", False), ("thorough", True),
+    ("fast", False), ("balanced", False), ("thorough", True), ("deep", True),
 ])
 def test_canonical_policy_and_budget_remain_mode_free_at_queue_boundary(profile, active):
     contract = bind_scan_scope_receipt(
