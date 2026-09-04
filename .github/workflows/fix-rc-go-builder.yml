@@ -1,0 +1,41 @@
+name: Fix RC Go builder
+on:
+  push:
+    branches: [fix/2.2.0-rc-failures]
+    paths: [.github/workflows/fix-rc-go-builder.yml]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {fetch-depth: 0}
+      - name: Apply supported Go toolchain and current Trivy release
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scanner/Dockerfile.model-intake'); s=p.read_text()
+          swaps={
+            'golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452':'golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36',
+            'ARG TRIVY_VERSION=0.73.0':'ARG TRIVY_VERSION=0.74.0',
+            'CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/trivy ./cmd/trivy':'GOEXPERIMENT=jsonv2 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/trivy ./cmd/trivy',
+            "go version /out/trivy | grep -F 'go1.27.0'":"go version /out/trivy | grep -F 'go1.26.6'",
+            "go version /out/osv-scanner | grep -F 'go1.27.0'":"go version /out/osv-scanner | grep -F 'go1.26.6'",
+          }
+          for a,b in swaps.items():
+            if a not in s: raise SystemExit(f'missing {a}')
+            s=s.replace(a,b,1)
+          p.write_text(s)
+          p=Path('tests/test_model_intake_image_split.py'); t=p.read_text()
+          t=t.replace('"ARG TRIVY_VERSION=0.73.0",','"ARG TRIVY_VERSION=0.74.0",')
+          t=t.replace('"golang:1.27.0-bookworm@sha256:"','"golang:1.26.6-bookworm@sha256:"')
+          p.write_text(t)
+          PY
+          python3 scripts/generate_install_manifest.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scanner/Dockerfile.model-intake tests/test_model_intake_image_split.py install/MANIFEST.sha256
+          git commit -m 'fix(build): use supported patched Go toolchain for native scanners'
+          git push origin HEAD:refs/heads/fix/2.2.0-rc-failures
