@@ -138,3 +138,38 @@ def test_build_on_main_and_the_reusable_build_parse_and_declare_jobs():
         document = _doc(path)
         assert _on(document), path.name
         assert document.get("jobs"), path.name
+
+
+def test_reusing_a_prebuilt_set_still_scans_and_certifies():
+    """Release candidate 33906867900 reused the build-on-main set: the build jobs were skipped,
+    `merge` ran under always(), and then `vulnerability-scan` and `certify` were skipped by the
+    implicit success() check that walks the whole needs graph. The run reported success while
+    scanning and certifying nothing. Every job downstream of a conditionally skipped build job
+    must gate on its direct needs with !cancelled()."""
+    document = _doc(CANDIDATE)
+    jobs = document["jobs"]
+    skippable = {name for name, job in jobs.items() if "prebuilt_run_id == ''" in str(job.get("if", ""))}
+    assert skippable == {"build-runtime", "build-ui", "build-signer"}
+
+    def transitive_needs(name, seen=None):
+        seen = set() if seen is None else seen
+        raw = jobs[name].get("needs") or []
+        for dependency in ([raw] if isinstance(raw, str) else raw):
+            if dependency not in seen:
+                seen.add(dependency)
+                transitive_needs(dependency, seen)
+        return seen
+
+    downstream = {
+        name for name in jobs
+        if name not in skippable and transitive_needs(name) & skippable
+    }
+    assert {"merge", "vulnerability-scan", "certify"} <= downstream
+    for name in downstream:
+        condition = str(jobs[name].get("if") or "")
+        assert "always()" in condition or "!cancelled()" in condition, name
+        raw = jobs[name].get("needs") or []
+        for dependency in ([raw] if isinstance(raw, str) else raw):
+            if dependency in skippable:
+                continue
+            assert f"needs.{dependency}.result == 'success'" in condition, (name, dependency)
