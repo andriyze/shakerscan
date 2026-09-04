@@ -70,6 +70,7 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
+import worker_queue_policy as worker_queue_policy_module
 from capabilities.network import (
     CapabilityInputError,
     NetworkExecutionAdapter,
@@ -415,6 +416,7 @@ SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
 WORKER_QUEUE_BLOCK_SECONDS = max(1, int(os.environ.get("WORKER_QUEUE_BLOCK_SECONDS", "30")))
+WORKER_BUILD_REPORT_INTERVAL_SECONDS = max(5, int(os.environ.get("SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS", "30")))
 QUEUE_VISIBILITY_TIMEOUT_SECONDS = max(
     60,
     int(os.environ.get("SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS", "300")),
@@ -23266,6 +23268,9 @@ async def async_main():
     loop = asyncio.get_event_loop()
     last_stale_check_monotonic = 0.0
     last_reservation_sweep_monotonic = 0.0
+    build_report_task = asyncio.create_task(worker_queue_policy_module.heartbeat_worker_build_report(
+        report_worker_build_fingerprint, interval_seconds=WORKER_BUILD_REPORT_INTERVAL_SECONDS,
+    ))
 
     try:
         while True:
@@ -23324,14 +23329,6 @@ async def async_main():
                     ),
                 )
                 if lease is None:
-                    # Re-report build identity while idle so the per-worker version
-                    # label converges to the API-published commit after a deploy (the
-                    # startup report can run before the API publishes). build_current
-                    # already uses the source fingerprint; this just freshens the label.
-                    try:
-                        report_worker_build_fingerprint()
-                    except Exception:
-                        pass
                     continue  # Timeout, continue polling
 
                 source_queue = lease.queue_name
@@ -23363,6 +23360,8 @@ async def async_main():
         # Clean shutdown
         pass
     finally:
+        build_report_task.cancel()
+        await worker_queue_policy_module.finish_cancelled_task(build_report_task)
         # A clean container replacement should disappear from lightweight fleet identity
         # immediately. Crash/kill remnants still age out server-side, while graceful rebuilds do
         # not leave a transient false mismatch in the sidebar.

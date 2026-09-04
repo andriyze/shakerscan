@@ -2,6 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+
+
+async def heartbeat_worker_build_report(
+    reporter: Callable[[], None], *, interval_seconds: float,
+) -> None:
+    """Refresh identity independently of queue work so busy workers do not age out."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await asyncio.to_thread(reporter)
+
+
+async def finish_cancelled_task(task: asyncio.Task[object]) -> None:
+    """Join a background task after its owner has requested cancellation."""
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
 
 def worker_role(
     *, device_only: bool, agent_tool_only: bool, model_intake_only: bool = False

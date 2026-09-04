@@ -8,6 +8,7 @@ against a fake registry and pin the /health and startup wiring.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import pathlib
@@ -114,3 +115,24 @@ def test_the_model_intake_worker_reports_its_toolchain(monkeypatch, tmp_path):
     assert set(worker_queue_policy.MODEL_INTAKE_WORKER_REQUIRED_TOOLS) == set(
         worker_queue_policy.MODEL_INTAKE_WORKER_TOOL_COMMANDS
     )
+
+
+def test_worker_identity_is_heartbeated_while_the_main_loop_is_busy(monkeypatch):
+    from api import worker_queue_policy
+
+    reports = []
+    sleeps = []
+
+    async def one_interval_then_cancel(delay):
+        sleeps.append(delay)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(worker_queue_policy.asyncio, "sleep", one_interval_then_cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker_queue_policy.heartbeat_worker_build_report(
+            lambda: reports.append(True), interval_seconds=30,
+        ))
+
+    assert reports == [True]
+    assert sleeps[0] == 30
