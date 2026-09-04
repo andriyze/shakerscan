@@ -131,6 +131,41 @@ def _canonical_proof_contract_v2(
     }
 
 
+# CVSS 3.1 for cross-site scripting whose execution a deterministic verifier observed in the
+# target origin (a real browser proof or a structured alert). Script running in the victim
+# origin reads the DOM, storage tokens, and same-origin responses (C:H), can alter the page and
+# issue same-origin requests (I:L), needs the victim to open a link (UI:R), and lands in the
+# user's browser rather than the vulnerable server (S:C). The generic reflected-XSS vector
+# (C:L/I:L, 6.1) describes an unproven reflection; a proven execution is not capped at medium.
+XSS_EXECUTION_CVSS_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
+XSS_EXECUTION_CVSS_SCORE = 8.2
+
+
+def _apply_xss_execution_evidence(
+    finding: dict[str, Any],
+    *,
+    location: Any,
+    parameter: Any,
+    signal: str,
+    verifier: Any,
+    dom_marker_executed: Any = None,
+) -> None:
+    """Record the explicit CVSS and the execution sink of a proven cross-site scripting."""
+    finding["cvss_score"] = XSS_EXECUTION_CVSS_SCORE
+    finding["evidence"]["cvss"] = {
+        "score": XSS_EXECUTION_CVSS_SCORE,
+        "vector": XSS_EXECUTION_CVSS_VECTOR,
+        "basis": "script execution observed in the target origin by a deterministic verifier",
+    }
+    finding["evidence"]["execution_sink"] = {
+        "location": str(location or "") or None,
+        "parameter": str(parameter or "") or None,
+        "signal": signal,
+        "verifier": str(verifier or "") or None,
+        "dom_marker_executed": dom_marker_executed,
+    }
+
+
 def _base_finding(
     *,
     tool: str,
@@ -333,6 +368,13 @@ def _findings_for_action(
                 "verification_reason": "Deterministic alert execution proof satisfied",
                 "proof_contract_v2": proof_contract,
             })
+            _apply_xss_execution_evidence(
+                finding,
+                location="request_parameter",
+                parameter=item.get("param"),
+                signal="headless_verified_alert",
+                verifier="dalfox",
+            )
             findings.append(finding)
         elif (
             kind == "xss_browser_proof"
@@ -387,6 +429,19 @@ def _findings_for_action(
                 ),
                 "verification_reason": "Canonical headless browser execution proof satisfied",
             })
+            technique = str(item.get("technique") or "")
+            _apply_xss_execution_evidence(
+                finding,
+                location=item.get("injection_location"),
+                parameter=item.get("parameter_name"),
+                signal={
+                    "headless_xss_dialog": "dialog",
+                    "headless_xss_console": "console",
+                    "headless_xss_dom": "dom_marker",
+                }.get(technique, technique or "browser_execution"),
+                verifier=item.get("browser_build"),
+                dom_marker_executed=item.get("dom_marker_executed"),
+            )
             findings.append(finding)
         elif kind == "request_body_verification":
             family = str(item.get("family") or "").strip().lower()
