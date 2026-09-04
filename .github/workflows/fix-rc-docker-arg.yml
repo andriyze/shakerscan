@@ -1,0 +1,32 @@
+name: Fix RC Docker ARG scope
+on:
+  push:
+    branches: [fix/2.2.0-rc-failures]
+    paths: [.github/workflows/fix-rc-docker-arg.yml]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {fetch-depth: 0}
+      - run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scanner/Dockerfile.model-intake'); s=p.read_text()
+          declaration='ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local\n'
+          if s.count(declaration) != 1: raise SystemExit('unexpected scanner runtime ARG count')
+          s=s.replace(declaration,'',1)
+          marker='ARG MODEL_INTAKE_GO_BUILDER='
+          i=s.index(marker)
+          s=s[:i]+declaration+s[i:]
+          p.write_text(s)
+          PY
+          git diff --check
+          python3 scripts/generate_install_manifest.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scanner/Dockerfile.model-intake install/MANIFEST.sha256
+          git commit -m 'fix(build): keep scanner runtime ARG global across builder stage'
+          git push origin HEAD:refs/heads/fix/2.2.0-rc-failures
