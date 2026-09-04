@@ -88,3 +88,13 @@ def test_the_local_build_builds_the_model_intake_overlay():
     assert "SCANNER_RUNTIME_IMAGE=${worker_image}" in scanner_sh
     # It is built after the worker runtime and reuses it, never rebuilding the scanner base.
     assert scanner_sh.index("scanner_runtime compose build") < scanner_sh.index("model_intake_overlay docker build")
+
+
+def test_the_scanner_image_removes_the_base_images_virtualenv_remnants():
+    # The Playwright base ships virtualenv, whose embedded pip wheels vendor msgpack and setuptools;
+    # those were the only findings left on the scanner and API images after the toolchain split.
+    assert "pip uninstall -y --break-system-packages virtualenv" in SCANNER
+    assert "rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv" in SCANNER
+    assert 'find_spec("virtualenv") is None' in SCANNER
+    # The removal happens in the scanner base, which the API and Model Intake images build from.
+    assert SCANNER.index("uninstall -y --break-system-packages virtualenv") < SCANNER.index("uninstall -y --break-system-packages pip")
