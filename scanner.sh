@@ -1442,6 +1442,11 @@ configure_runtime_mode() {
 
     if [ -n "$IMAGE_TAG_OVERRIDE" ]; then
         export SCANNER_IMAGE_TAG="$IMAGE_TAG_OVERRIDE"
+        # CLI arguments have higher precedence than environment inherited from the installed
+        # launcher. That launcher normally exports the certified digest lock before scanner.sh
+        # parses its arguments; discard those resolved identities so --image-tag actually selects
+        # all five repositories at the requested tag.
+        unset SCANNER_IMAGE API_IMAGE UI_IMAGE SIGNER_IMAGE MODEL_INTAKE_IMAGE
     fi
 
     # The five release images. Every lifecycle path (pull, cache fallback, status, identity

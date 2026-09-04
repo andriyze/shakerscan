@@ -298,7 +298,13 @@ install_command() {
 #!/bin/sh
 : "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
 export SCANNER_IMAGE_TAG
-if [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
+use_release_image_lock=1
+for arg in "\$@"; do
+    case "\$arg" in
+        --image-tag|--image-tag=*) use_release_image_lock=0 ;;
+    esac
+done
+if [ "\$use_release_image_lock" = "1" ] && [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
     while IFS='=' read -r key value; do
         case "\$key" in
             SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|MODEL_INTAKE_IMAGE)
@@ -435,9 +441,16 @@ refuse_foreign_install() {
     [ ! -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ] || return 0
     have docker || return 0
     project="${COMPOSE_PROJECT_NAME:-shakerscan}"
-    other_dir="$(docker ps -a --filter "label=com.docker.compose.project=$project" \
+    working_dirs="$(docker ps -a --filter "label=com.docker.compose.project=$project" \
         --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null \
-        | grep -v '^$' | grep -vx "$INSTALL_DIR" | sort -u | head -n 1 || true)"
+        | grep -v '^$' | sort -u || true)"
+    # Releases before the installer-owned manifest existed can still prove ownership through
+    # Compose's recorded working directory. Treat that as an in-place upgrade instead of rejecting
+    # the install merely because its data volume already exists.
+    if printf '%s\n' "$working_dirs" | grep -Fxq "$INSTALL_DIR"; then
+        return 0
+    fi
+    other_dir="$(printf '%s\n' "$working_dirs" | head -n 1)"
     if [ -n "$other_dir" ]; then
         say "Error: a ShakerScan install already exists in $other_dir (Compose project '$project')." >&2
         say "Installing into $INSTALL_DIR as well would take over that install's Docker volumes and rotate its database password." >&2
@@ -710,13 +723,13 @@ chmod +x "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh"
 chmod +x "$INSTALL_STAGE/scripts/build-model-intake-guest-rootfs.sh"
 chmod +x "$INSTALL_STAGE/scripts/provision-model-intake-firecracker.sh"
 chmod +x "$INSTALL_STAGE/.claude/hooks/session-start.sh"
-commit_staged_downloads
 
 # This runtime is the certified release image set. Record that beside the launcher so a later
 # `shakerscan start` from this directory never builds the scanner from a source tree that happens
 # to share it (the installer run over a checkout used to keep local-build mode and rebuild the
 # 5.7 GB scanner image), and so `./scanner.sh` run directly here resolves the same mode.
-printf 'prebuilt\n' > "$INSTALL_DIR/.shakerscan-local-build"
+printf 'prebuilt\n' > "$INSTALL_STAGE/.shakerscan-local-build"
+commit_staged_downloads
 
 install_command
 
