@@ -196,30 +196,6 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
     pip check && \
     test -z "$(python -c 'pass' 2>&1)"
 
-# Model-intake evidence adapters live in separate, hash-locked virtual
-# environments. Their dependency graphs cannot alter the API/worker runtime.
-COPY scanner/model_intake_tools /opt/model-intake-locks
-COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
-COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
-COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
-COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
-RUN set -eu; \
-    for tool in modelscan fickling semgrep safetensors pip-audit; do \
-      python3 -m venv "/opt/model-intake-tools/${tool}"; \
-      "/opt/model-intake-tools/${tool}/bin/pip" install \
-        --no-cache-dir --require-hashes -r "/opt/model-intake-locks/${tool}.lock"; \
-      if [ "${tool}" != "pip-audit" ]; then \
-        ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
-      fi; \
-    done; \
-    install -m 0755 /opt/model-intake-locks/pip_audit_offline.py /opt/tools/pip-audit-offline; \
-    mkdir -p /opt/pip-audit-cache; \
-    /opt/tools/pip-audit-offline --build-cache \
-      --lock /opt/model-intake-locks/firecracker-runtime.lock \
-      --pip-audit /opt/model-intake-tools/pip-audit/bin/pip-audit \
-      --output /opt/pip-audit-cache/runtime-audit.json \
-      --metadata /opt/pip-audit-cache/metadata.json
-
 # Compiler headers are build-only. Keeping them in the scanner runtime both
 # enlarges the release image and exposes kernel-header packages that no scan
 # path executes.
@@ -228,69 +204,9 @@ RUN apt-get purge -y --auto-remove \
       python3-venv python3.12-venv python3-pip-whl python3-setuptools-whl && \
     rm -rf /var/lib/apt/lists/*
 
-# Trivy is a checksum-pinned native adapter. The vulnerability database is
-# captured in the image and scanned offline; readiness exposes its metadata.
-ARG TARGETARCH
-ARG TRIVY_VERSION=0.73.0
-ARG TRIVY_AMD64_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
-ARG TRIVY_ARM64_SHA256=13833d97e8a1a5367471c372a173180157f593bece570e20d5d925fef552f5dd
-ARG TRIVY_DOWNLOAD_ATTEMPTS=4
-# OSV Scanner 2.5 delegates offline matching to OSV-Scalibr, which appends
-# osv-scalibr/<ecosystem>/all.zip to the configured base path.
-ARG OSV_SCANNER_VERSION=2.5.0
-ARG OSV_SCANNER_AMD64_SHA256=edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
-ARG OSV_SCANNER_ARM64_SHA256=fe152e1a546af223e6c557cc3111a8bb3e5dc02fcbf7dbe95d26567c0f0041f2
-RUN set -eu; \
-    case "${TARGETARCH}" in \
-      amd64) trivy_arch="64bit"; trivy_sha="${TRIVY_AMD64_SHA256}"; osv_arch="amd64"; osv_sha="${OSV_SCANNER_AMD64_SHA256}" ;; \
-      arm64) trivy_arch="ARM64"; trivy_sha="${TRIVY_ARM64_SHA256}"; osv_arch="arm64"; osv_sha="${OSV_SCANNER_ARM64_SHA256}" ;; \
-      *) echo "Unsupported Trivy architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}" \
-      -o "/tmp/${trivy_archive}"; \
-    echo "${trivy_sha}  /tmp/${trivy_archive}" | sha256sum -c -; \
-    tar -xzf "/tmp/${trivy_archive}" -C /opt/tools trivy; \
-    rm "/tmp/${trivy_archive}"; \
-    chmod 755 /opt/tools/trivy; \
-    mkdir -p /opt/trivy-cache; \
-    download_trivy_data() { \
-      /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && \
-      /opt/tools/trivy fs --scanners misconfig --format json \
-        --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; \
-    }; \
-    attempt=1; \
-    until download_trivy_data; do \
-      if [ "$attempt" -ge "${TRIVY_DOWNLOAD_ATTEMPTS}" ]; then \
-        echo "Trivy database/check bundle download failed after ${TRIVY_DOWNLOAD_ATTEMPTS} attempts" >&2; \
-        exit 1; \
-      fi; \
-      delay=$((attempt * 5)); \
-      echo "Trivy data download failed (attempt ${attempt}/${TRIVY_DOWNLOAD_ATTEMPTS}); retrying in ${delay}s" >&2; \
-      sleep "$delay"; \
-      attempt=$((attempt + 1)); \
-    done; \
-    osv_archive="osv-scanner_linux_${osv_arch}"; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/${osv_archive}" \
-      -o "/tmp/${osv_archive}"; \
-    echo "${osv_sha}  /tmp/${osv_archive}" | sha256sum -c -; \
-    install -m 0755 "/tmp/${osv_archive}" /opt/tools/osv-scanner; \
-    rm "/tmp/${osv_archive}"; \
-    mkdir -p /opt/osv-cache/osv-scalibr/PyPI; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip" \
-      -o /opt/osv-cache/osv-scalibr/PyPI/all.zip; \
-    osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; \
-    osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
-    printf '{"UpdatedAt":"%s","Ecosystem":"PyPI","DatabaseSHA256":"%s"}\n' \
-      "$osv_updated" "$osv_db_sha" > /opt/osv-cache/metadata.json
-
 # Playwright browser path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
 
 # Create symlink for nuclei's headless mode
 RUN CHROME_PATH=$(find /ms-playwright -name "chrome" -type f 2>/dev/null | head -1) && \
@@ -355,12 +271,6 @@ COPY skills/web /app/skills/web
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads /app/skills/web
 
-# The official Rust parser boundary is a release-image gate, not an optional
-# test dependency or a monkeypatched unit-test seam.
-RUN PYTHONPATH=/app/scanner_tools \
-    /opt/model-intake-tools/safetensors/bin/python \
-    /app/scanner_tools/model_intake_safetensors_selftest.py
-
 # The adapter harness always drops tool subprocesses to this account, including
 # during the image's functional self-test.
 RUN useradd --uid 10001 --user-group --create-home scanner
@@ -391,15 +301,7 @@ RUN set -e && \
     /opt/tools/naabu -version && \
     /opt/tools/nuclei -version && \
     /opt/tools/dalfox version && \
-    /opt/tools/modelscan --version && \
-    /opt/tools/fickling --version && \
-    /opt/tools/semgrep --version && \
-    /opt/tools/trivy --version && \
-    /opt/tools/osv-scanner --version && \
-    /opt/tools/pip-audit-offline --version && \
     /opt/tools/gungnir -h | head -1 && \
-    python3 /app/scanner_tools/model_intake_adapter_self_test.py \
-      --output /opt/model-intake-tools/self-test.json && \
     echo "ALL TOOLS VERIFIED OK"
 
 # pip is a build tool, not a scanner runtime capability. Keeping it would also
