@@ -46,7 +46,7 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     for token in (
         "COPY scanner/model_intake_tools /opt/model-intake-locks",
         "for tool in modelscan fickling semgrep safetensors pip-audit;",
-        "ARG TRIVY_VERSION=0.73.0",
+        "ARG TRIVY_VERSION=0.74.0",
         "ARG OSV_SCANNER_VERSION=2.5.1",
         "model_intake_safetensors_selftest.py",
         "model_intake_adapter_self_test.py",
@@ -57,7 +57,7 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "python3-pip-whl python3-setuptools-whl" in MI
     assert MI.count("apt-get purge -y --auto-remove") == 1
     assert "AS model-intake-go-tools" in MI
-    assert "golang:1.27.0-bookworm@sha256:" in MI
+    assert "golang:1.26.6-bookworm@sha256:" in MI
     assert "golang.org/x/crypto@v0.55.0" in MI
     assert "google.golang.org/grpc@v1.83.1" in MI
     assert "COPY --from=model-intake-go-tools /out/trivy" in MI

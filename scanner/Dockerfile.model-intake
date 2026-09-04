@@ -7,21 +7,21 @@
 # scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
 # removed after installation so it cannot require a runtime vulnerability waiver.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
-ARG MODEL_INTAKE_GO_BUILDER=golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
+ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
 FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
-ARG TRIVY_VERSION=0.73.0
+ARG TRIVY_VERSION=0.74.0
 ARG OSV_SCANNER_VERSION=2.5.1
 RUN set -eux; \
     git clone --depth 1 --branch "v${TRIVY_VERSION}" https://github.com/aquasecurity/trivy.git /src/trivy; \
     cd /src/trivy; \
     go get github.com/go-git/go-git/v5@v5.19.2 golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1 oras.land/oras-go/v2@v2.6.2; \
-    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/trivy ./cmd/trivy; \
+    GOEXPERIMENT=jsonv2 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/trivy ./cmd/trivy; \
     git clone --depth 1 --branch "v${OSV_SCANNER_VERSION}" https://github.com/google/osv-scanner.git /src/osv-scanner; \
     cd /src/osv-scanner; \
     go get golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1; \
     CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/osv-scanner ./cmd/osv-scanner; \
-    go version /out/trivy | grep -F 'go1.27.0'; \
-    go version /out/osv-scanner | grep -F 'go1.27.0'; \
+    go version /out/trivy | grep -F 'go1.26.6'; \
+    go version /out/osv-scanner | grep -F 'go1.26.6'; \
     go version -m /out/trivy | grep -F 'golang.org/x/crypto	v0.55.0'; \
     go version -m /out/trivy | grep -F 'github.com/go-git/go-git/v5	v5.19.2'; \
     go version -m /out/trivy | grep -F 'oras.land/oras-go/v2	v2.6.2'; \
