@@ -72,7 +72,7 @@ def test_browser_registry_and_durable_set_are_explicit_and_bounded():
     assert interaction.requires_active_approval is False
     assert interaction.placement_requirements == spec.placement_requirements
     assert interaction.budget_cost == {
-        "browser_actions": 2,
+        "browser_actions": 9,
         "http_requests": 50,
         "tool_wall_seconds": 30,
     }
@@ -134,7 +134,7 @@ def test_browser_prepare_address_selection_is_stable_across_dns_order():
 
 
 @pytest.mark.parametrize("path", [
-    "https://evil.example/", "//evil.example/", "/path#fragment", "/bad\\path",
+    "https://evil.example/", "//evil.example/", "/bad\\path",
 ])
 def test_browser_prepare_rejects_paths_that_can_escape_or_hide_scope(path):
     with pytest.raises(BrowserCapabilityInputError):
@@ -343,6 +343,9 @@ def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypat
             page.url = "https://app.example.test/report?view=public"
 
     class FakePage:
+        async def evaluate(self, _script):
+            return {"controls": [], "total": 0}
+
         def __init__(self):
             self.url = "about:blank"
             self.route_handler = None
@@ -485,6 +488,9 @@ def test_browser_execution_blocks_cross_origin_and_writes_and_redacts_evidence(m
             self.headers = {"content-type": "text/html; charset=utf-8"}
 
     class FakePage:
+        async def evaluate(self, _script):
+            return {"controls": [], "total": 0}
+
         def __init__(self):
             self.url = "about:blank"
             self.route_handler = None

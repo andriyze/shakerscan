@@ -680,6 +680,10 @@ class HuntRunService:
             spec = library.require(skill_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            payload = spec.public(include_body=True)
+        except (HuntSkillError, OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=503, detail="Methodology revision is unavailable") from exc
         hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
         async with self._pool().acquire() as connection:
             async with connection.transaction():
@@ -704,7 +708,6 @@ class HuntRunService:
                         hunt_uuid, spec.skill_id, spec.version, spec.body_sha256,
                         "Methodology fetched on demand",
                     )
-        payload = spec.public(include_body=True)
         payload["hunt_id"] = hunt_id
         payload["context_policy"] = "on_demand_single_methodology"
         return payload
@@ -722,11 +725,6 @@ class HuntRunService:
                         status_code=409, detail=f"Hunt is {row['status']}",
                     )
                 context = _json_object_copy(row["context_pack"])
-                previous_bound_ids = {
-                    str(item.get("skill_id"))
-                    for item in (context.get("skills") or {}).get("bound") or []
-                    if isinstance(item, Mapping)
-                }
                 requested = _requested_skill_ids(context)
                 if skill_id not in requested:
                     requested.append(skill_id)
@@ -752,6 +750,12 @@ class HuntRunService:
                 changed = skill_id not in _requested_skill_ids(
                     _decode_json(row["context_pack"], {})
                 )
+                previous_revisions = {
+                    item.get("skill_id"): item.get("body_sha256")
+                    for item in (_decode_json(row["context_pack"], {}).get("skills") or {}).get("bound") or []
+                    if isinstance(item, Mapping)
+                }
+                changed = changed or previous_revisions.get(skill_id) != explicit.body_sha256
                 if changed:
                     was_read = await connection.fetchval(
                         """SELECT EXISTS(
@@ -770,7 +774,7 @@ class HuntRunService:
                             ),
                         )
                     for spec in specs:
-                        if spec.skill_id in previous_bound_ids:
+                        if previous_revisions.get(spec.skill_id) == spec.body_sha256:
                             continue
                         await connection.execute(
                             """INSERT INTO hunt_skill_events (
@@ -870,14 +874,16 @@ class HuntRunService:
         hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
         action_uuid = _uuid_or_400(action_id, "action id") if action_id else None
         refs = list(dict.fromkeys(evidence_refs or []))[:20]
-        if state in {"used", "completed"} and action_uuid is None and not refs:
+        if state in {"used", "completed"} and action_uuid is None:
             raise HTTPException(
                 status_code=422,
-                detail="Used or completed methodology requires an action or evidence reference",
+                detail="Used or completed methodology requires a same-Hunt action_id; evidence references alone do not establish usage",
             )
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
+                if row["status"] not in ACTIVE_HUNT_STATUSES:
+                    raise HTTPException(status_code=409, detail=f"Hunt is {row['status']}")
                 context = _decode_json(row["context_pack"], {})
                 bound_ids = {
                     str(item.get("skill_id"))
@@ -890,9 +896,20 @@ class HuntRunService:
                     spec = skill_library().require(skill_id)
                 except KeyError as exc:
                     raise HTTPException(status_code=404, detail=str(exc)) from exc
+                bound = next(item for item in context["skills"]["bound"] if item.get("skill_id") == skill_id)
+                if bound.get("body_sha256") != spec.body_sha256:
+                    raise HTTPException(status_code=409, detail="Bound methodology revision changed; read and rebind it before use")
+                if state in {"used", "completed"}:
+                    was_read = await connection.fetchval(
+                        """SELECT EXISTS(SELECT 1 FROM hunt_skill_events
+                           WHERE hunt_run_id=$1 AND skill_id=$2 AND event_type='read' AND body_sha256=$3)""",
+                        hunt_uuid, spec.skill_id, spec.body_sha256,
+                    )
+                    if not was_read:
+                        raise HTTPException(status_code=409, detail="Read this methodology before reporting usage")
                 if action_uuid is not None:
                     action = await connection.fetchrow(
-                        """SELECT capability_name FROM hunt_actions
+                        """SELECT capability_name, status FROM hunt_actions
                            WHERE id=$1 AND hunt_run_id=$2""",
                         action_uuid, hunt_uuid,
                     )
@@ -900,6 +917,9 @@ class HuntRunService:
                         raise HTTPException(
                             status_code=422, detail="Action does not belong to this Hunt",
                         )
+                    allowed_statuses = {"completed"} if state == "completed" else {"running", "completed", "partial"}
+                    if state in {"used", "completed"} and str(action["status"]) not in allowed_statuses:
+                        raise HTTPException(status_code=422, detail="Action has not reached the reported methodology usage state")
                     if str(action["capability_name"]) not in {
                         *spec.capabilities, *spec.optional_capabilities,
                     }:

@@ -1253,7 +1253,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "browser.navigate",
-            "Open one target-bound page while blocking cross-origin and state-changing requests.",
+            "Inspect a target-bound page or SPA route; optionally use a managed session. Returns a redacted actionable surface.",
             "browser", "passive", _HTTP_TARGETS, "playwright", "1", None,
             {
                 "browser_actions": 1,
@@ -1268,6 +1268,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
+                "session_ref": {"type": "string", "format": "uuid"},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1285,10 +1286,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "browser.interact",
-            "Click one strictly read-only target-bound link, disclosure, or tab.",
+            "Replay up to eight read-only clicks or non-secret field fills in one target-bound browser context; no writes or form submission.",
             "browser", "passive", _HTTP_TARGETS, "playwright", "1", None,
             {
-                "browser_actions": 2,
+                "browser_actions": 9,
                 "http_requests": 50,
                 "tool_wall_seconds": 30,
             },
@@ -1298,9 +1299,18 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "agent_tool_worker": True,
                 "runtime_target_binding": True,
             },
-            _schema({
+            {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                "session_ref": {"type": "string", "format": "uuid"},
+                "steps": {
+                    "type": "array", "minItems": 1, "maxItems": 8,
+                    "items": _schema({
+                        "action": {"type": "string", "enum": ["click", "fill"]},
+                        "selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "value": {"type": "string", "maxLength": 500},
+                    }, required=("action", "selector")),
+                },
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1313,7 +1323,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "settle_ms": {
                     "type": "integer", "minimum": 0, "maximum": 2000,
                 },
-            }, required=("selector",)),
+            }), "oneOf": [{"required": ["selector"]}, {"required": ["steps"]}]},
             "browser-interaction/v1",
             ("browser_interaction_observation", "http_observation", "tool_receipt"),
             default_timeout_ms=30_000,

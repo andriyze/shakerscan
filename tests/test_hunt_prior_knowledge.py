@@ -137,36 +137,27 @@ def test_device_census_reports_services_instead_of_endpoints():
 # and findings on severity alone, so an agent could read the census and still only page the top of
 # the priority ranking. These pin the filters that close that gap.
 
-def _query_source() -> str:
-    from tests.api_sources import definition_source
-    return definition_source("_agent_tool_query_kb")
-
-
 def test_endpoint_query_can_select_the_untested_frontier():
-    source = _query_source()
-    assert 'test_status = str(flt.get("test_status") or "").strip().lower()' in source
-    assert 'auth_state = str(flt.get("auth_state") or "").strip().lower()' in source
-    # Bound as parameters, never interpolated: these reach a SQL WHERE clause.
-    assert "lower(COALESCE(test_status,''))=$4" in source
-    assert "lower(COALESCE(auth_state,''))=$5" in source
-    assert "target_uuid, path_contains, method, test_status, auth_state, limit," in source
+    from tests.test_hunt_knowledge_pages import KnowledgeDB, TARGET, STAMP, page
+    db = KnowledgeDB()
+    db.insert("endpoints", id="00000000-0000-0000-0000-000000000010", target_id=str(TARGET), path="/private", method="GET", auth_state="user1", test_status="untested", priority_score=10, last_seen_at=STAMP)
+    assert page(db, filters={"test_status": "untested", "auth_state": "user1"})["count"] == 1
+    assert page(db, filters={"auth_state": "anonymous"})["count"] == 0
 
 
 def test_findings_query_can_separate_proven_work_from_open_work():
-    source = _query_source()
-    assert 'finding_status = str(flt.get("status") or "").strip().lower()' in source
-    assert 'verified_only = bool(flt.get("verified_only"))' in source
-    assert "NOT $4::boolean OR last_verification_verdict='exploited'" in source
-    assert "target_uuid, severity, finding_status, verified_only, limit," in source
+    from tests.test_hunt_knowledge_pages import KnowledgeDB, TARGET, STAMP, page
+    db = KnowledgeDB()
+    db.insert("findings", id="00000000-0000-0000-0000-000000000010", target_id=str(TARGET), status="active", severity="high", last_verification_verdict="inconclusive", last_seen_at=STAMP)
+    assert page(db, "findings", filters={"verified_only": True})["count"] == 0
+    assert page(db, "findings", filters={"status": "active", "verified_only": False})["count"] == 1
 
 
 def test_new_filters_default_to_the_previous_behaviour():
-    # Every added predicate is guarded by an empty/false check, so a caller that sends no filter
-    # gets exactly the rows it got before -- the filters widen expressiveness, never narrow default
-    # results.
-    source = _query_source()
-    for guard in ("($4='' OR", "($5='' OR", "($3='' OR", "NOT $4::boolean OR"):
-        assert guard in source, guard
+    from tests.test_hunt_knowledge_pages import KnowledgeDB, TARGET, STAMP, page
+    db = KnowledgeDB()
+    db.insert("findings", id="00000000-0000-0000-0000-000000000010", target_id=str(TARGET), status="active", severity="high", last_seen_at=STAMP)
+    assert page(db, "findings")["rows"] == page(db, "findings", filters={"severity": "", "status": "", "verified_only": False})["rows"]
 
 
 def test_census_guidance_names_the_filters_it_promises():
@@ -187,8 +178,8 @@ def test_every_knowledge_base_kind_is_reachable_from_a_hunt():
 
     from tests.api_sources import definition_source
 
-    query_source = definition_source("_agent_tool_query_kb")
-    implemented = set(re.findall(r'kind == "([a-z_]+)"', query_source))
+    from api.hunt.knowledge import QUERIES
+    implemented = set(QUERIES)
     # tool_receipts is reached through the "receipts" alias the route maps for it.
     implemented = (implemented - {"tool_receipts"}) | {"receipts"}
 

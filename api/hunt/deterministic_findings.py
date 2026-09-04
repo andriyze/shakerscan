@@ -20,8 +20,10 @@ except ModuleNotFoundError:
 
 try:
     from scanner_tools.url_redaction import redact_client_route
+    from scanner_tools.xss_evidence import apply_xss_execution_evidence
 except ModuleNotFoundError:
     from scanner.scanner_tools.url_redaction import redact_client_route
+    from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence
 
 
 def _origin(value: urllib.parse.SplitResult) -> tuple[str, str | None, int | None]:
@@ -150,6 +152,11 @@ async def materialize_verified_hunt_findings(
             "method": method,
             **proof,
         }
+        apply_xss_execution_evidence(
+            {"evidence": evidence},
+            location="client_route" if proof.get("client_route") else "request_parameter",
+            parameter=proof.get("param"), signal="browser_or_alert_execution", verifier=capability_name,
+        )
         finding_id = await conn.fetchval(
             """INSERT INTO findings (
                    target_id, hunt_run_id, fingerprint, title, description,
@@ -159,12 +166,16 @@ async def materialize_verified_hunt_findings(
                ) VALUES (
                    $1,$2,$3,'Verified cross-site scripting',
                    'Dalfox observed deterministic browser or alert execution on the bound target.',
-                   'high',8.1,'dalfox','CWE-79',$4,$5::jsonb,'deep_hunt','active',
+                   'high',NULL,'dalfox','CWE-79',$4,$5::jsonb,'deep_hunt','active',
                    'still_vulnerable','exploited',1.0,NOW(),1
                ) ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL
                DO UPDATE SET
                    hunt_run_id=EXCLUDED.hunt_run_id, status='active', resolved_at=NULL,
-                   last_seen_at=NOW(), url=EXCLUDED.url, evidence=EXCLUDED.evidence,
+                   last_seen_at=NOW(), url=EXCLUDED.url,
+                   evidence=EXCLUDED.evidence || CASE
+                       WHEN findings.evidence ? 'cvss'
+                       THEN jsonb_build_object('cvss', findings.evidence->'cvss')
+                       ELSE '{}'::jsonb END,
                    last_verification_status='still_vulnerable',
                    last_verification_verdict='exploited',
                    last_verification_confidence=1.0, last_verified_at=NOW(),

@@ -223,7 +223,10 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - Do not describe binding as narrowing, sandboxing, or fencing the Hunt. To reduce authority, start
   a new Hunt with a smaller policy/capability contract; methodology binding cannot do that.
 - Record evidenced methodology use or completion at
-  `POST /hunts/{hunt_id}/skills/{skill_id}/usage`. Unbind it when it is no longer relevant. The
+  `POST /hunts/{hunt_id}/skills/{skill_id}/usage` with the actual `action_id`. Read the exact
+  bound revision first, including prerequisites when you use them. `used` requires an executing,
+  partial, or completed declared action; `completed` requires a completed action. Neither state
+  proves a vulnerability. Unbind it when it is no longer relevant. The
   server retains version, digest, trigger, evidence, and lifecycle outside the planner context.
 - For a client bundle, prefer `javascript.analyze` for compact routes, source-map references,
   sink signals, and decoded JWT claims. Use `artifact.inspect` only for one necessary redacted
@@ -234,6 +237,17 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   permission merely to satisfy a methodology.
 
 - Query context with `POST /hunts/{hunt_id}/query` before sending new traffic.
+  Follow `next_cursor` with the same kind and filters while `has_more` is true; the page limit
+  is not the inventory size. Use returned IDs for follow-up and `filter.id` for exact records.
+  Prefer untested endpoints, unresolved hypotheses, and prior findings over repeating settled work.
+- Browser capabilities return `browser_surface` observations containing safe CSS selectors,
+  visible control structure, a redacted SPA route, and a `state_id`, not page text or secrets.
+  `browser.interact` accepts either one `selector` or up to eight `steps` (`click` or non-secret
+  `fill`). Each call starts a fresh context: replay the required earlier steps in the same call.
+  Use an opaque `session_ref` returned by `auth.session.establish` for authenticated pages;
+  its profile must explicitly allow the browser capability. Never type credentials into fields.
+  Browsers still block writes, cross-origin traffic, uploads, downloads, and realtime sockets;
+  state-changing tests require the existing separately authorized typed verification paths.
 - Execute only a capability returned by the run at
   `POST /hunts/{hunt_id}/capabilities/{capability_name}`. Supply a fresh opaque
   `idempotency_key` for each intended action and reuse that same key only when retrying the exact
@@ -288,6 +302,8 @@ actions. Cancel with `/cancel`; resume only when the server reports an awaiting-
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,
 or any budget is exhausted. Preserve partial observations and name material coverage gaps.
+An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
+reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
 
 Store no hidden chain-of-thought. Durable records should contain objectives, capability calls,
 receipts, observations, bounded notes, candidates, and the final debrief.

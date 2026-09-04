@@ -116,7 +116,7 @@ class _Connection:
     async def fetchrow(self, query, *args):
         if query.startswith("SELECT * FROM hunt_runs"):
             return self.row
-        if "SELECT capability_name FROM hunt_actions" in query:
+        if "SELECT capability_name, status FROM hunt_actions" in query:
             return None
         raise AssertionError(query)
 
@@ -224,6 +224,52 @@ def test_runtime_binding_requires_that_exact_methodology_revision_to_be_read():
     assert getattr(exc.value, "status_code", None) == 409
     assert "read endpoint" in str(getattr(exc.value, "detail", ""))
     assert connection.row["context_pack"]["skills"]["bound"] == []
+
+
+def test_usage_cannot_be_claimed_from_arbitrary_evidence_labels():
+    connection = _Connection()
+    service = HuntRunService(lambda: _Pool(connection))
+    with pytest.raises(HTTPException, match="action_id"):
+        asyncio.run(service.record_skill_usage(str(connection.hunt_id), SKILL_ID, state="used", evidence_refs=["made-up-evidence"]))
+    assert not connection.events
+
+
+@pytest.mark.parametrize("status,state,accepted", [
+    ("reserved", "used", False), ("failed", "completed", False),
+    ("running", "used", True), ("partial", "completed", False),
+    ("completed", "completed", True),
+])
+def test_usage_is_linked_to_actual_declared_action_state(status, state, accepted):
+    connection = _Connection()
+    service = HuntRunService(lambda: _Pool(connection))
+    hunt_id = str(connection.hunt_id)
+    asyncio.run(service.read_skill(hunt_id, SKILL_ID))
+    asyncio.run(service.bind_skill(hunt_id, SKILL_ID))
+    original = connection.fetchrow
+    async def fetchrow(query, *args):
+        if "SELECT capability_name, status FROM hunt_actions" in query:
+            return {"capability_name": "http.request", "status": status}
+        return await original(query, *args)
+    connection.fetchrow = fetchrow
+    operation = service.record_skill_usage(hunt_id, SKILL_ID, state=state, action_id=str(uuid.uuid4()))
+    if accepted:
+        result = asyncio.run(operation)
+        assert result["skill_activity"][-1]["event_type"] == state
+        assert result["skill_activity"][-1]["action_id"]
+    else:
+        with pytest.raises(HTTPException): asyncio.run(operation)
+        assert not any(event["event_type"] in {"used", "completed"} for event in connection.events)
+
+
+def test_methodology_body_changes_cannot_keep_the_old_catalog_digest(tmp_path):
+    from api.hunt.skills import HuntSkillError, load_skill_library
+    path = tmp_path / "sample.md"
+    path.write_text("---\nid: skill.web.sample\nname: sample\ntitle: Sample\ndescription: Sample\nversion: 1\nkind: discovery\nphase: discovery\nrisk: low\nsupport: supported\ntarget_kinds: [web]\ncapabilities: [http.request]\n---\nFirst body\n")
+    spec = load_skill_library(tmp_path).require("skill.web.sample")
+    assert spec.public(include_body=True)["methodology"] == "First body\n"
+    path.write_text(path.read_text().replace("First body", "Different body"))
+    with pytest.raises(HuntSkillError, match="changed"):
+        spec.public(include_body=True)
 
 
 def test_fresh_and_upgraded_databases_persist_methodology_lifecycle_outside_context():
