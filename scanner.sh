@@ -534,6 +534,40 @@ ui_probe_url() {
     echo "http://$(format_url_host "$(probe_access_host)"):${SHAKERSCAN_UI_PORT:-3000}"
 }
 
+host_port_is_occupied() {
+    local host="$1"
+    local port="$2"
+    python3 -c 'import errno, socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_STREAM)
+try:
+    sock.bind((host, port))
+except OSError as exc:
+    raise SystemExit(0 if exc.errno in {errno.EADDRINUSE, errno.EACCES} else 2)
+finally:
+    sock.close()
+raise SystemExit(1)' "$host" "$port" 2>/dev/null
+}
+
+warn_if_ui_port_has_foreign_listener() {
+    local host="${SHAKERSCAN_BIND_HOST:-127.0.0.1}"
+    local port="${SHAKERSCAN_UI_PORT:-3000}"
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    local owned_ui
+
+    owned_ui="$(docker ps --quiet \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=ui" \
+        --filter "publish=$port" 2>/dev/null || true)"
+    [ -z "$owned_ui" ] || return 0
+    if host_port_is_occupied "$host" "$port"; then
+        echo -e "${YELLOW}Warning: UI port $host:$port is already held by a process outside Compose project '$project'.${NC}" >&2
+        echo "ShakerScan will not stop that process; startup may fail when the UI binds its port." >&2
+        echo "Stop the stray process or choose another port with SHAKERSCAN_UI_PORT=<port>." >&2
+    fi
+}
+
 run_with_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
@@ -2075,6 +2109,7 @@ start_services() {
 
     prepare_runtime_files
     persist_remote_access_env
+    warn_if_ui_port_has_foreign_listener
     if [ -n "$requested_workers" ]; then
         start_workers="$requested_workers"
     else

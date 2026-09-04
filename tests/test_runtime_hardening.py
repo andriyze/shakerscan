@@ -833,6 +833,48 @@ start_services
     assert "compose:up --no-build -d --scale worker=1" in outputs[(1, 1)]
 
 
+def test_start_warns_only_when_the_ui_port_is_owned_outside_the_compose_project():
+    script = (ROOT / "scanner.sh").read_text()
+    warning = script.split("warn_if_ui_port_has_foreign_listener() {", 1)[1].split("\n}", 1)[0]
+    harness = r'''
+set -eu
+YELLOW=''
+NC=''
+SHAKERSCAN_BIND_HOST=127.0.0.1
+SHAKERSCAN_UI_PORT=3000
+COMPOSE_PROJECT_NAME=expected-project
+docker() {
+    if [ "${OWNED:-0}" = 1 ]; then
+        printf 'owned-ui\n'
+    fi
+}
+host_port_is_occupied() { [ "${OCCUPIED:-0}" = 1 ]; }
+warn_if_ui_port_has_foreign_listener() {
+__WARNING__
+}
+warn_if_ui_port_has_foreign_listener
+'''.replace("__WARNING__", warning)
+
+    free = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "0", "OWNED": "0"}, check=False,
+    )
+    foreign = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "1", "OWNED": "0"}, check=False,
+    )
+    owned = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "1", "OWNED": "1"}, check=False,
+    )
+
+    assert free.returncode == foreign.returncode == owned.returncode == 0
+    assert free.stderr == ""
+    assert "outside Compose project 'expected-project'" in foreign.stderr
+    assert "ShakerScan will not stop that process" in foreign.stderr
+    assert owned.stderr == ""
+
+
 def test_build_receipt_scopes_prevent_partial_rebuilds_from_authorizing_startup():
     script = (ROOT / "scanner.sh").read_text()
     writer = script.split("write_build_receipt() {", 1)[1].split("\n}", 1)[0]
