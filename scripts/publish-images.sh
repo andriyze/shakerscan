@@ -11,6 +11,7 @@ SCANNER_REPO="${SCANNER_IMAGE_REPO:-shakerscan/shakerscan-scanner}"
 API_REPO="${API_IMAGE_REPO:-shakerscan/shakerscan-api}"
 UI_REPO="${UI_IMAGE_REPO:-shakerscan/shakerscan-ui}"
 SIGNER_REPO="${MODEL_INTAKE_SIGNER_IMAGE_REPO:-shakerscan/shakerscan-model-intake-signer}"
+MODEL_INTAKE_REPO="${MODEL_INTAKE_IMAGE_REPO:-shakerscan/shakerscan-model-intake}"
 TAG="${SCANNER_IMAGE_TAG:-}"
 SOURCE_URL="${SOURCE_URL:-https://github.com/andriyze/shakerscan}"
 IMAGE_URL="${IMAGE_URL:-https://hub.docker.com/r/shakerscan}"
@@ -226,6 +227,7 @@ echo "  scanner:  $SCANNER_REPO:$TAG"
 echo "  api:      $API_REPO:$TAG"
 echo "  ui:       $UI_REPO:$TAG"
 echo "  signer:   $SIGNER_REPO:$TAG"
+echo "  intake:   $MODEL_INTAKE_REPO:$TAG"
 echo "  platform: $PLATFORM"
 echo
 
@@ -233,11 +235,13 @@ SCANNER_TAGS=(-t "$SCANNER_REPO:$TAG")
 API_TAGS=(-t "$API_REPO:$TAG")
 UI_TAGS=(-t "$UI_REPO:$TAG")
 SIGNER_TAGS=(-t "$SIGNER_REPO:$TAG")
+MODEL_INTAKE_TAGS=(-t "$MODEL_INTAKE_REPO:$TAG")
 if [[ "$TAG_LATEST" -eq 1 ]]; then
     SCANNER_TAGS+=(-t "$SCANNER_REPO:latest")
     API_TAGS+=(-t "$API_REPO:latest")
     UI_TAGS+=(-t "$UI_REPO:latest")
     SIGNER_TAGS+=(-t "$SIGNER_REPO:latest")
+    MODEL_INTAKE_TAGS+=(-t "$MODEL_INTAKE_REPO:latest")
 fi
 
 docker buildx build \
@@ -260,6 +264,17 @@ docker buildx build \
     --build-arg "SCANNER_RUNTIME_IMAGE=$SCANNER_REPO:$TAG" \
     "${API_TAGS[@]}" \
     -f scanner/Dockerfile.api \
+    .
+
+docker buildx build \
+    "${BUILD_ARGS[@]}" \
+    "${OUTPUT_ARGS[@]}" \
+    "${COMMON_LABELS[@]}" \
+    --label "org.opencontainers.image.title=ShakerScan Model Intake" \
+    --label "org.opencontainers.image.description=ShakerScan Model Intake worker and sandbox: the scanner runtime plus the artifact-scanning toolchain" \
+    --build-arg "SCANNER_RUNTIME_IMAGE=$SCANNER_REPO:$TAG" \
+    "${MODEL_INTAKE_TAGS[@]}" \
+    -f scanner/Dockerfile.model-intake \
     .
 
 docker buildx build \

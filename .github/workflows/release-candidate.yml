@@ -44,6 +44,7 @@ env:
   API_IMAGE: shakerscan/shakerscan-api
   UI_IMAGE: shakerscan/shakerscan-ui
   SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+  MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
   SOURCE_URL: https://github.com/andriyze/shakerscan
 
 jobs:
@@ -418,6 +419,33 @@ jobs:
           cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.API_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
+      - name: Build and push Model Intake by digest
+        id: model_intake
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: scanner/Dockerfile.model-intake
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            SCANNER_RUNTIME_IMAGE=${{ env.SCANNER_IMAGE }}@${{ steps.scanner.outputs.digest }}
+          labels: |
+            org.opencontainers.image.title=ShakerScan Model Intake
+            org.opencontainers.image.description=ShakerScan Model Intake worker and sandbox: the scanner runtime plus the artifact-scanning toolchain
+            org.opencontainers.image.created=${{ needs.meta.outputs.created }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.meta.outputs.candidate_sha }}
+            com.shakerscan.release.workflow-revision=${{ needs.meta.outputs.workflow_sha }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.opencontainers.image.url=https://hub.docker.com/r/shakerscan/shakerscan-model-intake
+            org.opencontainers.image.documentation=${{ env.SOURCE_URL }}#readme
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.vendor=ShakerScan
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=model-intake-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=model-intake-${{ env.PLATFORM_PAIR }}
+          outputs: type=image,name=${{ env.MODEL_INTAKE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
       - name: Verify baked scanner release identity
         shell: bash
         env:
@@ -425,8 +453,9 @@ jobs:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
           SCANNER_DIGEST: ${{ steps.scanner.outputs.digest }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
+          MODEL_INTAKE_DIGEST: ${{ steps.model_intake.outputs.digest }}
         run: |
-          for image in "${SCANNER_IMAGE}@${SCANNER_DIGEST}" "${API_IMAGE}@${API_DIGEST}"; do
+          for image in "${SCANNER_IMAGE}@${SCANNER_DIGEST}" "${API_IMAGE}@${API_DIGEST}" "${MODEL_INTAKE_IMAGE}@${MODEL_INTAKE_DIGEST}"; do
             docker pull "$image"
             baked_version="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | awk -F= '$1 == "SCANNER_VERSION" {print $2}')"
             if [[ "$baked_version" != "$VERSION" ]]; then
@@ -448,11 +477,13 @@ jobs:
       - name: Export digests
         shell: bash
         run: |
-          mkdir -p /tmp/digests/scanner /tmp/digests/api
+          mkdir -p /tmp/digests/scanner /tmp/digests/api /tmp/digests/model-intake
           scanner_digest="${{ steps.scanner.outputs.digest }}"
           api_digest="${{ steps.api.outputs.digest }}"
+          model_intake_digest="${{ steps.model_intake.outputs.digest }}"
           touch "/tmp/digests/scanner/${scanner_digest#sha256:}"
           touch "/tmp/digests/api/${api_digest#sha256:}"
+          touch "/tmp/digests/model-intake/${model_intake_digest#sha256:}"
 
       - name: Upload digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -638,10 +669,12 @@ jobs:
       api_image: shakerscan/shakerscan-api:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
       ui_image: shakerscan/shakerscan-ui:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
       signer_image: shakerscan/shakerscan-model-intake-signer:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
+      model_intake_image: shakerscan/shakerscan-model-intake:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
       scanner_digest: ${{ steps.receipt.outputs.scanner_digest }}
       api_digest: ${{ steps.receipt.outputs.api_digest }}
       ui_digest: ${{ steps.receipt.outputs.ui_digest }}
       signer_digest: ${{ steps.receipt.outputs.signer_digest }}
+      model_intake_digest: ${{ steps.receipt.outputs.model_intake_digest }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -704,6 +737,16 @@ jobs:
             $(printf "${SIGNER_IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${SIGNER_IMAGE}:${CANDIDATE_TAG}"
 
+      - name: Create Model Intake manifest list
+        working-directory: /tmp/digests/model-intake
+        env:
+          CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
+        shell: bash
+        run: |
+          docker buildx imagetools create -t "${MODEL_INTAKE_IMAGE}:${CANDIDATE_TAG}" \
+            $(printf "${MODEL_INTAKE_IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${MODEL_INTAKE_IMAGE}:${CANDIDATE_TAG}"
+
       - name: Write immutable candidate receipt
         id: receipt
         env:
@@ -718,10 +761,12 @@ jobs:
           api_digest="$(digest "${API_IMAGE}:${CANDIDATE_TAG}")"
           ui_digest="$(digest "${UI_IMAGE}:${CANDIDATE_TAG}")"
           signer_digest="$(digest "${SIGNER_IMAGE}:${CANDIDATE_TAG}")"
+          model_intake_digest="$(digest "${MODEL_INTAKE_IMAGE}:${CANDIDATE_TAG}")"
           echo "scanner_digest=$scanner_digest" >> "$GITHUB_OUTPUT"
           echo "api_digest=$api_digest" >> "$GITHUB_OUTPUT"
           echo "ui_digest=$ui_digest" >> "$GITHUB_OUTPUT"
           echo "signer_digest=$signer_digest" >> "$GITHUB_OUTPUT"
+          echo "model_intake_digest=$model_intake_digest" >> "$GITHUB_OUTPUT"
           # The host-side runtime is verified file by file against install/MANIFEST.sha256;
           # its digest is bound into the receipt so promotion can publish it in the image lock.
           python3 scripts/generate_install_manifest.py --check
@@ -735,8 +780,9 @@ jobs:
             --arg api "$api_digest" \
             --arg ui "$ui_digest" \
             --arg signer "$signer_digest" \
+            --arg model_intake "$model_intake_digest" \
             --arg runtime_manifest "$runtime_manifest" \
-            '{schema_version:"shakerscan-release-candidate/v1",version:$version,candidate_sha:$candidate_sha,candidate_tag:$candidate_tag,workflow_run:$workflow_run,images:{scanner:$scanner,api:$api,ui:$ui,signer:$signer},runtime_manifest_sha256:$runtime_manifest}' \
+            '{schema_version:"shakerscan-release-candidate/v1",version:$version,candidate_sha:$candidate_sha,candidate_tag:$candidate_tag,workflow_run:$workflow_run,images:{scanner:$scanner,api:$api,ui:$ui,signer:$signer,model_intake:$model_intake},runtime_manifest_sha256:$runtime_manifest}' \
             > release-candidate-receipt.json
 
       - name: Attest final scanner manifest provenance
@@ -771,6 +817,14 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
+      - name: Attest final Model Intake manifest provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: docker.io/${{ env.MODEL_INTAKE_IMAGE }}
+          subject-digest: ${{ steps.receipt.outputs.model_intake_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
       - name: Verify signed candidate provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -778,12 +832,14 @@ jobs:
           API_DIGEST: ${{ steps.receipt.outputs.api_digest }}
           UI_DIGEST: ${{ steps.receipt.outputs.ui_digest }}
           SIGNER_DIGEST: ${{ steps.receipt.outputs.signer_digest }}
+          MODEL_INTAKE_DIGEST: ${{ steps.receipt.outputs.model_intake_digest }}
         shell: bash
         run: |
           gh attestation verify "oci://docker.io/${SCANNER_IMAGE}@${SCANNER_DIGEST}" --repo "$GITHUB_REPOSITORY"
           gh attestation verify "oci://docker.io/${API_IMAGE}@${API_DIGEST}" --repo "$GITHUB_REPOSITORY"
           gh attestation verify "oci://docker.io/${UI_IMAGE}@${UI_DIGEST}" --repo "$GITHUB_REPOSITORY"
           gh attestation verify "oci://docker.io/${SIGNER_IMAGE}@${SIGNER_DIGEST}" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "oci://docker.io/${MODEL_INTAKE_IMAGE}@${MODEL_INTAKE_DIGEST}" --repo "$GITHUB_REPOSITORY"
           receipt_tmp="$(mktemp)"
           jq --arg repository "$GITHUB_REPOSITORY" \
             '.provenance={verified:true,issuer:"github-actions-sigstore",repository:$repository,subject:"final-multiarch-image-digests"}' \
@@ -816,13 +872,20 @@ jobs:
           - name: scanner
             image: shakerscan/shakerscan-scanner
             digest: ${{ needs.merge.outputs.scanner_digest }}
-            skip_dirs: /opt/model-intake-tools
-            skip_files: /opt/tools/trivy,/opt/tools/osv-scanner
+            skip_dirs: ""
+            skip_files: ""
           - name: api
             image: shakerscan/shakerscan-api
             digest: ${{ needs.merge.outputs.api_digest }}
+            skip_dirs: ""
+            skip_files: /usr/local/bin/docker
+          # The Model Intake toolchain moved out of the scanner and API images into this one. Its
+          # isolated tool environments keep the same scope exclusion they had before the split.
+          - name: model-intake
+            image: shakerscan/shakerscan-model-intake
+            digest: ${{ needs.merge.outputs.model_intake_digest }}
             skip_dirs: /opt/model-intake-tools
-            skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker
+            skip_files: /opt/tools/trivy,/opt/tools/osv-scanner
           - name: ui
             image: shakerscan/shakerscan-ui
             digest: ${{ needs.merge.outputs.ui_digest }}
@@ -951,7 +1014,8 @@ jobs:
             "scanner:${SCANNER_IMAGE}:shakerscan-scanner" \
             "api:${API_IMAGE}:shakerscan-api" \
             "ui:${UI_IMAGE}:shakerscan-ui" \
-            "signer:${SIGNER_IMAGE}:shakerscan-model-intake-signer"; do
+            "signer:${SIGNER_IMAGE}:shakerscan-model-intake-signer" \
+            "model_intake:${MODEL_INTAKE_IMAGE}:shakerscan-model-intake"; do
             IFS=: read -r key repository local_repository <<<"$binding"
             digest="$(jq -r ".images.${key}" "$receipt")"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -1045,6 +1109,7 @@ jobs:
             --image "api=$(jq -r '.images.api' "$receipt")" \
             --image "ui=$(jq -r '.images.ui' "$receipt")" \
             --image "signer=$(jq -r '.images.signer' "$receipt")" \
+            --image "model_intake=$(jq -r '.images.model_intake' "$receipt")" \
             --output artifacts/certification/preservation-receipt.json
 
       - name: Seal promotion-ready candidate receipt

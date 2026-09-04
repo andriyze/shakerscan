@@ -76,7 +76,7 @@ def test_the_shared_build_writes_the_uncertified_receipt_the_release_path_reuses
     assert "shakerscan-release-candidate/v1" in text
     assert "release-candidate-uncertified-${{ inputs.version }}-${{ inputs.candidate_sha }}" in text
     assert "runtime_manifest_sha256" in text
-    for image in ("scanner", "api", "ui", "signer"):
+    for image in ("scanner", "api", "ui", "signer", "model_intake"):
         assert f"{image}_digest:" in text
 
 
@@ -90,15 +90,16 @@ def test_the_shared_build_matches_the_candidates_build_construction():
         "file: scanner/Dockerfile.api",
         "file: ui/Dockerfile",
         "file: api/model_intake_signer.Dockerfile",
+        "file: scanner/Dockerfile.model-intake",
         "SCANNER_RUNTIME_IMAGE=${{ env.SCANNER_IMAGE }}@${{ steps.scanner.outputs.digest }}",
         "push-by-digest=true,name-canonical=true,push=true",
     ):
         assert token in reusable, token
         assert token in candidate, token
     # Both build native per platform, attest four subjects, and verify the signatures.
-    assert reusable.count("provenance: mode=max") == 4
-    assert reusable.count("sbom: true") == 4
-    assert reusable.count("gh attestation verify") == 4
+    assert reusable.count("provenance: mode=max") == 5
+    assert reusable.count("sbom: true") == 5
+    assert reusable.count("gh attestation verify") == 5
     assert "ubuntu-24.04-arm" in reusable
 
 

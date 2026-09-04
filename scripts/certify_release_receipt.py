@@ -96,8 +96,8 @@ def certify_receipt(
     if candidate.get("candidate_sha") != source_sha:
         raise CertificationError("candidate receipt does not bind the requested source SHA")
     images = candidate.get("images")
-    if not isinstance(images, Mapping) or set(images) != {"scanner", "api", "ui", "signer"}:
-        raise CertificationError("candidate receipt must contain the four release images")
+    if not isinstance(images, Mapping) or set(images) != {"scanner", "api", "ui", "signer", "model_intake"}:
+        raise CertificationError("candidate receipt must contain the five release images")
     if not all(SHA256.fullmatch(str(value)) for value in images.values()):
         raise CertificationError("candidate receipt contains a non-exact image digest")
     provenance = candidate.get("provenance")

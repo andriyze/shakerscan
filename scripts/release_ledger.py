@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "RELEASES.md"
-COLUMNS = {"scanner": 2, "api": 3, "ui": 4, "signer": 5}
+COLUMNS = {"scanner": 2, "api": 3, "ui": 4, "signer": 5, "model_intake": 6}
 _REF = re.compile(r"`([^`@]+)`\s*\(`(sha256:[0-9a-f]{64})`\)")
 
 
@@ -39,7 +39,10 @@ def published_image(version: str, image: str, text: str | None = None) -> str:
     if image not in COLUMNS:
         raise LedgerError(f"unknown image {image!r}; expected one of {sorted(COLUMNS)}")
     cells = ledger_row(version, text if text is not None else LEDGER.read_text(encoding="utf-8"))
-    match = _REF.search(cells[COLUMNS[image]])
+    column = COLUMNS[image]
+    if column >= len(cells):
+        raise LedgerError(f"RELEASES.md records no {image} image for {version}; it predates that image")
+    match = _REF.search(cells[column])
     if match is None:
         raise LedgerError(f"RELEASES.md records no published digest for {image} {version}")
     repository = match.group(1).rsplit(":", 1)[0]

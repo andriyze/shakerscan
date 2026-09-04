@@ -30,6 +30,7 @@ REPOSITORIES = (
     "shakerscan/shakerscan-api",
     "shakerscan/shakerscan-ui",
     "shakerscan/shakerscan-model-intake-signer",
+    "shakerscan/shakerscan-model-intake",
 )
 CANDIDATE_TAG = re.compile(r"^candidate-[0-9a-f]{40}-[0-9]+$")
 

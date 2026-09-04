@@ -23,8 +23,8 @@ def _ledger():
 ledger = _ledger()
 
 SAMPLE = """
-| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
-| --- | --- | --- | --- | --- | --- |
+| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
+| --- | --- | --- | --- | --- | --- | --- |
 | 9.9.9 | pending candidate | pending | pending | pending | pending |
 | 0.8.18 | `9f87f7db` | `shakerscan/shakerscan-scanner:0.8.18` (`sha256:%s`) | `shakerscan/shakerscan-api:0.8.18` (`sha256:%s`) | `shakerscan/shakerscan-ui:0.8.18` (`sha256:%s`) | `shakerscan/shakerscan-model-intake-signer:0.8.18` (`sha256:%s`) |
 | 0.8.14 | `82ecff77` (failed validation; not published) | not published | not published | not published | not published |
@@ -63,3 +63,9 @@ def test_the_upgrade_smoke_derives_its_baseline_from_the_ledger():
     for variable, image in (("BASELINE_IMAGE", "scanner"), ("BASELINE_API_IMAGE", "api"), ("BASELINE_UI_IMAGE", "ui")):
         assert f'{variable}="${{{variable}:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image {image})}}"' in source
     assert "@sha256:" not in source.split("SCANNER_IMAGE=", 1)[0], "no hardcoded baseline digests remain"
+
+
+def test_a_row_that_predates_the_model_intake_image_fails_closed():
+    # 2.0.x rows carry four images; asking them for the Model Intake image must not index past the row.
+    with pytest.raises(ledger.LedgerError, match="predates"):
+        ledger.published_image("0.8.18", "model_intake", SAMPLE)

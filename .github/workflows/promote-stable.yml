@@ -64,7 +64,7 @@ jobs:
             and .checks.ui_api_identity == "pass"
             and .checks.worker_identity == "pass"
           ' public-smoke-receipt.json >/dev/null
-          for binding in scanner:SCANNER_IMAGE api:API_IMAGE ui:UI_IMAGE signer:SIGNER_IMAGE; do
+          for binding in scanner:SCANNER_IMAGE api:API_IMAGE ui:UI_IMAGE signer:SIGNER_IMAGE model_intake:MODEL_INTAKE_IMAGE; do
             key="${binding%%:*}"
             variable="${binding#*:}"
             expected="$(sed -n "s/^${variable}=//p" release-image-lock.env)"
@@ -98,7 +98,8 @@ jobs:
             shakerscan/shakerscan-scanner \
             shakerscan/shakerscan-api \
             shakerscan/shakerscan-ui \
-            shakerscan/shakerscan-model-intake-signer; do
+            shakerscan/shakerscan-model-intake-signer \
+            shakerscan/shakerscan-model-intake; do
             digest="$(docker buildx imagetools inspect "${image}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             docker buildx imagetools create -t "${image}:latest" "${image}@${digest}"

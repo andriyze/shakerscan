@@ -72,7 +72,7 @@ def _write_evidence(tmp_path: Path, *, fail_row: str | None = None):
 
 def _images():
     return {name: f"sha256:{index:064x}" for index, name in enumerate(
-        ("scanner", "api", "ui", "signer"), start=1,
+        ("scanner", "api", "ui", "signer", "model_intake"), start=1,
     )}
 
 

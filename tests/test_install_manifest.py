@@ -80,6 +80,7 @@ def _lock(tmp_path: Path, tree: Path, manifest_digest: str | None = None) -> Pat
         "API_IMAGE=shakerscan/shakerscan-api@sha256:" + "2" * 64 + "\n"
         "UI_IMAGE=shakerscan/shakerscan-ui@sha256:" + "3" * 64 + "\n"
         "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@sha256:" + "4" * 64 + "\n"
+        "MODEL_INTAKE_IMAGE=shakerscan/shakerscan-model-intake@sha256:" + "5" * 64 + "\n"
         f"RUNTIME_MANIFEST_SHA256={digest}\n",
         encoding="utf-8",
     )

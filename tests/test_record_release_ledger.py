@@ -33,6 +33,7 @@ def _lock(**overrides):
         "API_IMAGE": f"shakerscan/shakerscan-api@{DIGEST}",
         "UI_IMAGE": f"shakerscan/shakerscan-ui@{DIGEST}",
         "SIGNER_IMAGE": f"shakerscan/shakerscan-model-intake-signer@{DIGEST}",
+        "MODEL_INTAKE_IMAGE": f"shakerscan/shakerscan-model-intake@{DIGEST}",
         "RUNTIME_MANIFEST_SHA256": "c" * 64,
     }
     values.update(overrides)
@@ -41,9 +42,9 @@ def _lock(**overrides):
 
 LEDGER = (
     "intro\n\n"
-    "| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |\n"
-    "| --- | --- | --- | --- | --- | --- |\n"
-    "| 2.0.1 | pending candidate | pending | pending | pending | pending |\n"
+    "| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |\n"
+    "| --- | --- | --- | --- | --- | --- | --- |\n"
+    "| 2.0.1 | pending candidate | pending | pending | pending | pending | pending |\n"
     f"| 2.0.0 | `{'d' * 40}` | `shakerscan/shakerscan-scanner:2.0.0` (`{DIGEST}`) | `shakerscan/shakerscan-api:2.0.0` (`{DIGEST}`)"
     f" | `shakerscan/shakerscan-ui:2.0.0` (`{DIGEST}`) | `shakerscan/shakerscan-model-intake-signer:2.0.0` (`{DIGEST}`) |\n"
     "\nprose after the table\n"
@@ -59,7 +60,7 @@ def test_a_pending_row_is_replaced_from_the_lock_and_the_ledger_reads_it_back():
     spec = importlib.util.spec_from_file_location("release_ledger_under_test", ROOT / "scripts" / "release_ledger.py")
     ledger = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ledger)
-    for image in ("scanner", "api", "ui", "signer"):
+    for image in ("scanner", "api", "ui", "signer", "model_intake"):
         assert ledger.published_image("2.0.1", image, text).endswith(f"@{DIGEST}")
     assert f"| 2.0.1 | `{COMMIT}` |" in text
     assert "prose after the table" in text and "| 2.0.0 |" in text

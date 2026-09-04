@@ -15,7 +15,7 @@ from scripts.validate_promotion_receipt import (
 SOURCE = "a" * 40
 IMAGES = {
     name: f"sha256:{index:064x}"
-    for index, name in enumerate(("scanner", "api", "ui", "signer"), start=1)
+    for index, name in enumerate(("scanner", "api", "ui", "signer", "model_intake"), start=1)
 }
 
 

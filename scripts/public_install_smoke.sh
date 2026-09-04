@@ -93,11 +93,12 @@ jq -n --arg version "$VERSION" --arg source_sha "$source_revision" \
   --arg api "$(sed -n 's/^API_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg ui "$(sed -n 's/^UI_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg signer "$(sed -n 's/^SIGNER_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
+  --arg model_intake "$(sed -n 's/^MODEL_INTAKE_IMAGE=//p' "$RUNTIME/release-image-lock.env")" \
   --arg tested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
   schema_version: "shakerscan-public-smoke/v2",
   version: $version,
   source_sha: $source_sha,
-  images: {scanner:$scanner, api:$api, ui:$ui, signer:$signer},
+  images: {scanner:$scanner, api:$api, ui:$ui, signer:$signer, model_intake:$model_intake},
   tested_at: $tested_at,
   scope_exclusions: ["model_intake"],
   checks: {

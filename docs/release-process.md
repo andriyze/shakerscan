@@ -56,10 +56,10 @@ The workflow verifies every supplied workflow identity, conclusion, and head SHA
 for the exact SHA (running the suite in the image only when a metadata-only merge skipped it); runs
 the installer smoke, the external wire ceilings, and the native builds; bakes version plus source revision into `/opt/shakerscan/release-manifest.json`;
 pushes only `candidate-<sha>-<run-id>` multi-architecture manifests; and uploads
-`release-candidate-receipt.json`. The receipt binds the four final image digests, the signed
+`release-candidate-receipt.json`. The receipt binds the five final image digests (scanner, API, UI, Model Intake signer, Model Intake), the signed
 provenance verification, and the digest of the installer manifest. Each platform build publishes
 BuildKit provenance and an SBOM; the final multi-architecture digests receive GitHub/Sigstore build
-attestations that are verified immediately. Vulnerability scans of the four final manifests run in
+attestations that are verified immediately. Vulnerability scans of the five final manifests run in
 parallel with certification; both must succeed for the run to be promotable.
 
 Certification runs the exact-manifest installed-stack E2E, the stateful previous-stable upgrade and
@@ -84,7 +84,7 @@ verifies that the candidate run succeeded for the exact SHA, downloads its recei
 installer manifest digest against the checked-out tree, compares every registry digest, re-verifies
 every signed provenance attestation, creates version tags from those digests, and creates an
 **annotated** `v<version>` git tag on the candidate commit. It performs no build. The GitHub Release
-attaches `release-image-lock.env` (four image digests plus `RUNTIME_MANIFEST_SHA256`) and the
+attaches `release-image-lock.env` (five image digests plus `RUNTIME_MANIFEST_SHA256`) and the
 certified `release-candidate-receipt.json`, so the evidence outlives workflow-artifact retention.
 `latest` and the installer remain unchanged.
 
