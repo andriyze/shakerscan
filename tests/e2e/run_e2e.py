@@ -496,12 +496,11 @@ def run_platform() -> H.Scorecard:
         while _time.monotonic() < readiness_deadline:
             workers = H.get("/workers")
             pools = workers.get("pools") or {}
+            # Web DAST, agent-tool, and Model Intake are the always-on execution pools. The device
+            # pool is opt-in capacity behind a Compose profile, so a default stack legitimately
+            # reports it not_ready; enabling or omitting devices must never gate Web DAST readiness.
             required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
-            device_pool = pools.get("device") or {}
-            if (
-                all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
-                and device_pool.get("status") in {"ready", "disabled"}
-            ):
+            if all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools):
                 break
             _time.sleep(2)
         fleet = health.get("fleet") or H.get("/health").get("fleet") or {}
@@ -513,7 +512,9 @@ def run_platform() -> H.Scorecard:
             isinstance(workers.get("workers"), list)
             and isinstance(workers.get("stale_count"), int)
             and all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
-            and device_pool.get("status") in {"ready", "disabled"}
+            # The device pool is opt-in capacity; it must be reported with a status but is not
+            # required to be running, so an absent device worker never fails this Web DAST gate.
+            and isinstance(device_pool.get("status"), str)
             and fleet.get("status") in {
                 "enabled", "ready", "configured", "disabled", "unsupported", "not_ready",
             },

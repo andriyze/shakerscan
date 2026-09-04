@@ -143,3 +143,21 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert "artifacts/release-external-wire.json" in text
     assert 'test "$(jq -r \'.status\' artifacts/release-external-wire.json)" = passed' in text
     assert 'test "$(jq -r \'.tool_count\' artifacts/release-external-wire.json)" = 9' in text
+
+
+def test_platform_pool_gate_requires_always_on_pools_but_not_opt_in_devices():
+    """P-4 gates on the three always-on execution pools and never on opt-in device capacity.
+
+    Web DAST, agent-tool, and Model Intake workers start with every stack, so the platform smoke
+    requires each of them current and ready. The device worker is opt-in behind a Compose profile,
+    so a default `docker compose up -d` legitimately reports the device pool not_ready; requiring it
+    ready or disabled failed the pre-merge smoke on exactly that expected state. The device pool must
+    be reported with a status but must never gate Web DAST readiness.
+    """
+    e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
+    gate = e2e[e2e.index("readiness_deadline = _time.monotonic()"):]
+    gate = gate[:gate.index("P-4 Fleet and workers surfaces")]
+    assert '"web_dast", "agent_tool", "model_intake"' in gate
+    assert 'all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)' in gate
+    assert 'isinstance(device_pool.get("status"), str)' in gate
+    assert 'device_pool.get("status") in {"ready", "disabled"}' not in gate
