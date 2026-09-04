@@ -111,8 +111,22 @@ ARG TRIVY_DOWNLOAD_ATTEMPTS=4
 RUN set -eu; \
     chmod 755 /opt/tools/trivy /opt/tools/osv-scanner; \
     mkdir -p /opt/trivy-cache; \
-    download_trivy_data() { /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && /opt/tools/trivy fs --scanners misconfig --format json --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; }; \
-    attempt=1; until download_trivy_data; do [ "$attempt" -lt "${TRIVY_DOWNLOAD_ATTEMPTS}" ] || exit 1; sleep $((attempt*5)); attempt=$((attempt+1)); done; \
+    download_trivy_data() { \
+      /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && \
+      /opt/tools/trivy fs --scanners misconfig --format json \
+        --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; \
+    }; \
+    attempt=1; \
+    until download_trivy_data; do \
+      if [ "$attempt" -ge "${TRIVY_DOWNLOAD_ATTEMPTS}" ]; then \
+        echo "Trivy database/check bundle download failed after ${TRIVY_DOWNLOAD_ATTEMPTS} attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 5)); \
+      echo "Trivy data download failed (attempt ${attempt}/${TRIVY_DOWNLOAD_ATTEMPTS}); retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done; \
     mkdir -p /opt/osv-cache/osv-scalibr/PyPI; \
     curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip" -o /opt/osv-cache/osv-scalibr/PyPI/all.zip; \
     osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
