@@ -14,8 +14,33 @@ def worker_role(
     if agent_tool_only:
         return "agent_tool", "shakerscan:agent_tool_worker_build"
     if model_intake_only:
-        return "model_intake", "shakerscan:model_intake_worker_build"
+        return "model_intake", MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY
     return "web_dast", "shakerscan:worker_build"
+
+
+# The Model Intake worker's toolchain, by the path the dedicated image installs it at. The worker
+# reports which of these resolve so the control plane can tell "a Model Intake worker registered"
+# from "a Model Intake worker that can actually scan an artifact" -- a worker started from the
+# plain scanner image registers too, but every path below is missing there.
+MODEL_INTAKE_WORKER_TOOL_COMMANDS: dict[str, str] = {
+    "trivy": "/opt/tools/trivy",
+    "osv-scanner": "/opt/tools/osv-scanner",
+    "semgrep": "/opt/tools/semgrep",
+    "modelscan": "/opt/tools/modelscan",
+    "fickling": "/opt/tools/fickling",
+    "pip-audit-offline": "/opt/tools/pip-audit-offline",
+}
+MODEL_INTAKE_WORKER_REQUIRED_TOOLS = frozenset(MODEL_INTAKE_WORKER_TOOL_COMMANDS)
+
+
+def worker_tool_commands(default: dict[str, str], *, model_intake_only: bool) -> dict[str, str]:
+    """The tool->command table one worker role reports from; the Model Intake role adds its
+    toolchain paths so readiness can require them, not just registration."""
+    commands = dict(default)
+    if model_intake_only:
+        commands.update(MODEL_INTAKE_WORKER_TOOL_COMMANDS)
+    return commands
+MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY = "shakerscan:model_intake_worker_build"
 
 
 def base_worker_queue_keys(

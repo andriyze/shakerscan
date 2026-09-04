@@ -4232,6 +4232,7 @@ app.include_router(settings_router)
 try:
     from model_intake.router import (
         POLICY_PROFILES,
+        _model_intake_worker_readiness,
         configure_model_intake_router,
         _model_intake_auto_runner_memory_ready,
         _model_intake_auto_runner_readiness_grace_active,
@@ -4407,6 +4408,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.model_intake.router import (
         POLICY_PROFILES,
+        _model_intake_worker_readiness,
         configure_model_intake_router,
         _model_intake_auto_runner_memory_ready,
         _model_intake_auto_runner_readiness_grace_active,
@@ -4582,6 +4584,9 @@ except ModuleNotFoundError:  # package import in host-side tests
 configure_model_intake_router(
     lambda: db_pool,
     get_redis=lambda *a, **k: get_redis(*a, **k),
+    expected_build_fingerprint=lambda *a, **k: expected_build_fingerprint(*a, **k),
+    current_scanner_version=lambda *a, **k: current_scanner_version(*a, **k),
+    worker_build_current=lambda *a, **k: worker_build_current(*a, **k),
     sanitize_scan_options=lambda *a, **k: _sanitize_scan_options(*a, **k),
     model_intake_json_object=lambda *a, **k: _model_intake_json_object(*a, **k),
     results_dir=lambda: RESULTS_DIR,
@@ -8759,6 +8764,7 @@ async def health():
         "legacy_compatibility": legacy_compatibility,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
+        "model_intake_worker": _model_intake_worker_readiness(),
         "fleet": fleet_feature_state(),
     }
 

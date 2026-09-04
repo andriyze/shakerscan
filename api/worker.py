@@ -313,7 +313,7 @@ from runtime.reservation_store import (
 )
 from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
-from worker_queue_policy import base_worker_queue_keys, worker_role
+from worker_queue_policy import base_worker_queue_keys, worker_role, worker_tool_commands
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -23439,7 +23439,7 @@ def _worker_build_hostname() -> str:
 
 def _worker_build_report_payload() -> tuple[str, str]:
     hostname = _worker_build_hostname()
-    tool_commands = dict(DEFAULT_WORKER_TOOL_COMMANDS)
+    tool_commands = worker_tool_commands(DEFAULT_WORKER_TOOL_COMMANDS, model_intake_only=MODEL_INTAKE_ONLY_WORKER)
     if AGENT_TOOL_ONLY_WORKER:
         tool_commands.update({
             str(spec.process_tool_name): str(spec.binary or spec.process_tool_name)
