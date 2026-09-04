@@ -510,15 +510,17 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     build_body = script.split("build_images() {", 1)[1].split("\n}", 1)[0]
     rebuild_body = script.split("rebuild_images() {", 1)[1].split("\n}", 1)[0]
 
-    # The common runtime is exported exactly once. The sandbox reuses that
-    # image byte-for-byte and the API is a thin derivative image.
+    # The common runtime is exported exactly once. The Model Intake image (which the sandbox and
+    # Model Intake worker run) is a thin overlay that adds the toolchain to that exact runtime, and
+    # the API is a thin Docker-client derivative. None of them rebuilds the scanner base.
     assert "compose build $no_cache worker" in helper
     assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"' in helper
     assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
     assert "compose images -q worker" not in helper
-    assert 'docker image tag "$worker_image_id" "$sandbox_image"' in helper
+    assert "-f scanner/Dockerfile.model-intake -t \"$sandbox_image\"" in helper
+    assert 'SCANNER_RUNTIME_IMAGE=${worker_image}' in helper
     assert "compose build $no_cache api" in helper
-    assert "scanner/toolchain a second time" in helper
+    assert "never rebuild the scanner base" in helper
     assert "compose build $no_cache model-intake-sandbox" not in helper
 
     assert "build_local_images" in build_body
@@ -542,8 +544,8 @@ docker() {{
   if [ "$1 $2" = 'image inspect' ]; then
     [ "${{@: -1}}" = 'release-candidate-worker:latest' ] || return 91
     printf '{image_id}\\n'
-  elif [ "$1 $2" = 'image tag' ]; then
-    printf 'tag:%s:%s\\n' "$3" "$4"
+  elif [ "$1" = 'build' ]; then
+    printf 'build:%s\\n' "$*"
   else
     return 92
   fi
@@ -567,7 +569,11 @@ build_local_scanner_family
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "compose:build worker" in result.stdout
-    assert f"tag:{image_id}:release-sandbox:test" in result.stdout
+    # The Model Intake overlay is built on the freshly-built worker runtime and tagged as the
+    # sandbox image (which the sandbox and Model Intake worker run), never a retired running image.
+    assert "build:build" in result.stdout
+    assert "scanner/Dockerfile.model-intake" in result.stdout
+    assert "SCANNER_RUNTIME_IMAGE=release-candidate-worker:latest" in result.stdout
     assert "compose:build api" in result.stdout
 
 
@@ -1201,7 +1207,8 @@ def test_go_tool_builder_retries_transient_network_failures_with_buildkit_caches
 
 
 def test_trivy_bundle_build_retries_transient_registry_failures():
-    dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
+    # The Trivy/OSV toolchain lives in the Model Intake image now, not the scanner image.
+    dockerfile = (ROOT / "scanner" / "Dockerfile.model-intake").read_text()
     assert "ARG TRIVY_DOWNLOAD_ATTEMPTS=4" in dockerfile
     assert "curl --retry 4 --retry-all-errors" in dockerfile
     assert "until download_trivy_data" in dockerfile
