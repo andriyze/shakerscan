@@ -61,8 +61,15 @@ def test_the_stable_channel_version_has_published_digests_in_the_real_ledger():
 def test_the_upgrade_smoke_derives_its_baseline_from_the_ledger():
     source = (ROOT / "scripts" / "upgrade_smoke.sh").read_text(encoding="utf-8")
     for variable, image in (("BASELINE_IMAGE", "scanner"), ("BASELINE_API_IMAGE", "api"), ("BASELINE_UI_IMAGE", "ui")):
-        assert f'{variable}="${{{variable}:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image {image})}}"' in source
+        assert f'{variable}="${{{variable}:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image {image})}}"' in source
     assert "@sha256:" not in source.split("SCANNER_IMAGE=", 1)[0], "no hardcoded baseline digests remain"
+
+
+def test_upgrade_certification_pins_the_oldest_supported_base():
+    assert (ROOT / "install" / "OLDEST_SUPPORTED_UPGRADE_BASE").read_text().strip() == "0.8.18"
+    workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
+    assert "install/OLDEST_SUPPORTED_UPGRADE_BASE" in workflow
+    assert "upgrade-receipt-${baseline}.json" in workflow
 
 
 def test_a_row_that_predates_the_model_intake_image_fails_closed():

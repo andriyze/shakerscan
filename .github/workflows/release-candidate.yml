@@ -1043,7 +1043,7 @@ jobs:
             "${SCANNER_IMAGE}@${scanner_digest}" \
             /tmp/verify-installed-runtime.py
 
-      - name: Prove previous-stable upgrade, restart, and rollback
+      - name: Prove supported upgrades, restart, and rollback
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
@@ -1052,14 +1052,22 @@ jobs:
           scanner_digest="$(jq -r '.images.scanner' "$receipt")"
           api_digest="$(jq -r '.images.api' "$receipt")"
           ui_digest="$(jq -r '.images.ui' "$receipt")"
-          SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
-            CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
-            CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
-            CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
-            CANDIDATE_API_IMAGE_DIGEST="$api_digest" \
-            CANDIDATE_UI_IMAGE_DIGEST="$ui_digest" \
-            UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
-            scripts/upgrade_smoke.sh
+          model_intake_digest="$(jq -r '.images.model_intake' "$receipt")"
+          for baseline in \
+            "$(tr -d '[:space:]' < install/STABLE_VERSION)" \
+            "$(tr -d '[:space:]' < install/OLDEST_SUPPORTED_UPGRADE_BASE)"; do
+            SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
+              CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
+              CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
+              CANDIDATE_MODEL_INTAKE_IMAGE="${MODEL_INTAKE_IMAGE}@${model_intake_digest}" \
+              CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
+              CANDIDATE_API_IMAGE_DIGEST="$api_digest" \
+              CANDIDATE_UI_IMAGE_DIGEST="$ui_digest" \
+              CANDIDATE_MODEL_INTAKE_IMAGE_DIGEST="$model_intake_digest" \
+              BASELINE_VERSION="$baseline" \
+              UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt-${baseline}.json" \
+              scripts/upgrade_smoke.sh
+          done
 
       - name: Set up supported Node browser runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -1124,7 +1132,8 @@ jobs:
         run: |
           certification_args=(
             --candidate artifacts/uncertified/release-candidate-receipt.json \
-            --upgrade artifacts/certification/upgrade-receipt.json \
+            --upgrade artifacts/certification/upgrade-receipt-$(tr -d '[:space:]' < install/STABLE_VERSION).json \
+            --upgrade artifacts/certification/upgrade-receipt-$(tr -d '[:space:]' < install/OLDEST_SUPPORTED_UPGRADE_BASE).json \
             --preservation artifacts/certification/preservation-receipt.json \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
             --dast-quality artifacts/certification/dast-recall.json \

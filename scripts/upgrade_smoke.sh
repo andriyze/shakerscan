@@ -3,18 +3,29 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STABLE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/install/STABLE_VERSION")"
-BASELINE_REF="${BASELINE_REF:-v${STABLE_VERSION}}"
+OLDEST_SUPPORTED_UPGRADE_BASE="$(tr -d '[:space:]' < "$REPO_ROOT/install/OLDEST_SUPPORTED_UPGRADE_BASE")"
+BASELINE_VERSION="${BASELINE_VERSION:-$STABLE_VERSION}"
+BASELINE_REF="${BASELINE_REF:-v${BASELINE_VERSION}}"
+case "$BASELINE_VERSION" in
+    "$STABLE_VERSION"|"$OLDEST_SUPPORTED_UPGRADE_BASE") ;;
+    *) echo "BASELINE_VERSION must be $STABLE_VERSION or $OLDEST_SUPPORTED_UPGRADE_BASE" >&2; exit 1 ;;
+esac
+if [ "$BASELINE_REF" != "v$BASELINE_VERSION" ]; then
+    echo "BASELINE_REF must match BASELINE_VERSION (v$BASELINE_VERSION)" >&2
+    exit 1
+fi
 # The previous-stable images come from the published ledger row for install/STABLE_VERSION, so
 # advancing the channel cannot leave this smoke qualifying an upgrade from stale digests.
-BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image scanner)}"
-BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image api)}"
-BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image ui)}"
+BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image scanner)}"
+BASELINE_API_IMAGE="${BASELINE_API_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image api)}"
+BASELINE_UI_IMAGE="${BASELINE_UI_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image ui)}"
 SCANNER_IMAGE="${SCANNER_IMAGE:-shakerscan-scanner:upgrade-smoke}"
 # Untagged defaults resolve to `:latest`, which is whatever happens to be on the host
 # -- so the smoke could pass while qualifying an upgrade the release does not ship, or
 # fail on a clean runner where no such image exists. Callers name the exact candidate.
 CANDIDATE_API_IMAGE="${CANDIDATE_API_IMAGE:-shakerscan-api:upgrade-smoke}"
 CANDIDATE_UI_IMAGE="${CANDIDATE_UI_IMAGE:-shakerscan-ui:upgrade-smoke}"
+CANDIDATE_MODEL_INTAKE_IMAGE="${CANDIDATE_MODEL_INTAKE_IMAGE:-shakerscan-model-intake:upgrade-smoke}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16.15-alpine3.23@sha256:421b84e07a72bb8f3715f20501a1fdbe1219aad1fa4af7786a49d9a3f2480296}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7.4.11-alpine3.21@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf}"
 UPGRADE_FERNET_KEY="${UPGRADE_FERNET_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}"
@@ -27,6 +38,7 @@ CANDIDATE_REDIS_CONTAINER="shakerscan-candidate-redis-$$"
 CANDIDATE_API_CONTAINER="shakerscan-candidate-api-$$"
 CANDIDATE_UI_CONTAINER="shakerscan-candidate-ui-$$"
 CANDIDATE_WORKER_CONTAINER="shakerscan-candidate-worker-$$"
+CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER="shakerscan-candidate-model-intake-worker-$$"
 REDIS_VOLUME="shakerscan-upgrade-redis-$$"
 UPGRADE_QUEUED_ID="upgrade-smoke-queued-$$"
 UPGRADE_LEASED_ID="upgrade-smoke-leased-$$"
@@ -35,16 +47,16 @@ SMOKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/shakerscan-upgrade-smoke.XXXXXX")"
 
 # A candidate image that is not present locally must stop the run, not be pulled from a
 # registry: the point of this smoke is to qualify the images this build just produced.
-for candidate_image in "$SCANNER_IMAGE" "$CANDIDATE_API_IMAGE" "$CANDIDATE_UI_IMAGE"; do
+for candidate_image in "$SCANNER_IMAGE" "$CANDIDATE_API_IMAGE" "$CANDIDATE_UI_IMAGE" "$CANDIDATE_MODEL_INTAKE_IMAGE"; do
     if ! docker image inspect "$candidate_image" >/dev/null 2>&1; then
         echo "upgrade smoke: candidate image is not built locally: $candidate_image" >&2
-        echo "build it first, or name the right one via SCANNER_IMAGE / CANDIDATE_API_IMAGE / CANDIDATE_UI_IMAGE" >&2
+        echo "build it first, or name the exact candidate image variables documented by this script" >&2
         exit 1
     fi
 done
 
 cleanup() {
-    docker rm -f "$CANDIDATE_WORKER_CONTAINER" "$CANDIDATE_UI_CONTAINER" \
+    docker rm -f "$CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER" "$CANDIDATE_WORKER_CONTAINER" "$CANDIDATE_UI_CONTAINER" \
         "$CANDIDATE_API_CONTAINER" "$CANDIDATE_REDIS_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$ROLLBACK_WORKER_CONTAINER" "$ROLLBACK_UI_CONTAINER" \
         "$ROLLBACK_API_CONTAINER" "$ROLLBACK_REDIS_CONTAINER" >/dev/null 2>&1 || true
@@ -54,11 +66,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 docker volume create "$REDIS_VOLUME" >/dev/null
-
-if [ "$BASELINE_REF" != "v$STABLE_VERSION" ]; then
-    echo "BASELINE_REF must match install/STABLE_VERSION (v$STABLE_VERSION)" >&2
-    exit 1
-fi
 
 git -C "$REPO_ROOT" cat-file -e "${BASELINE_REF}:db/init.sql"
 git -C "$REPO_ROOT" show "${BASELINE_REF}:db/init.sql" > "$SMOKE_TMP/baseline.sql"
@@ -369,13 +376,26 @@ run_operational_candidate() {
         -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
         -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
         "$SCANNER_IMAGE" python3 /app/worker.py >/dev/null
+    docker run --detach --name "$CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER" \
+        --network "container:$SMOKE_CONTAINER" \
+        -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
+        -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
+        -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
+        -e MODEL_INTAKE_ONLY_WORKER=true \
+        -e SHAKERSCAN_TRIVY_REFRESH_ON_START=false \
+        "$CANDIDATE_MODEL_INTAKE_IMAGE" python3 /app/worker.py >/dev/null
     sleep 2
     if [ "$(docker inspect --format '{{.State.Running}}' "$CANDIDATE_WORKER_CONTAINER")" != "true" ]; then
         echo "candidate worker did not remain running on the upgraded database" >&2
         docker logs "$CANDIDATE_WORKER_CONTAINER" >&2 || true
         exit 1
     fi
-    docker rm -f "$CANDIDATE_WORKER_CONTAINER" >/dev/null 2>&1 || true
+    if [ "$(docker inspect --format '{{.State.Running}}' "$CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER")" != "true" ]; then
+        echo "candidate Model Intake worker did not remain running on the upgraded database" >&2
+        docker logs "$CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER" >&2 || true
+        exit 1
+    fi
+    docker rm -f "$CANDIDATE_MODEL_INTAKE_WORKER_CONTAINER" "$CANDIDATE_WORKER_CONTAINER" >/dev/null 2>&1 || true
     # Re-establish the sentinels after the worker boot so rollback proves the same durable Redis
     # volume, not a fresh empty service, survives the reverse transition as well.
     seed_redis_upgrade_work "$CANDIDATE_REDIS_CONTAINER"
@@ -416,8 +436,8 @@ run_operational_rollback() {
         -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
         -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
         -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
-        -e SCANNER_VERSION="$STABLE_VERSION" \
-        -e SCANNER_EXPECTED_VERSION="$STABLE_VERSION" \
+        -e SCANNER_VERSION="$BASELINE_VERSION" \
+        -e SCANNER_EXPECTED_VERSION="$BASELINE_VERSION" \
         -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
         -e RESULTS_DIR=/results \
         -v "$SMOKE_TMP/results:/results" \
@@ -425,7 +445,7 @@ run_operational_rollback() {
     docker run --detach --name "$ROLLBACK_UI_CONTAINER" \
         --network "container:$SMOKE_CONTAINER" \
         -e NEXT_PUBLIC_API_URL=http://127.0.0.1:8080 \
-        -e NEXT_PUBLIC_APP_VERSION="$STABLE_VERSION" \
+        -e NEXT_PUBLIC_APP_VERSION="$BASELINE_VERSION" \
         -e HOSTNAME=0.0.0.0 \
         "$BASELINE_UI_IMAGE" >/dev/null
     local healthy=0
@@ -455,7 +475,7 @@ run_operational_rollback() {
         -e REDIS_URL=redis://:scanner@127.0.0.1:6379 \
         -e DATABASE_URL=postgresql://scanner:scanner@127.0.0.1:5432/scanner_dirty \
         -e AI_CREDENTIAL_ENC_KEY="$UPGRADE_FERNET_KEY" \
-        -e SCANNER_VERSION="$STABLE_VERSION" \
+        -e SCANNER_VERSION="$BASELINE_VERSION" \
         -e GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$BASELINE_REF^{commit}")" \
         "$BASELINE_IMAGE" python3 /app/worker.py >/dev/null
     sleep 2
@@ -483,9 +503,10 @@ baseline_ui_image_id="${BASELINE_UI_IMAGE_DIGEST:-$(image_digest "$BASELINE_UI_I
 candidate_scanner_image_id="${CANDIDATE_IMAGE_DIGEST:-$(image_digest "$SCANNER_IMAGE")}"
 candidate_api_image_id="${CANDIDATE_API_IMAGE_DIGEST:-$(image_digest "$CANDIDATE_API_IMAGE")}"
 candidate_ui_image_id="${CANDIDATE_UI_IMAGE_DIGEST:-$(image_digest "$CANDIDATE_UI_IMAGE")}"
+candidate_model_intake_image_id="${CANDIDATE_MODEL_INTAKE_IMAGE_DIGEST:-$(image_digest "$CANDIDATE_MODEL_INTAKE_IMAGE")}"
 receipt_path="${UPGRADE_RECEIPT_PATH:-$SMOKE_TMP/upgrade-receipt.json}"
 python3 "$REPO_ROOT/scripts/upgrade_acceptance_receipt.py" \
-    --baseline-version "$STABLE_VERSION" \
+    --baseline-version "$BASELINE_VERSION" \
     --baseline-source-sha "$baseline_source_sha" \
     --candidate-source-sha "$candidate_source_sha" \
     --baseline-scanner-image "$baseline_scanner_image_id" \
@@ -494,6 +515,7 @@ python3 "$REPO_ROOT/scripts/upgrade_acceptance_receipt.py" \
     --candidate-scanner-image "$candidate_scanner_image_id" \
     --candidate-api-image "$candidate_api_image_id" \
     --candidate-ui-image "$candidate_ui_image_id" \
+    --candidate-model-intake-image "$candidate_model_intake_image_id" \
     --output "$receipt_path"
 
 echo "Upgrade and operational rollback smoke passed from $BASELINE_REF using $SCANNER_IMAGE"

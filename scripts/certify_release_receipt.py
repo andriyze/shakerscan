@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -78,8 +78,8 @@ def certify_receipt(
     *,
     candidate: Mapping[str, Any],
     candidate_path: Path,
-    upgrade: Mapping[str, Any],
-    upgrade_path: Path,
+    upgrade: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    upgrade_path: Path | Sequence[Path],
     preservation: Mapping[str, Any],
     preservation_path: Path,
     e2e: Mapping[str, Any],
@@ -88,6 +88,7 @@ def certify_receipt(
     waive_dast_quality: bool = False,
     waive_e2e_declared_debt: bool = False,
     external_evidence: Mapping[str, tuple[Mapping[str, Any], Path]] | None = None,
+    required_upgrade_baselines: set[str] | None = None,
 ) -> dict[str, Any]:
     if not SOURCE_SHA.fullmatch(source_sha):
         raise CertificationError("source SHA must be a full lowercase commit identity")
@@ -109,24 +110,42 @@ def certify_receipt(
     if not isinstance(runtime_manifest, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_manifest):
         raise CertificationError("candidate receipt does not bind the runtime manifest digest")
 
-    if upgrade.get("schema_version") != "stateful-upgrade-acceptance/v2":
-        raise CertificationError("unsupported upgrade receipt schema")
-    if upgrade.get("status") != "pass":
-        raise CertificationError("stateful upgrade acceptance did not pass")
-    upgrade_candidate = upgrade.get("candidate")
-    if not isinstance(upgrade_candidate, Mapping):
-        raise CertificationError("upgrade receipt has no candidate identity")
-    if upgrade_candidate.get("source_sha") != source_sha:
-        raise CertificationError("upgrade receipt source does not match the candidate")
-    if upgrade_candidate.get("images") != {
-        key: images[key] for key in ("scanner", "api", "ui")
-    }:
-        raise CertificationError("upgrade receipt did not run all final runtime manifest digests")
-    upgrade_checks = upgrade.get("checks")
-    if not isinstance(upgrade_checks, Mapping) or not upgrade_checks or any(
-        value != "pass" for value in upgrade_checks.values()
-    ):
-        raise CertificationError("upgrade receipt contains a failed or missing check")
+    upgrades = [upgrade] if isinstance(upgrade, Mapping) else list(upgrade)
+    upgrade_paths = [upgrade_path] if isinstance(upgrade_path, Path) else list(upgrade_path)
+    if not upgrades or len(upgrades) != len(upgrade_paths):
+        raise CertificationError("upgrade receipts and paths must be non-empty and aligned")
+    upgrade_versions: set[str] = set()
+    upgrade_evidence_paths: dict[str, Path] = {}
+    for upgrade_receipt, receipt_path in zip(upgrades, upgrade_paths, strict=True):
+        if upgrade_receipt.get("schema_version") != "stateful-upgrade-acceptance/v2":
+            raise CertificationError("unsupported upgrade receipt schema")
+        if upgrade_receipt.get("status") != "pass":
+            raise CertificationError("stateful upgrade acceptance did not pass")
+        baseline = upgrade_receipt.get("baseline")
+        baseline_version = str(baseline.get("version") or "") if isinstance(baseline, Mapping) else ""
+        if not baseline_version or baseline_version in upgrade_versions:
+            raise CertificationError("upgrade receipts must identify distinct baseline versions")
+        upgrade_versions.add(baseline_version)
+        upgrade_evidence_paths[baseline_version] = receipt_path
+        upgrade_candidate = upgrade_receipt.get("candidate")
+        if not isinstance(upgrade_candidate, Mapping):
+            raise CertificationError("upgrade receipt has no candidate identity")
+        if upgrade_candidate.get("source_sha") != source_sha:
+            raise CertificationError("upgrade receipt source does not match the candidate")
+        if upgrade_candidate.get("images") != {
+            key: images[key] for key in ("scanner", "api", "ui", "model_intake")
+        }:
+            raise CertificationError("upgrade receipt did not run all final runtime manifest digests")
+        upgrade_checks = upgrade_receipt.get("checks")
+        if not isinstance(upgrade_checks, Mapping) or not upgrade_checks or any(
+            value != "pass" for value in upgrade_checks.values()
+        ):
+            raise CertificationError("upgrade receipt contains a failed or missing check")
+    if required_upgrade_baselines is not None and upgrade_versions != required_upgrade_baselines:
+        raise CertificationError(
+            "upgrade receipts must cover exactly these baselines: "
+            + ", ".join(sorted(required_upgrade_baselines))
+        )
 
     if preservation.get("schema_version") != "release-preservation-receipt/v1":
         raise CertificationError("unsupported preservation receipt schema")
@@ -354,7 +373,10 @@ def certify_receipt(
         ],
         "evidence_sha256": {
             "uncertified_candidate_receipt": _file_sha256(candidate_path),
-            "stateful_upgrade_receipt": _file_sha256(upgrade_path),
+            **{
+                f"stateful_upgrade_receipt_{version.replace('.', '_')}": _file_sha256(path)
+                for version, path in sorted(upgrade_evidence_paths.items())
+            },
             "preservation_receipt": _file_sha256(preservation_path),
             "exact_manifest_e2e_scorecard": _file_sha256(e2e_path),
             **{
@@ -362,7 +384,9 @@ def certify_receipt(
                 for key, (_value, path) in sorted(external.items())
             },
         },
-        "rollback_boundary": str(upgrade.get("rollback_boundary") or ""),
+        "rollback_boundary": "; ".join(sorted({
+            str(item.get("rollback_boundary") or "") for item in upgrades
+        })),
     }
     result.pop("receipt_sha256", None)
     result["receipt_sha256"] = hashlib.sha256(
@@ -374,7 +398,7 @@ def certify_receipt(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, type=Path)
-    parser.add_argument("--upgrade", required=True, type=Path)
+    parser.add_argument("--upgrade", required=True, type=Path, action="append")
     parser.add_argument("--preservation", required=True, type=Path)
     parser.add_argument("--e2e-scorecard", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
@@ -410,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         result = certify_receipt(
             candidate=_read(args.candidate),
             candidate_path=args.candidate,
-            upgrade=_read(args.upgrade),
+            upgrade=[_read(path) for path in args.upgrade],
             upgrade_path=args.upgrade,
             preservation=_read(args.preservation),
             preservation_path=args.preservation,
@@ -419,6 +443,10 @@ def main(argv: list[str] | None = None) -> int:
             source_sha=args.source_sha,
             waive_dast_quality=args.waive_dast_quality_shortfall,
             waive_e2e_declared_debt=args.waive_e2e_declared_debt,
+            required_upgrade_baselines={
+                (Path(__file__).resolve().parents[1] / "install" / name).read_text(encoding="utf-8").strip()
+                for name in ("STABLE_VERSION", "OLDEST_SUPPORTED_UPGRADE_BASE")
+            },
             external_evidence={
                 "dast_quality": (_read(args.dast_quality), args.dast_quality),
                 "fault_cancellation": (

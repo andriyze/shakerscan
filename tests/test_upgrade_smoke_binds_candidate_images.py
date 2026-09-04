@@ -15,12 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "scripts" / "upgrade_smoke.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "release-candidate.yml"
 
-CANDIDATE_VARS = ("SCANNER_IMAGE", "CANDIDATE_API_IMAGE", "CANDIDATE_UI_IMAGE")
+CANDIDATE_VARS = (
+    "SCANNER_IMAGE", "CANDIDATE_API_IMAGE", "CANDIDATE_UI_IMAGE",
+    "CANDIDATE_MODEL_INTAKE_IMAGE",
+)
 
 
 def test_no_candidate_default_resolves_to_latest():
     source = SMOKE.read_text(encoding="utf-8")
-    for name in ("CANDIDATE_API_IMAGE", "CANDIDATE_UI_IMAGE", "SCANNER_IMAGE"):
+    for name in CANDIDATE_VARS:
         match = re.search(rf'^{name}="\$\{{{name}:-([^}}"]+)\}}"', source, re.MULTILINE)
         assert match, f"{name} has no defaulted assignment"
         default = match.group(1)
@@ -42,7 +45,7 @@ def test_the_smoke_refuses_to_run_without_the_candidate_images():
 def test_the_release_workflow_names_every_candidate_image():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     invocation = re.search(
-        r"- name: Prove previous-stable upgrade, restart, and rollback\n(?:.*\n)*?(?=\n      - name: )",
+        r"- name: Prove supported upgrades, restart, and rollback\n(?:.*\n)*?(?=\n      - name: )",
         workflow,
     )
     assert invocation, "the upgrade smoke step was renamed or removed"
@@ -52,12 +55,13 @@ def test_the_release_workflow_names_every_candidate_image():
     assert '${SCANNER_IMAGE}@${scanner_digest}' in step
     assert '${API_IMAGE}@${api_digest}' in step
     assert '${UI_IMAGE}@${ui_digest}' in step
+    assert '${MODEL_INTAKE_IMAGE}@${model_intake_digest}' in step
 
 
 def test_the_final_manifests_are_pulled_before_the_smoke_runs():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     pulled = workflow.index("- name: Pull and identify exact final manifests")
-    smoked = workflow.index("- name: Prove previous-stable upgrade, restart, and rollback")
+    smoked = workflow.index("- name: Prove supported upgrades, restart, and rollback")
     assert pulled < smoked
 
 
@@ -122,7 +126,7 @@ def test_every_caller_names_all_three_candidate_images():
             continue
         text = path.read_text(encoding="utf-8")
         for block in _invocations(text):
-            for variable in ("SCANNER_IMAGE", "CANDIDATE_API_IMAGE", "CANDIDATE_UI_IMAGE"):
+            for variable in CANDIDATE_VARS:
                 if f"{variable}=" not in block:
                     missing.append(f"{relative}: invocation omits {variable}")
     assert not missing, "\n".join(missing)

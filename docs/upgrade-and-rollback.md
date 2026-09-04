@@ -43,6 +43,11 @@ shakerscan backup /secure/path/shakerscan-backups
 
 ## Upgrade
 
+The oldest directly supported upgrade base is **0.8.18**. Installations older than that must first
+upgrade to 0.8.18, confirm health and create a fresh backup, then upgrade to the current stable
+release. Release certification exercises both the immediately previous stable version and 0.8.18;
+versions older than the pinned minimum are not covered by the direct-migration guarantee.
+
 Download the runtime first without starting it, then start explicitly:
 
 ### Installs that live in another directory
