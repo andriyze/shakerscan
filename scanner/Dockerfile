@@ -318,9 +318,18 @@ RUN set -e && \
 # ship pip's vendor SBOM, which describes packages such as msgpack and
 # setuptools that are not installed as runtime modules. Image scanners then
 # report those build-only components as deployed vulnerabilities.
-RUN python3 -m pip uninstall -y --break-system-packages pip && \
+# The Playwright base image also ships virtualenv, whose embedded pip wheels and wheel cache vendor
+# msgpack and setuptools: the exact two findings the vulnerability gate kept reporting on the scanner
+# and API images even after the Model Intake toolchain moved out. Nothing in the runtime imports
+# virtualenv (the Model Intake overlay builds its venvs with the stdlib venv module), so remove it
+# and its caches before pip itself goes.
+RUN python3 -m pip uninstall -y --break-system-packages virtualenv && \
+    rm -rf /root/.cache/virtualenv /usr/local/bin/virtualenv && \
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("virtualenv") is None' && \
+    python3 -m pip uninstall -y --break-system-packages pip && \
     rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
-    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None'
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None' && \
+    test -z "$(find / -path /proc -prune -o \( -iname 'msgpack*' -o -iname 'setuptools-*.dist-info' \) -print 2>/dev/null | grep -v /opt/model-intake-tools)"
 
 # Keep the exact Dockerfile in the runtime fingerprint without placing this
 # self-referential copy ahead of expensive, otherwise cacheable tool layers.
