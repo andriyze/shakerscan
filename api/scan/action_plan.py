@@ -86,11 +86,14 @@ _BATCH_CAPABILITIES = frozenset({
 _BATCH_ATTEMPT_COSTS: Mapping[str, Mapping[str, int]] = {
     "xss.verify_batch": {"http_requests": 700, "tool_wall_seconds": 200},
     "sqli.verify_batch": {"http_requests": 400, "tool_wall_seconds": 180},
-    # Per template. Measured: a 50-template passive sweep needs ~240 s; the active
-    # sweep was wall-bound at 300 s for 3,392 requests, so 18 s and 80 requests
-    # per template let it finish.
-    "templates.passive_batch": {"http_requests": 7, "tool_wall_seconds": 5},
-    "templates.active_batch": {"http_requests": 80, "tool_wall_seconds": 18},
+    # Per template, and a template runs against every endpoint in the manifest, so
+    # the time it needs grows with the target. Measured on the benchmark: a
+    # 50-template passive sweep needed ~240 s and every active batch sized at 18 s
+    # per template still timed out at its slice on a 400-endpoint manifest (three
+    # rounds in a row on the live 2.2.0 retest). Fund 12 s and 45 s per template;
+    # the rounds cover the rest of the manifest with more, smaller slices.
+    "templates.passive_batch": {"http_requests": 7, "tool_wall_seconds": 12},
+    "templates.active_batch": {"http_requests": 120, "tool_wall_seconds": 45},
     "xss.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
     "sqli.request_verify_batch": {"http_requests": 2, "state_changing_requests": 2, "tool_wall_seconds": 12},
     "sqli.prove_batch": {"http_requests": 8, "state_changing_requests": 8, "tool_wall_seconds": 12},

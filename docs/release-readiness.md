@@ -7,7 +7,13 @@ UI unit suite, the source gates (module-size ratchet, capability inventory, inst
 and hunt contracts, image inventory, import closure), both offline installer smokes, a local build
 of the slim non-root API image with socket access proven through the in-container group, and a
 local build of the Model Intake image with `pip` and `setuptools` stripped from its tool
-environments. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
+environments. Live retest on the rebuilt local fleet (2026-09-04, honey, balanced, active): the single-worker
+Scan ran three appended continuation revisions before the finalizer (plan revision 4), spent 1,891 of
+3,600 tool-wall seconds and 8,678 requests, and stopped because the template manifest was exhausted,
+not the budget; the pre-fix thorough Scan of the same target had spent 26% of its wall after one
+round. Every active template batch still timed out at its slice at 18 s per template, so the
+per-template wall is now 45 s (12 s passive). The verifier batches settling their reservation in one
+second is the open DAST-1 item. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
 both upgrade receipts, the five image scans), a current-fleet authenticated Juice Shop and crAPI
 measurement against the DAST-8 exit bar, and the installed-stack run of H-10/H-11 and MI-6.
 

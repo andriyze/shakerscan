@@ -5,8 +5,9 @@ prepared; certification pending.** The base is published 2.1.0 (`0723cbb5` on `m
 implementation is on `fix/start-secrets-before-rotation` (PR #76). The implementation pass was
 audited (22 failing tests, four red gates, three defects) and then fixed and retested: complete
 partitioned Python suite, UI unit suite, every source gate, both offline installer smokes, and local
-builds of the slim API image and the Model Intake image. What only certification can prove is listed
-in `release-readiness.md`.
+builds of the slim API image and the Model Intake image. A live balanced Scan of honey on the rebuilt fleet ran three continuation rounds and ended on
+work exhaustion rather than budget (details in `release-readiness.md`). What only certification can
+prove is listed there too.
 
 ### Implementation ledger
 
