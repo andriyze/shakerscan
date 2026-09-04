@@ -95,7 +95,12 @@ UNIT_TESTS = tests/test_deployment_gate.py tests/test_canonical_dedupe.py \
 FOUNDATION_PACKAGE_TESTS = tests/test_http_archive.py \
 	tests/test_hunt_authority_integrity.py tests/test_hunt_direct_origin.py \
 	tests/test_hunt_http_capability.py tests/test_hunt_run_router.py \
-	tests/test_hunt_skills.py tests/test_runtime_credentials.py \
+	tests/test_hunt_skills.py tests/test_hunt_skill_lifecycle.py \
+	tests/test_hunt_knowledge_pages.py tests/test_hunt_prior_knowledge.py \
+	tests/test_hunt_verification_admission.py tests/test_hunt_deterministic_findings.py \
+	tests/test_hunt_browser_capability.py tests/test_hunt_browser_replay.py \
+	tests/test_hunt_browser_credentials.py tests/test_hunt_investigation_score.py \
+	tests/test_mcp_hunt_asgi_contract.py tests/test_runtime_credentials.py \
 	tests/test_scan_credentials.py tests/test_scan_finalizer.py \
 	tests/test_scan_risk_and_assurance.py
 test:

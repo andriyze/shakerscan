@@ -182,6 +182,33 @@ def test_mcp_hunt_start_preserves_explicit_zero_ceilings_at_asgi_boundary(hunt_a
     assert captured[0].budgets == zeroable
 
 
+def test_mcp_knowledge_cursor_reaches_real_api_and_returns_the_remaining_rows(hunt_asgi, monkeypatch):
+    from contextlib import asynccontextmanager
+    import uuid
+    from tests.test_hunt_knowledge_pages import KnowledgeDB, TARGET, STAMP
+    db = KnowledgeDB(check_same_thread=False)
+    for index in range(125):
+        db.insert("endpoints", id=str(uuid.UUID(int=index + 100)), target_id=str(TARGET),
+                  method="GET", path=f"/item/{index}", test_status="untested", priority_score=10, last_seen_at=STAMP)
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self): yield db
+    async def run(*args): return {"target_id": TARGET, "device_target_id": None}
+    routes = (nested for route in api_module.app.routes for nested in getattr(getattr(route, "original_router", None), "routes", (route,)))
+    endpoint = next(route.endpoint for route in routes if getattr(route, "path", None) == "/hunts/{hunt_id}/query")
+    monkeypatch.setitem(endpoint.__globals__, "_pool", lambda: Pool())
+    monkeypatch.setitem(endpoint.__globals__, "_hunt_run_or_404", run)
+    client, _, _ = hunt_asgi
+    args = {"hunt_id": str(uuid.UUID(int=1)), "kind": "endpoints", "limit": 100}
+    first = client.call_tool("shakerscan_hunt_query", args)["structuredContent"]
+    assert first["count"] == 100 and first["has_more"] is True
+    second = client.call_tool("shakerscan_hunt_query", {**args, "cursor": first["next_cursor"]})["structuredContent"]
+    assert second["count"] == 25 and second["has_more"] is False
+    assert len({row["id"] for row in first["rows"] + second["rows"]}) == 125
+    schema = mcp.HUNT_TOOL_BY_NAME["shakerscan_hunt_query"].properties
+    assert {"hypotheses", "graph_nodes", "graph_edges"} <= set(schema["kind"]["enum"])
+
+
 @pytest.mark.parametrize(
     "payload",
     [

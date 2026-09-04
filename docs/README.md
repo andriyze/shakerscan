@@ -32,6 +32,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`releases/0.8.18.md`](releases/0.8.18.md) | Current stable-line release notes until 2.0.0 promotion succeeds |
 | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
 | [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
+| [`hunt-investigation-evaluation.md`](hunt-investigation-evaluation.md) | Independent planner evaluation, hidden oracles, patched controls, exact-cost scoring, and limitations |
 | [`mcp.md`](mcp.md) | MCP's separate read-only Arsenal and state-changing target-bound Hunt trust levels |
 | [`compatibility.md`](compatibility.md) | Internal legacy-input/read compatibility boundary; not a second product surface |
 | [`data-lifecycle-retention-and-portability-plan.md`](data-lifecycle-retention-and-portability-plan.md) | Implemented retention/export safety boundary and genuinely remaining lifecycle work |

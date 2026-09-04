@@ -1,8 +1,12 @@
 import hashlib
+import asyncio
+import json
+import uuid
 
 from api.hunt.deterministic_findings import (
     _verified_xss_fingerprint,
     verified_xss_observations,
+    materialize_verified_hunt_findings,
 )
 from scanner.findings import templated_finding_identity
 
@@ -90,3 +94,26 @@ def test_reflected_xss_uses_the_canonical_scan_fingerprint():
     expected = "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
     assert _verified_xss_fingerprint(proof, method="GET") == expected
+
+
+def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
+    class DB:
+        async def fetchval(self, query, *args):
+            self.query, self.evidence = query, json.loads(args[4])
+            return uuid.uuid4()
+        async def execute(self, *args): pass
+
+    db = DB()
+    ids = asyncio.run(materialize_verified_hunt_findings(
+        db, uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "https://app.example.test",
+        "xss.verify", uuid.uuid4(), {"path": "/search"}, [{
+            "kind": "xss_alert", "proof_state": "verified", "param": "q",
+            "url": "https://app.example.test/search?q=payload", "payload_sha256": "a" * 64,
+        }],
+    ))
+    assert len(ids) == 1
+    assert "'high',NULL" in db.query
+    assert "8.1" not in db.query
+    assert db.evidence["cvss"]["status"] == "not_assessed"
+    assert db.evidence["execution_sink"]["parameter"] == "q"
+    assert db.evidence["proof_state"] == "verified"

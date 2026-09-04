@@ -304,7 +304,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     HuntMCPTool(
         "shakerscan_hunt_skill_usage", "POST",
         "/hunts/{hunt_id}/skills/{skill_id}/usage",
-        "Record evidenced methodology use, completion, or deferral.",
+        "Record methodology activity. Used/completed require a same-Hunt action_id and a read of the bound revision; evidence labels alone are insufficient.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
             "skill_id": {"type": "string", "minLength": 1, "maxLength": 160},
@@ -319,12 +319,13 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
         ("hunt_id", "skill_id", "state"), idempotent=True,
     ),
     HuntMCPTool(
-        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query bounded Hunt context.",
+        "shakerscan_hunt_query", "POST", "/hunts/{hunt_id}/query", "Query target-scoped Hunt knowledge pages. Follow next_cursor with unchanged kind/filter while has_more is true; count is this page, not a total.",
         {
             "hunt_id": {"type": "string", "format": "uuid"},
-            "kind": {"type": "string", "enum": ["summary", "endpoints", "findings", "principals", "services", "scans", "collections", "candidates", "notes", "receipts"]},
+            "kind": {"type": "string", "enum": ["summary", "endpoints", "findings", "hypotheses", "principals", "graph_nodes", "graph_edges", "services", "scans", "collections", "candidates", "notes", "receipts"]},
             "filter": {"type": "object"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            "cursor": {"type": "string", "maxLength": 2048},
         },
         ("hunt_id", "kind"), read_only=True, idempotent=True,
     ),

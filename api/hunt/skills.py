@@ -650,8 +650,10 @@ def load_skill_library(root: pathlib.Path | None = None) -> HuntSkillLibrary:
 
 
 def read_skill_body(spec: HuntSkillSpec) -> str:
-    """Read one skill's methodology text."""
+    """Read exactly the revision named by the cached catalog and binding."""
     _, body = _frontmatter(pathlib.Path(spec.path).read_text(encoding="utf-8"))
+    if hashlib.sha256(body.encode("utf-8")).hexdigest() != spec.body_sha256:
+        raise HuntSkillError("Methodology changed since catalog load; reload the catalog before reading")
     return body
 
 

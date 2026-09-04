@@ -78,6 +78,7 @@ from capabilities.network import (
     network_capability_adapter,
 )
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
+from hunt.browser_credentials import browser_session_headers
 from capabilities.http import execute_bound_http_request
 from capabilities.artifact import analyze_target_javascript, inspect_target_artifact
 from capabilities.auth import (
@@ -21091,7 +21092,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                 }
                 requested_budget["agent_actions"] = 1
                 spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-                if spec.requires_active_approval:
+                if spec.requires_active_approval or prepared.session_ref:
                     requested_budget["active_actions"] = 1
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
@@ -21177,7 +21178,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         current=heartbeat,
                     )
 
-        executable_browser_adapter = browser_adapter(prepared)
+        executable_browser_adapter = browser_adapter(prepared, session_loader=lambda: browser_session_headers(db_pool, prepared=prepared, hunt_id=hunt_id, policy=policy))
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),

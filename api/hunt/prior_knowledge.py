@@ -23,6 +23,8 @@ SCHEMA_VERSION = "hunt-prior-knowledge/v1"
 
 # A Hunt that re-derives a surface the deployment already inventoried spends its budget twice.
 _GUIDANCE = (
+    "Query responses are pages, not totals: follow next_cursor with unchanged kind/filter while "
+    "has_more is true; use row IDs for exact follow-up. "
     "Prior scans already populated this target's knowledge base. Query it with "
     "POST /hunts/{hunt_id}/query before spending crawl or discovery budget: kind='endpoints' "
     "returns the inventoried surface ranked by priority_score with param_shape, auth_state and "

@@ -131,30 +131,10 @@ def _canonical_proof_contract_v2(
     }
 
 
-# Execution proof establishes exploitability, not a universal CVSS impact vector.
-# Keep proof, qualitative severity, and a context-supported CVSS assessment independent.
-def _apply_xss_execution_evidence(
-    finding: dict[str, Any],
-    *,
-    location: Any,
-    parameter: Any,
-    signal: str,
-    verifier: Any,
-    dom_marker_executed: Any = None,
-) -> None:
-    """Attach the execution sink without replacing a finding's impact assessment."""
-    finding["evidence"].setdefault("cvss", {
-        "status": "not_assessed",
-        "basis": "Execution proof alone does not establish privileges or confidentiality/integrity impact",
-        "required_context": ["attacker_privileges", "victim_context", "confidentiality_impact", "integrity_impact"],
-    })
-    finding["evidence"]["execution_sink"] = {
-        "location": str(location or "") or None,
-        "parameter": str(parameter or "") or None,
-        "signal": signal,
-        "verifier": str(verifier or "") or None,
-        "dom_marker_executed": dom_marker_executed,
-    }
+try:
+    from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
+except ModuleNotFoundError:
+    from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
 
 
 def _base_finding(

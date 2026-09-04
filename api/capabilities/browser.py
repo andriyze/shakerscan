@@ -10,8 +10,11 @@ import ipaddress
 import math
 import re
 import time
+import uuid
+from http.cookies import SimpleCookie
 from typing import Any, Mapping
 import urllib.parse
+from .browser_steps import browser_steps, browser_surface, ELEMENT_DESCRIPTOR, validate_fill
 
 try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
@@ -92,6 +95,7 @@ class PreparedBrowserNavigation:
     input_digest: str
     estimated_budget: Mapping[str, int]
     redacted_execution: Mapping[str, Any]
+    session_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,8 @@ class PreparedBrowserInteraction:
     input_digest: str
     estimated_budget: Mapping[str, int]
     redacted_execution: Mapping[str, Any]
+    session_ref: str | None = None
+    steps: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -341,9 +347,9 @@ def _prepare_browser_base(
             "browser path must be a bounded same-origin absolute path"
         )
     parsed_path = urllib.parse.urlsplit(path)
-    if parsed_path.scheme or parsed_path.netloc or parsed_path.fragment:
+    if parsed_path.scheme or parsed_path.netloc:
         raise BrowserCapabilityInputError(
-            "browser path must not contain an origin or fragment"
+            "browser path must not contain an origin"
         )
     query_pairs = urllib.parse.parse_qsl(
         parsed_path.query, keep_blank_values=True, max_num_fields=50,
@@ -352,6 +358,12 @@ def _prepare_browser_base(
         raise BrowserCapabilityInputError(
             "browser input contains raw secret material; use a managed credential reference"
         )
+    session_ref = args.get("session_ref")
+    if session_ref is not None:
+        try:
+            session_ref = str(uuid.UUID(session_ref))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise BrowserCapabilityInputError("session_ref must be an opaque session UUID") from exc
     raw_wait_until = args.get("wait_until", "domcontentloaded")
     if not isinstance(raw_wait_until, str):
         raise BrowserCapabilityInputError("wait_until must be a string")
@@ -413,6 +425,7 @@ def _prepare_browser_base(
         "timeout_ms": timeout_ms,
         "max_requests": max_requests,
         "address_policy": socket_factory.policy_receipt,
+        "session_ref": session_ref,
     }
 
 
@@ -422,8 +435,9 @@ class BrowserNavigateAdapter:
     adapter_version = "1"
     parser_version = "browser-navigation/v1"
 
-    def __init__(self, prepared: PreparedBrowserNavigation):
+    def __init__(self, prepared: PreparedBrowserNavigation, *, session_loader=None):
         self.prepared = prepared
+        self.session_loader = session_loader
 
     @classmethod
     def prepare(
@@ -437,7 +451,7 @@ class BrowserNavigateAdapter:
             target=target,
             base_url=base_url,
             args=args,
-            allowed_fields={"path", "wait_until", "timeout_ms", "max_requests"},
+            allowed_fields={"path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
         )
         normalized = {
             "target_id": target.target_id,
@@ -448,6 +462,7 @@ class BrowserNavigateAdapter:
             "wait_until": common["wait_until"],
             "timeout_ms": common["timeout_ms"],
             "max_requests": common["max_requests"],
+            "session_ref": common["session_ref"],
         }
         return PreparedBrowserNavigation(
             capability_name=cls.capability_name,
@@ -461,6 +476,7 @@ class BrowserNavigateAdapter:
             wait_until=common["wait_until"],
             timeout_ms=common["timeout_ms"],
             max_requests=common["max_requests"],
+            session_ref=common["session_ref"],
             input_digest=PreparedExecution.digest_input(normalized),
             estimated_budget={
                 "browser_actions": 1,
@@ -486,8 +502,9 @@ class BrowserNavigateAdapter:
         heartbeat: Heartbeat,
         cancelled: Cancelled,
     ) -> CapabilityAdapterResult:
-        return await _execute_browser_action(
+        return await _execute_browser_with_session(
             self.prepared,
+            session_loader=self.session_loader,
             heartbeat=heartbeat,
             cancelled=cancelled,
         )
@@ -499,8 +516,9 @@ class BrowserInteractAdapter:
     adapter_version = "1"
     parser_version = "browser-interaction/v1"
 
-    def __init__(self, prepared: PreparedBrowserInteraction):
+    def __init__(self, prepared: PreparedBrowserInteraction, *, session_loader=None):
         self.prepared = prepared
+        self.session_loader = session_loader
 
     @classmethod
     def prepare(
@@ -516,10 +534,14 @@ class BrowserInteractAdapter:
             args=args,
             allowed_fields={
                 "path", "selector", "wait_until", "timeout_ms",
-                "max_requests", "settle_ms",
+                "max_requests", "settle_ms", "steps", "session_ref",
             },
         )
-        raw_selector = args.get("selector")
+        try:
+            steps = browser_steps(args)
+        except ValueError as exc:
+            raise BrowserCapabilityInputError(str(exc)) from exc
+        raw_selector = steps[-1]["selector"]
         if not isinstance(raw_selector, str):
             raise BrowserCapabilityInputError("browser selector must be a string")
         selector = raw_selector.strip()
@@ -558,6 +580,8 @@ class BrowserInteractAdapter:
             "max_requests": common["max_requests"],
             "selector": selector,
             "settle_ms": settle_ms,
+            "steps": steps,
+            "session_ref": common["session_ref"],
         }
         return PreparedBrowserInteraction(
             capability_name=cls.capability_name,
@@ -571,12 +595,14 @@ class BrowserInteractAdapter:
             wait_until=common["wait_until"],
             timeout_ms=common["timeout_ms"],
             max_requests=common["max_requests"],
+            session_ref=common["session_ref"],
+            steps=steps,
             selector=selector,
             selector_digest=selector_digest,
             settle_ms=settle_ms,
             input_digest=PreparedExecution.digest_input(normalized),
             estimated_budget={
-                "browser_actions": 2,
+                "browser_actions": 1 + len(steps),
                 "http_requests": common["max_requests"],
                 "tool_wall_seconds": max(
                     1, math.ceil(common["timeout_ms"] / 1_000)
@@ -591,7 +617,9 @@ class BrowserInteractAdapter:
                 "max_requests": common["max_requests"],
                 "selector_sha256": selector_digest,
                 "settle_ms": settle_ms,
-                "interaction": "click",
+                "interaction": "replay",
+                "step_count": len(steps),
+                "authenticated_session": bool(common["session_ref"]),
                 "read_only_requests_only": True,
             },
         )
@@ -602,8 +630,9 @@ class BrowserInteractAdapter:
         heartbeat: Heartbeat,
         cancelled: Cancelled,
     ) -> CapabilityAdapterResult:
-        return await _execute_browser_action(
+        return await _execute_browser_with_session(
             self.prepared,
+            session_loader=self.session_loader,
             heartbeat=heartbeat,
             cancelled=cancelled,
         )
@@ -622,11 +651,21 @@ def browser_capability_adapter(name: str):
     return adapters[normalized]
 
 
+async def _execute_browser_with_session(prepared, *, session_loader, heartbeat, cancelled):
+    if prepared.session_ref:
+        if session_loader is None:
+            raise BrowserCapabilityInputError("Managed browser session requires worker resolution")
+        async with session_loader() as headers:
+            return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled, trusted_headers=headers)
+    return await _execute_browser_action(prepared, heartbeat=heartbeat, cancelled=cancelled)
+
+
 async def _execute_browser_action(
     prepared: PreparedBrowserAction,
     *,
     heartbeat: Heartbeat,
     cancelled: Cancelled,
+    trusted_headers: Mapping[str, str] | None = None,
 ) -> CapabilityAdapterResult:
     started = time.monotonic()
     request_count = 0
@@ -634,6 +673,8 @@ async def _execute_browser_action(
     browser_actions = 0
     blocked: list[dict[str, Any]] = []
     responses: list[dict[str, Any]] = []
+    action_observations: list[dict[str, Any]] = []
+    navigation_observations: list[dict[str, Any]] = []
     related_request_urls: list[str] = []
     playwright = None
     browser = None
@@ -709,6 +750,17 @@ async def _execute_browser_action(
             ignore_https_errors=True,
             service_workers="block",
         )
+        # Cookie headers cannot be overridden by Playwright routing. Bind them
+        # to the exact target URL; do not serialize or return browser storage.
+        for name, value in (trusted_headers or {}).items():
+            if name.lower() == "cookie":
+                cookies = SimpleCookie()
+                cookies.load(value)
+                await context.add_cookies([
+                    {"name": key, "value": cookie.value, "url": prepared.origin,
+                     "httpOnly": True, "secure": prepared.origin.startswith("https:")}
+                    for key, cookie in cookies.items()
+                ])
         await context.add_init_script(
             "window.WebSocket = class { constructor() { throw new Error('blocked'); } };"
             "window.EventSource = class { constructor() { throw new Error('blocked'); } };"
@@ -765,7 +817,14 @@ async def _execute_browser_action(
                 await route.abort("blockedbyclient")
                 return
             request_count += 1
-            await route.continue_()
+            if trusted_headers:
+                headers = {**dict(request.headers), **{
+                    name.lower(): value for name, value in trusted_headers.items()
+                    if name.lower() != "cookie"
+                }}
+                await route.continue_(headers=headers)
+            else:
+                await route.continue_()
 
         async def record_response(response) -> None:
             if len(responses) >= MAX_BROWSER_RESPONSE_OBSERVATIONS:
@@ -856,6 +915,7 @@ async def _execute_browser_action(
             "request_count": request_count,
             "blocked_request_count": len(blocked),
         }
+        navigation_observations.append(navigation_observation)
         if isinstance(prepared, PreparedXSSBrowserProof):
             browser_actions = 2
             await asyncio.sleep(1.5)
@@ -917,117 +977,68 @@ async def _execute_browser_action(
                 errors=("browser_requests_blocked",) if blocked else (),
             )
         if isinstance(prepared, PreparedBrowserInteraction):
-            locator = page.locator(prepared.selector)
-            match_count = await locator.count()
-            if match_count != 1:
-                return _browser_result(
-                    prepared,
-                    status="blocked",
-                    request_count=request_count,
-                    browser_actions=browser_actions,
-                    started=started,
-                    observations=[navigation_observation, *responses],
-                    blocked=blocked,
-                    errors=(
-                        "browser_selector_not_found"
-                        if match_count == 0
-                        else "browser_selector_ambiguous",
-                    ),
-                )
-            element = await locator.evaluate(
-                """element => ({
-                    tag: String(element.tagName || '').toLowerCase(),
-                    role: String(element.getAttribute('role') || '').toLowerCase(),
-                    type: String(element.getAttribute('type') || '').toLowerCase(),
-                    href: String(element.href || ''),
-                    target: String(element.getAttribute('target') || '').toLowerCase(),
-                    download: element.hasAttribute('download'),
-                    semantics: String(
-                        element.getAttribute('aria-label') ||
-                        element.getAttribute('title') ||
-                        element.getAttribute('name') ||
-                        element.getAttribute('value') ||
-                        element.textContent || ''
-                    ).slice(0, 500)
-                })"""
-            )
-            element_kind = _validate_read_only_interaction(prepared, element)
-            remaining_ms = prepared.timeout_ms - int(
-                (time.monotonic() - started) * 1_000
-            )
-            if remaining_ms <= 0:
-                raise PlaywrightTimeoutError("browser interaction deadline expired")
-            browser_actions = 2
-            click = asyncio.create_task(locator.click(timeout=remaining_ms))
-            completed, _value = await await_task(click)
-            if not completed:
-                return _browser_result(
-                    prepared,
-                    status="cancelled",
-                    request_count=request_count,
-                    browser_actions=browser_actions,
-                    started=started,
-                    observations=[navigation_observation, *responses],
-                    blocked=blocked,
-                    errors=("cancelled",),
-                )
-            remaining_ms = prepared.timeout_ms - int(
-                (time.monotonic() - started) * 1_000
-            )
-            if prepared.settle_ms and remaining_ms > 0:
-                await asyncio.sleep(min(prepared.settle_ms, remaining_ms) / 1_000)
-            if _origin_key(page.url) != _origin_key(prepared.origin):
-                return _browser_result(
-                    prepared,
-                    status="blocked",
-                    request_count=request_count,
-                    browser_actions=browser_actions,
-                    started=started,
-                    observations=[navigation_observation, *responses],
-                    blocked=blocked,
-                    errors=("interaction_final_url_outside_target_origin",),
-                )
-            interaction_observation = {
-                "kind": "browser_interaction",
-                "interaction": "click",
-                "selector_sha256": prepared.selector_digest,
-                "element_kind": element_kind,
-                "url": _observation_url(page.url),
-                "same_origin": True,
-                "read_only_requests_only": True,
-                "request_count": request_count,
-                "blocked_request_count": len(blocked),
-            }
-            return _browser_result(
-                prepared,
-                status="partial" if blocked else "success",
-                request_count=request_count,
-                browser_actions=browser_actions,
-                started=started,
-                observations=[
-                    navigation_observation, interaction_observation, *responses,
-                ],
-                blocked=blocked,
-                errors=("browser_requests_blocked",) if blocked else (),
-            )
+            steps = prepared.steps or ({"action": "click", "selector": prepared.selector},)
+            for index, step in enumerate(steps):
+                locator = page.locator(step["selector"])
+                match_count = await locator.count()
+                if match_count != 1:
+                    return _browser_result(
+                        prepared, status="partial" if action_observations else "blocked",
+                        request_count=request_count, browser_actions=browser_actions,
+                        started=started, observations=[navigation_observation, *action_observations, *responses],
+                        blocked=blocked, errors=("browser_selector_not_found" if match_count == 0 else "browser_selector_ambiguous",),
+                    )
+                element = await locator.evaluate(ELEMENT_DESCRIPTOR)
+                if step["action"] == "fill":
+                    try:
+                        validate_fill(element)
+                    except ValueError as exc:
+                        raise BrowserCapabilityInputError(str(exc)) from exc
+                    element_kind = "text_field"
+                else:
+                    element_kind = _validate_read_only_interaction(prepared, element)
+                remaining_ms = prepared.timeout_ms - int((time.monotonic() - started) * 1_000)
+                if remaining_ms <= 0:
+                    raise PlaywrightTimeoutError("browser interaction deadline expired")
+                browser_actions += 1
+                operation = locator.fill(step["value"], timeout=remaining_ms) if step["action"] == "fill" else locator.click(timeout=remaining_ms)
+                completed, _value = await await_task(asyncio.create_task(operation))
+                if not completed:
+                    return _browser_result(
+                        prepared, status="cancelled", request_count=request_count,
+                        browser_actions=browser_actions, started=started,
+                        observations=[navigation_observation, *action_observations, *responses],
+                        blocked=blocked, errors=("cancelled",),
+                    )
+                remaining_ms = prepared.timeout_ms - int((time.monotonic() - started) * 1_000)
+                if prepared.settle_ms and remaining_ms > 0:
+                    await asyncio.sleep(min(prepared.settle_ms, remaining_ms) / 1_000)
+                if _origin_key(page.url) != _origin_key(prepared.origin):
+                    raise BrowserCapabilityInputError("interaction_final_url_outside_target_origin")
+                action_observations.append({
+                    "kind": "browser_interaction", "interaction": step["action"],
+                    "step_index": index, "selector_sha256": hashlib.sha256(step["selector"].encode()).hexdigest(),
+                    "element_kind": element_kind, "url": _observation_url(page.url),
+                    "client_route": redact_client_route(page.url),
+                    "same_origin": True, "read_only_requests_only": True,
+                    "request_count": request_count, "blocked_request_count": len(blocked),
+                })
+        remaining_seconds = max(0.001, prepared.timeout_ms / 1000 - (time.monotonic() - started))
+        surface = await asyncio.wait_for(browser_surface(page), timeout=remaining_seconds)
         return _browser_result(
-            prepared,
-            status="partial" if blocked else "success",
-            request_count=request_count,
-            browser_actions=browser_actions,
-            started=started,
-            observations=[navigation_observation, *responses],
-            blocked=blocked,
-            errors=("browser_requests_blocked",) if blocked else (),
+            prepared, status="partial" if blocked else "success",
+            request_count=request_count, browser_actions=browser_actions, started=started,
+            observations=[navigation_observation, *action_observations, surface, *responses],
+            blocked=blocked, errors=("browser_requests_blocked",) if blocked else (),
         )
-    except PlaywrightTimeoutError:
+    except (PlaywrightTimeoutError, asyncio.TimeoutError):
         return _browser_result(
             prepared,
             status="partial",
             request_count=request_count,
             browser_actions=browser_actions,
             started=started,
-            observations=responses,
+            observations=[*navigation_observations, *action_observations, *responses],
             blocked=blocked,
             errors=("browser_action_timeout",),
             timed_out=True,
@@ -1035,11 +1046,11 @@ async def _execute_browser_action(
     except BrowserCapabilityInputError as exc:
         return _browser_result(
             prepared,
-            status="blocked",
+            status="partial" if action_observations else "blocked",
             request_count=request_count,
             browser_actions=browser_actions,
             started=started,
-            observations=responses,
+            observations=[*navigation_observations, *action_observations, *responses],
             blocked=blocked,
             errors=(str(exc),),
         )
@@ -1048,11 +1059,11 @@ async def _execute_browser_action(
     except Exception as exc:
         return _browser_result(
             prepared,
-            status="failed",
+            status="partial" if action_observations else "failed",
             request_count=request_count,
             browser_actions=browser_actions,
             started=started,
-            observations=responses,
+            observations=[*navigation_observations, *action_observations, *responses],
             blocked=blocked,
             errors=(f"browser_action:{type(exc).__name__}",),
         )
@@ -1109,11 +1120,13 @@ def _validate_read_only_interaction(
             raise BrowserCapabilityInputError(
                 "browser link query is too large"
             ) from exc
-        if parsed.fragment or contains_secret_material(query) or contains_secret_material(href):
+        if contains_secret_material(query) or contains_secret_material(href):
             raise BrowserCapabilityInputError("browser link contains unsafe material")
         return "same_origin_link"
     if tag == "summary":
         return "disclosure"
+    if tag == "button" and element_type == "button" and element.get("expanded"):
+        return "disclosure_button"
     if role == "tab" and tag in {"button", "div", "li", "span"}:
         if tag == "button" and element_type not in {"", "button"}:
             raise BrowserCapabilityInputError("browser tab button can submit a form")

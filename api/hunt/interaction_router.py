@@ -31,6 +31,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .run_service import agent_tools
+from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
+from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
 from .cancellation import (
     HuntCancellationWatch,
@@ -106,7 +108,7 @@ _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
 
 
-_AGENT_TOOL_MAX_QUERY_ROWS = 100
+_AGENT_TOOL_MAX_QUERY_ROWS = MAX_QUERY_ROWS
 
 
 def _hunt_budget_accounting(
@@ -211,6 +213,7 @@ class HuntQueryRequest(BaseModel):
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
+    cursor: str | None = Field(default=None, max_length=2048)
 
 
 class HuntCandidateRequest(BaseModel):
@@ -252,53 +255,22 @@ class HuntCandidateUpdateRequest(BaseModel):
 async def query_hunt(hunt_id: str, request: HuntQueryRequest):
     async with _pool().acquire() as conn:
         run = await _hunt_run_or_404(conn, hunt_id)
-    kind = request.kind
-    limit = request.limit
-    if str(run["target_kind"]) != "device" and kind in {
-        "endpoints", "findings", "principals", "notes", "receipts",
-        "hypotheses", "graph_nodes", "graph_edges",
-    }:
-        mapped = {"receipts": "tool_receipts"}.get(kind, kind)
-        result = await _agent_tool_query_kb(run["target_id"], mapped, {**request.filter, "limit": limit})
-        return {"hunt_id": hunt_id, **result}
-    async with _pool().acquire() as conn:
-        if kind == "collections":
-            target_ref = run["device_target_id"] or run["target_id"]
-            rows = await conn.fetch(
-                """SELECT id, name, format, request_count, safe_request_count,
-                          potentially_mutating_request_count, payload_sha256, updated_at
-                   FROM request_collections
-                   WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
-                   ORDER BY updated_at DESC LIMIT $2""", target_ref, limit,
+        if request.kind == "summary":
+            return {"hunt_id": hunt_id, "kind": "summary", "count": 0, "rows": [],
+                    "context": _hunt_public(run).get("context_pack"),
+                    "has_more": False, "next_cursor": None}
+        try:
+            result = await query_knowledge_page(
+                conn, target_id=run["device_target_id"] or run["target_id"],
+                device=bool(run["device_target_id"]), kind=request.kind,
+                filters=request.filter, limit=request.limit, cursor=request.cursor,
             )
-        elif kind == "services" and run["device_target_id"]:
-            rows = await conn.fetch(
-                """SELECT transport, port, state, service_name, product, version, encrypted,
-                          web_origin, policy_disposition, last_seen_at
-                   FROM device_services WHERE device_target_id=$1
-                   ORDER BY state='open' DESC, transport, port LIMIT $2""",
-                run["device_target_id"], limit,
-            )
-        elif kind == "scans" and run["device_target_id"]:
-            rows = await conn.fetch(
-                """SELECT id, status, progress, current_phase, findings_count, created_at
-                   FROM scans WHERE device_target_id=$1 ORDER BY created_at DESC LIMIT $2""",
-                run["device_target_id"], limit,
-            )
-        elif kind == "candidates":
-            column = "device_target_id" if run["device_target_id"] else "target_id"
-            rows = await conn.fetch(
-                f"""SELECT id, family, canonical_locus, title, claim, claimed_severity,
-                            evidence_refs, verifier_contract_id, status, last_seen_at
-                     FROM investigation_candidates WHERE {column}=$1
-                     ORDER BY last_seen_at DESC LIMIT $2""",
-                run["device_target_id"] or run["target_id"], limit,
-            )
-        else:
-            return {"hunt_id": hunt_id, "kind": kind, "count": 0, "rows": [],
-                    "context": _hunt_public(run).get("context_pack") if kind == "summary" else None}
-    items = [_arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in rows]
-    return {"hunt_id": hunt_id, "kind": kind, "count": len(items), "rows": items}
+        except KnowledgeQueryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result["rows"] = [
+        _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
+    ]
+    return {"hunt_id": hunt_id, **result}
 
 
 @router.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")
@@ -1182,83 +1154,22 @@ async def verify_hunt_candidate(
         "action": action,
     }
 async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility entrypoint using the same paged target knowledge as Hunt."""
+    values = dict(flt)
+    limit = values.pop("limit", 25)
+    cursor = values.pop("cursor", None)
     try:
-        limit = int(flt.get("limit"))
-    except (TypeError, ValueError):
-        limit = 25
-    limit = max(1, min(limit, _AGENT_TOOL_MAX_QUERY_ROWS))
-    path_contains = str(flt.get("path_contains") or "").strip()
-    family = str(flt.get("family") or "").strip().lower()
-    severity = str(flt.get("severity") or "").strip().lower()
-    method = str(flt.get("method") or "").strip().upper()
-    # The context pack advertises how much of the inventory is untested and how many findings are
-    # already proven, so the query has to be able to express both. Without these an agent could read
-    # the census and still only page the top of the priority ranking.
-    test_status = str(flt.get("test_status") or "").strip().lower()
-    auth_state = str(flt.get("auth_state") or "").strip().lower()
-    finding_status = str(flt.get("status") or "").strip().lower()
-    verified_only = bool(flt.get("verified_only"))
-    rows: list[Any] = []
-    async with _pool().acquire() as conn:
-        if kind == "endpoints":
-            rows = await conn.fetch(
-                """SELECT method, path, auth_state, test_status, last_verdict, param_shape, content_type, priority_score
-                   FROM target_endpoints WHERE target_id=$1 AND COALESCE(test_status,'')<>'gone'
-                     AND ($2='' OR path ILIKE '%'||$2||'%') AND ($3='' OR method=$3)
-                     AND ($4='' OR lower(COALESCE(test_status,''))=$4)
-                     AND ($5='' OR lower(COALESCE(auth_state,''))=$5)
-                   ORDER BY priority_score DESC, last_seen_at DESC LIMIT $6""",
-                target_uuid, path_contains, method, test_status, auth_state, limit,
+        async with _pool().acquire() as conn:
+            result = await query_knowledge_page(
+                conn, target_id=target_uuid, kind=kind,
+                filters=values, limit=limit, cursor=cursor,
             )
-        elif kind == "findings":
-            rows = await conn.fetch(
-                """SELECT title, severity, status, tool, url, last_verification_verdict
-                   FROM findings WHERE target_id=$1 AND ($2='' OR severity=$2)
-                     AND ($3='' OR lower(COALESCE(status,''))=$3)
-                     AND (NOT $4::boolean OR last_verification_verdict='exploited')
-                   ORDER BY last_seen_at DESC LIMIT $5""",
-                target_uuid, severity, finding_status, verified_only, limit,
-            )
-        elif kind == "hypotheses":
-            rows = await conn.fetch(
-                """SELECT family, title, status, confidence, source, dedupe_key
-                   FROM hypotheses WHERE target_id=$1 AND ($2='' OR lower(family)=$2)
-                   ORDER BY updated_at DESC LIMIT $3""",
-                target_uuid, family, limit,
-            )
-        elif kind == "principals":
-            rows = await conn.fetch(
-                """SELECT label, role, tenant_id, auth_state, is_active FROM target_principals
-                   WHERE target_id=$1 AND is_active=true ORDER BY role, label LIMIT $2""",
-                target_uuid, limit,
-            )
-        elif kind == "graph_nodes":
-            rows = await conn.fetch(
-                """SELECT node_type, node_key, label FROM application_graph_nodes
-                   WHERE target_id=$1 ORDER BY last_seen_at DESC LIMIT $2""",
-                target_uuid, limit,
-            )
-        elif kind == "graph_edges":
-            rows = await conn.fetch(
-                """SELECT src_key, edge_type, dst_key FROM application_graph_edges
-                   WHERE target_id=$1 ORDER BY last_seen_at DESC LIMIT $2""",
-                target_uuid, limit,
-            )
-        elif kind == "tool_receipts":
-            rows = await conn.fetch(
-                """SELECT tool_name, status, redacted_argv, created_at FROM tool_receipts
-                   WHERE target_scope->>'target_id'=$1 ORDER BY created_at DESC LIMIT $2""",
-                str(target_uuid), limit,
-            )
-        elif kind == "notes":
-            rows = await conn.fetch(
-                """SELECT metadata_json, created_at FROM tool_receipts
-                   WHERE tool_name='agent.note' AND target_scope->>'target_id'=$1
-                   ORDER BY created_at DESC LIMIT $2""",
-                str(target_uuid), limit,
-            )
-    items = [_arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in rows]
-    return {"ok": True, "kind": kind, "count": len(items), "rows": items}
+    except KnowledgeQueryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result["rows"] = [
+        _arsenal_routes._redact_agent_payload(_json_safe_row(row)) for row in result["rows"]
+    ]
+    return result
 
 
 class HuntCapabilityRequest(BaseModel):
@@ -1562,7 +1473,7 @@ async def _execute_hunt_capability_lifecycle(
                 validated_device_input = dict(request.input)
             uses_session = bool(
                 (
-                    name == "http.request"
+                    name in {"http.request", "browser.navigate", "browser.interact"}
                     and request.input.get("session_ref")
                 )
                 or (
@@ -1744,11 +1655,10 @@ async def _execute_hunt_capability_lifecycle(
                             )
                             charges[transport_dimension] = 1
                     else:
-                        charges["http_requests"] = 24
-                        charges["browser_actions"] = 12
                         family = family_proof.canonical_family(
                             candidate_record["family"]
                         )
+                        charges.update(web_candidate_budget(family))
                         if family in _AGENT_MUTATING_VERIFY_FAMILIES:
                             if not policy.get("allow_state_changing_http"):
                                 raise HTTPException(
@@ -1937,19 +1847,17 @@ async def _execute_hunt_capability_lifecycle(
                         receipt=None,
                     )
                     dimension = next(iter(exc.shortages), "unknown")
-                    await conn.execute(
-                        "UPDATE hunt_runs SET status='budget_exhausted', "
-                        "stop_reason=$2, updated_at=NOW() WHERE id=$1",
-                        run["id"],
-                        f"budget_exhausted:{dimension}",
+                    shortage = await record_budget_shortage(
+                        conn, hunt_id=run["id"], limits=limits, used=used,
+                        shortages=exc.shortages,
                     )
                     admission_error = HTTPException(
                         status_code=409,
-                        detail=f"Hunt budget exhausted: {dimension}",
+                        detail=shortage,
                     )
                     admission_action_status = "failed"
                     admission_result_summary = {
-                        "error": f"budget_exhausted:{dimension}",
+                        **shortage,
                         "budget_reservation_id": released.reservation_id,
                         "budget_reservation_state": released.status,
                     }
@@ -1975,18 +1883,16 @@ async def _execute_hunt_capability_lifecycle(
                     )
                 except BudgetExceeded as exc:
                     dimension = next(iter(exc.shortages), "unknown")
-                    await conn.execute(
-                        "UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2, updated_at=NOW() WHERE id=$1",
-                        run["id"], f"budget_exhausted:{dimension}",
+                    shortage = await record_budget_shortage(
+                        conn, hunt_id=run["id"], limits=limits, used=used,
+                        shortages=exc.shortages,
                     )
                     admission_error = HTTPException(
                         status_code=409,
-                        detail=f"Hunt budget exhausted: {dimension}",
+                        detail=shortage,
                     )
                     admission_action_status = "failed"
-                    admission_result_summary = {
-                        "error": f"budget_exhausted:{dimension}",
-                    }
+                    admission_result_summary = shortage
                 else:
                     used.update(reserved_used)
                     await conn.execute("UPDATE hunt_runs SET budget_used_json=$2, status='active', updated_at=NOW() WHERE id=$1", run["id"], json.dumps(used))

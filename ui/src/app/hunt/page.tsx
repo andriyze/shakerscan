@@ -909,7 +909,7 @@ function HuntContent() {
               </div>
               {(hunt.skills || []).length > 0 ? (
                 <div className="space-y-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Applied</p>
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Selected</p>
                   {(hunt.skills || []).map((skill) => (
                     <div key={skill.skill_id} className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
                       <p className="text-sm font-medium text-violet-200">{skill.title}</p>
@@ -921,7 +921,23 @@ function HuntContent() {
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">No methodology is applied. The agent can begin with ordinary discovery.</p>
+                <p className="text-sm text-gray-500">No methodology is selected. The agent can begin with ordinary discovery.</p>
+              )}
+              <p className="text-xs text-gray-500">Selection is not execution. Usage below links a methodology to a Hunt action; it does not establish a vulnerability.</p>
+              {(hunt.skill_activity || []).length > 0 && (
+                <details className="rounded-lg border border-gray-800 p-3">
+                  <summary className="cursor-pointer text-sm text-gray-300">Methodology activity</summary>
+                  <ol className="mt-3 space-y-2 text-xs">
+                    {[...(hunt.skill_activity || [])].reverse().slice(0, 20).map((event) => (
+                      <li key={event.event_id} className="rounded bg-gray-950 p-2">
+                        <span className="text-violet-200">{event.event_type.replaceAll('_', ' ')}</span>
+                        <span className="ml-2 break-all text-gray-400">{event.skill_id.replace('skill.web.', '')} · v{event.skill_version}</span>
+                        {event.action_id && <p className="mt-1 break-all font-mono text-gray-500">Action {event.action_id}</p>}
+                        {event.reason && <p className="mt-1 text-gray-400">{event.reason}</p>}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
               )}
               {skillSuggestions.length > 0 && (
                 <div className="space-y-2">

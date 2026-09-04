@@ -11,8 +11,10 @@ the sole authority on what may run.
 
 ## Provenance
 
-Skills 01–30 are adapted from the `web-security-agent-skills` v2 library. Bodies are kept as
-written; the frontmatter was rewritten into ShakerScan's vocabulary:
+Skills 01–30 are adapted from the `web-security-agent-skills` v2 library. Most bodies retain
+upstream methodology; skills 03 and 14 now describe the current runtime directly. The live Hunt
+capability schemas take precedence over upstream adapter names and package-schema references.
+The frontmatter was rewritten into ShakerScan's vocabulary:
 
 - Upstream adapter ids became capability names from `api/runtime/capability_registry.py`.
 - Upstream budget fields became hunt budget dimensions.
@@ -36,9 +38,9 @@ The `partial` level exists so a gap is visible before a run starts rather than d
 planner reaches for a capability that was never there. `missing_capabilities` names the exact gap.
 
 A `supported` skill may still carry `deferred_techniques`: parts of its methodology this runtime
-cannot execute, each naming what it would need. Skill 31 is the clearest case — it can prove an
-origin is exposed but cannot complete the direct-origin request, because runtime target binding
-refuses to send a request to an unbound address.
+cannot execute, each naming what it would need. Skill 14 supports bounded SQL verification while
+explicitly deferring OOB, LDAP, and unsupported query-language mutations. Skill 31's direct-origin
+work requires separately admitted direct-origin authority; binding the skill never supplies it.
 
 ## Two rules that do not bend
 
