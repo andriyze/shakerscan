@@ -209,6 +209,9 @@ jobs:
       - name: Smoke-test frozen-source installer
         run: make installer-smoke
 
+      - name: Smoke-test installer-driven upgrades and ownership guards
+        run: make installer-upgrade-smoke
+
       - name: Pre-pull checksum-pinned scanner bases
         run: |
           scripts/retry-command.sh timeout 300 docker pull \
