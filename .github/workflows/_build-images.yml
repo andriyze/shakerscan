@@ -6,11 +6,9 @@ name: Build release images
 # `latest`, no Git tag, and no GitHub Release -- exactly like the candidate build's own build and
 # merge jobs, which it exists to share.
 #
-# Two callers use it: `build-on-main.yml` runs it on every push to main so a certifiable image set
-# exists per SHA before any release is cut, and (once the release path is switched over) the
-# release candidate reuses that pre-built set instead of building a second time. The build steps
-# are kept byte-for-byte equivalent to the candidate's historical build jobs so the produced
-# images are identical in construction.
+# `build-on-main.yml` runs it on every image-affecting push to main so a certifiable image set
+# exists per SHA before any release is cut. The release candidate consumes that receipt when it
+# exists and retains byte-for-byte-equivalent build jobs as its no-artifact fallback.
 
 on:
   workflow_call:
@@ -41,6 +39,8 @@ on:
         value: ${{ jobs.merge.outputs.ui_digest }}
       signer_digest:
         value: ${{ jobs.merge.outputs.signer_digest }}
+      model_intake_digest:
+        value: ${{ jobs.merge.outputs.model_intake_digest }}
       candidate_tag:
         value: candidate-${{ inputs.candidate_sha }}-${{ github.run_id }}
 

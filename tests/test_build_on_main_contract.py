@@ -101,11 +101,34 @@ def test_the_shared_build_matches_the_candidates_build_construction():
     ):
         assert token in reusable, token
         assert token in candidate, token
-    # Both build native per platform, attest four subjects, and verify the signatures.
+    # Both build native per platform, attest five subjects, and verify the signatures.
     assert reusable.count("provenance: mode=max") == 5
     assert reusable.count("sbom: true") == 5
     assert reusable.count("gh attestation verify") == 5
     assert "ubuntu-24.04-arm" in reusable
+
+
+def test_release_candidate_reuses_only_an_attested_exact_sha_image_set():
+    candidate = CANDIDATE.read_text(encoding="utf-8")
+    document = _doc(CANDIDATE)
+    meta = document["jobs"]["meta"]
+    assert meta["outputs"]["prebuilt_run_id"] == "${{ steps.prebuilt.outputs.run_id }}"
+    assert "gh run list --workflow=build-on-main.yml --branch main" in candidate
+    assert '--commit "$CANDIDATE_SHA" --status success' in candidate
+    assert ".runtime_manifest_sha256 == $runtime_manifest" in candidate
+    assert candidate.count("gh attestation verify") >= 10
+    for job_name in ("build-runtime", "build-ui", "build-signer"):
+        assert document["jobs"][job_name]["if"] == "needs.meta.outputs.prebuilt_run_id == ''"
+    validate = document["jobs"]["validate"]
+    pull_step = next(
+        step for step in validate["steps"]
+        if step["name"] == "Pull exact reusable scanner and API manifests"
+    )
+    assert pull_step["if"] == "needs.meta.outputs.prebuilt_run_id != ''"
+    merge = document["jobs"]["merge"]
+    assert "validate" in merge["needs"]
+    assert "needs.meta.outputs.prebuilt_run_id != ''" in merge["if"]
+    assert any(step["name"] == "Download reusable exact-SHA receipt" for step in merge["steps"])
 
 
 def test_build_on_main_and_the_reusable_build_parse_and_declare_jobs():
