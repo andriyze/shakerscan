@@ -31,3 +31,4 @@ jobs:
             /out/trivy --version
             /out/osv-scanner --version
           '
+# rerun after global SCANNER_RUNTIME_IMAGE scope correction
