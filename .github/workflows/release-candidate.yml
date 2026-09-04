@@ -305,6 +305,8 @@ jobs:
         run: |
           docker build \
             --build-arg SCANNER_RUNTIME_IMAGE=shakerscan-scanner:release-candidate \
+            --build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }} \
+            --build-arg SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }} \
             -f scanner/Dockerfile.api -t shakerscan-api:release-candidate .
 
       - name: Pull exact reusable scanner and API manifests
@@ -337,6 +339,7 @@ jobs:
           '
           test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10002:10002"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
+          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
           test "$(docker run --rm --entrypoint sh shakerscan-api:release-candidate -c 'python3 -c '\''import json; print(json.load(open("/opt/shakerscan/release-manifest.json"))["version"])'\'')" = "${{ needs.meta.outputs.version }}"
 
       - name: Enforce candidate-image external wire ceilings
@@ -505,6 +508,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             SCANNER_RUNTIME_IMAGE=${{ env.SCANNER_IMAGE }}@${{ steps.scanner.outputs.digest }}
+            SCANNER_VERSION=${{ needs.meta.outputs.version }}
+            SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
           labels: |
             org.opencontainers.image.title=ShakerScan API Control Plane
             org.opencontainers.image.description=ShakerScan API with checksum-pinned Docker client for Model Intake guest staging

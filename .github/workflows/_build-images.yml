@@ -128,6 +128,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             SCANNER_RUNTIME_IMAGE=${{ env.SCANNER_IMAGE }}@${{ steps.scanner.outputs.digest }}
+            SCANNER_VERSION=${{ inputs.version }}
+            SCANNER_SOURCE_REVISION=${{ inputs.candidate_sha }}
           labels: |
             org.opencontainers.image.title=ShakerScan API Control Plane
             org.opencontainers.image.description=ShakerScan API with checksum-pinned Docker client for Model Intake guest staging
