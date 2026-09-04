@@ -1,11 +1,12 @@
 # ShakerScan 2.2.0 plan: trustworthy upgrades, a complete fifth image, and DAST depth
 
-**Status (2026-09-04): planned source changes implemented except DAST-1; certification pending.**
-The base is published 2.1.0 (`0723cbb5` on `main`); implementation is on
-`fix/start-secrets-before-rotation`. No test, build, image scan, or target Scan was run while
-completing the branch because the operator explicitly prohibited them. Static syntax, generated
-contract, generated image-inventory, and generated installer-manifest checks are preparation only
-and are not release evidence.
+**Status (2026-09-04): implemented and retested except DAST-1; 2.2.0 candidate metadata
+prepared; certification pending.** The base is published 2.1.0 (`0723cbb5` on `main`);
+implementation is on `fix/start-secrets-before-rotation` (PR #76). The implementation pass was
+audited (22 failing tests, four red gates, three defects) and then fixed and retested: complete
+partitioned Python suite, UI unit suite, every source gate, both offline installer smokes, and local
+builds of the slim API image and the Model Intake image. What only certification can prove is listed
+in `release-readiness.md`.
 
 ### Implementation ledger
 
@@ -13,9 +14,9 @@ and are not release evidence.
 |---|---|---|
 | A1–A6 installer/upgrade | Implemented in `7957291e`, `230c1b4f`, `e4350771`, `9ec647ea`, and `1fecb57e`. | Installer and both supported-baseline upgrade smokes. |
 | IMG-1–IMG-3, B1, B2, D3, UPG-1 | Implemented in `7b54a800`, `3c476c19`, `9c1592bc`, `a949377d`, `9ec647ea`, `a867a069`, and `d2c59e33`. | Exact-SHA five-image startup, pool readiness, and both upgrade receipts. |
-| B3, B4, B6 | Complete-image scanning is enforced (`4e994037`), Trivy provenance/refresh is implemented (`88d93d6f`), and the stale build-tool waivers are removed (`a59cd213`). | A fresh candidate image scan must prove the now waiver-free image clean. |
-| API-1, API-2 | Execution inventory is frozen (`ba1ee634`); the API is slim and non-root (`c07abdb1`). | Image-content and installed Model Intake staging gates. API-3 remains a 2.3.0 design item. |
-| DAST-2–DAST-5 | Profile ladder (`6200743f`), proportional batches (`7ca5bad2`), bounded append-only continuation (`ab77a262`, `6185a4bb`), and authenticated browser state (`46de445b`) are implemented. | Current-fleet authenticated Juice Shop/crAPI measurements and the DAST-8 exit gate. |
+| B3, B4, B6 | Complete-image scanning is enforced (`4e994037`), Trivy provenance/refresh is implemented (`88d93d6f`), and the waivers are removed (`a59cd213`). The first removal left `pip` in every venv, whose vendor.txt names msgpack 1.1.2 and setuptools 70.3.0 (the two waived findings); the four tool venvs now lose pip and setuptools, and the pip-audit venv keeps pip for pip-api but drops the vendored msgpack and pkg_resources, proven by a local image build whose offline cache step still passes. | A fresh candidate image scan must prove the now waiver-free image clean. |
+| API-1, API-2 | Execution inventory is frozen (`ba1ee634`); the API is slim and non-root (`c07abdb1`). The socket group is now resolved from inside a container (Docker Desktop mounts the socket root:root, so the host gid was useless), and the API's default uid is 10002 so it never shares the sandbox's 10001. Verified with a local build: non-root, socket reachable, app imports. | Image-content and installed Model Intake staging gates. API-3 remains a 2.3.0 design item. |
+| DAST-2–DAST-5 | Profile ladder (`6200743f`), bounded append-only continuation (`ab77a262`, `6185a4bb`, extracted to `api/scan/continuation_rounds.py`), and authenticated browser state (`46de445b`) are implemented. The first batch scaling (`7ca5bad2`) divided fast-reference shapes by the ceiling and sized slices by the 30 s floors, giving thorough 31 s per candidate; it was replaced by measured per-attempt costs (200 s XSS, 180 s SQLi, 420 s body) with slices sized as a share of the wall, a 25% per-lane root cap, first-proof-slice priority, and a floor tier for starved shards. | Current-fleet authenticated Juice Shop/crAPI measurements and the DAST-8 exit gate. |
 | DAST-6, DAST-7 | Body/spec and browser-XSS paths were already present in the 2.1.0 history, including PRs #59 and #60 and their later correctness fixes. | Re-measure the named fixture expectations; source presence is not proof of recall. |
 | H-10/H-11, MI-6 | Installed CLI targeting is fixed (`926c074d`); trust-anchor lifecycle is a hard gate (`708cbe03`). | Installed-stack execution of those named checks. |
 | D1, D2 | Exact-SHA image reuse and image-affecting path classification are implemented in `8dbfc6f3` and `fead8f7d`. | Candidate workflow execution and attestation lookup. |

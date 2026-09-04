@@ -1,11 +1,15 @@
 # ShakerScan 2.2.0 Release Readiness
 
-**Status (2026-09-04): implementation branch, not release-ready.** 2.1.0 is already published and
-is the stable upgrade base. The 2.2.0 source work is collected on
-`fix/start-secrets-before-rotation`, but no test, build, image-vulnerability scan, target Scan, or
-candidate workflow was run during the final implementation pass because the operator explicitly
-prohibited tests and scans. Every frozen-candidate checkbox therefore remains open. Historical
-receipts below are context only and do not qualify 2.2.0.
+**Status (2026-09-04): 2.2.0 candidate metadata prepared on `fix/start-secrets-before-rotation`
+(PR #76); certification not yet run.** 2.1.0 is published and is the stable upgrade base. The branch
+was audited and retested after its implementation pass: the complete partitioned Python suite, the
+UI unit suite, the source gates (module-size ratchet, capability inventory, install manifest, scan
+and hunt contracts, image inventory, import closure), both offline installer smokes, a local build
+of the slim non-root API image with socket access proven through the in-container group, and a
+local build of the Model Intake image with `pip` and `setuptools` stripped from its tool
+environments. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
+both upgrade receipts, the five image scans), a current-fleet authenticated Juice Shop and crAPI
+measurement against the DAST-8 exit bar, and the installed-stack run of H-10/H-11 and MI-6.
 
 This is the live release checklist. Source, migrations, generated inventories, immutable runtime
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
