@@ -5,6 +5,12 @@
 The 2.2.0 API-image split must preserve the behavior the control-plane process actually owns. A
 source audit found a wider boundary than the original release plan assumed.
 
+Because the final stage starts again from the Playwright base, nothing from the scanner runtime's
+`ENV` crosses into the API image. The release identity (`SCANNER_VERSION`,
+`SHAKERSCAN_BUILD_VERSION`, `SHAKERSCAN_SOURCE_REVISION`) is therefore passed as build arguments by
+every build site and verified inside the Dockerfile against the release manifest copied from the
+runtime stage, so the API can never carry a different identity than the workers.
+
 The API process currently executes:
 
 - Playwright/Chromium through the Python library for interactive sessions and AI Gate widget

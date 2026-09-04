@@ -112,6 +112,10 @@ services:
         # build_local_scanner_family builds this exact runtime first. The API
         # adds only the checksum-pinned Docker client used for guest staging.
         SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}
+        # The same identity the worker build above bakes; the API Dockerfile
+        # fails closed if these disagree with the runtime's release manifest.
+        SCANNER_VERSION: ${SCANNER_VERSION:-dev}
+        SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     # Development source sync copies bind-mounted modules into /app. Released
     # deployments use docker-compose.release.yml and run as the host identity.
     user: "0:0"

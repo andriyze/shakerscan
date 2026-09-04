@@ -261,6 +261,7 @@ docker buildx build \
     "${COMMON_LABELS[@]}" \
     --label "org.opencontainers.image.title=ShakerScan API Control Plane" \
     --label "org.opencontainers.image.description=ShakerScan API with checksum-pinned Docker client for Model Intake guest staging" \
+    "${SCANNER_BUILD_ARGS[@]}" \
     --build-arg "SCANNER_RUNTIME_IMAGE=$SCANNER_REPO:$TAG" \
     "${API_TAGS[@]}" \
     -f scanner/Dockerfile.api \

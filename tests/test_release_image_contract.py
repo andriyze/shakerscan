@@ -206,17 +206,96 @@ def test_scanner_image_bakes_release_identity_for_broker_workers():
     # Only services that actually own a scanner build carry build arguments.
     # Agent, device, and sandbox consumers reuse the worker image so a clean
     # source start cannot export the same multi-gigabyte image repeatedly.
-    for service in ("fleet-edge", "worker", "gungnir-worker"):
+    # The API overlay starts from the Playwright base, so it must receive the identity too.
+    for service in ("fleet-edge", "worker", "gungnir-worker", "api"):
         assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" in _service_block(compose, service)
+        assert "SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}" in _service_block(compose, service)
     assert "SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" in _service_block(compose, "api")
     for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox", "model-intake-worker"):
         assert "SCANNER_VERSION: ${SCANNER_VERSION:-dev}" not in _service_block(compose, service)
-    assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 2
+    # validate: scanner + API docker builds; build-runtime: scanner + API build-push steps.
+    assert workflow.count("SCANNER_VERSION=${{ needs.meta.outputs.version }}") == 4
     assert "Verify baked scanner release identity" in workflow
     assert "SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}" in workflow
     assert "0.0.0-intentional-mismatch" in workflow
     assert "accepted an intentionally wrong deployment identity" in workflow
     assert 'baked SCANNER_VERSION=$baked_version; expected $VERSION' in workflow
+
+
+def _build_step_for(workflow: Path, dockerfile: str) -> dict:
+    document = yaml.safe_load(workflow.read_text())
+    steps = [
+        step
+        for job in document["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and (step.get("with") or {}).get("file") == dockerfile
+    ]
+    assert len(steps) == 1, (workflow.name, dockerfile, len(steps))
+    return steps[0]
+
+
+def _step_named(workflow: Path, name: str) -> dict:
+    document = yaml.safe_load(workflow.read_text())
+    steps = [
+        step
+        for job in document["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and step.get("name") == name
+    ]
+    assert len(steps) == 1, (workflow.name, name, len(steps))
+    return steps[0]
+
+
+def test_api_image_bakes_the_same_release_identity_environment_as_the_runtime():
+    """The slim control plane starts again from the Playwright base, so it does not inherit
+    the scanner's ENV. build-on-main 33886615072 pushed an API image whose SCANNER_VERSION was
+    empty and every arch failed the baked-identity gate. Every API build site must pass the
+    scanner's own identity, and the Dockerfile must fail closed against the copied manifest."""
+    api_dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text()
+    assert "ARG SCANNER_VERSION=dev" in api_dockerfile
+    assert "ARG SCANNER_SOURCE_REVISION=unknown" in api_dockerfile
+    assert "ENV SCANNER_VERSION=${SCANNER_VERSION}" in api_dockerfile
+    assert "ENV SHAKERSCAN_BUILD_VERSION=${SCANNER_VERSION}" in api_dockerfile
+    assert "ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}" in api_dockerfile
+    assert 'test -n "$SCANNER_VERSION" && test -n "$SHAKERSCAN_SOURCE_REVISION"' in api_dockerfile
+    assert 'SCANNER_EXPECTED_VERSION="$SCANNER_VERSION"' in api_dockerfile
+    assert 'SCANNER_EXPECTED_REVISION="$SHAKERSCAN_SOURCE_REVISION"' in api_dockerfile
+    assert api_dockerfile.count("release_identity.py --verify") == 1
+    # Declared after the heavy layers and after the manifest it is checked against.
+    version_arg = api_dockerfile.index("ARG SCANNER_VERSION=dev")
+    assert version_arg > api_dockerfile.index("install -m 0755 /tmp/docker/docker")
+    assert version_arg > api_dockerfile.index("pip uninstall")
+    assert version_arg > api_dockerfile.index(
+        "COPY --from=scanner-runtime /opt/shakerscan/release-manifest.json"
+    )
+
+    reusable = ROOT / ".github" / "workflows" / "_build-images.yml"
+    candidate = ROOT / ".github" / "workflows" / "release-candidate.yml"
+    for workflow, version, revision in (
+        (reusable, "${{ inputs.version }}", "${{ inputs.candidate_sha }}"),
+        (candidate, "${{ needs.meta.outputs.version }}", "${{ needs.meta.outputs.candidate_sha }}"),
+    ):
+        scanner_args = _build_step_for(workflow, "scanner/Dockerfile")["with"]["build-args"].splitlines()
+        api_args = _build_step_for(workflow, "scanner/Dockerfile.api")["with"]["build-args"].splitlines()
+        for argument in (f"SCANNER_VERSION={version}", f"SCANNER_SOURCE_REVISION={revision}"):
+            assert argument in scanner_args, (workflow.name, argument)
+            assert argument in api_args, (workflow.name, argument)
+        assert any(line.startswith("SCANNER_RUNTIME_IMAGE=") for line in api_args)
+
+    validate_build = _step_named(candidate, "Build locked API control-plane image")["run"]
+    assert "--build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }}" in validate_build
+    assert "--build-arg SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}" in validate_build
+    validate_check = _step_named(candidate, "Verify locked API control-plane image")["run"]
+    assert "shakerscan-api:release-candidate | awk -F= '$1 == \"SCANNER_VERSION\" {print $2}'" in validate_check
+
+    publisher = (ROOT / "scripts" / "publish-images.sh").read_text()
+    api_build = publisher[publisher.index("ShakerScan API Control Plane"):publisher.index("-f scanner/Dockerfile.api")]
+    assert '"${SCANNER_BUILD_ARGS[@]}"' in api_build
+
+    smoke = (ROOT / "scripts" / "docker_api_overlay_smoke.sh").read_text()
+    assert '--build-arg "SCANNER_VERSION=$worker_version"' in smoke
+    assert '--build-arg "SCANNER_SOURCE_REVISION=$worker_revision"' in smoke
+    assert "for name in SCANNER_VERSION SHAKERSCAN_BUILD_VERSION SHAKERSCAN_SOURCE_REVISION" in smoke
 
 
 def test_scanner_image_contains_runtime_device_catalog():

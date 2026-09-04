@@ -17,14 +17,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+image_env() {
+    docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" \
+        | awk -F= -v name="$2" '$1 == name {print substr($0, length(name) + 2)}'
+}
+
 docker image inspect "$WORKER_IMAGE" >/dev/null
 if [ "$PREBUILT_API" = "1" ]; then
     # Candidate acceptance must inspect the exact already-built product image;
     # rebuilding a throwaway overlay would not prove the accepted API digest.
     docker image inspect "$API_IMAGE" >/dev/null
 else
+    # The overlay starts from the Playwright base, so the worker's identity
+    # environment does not cross the stage boundary: pass the worker's own
+    # baked values and let the Dockerfile fail closed against its manifest.
+    worker_version="$(image_env "$WORKER_IMAGE" SCANNER_VERSION)"
+    worker_revision="$(image_env "$WORKER_IMAGE" SHAKERSCAN_SOURCE_REVISION)"
+    test -n "$worker_version"
+    test -n "$worker_revision"
     docker build \
         --build-arg "SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE" \
+        --build-arg "SCANNER_VERSION=$worker_version" \
+        --build-arg "SCANNER_SOURCE_REVISION=$worker_revision" \
         -f "$ROOT_DIR/scanner/Dockerfile.api" \
         -t "$API_IMAGE" \
         "$ROOT_DIR"
@@ -36,6 +50,14 @@ if [ "$worker_manifest" != "$api_manifest" ]; then
     echo "API overlay changed the scanner release identity" >&2
     exit 1
 fi
+for name in SCANNER_VERSION SHAKERSCAN_BUILD_VERSION SHAKERSCAN_SOURCE_REVISION; do
+    worker_value="$(image_env "$WORKER_IMAGE" "$name")"
+    api_value="$(image_env "$API_IMAGE" "$name")"
+    if [ -z "$api_value" ] || [ "$worker_value" != "$api_value" ]; then
+        echo "API image bakes $name='$api_value'; the worker bakes '$worker_value'" >&2
+        exit 1
+    fi
+done
 
 docker run --rm --entrypoint sh "$WORKER_IMAGE" -ceu '
     if command -v docker >/dev/null 2>&1; then

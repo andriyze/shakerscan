@@ -110,9 +110,23 @@ RUN python3 -m pip uninstall -y --break-system-packages virtualenv msgpack setup
     rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 && \
     python3 -c 'import importlib.util; assert importlib.util.find_spec("pip") is None; assert importlib.util.find_spec("virtualenv") is None'
 
+# The control plane carries the same release identity environment as the
+# scanner runtime it was derived from. Docker cannot copy ENV across stages, so
+# every build passes the values explicitly and the build fails closed when they
+# disagree with the runtime's immutable release manifest copied above. Declared
+# after the heavy layers so a version bump never rebuilds them.
+ARG SCANNER_VERSION=dev
+ARG SCANNER_SOURCE_REVISION=unknown
+ENV SCANNER_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_BUILD_VERSION=${SCANNER_VERSION}
+ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}
+
 COPY scanner/api-entrypoint.sh /app/api-entrypoint.sh
 RUN chmod 0755 /app/api-entrypoint.sh && \
     python3 -c 'import asyncpg, fastapi, playwright, redis' && \
+    test -n "$SCANNER_VERSION" && test -n "$SHAKERSCAN_SOURCE_REVISION" && \
+    SCANNER_EXPECTED_VERSION="$SCANNER_VERSION" \
+    SCANNER_EXPECTED_REVISION="$SHAKERSCAN_SOURCE_REVISION" \
     python3 /app/release_identity.py --verify
 
 USER 10002:10002
