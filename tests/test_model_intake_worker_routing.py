@@ -86,8 +86,16 @@ class _ListRedis:
 
 
 def _router_module():
+    """The router under either import layout the suite runner uses."""
     import importlib
-    return importlib.import_module("api.model_intake.router")
+
+    for name in ("api.model_intake.router", "model_intake.router"):
+        try:
+            return importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if not str(exc).startswith("No module named 'api"):
+                raise
+    raise ModuleNotFoundError("model_intake.router is not importable under either layout")
 
 
 def test_model_intake_jobs_are_never_routed_to_a_fleet_placement_queue():

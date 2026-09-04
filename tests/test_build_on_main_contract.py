@@ -116,7 +116,9 @@ def test_release_candidate_reuses_only_an_attested_exact_sha_image_set():
     assert "gh run list --workflow=build-on-main.yml --branch main" in candidate
     assert '--commit "$CANDIDATE_SHA" --status success' in candidate
     assert ".runtime_manifest_sha256 == $runtime_manifest" in candidate
-    assert candidate.count("gh attestation verify") >= 10
+    # One verify per final manifest in merge, plus the reusable-set loop in meta.
+    assert candidate.count("gh attestation verify") == 6
+    assert "for binding in" in candidate
     for job_name in ("build-runtime", "build-ui", "build-signer"):
         assert document["jobs"][job_name]["if"] == "needs.meta.outputs.prebuilt_run_id == ''"
     validate = document["jobs"]["validate"]

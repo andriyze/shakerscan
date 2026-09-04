@@ -1,5 +1,7 @@
 # API image execution boundary
 
+**Status (2026-09-04): frozen by `tests/test_api_image_boundary.py`; the slim non-root API image ships in 2.2.0, the narrow Docker-staging service is a 2.3.0 design item.**
+
 The 2.2.0 API-image split must preserve the behavior the control-plane process actually owns. A
 source audit found a wider boundary than the original release plan assumed.
 

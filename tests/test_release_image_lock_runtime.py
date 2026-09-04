@@ -159,9 +159,9 @@ def test_the_lock_can_be_disabled_and_an_image_tag_override_skips_its_digests(tm
 def test_an_installed_launcher_does_not_preload_digests_for_an_image_tag_override():
     installer = (ROOT / "install" / "index.sh").read_text(encoding="utf-8")
     launcher = installer.split('cat > "$launcher" <<EOF\n', 1)[1].split("\nEOF", 1)[0]
-    assert 'case "$arg" in' in launcher
+    assert 'case "\\$arg" in' in launcher
     assert "--image-tag|--image-tag=*" in launcher
-    assert '[ "$use_release_image_lock" = "1" ]' in launcher
+    assert '[ "\\$use_release_image_lock" = "1" ]' in launcher
 
 
 def test_the_prebuilt_marker_is_part_of_the_atomic_candidate_tree():

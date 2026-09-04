@@ -173,6 +173,14 @@
       "smokePath": "/findings/candidates"
     },
     {
+      "route": "/workers",
+      "source": "src/app/workers/page.tsx",
+      "owner": "platform",
+      "caseId": "NAV-002",
+      "stateAssertion": "Worker Pools renders the four execution pools (Web DAST, agent tools, devices, Model Intake) with count, current, stale, pending and a readiness reason, or an error state with retry.",
+      "smokePath": "/workers"
+    },
+    {
       "route": "/fleet",
       "source": "src/app/fleet/page.tsx",
       "owner": "fleet",
