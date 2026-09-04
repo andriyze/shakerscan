@@ -25,7 +25,7 @@ proof gates.
 
 ### One deterministic Scan
 
-Every new assessment uses the same deterministic Scan pipeline. `fast`, `balanced`, and `thorough`
+Every new assessment uses the same deterministic Scan pipeline. `fast`, `balanced`, `thorough`, and opt-in `deep`
 are resource ceilings; active testing, network discovery, and subdomain discovery are explicit
 permissions. Historical mode names are translated only at the compatibility boundary and do not
 select a second engine or module registry. Phases are ordered where later work depends on earlier

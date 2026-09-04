@@ -12,6 +12,25 @@ case "$MODEL_INTAKE_SIGNER_DATABASE_PASSWORD" in
 esac
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
+
+# Compose starts this one-shot init once PostgreSQL's healthcheck passes, but that check is
+# pg_isready, which only proves the server accepts connections. Password authentication and
+# the scanner database can still be a few seconds behind on a cold volume, so a single psql
+# used to exit 2 and fail the whole `compose up` (seen once on a release candidate smoke).
+# Wait, bounded, for a real authenticated query before touching any role.
+SIGNER_INIT_ATTEMPTS="${MODEL_INTAKE_SIGNER_INIT_ATTEMPTS:-30}"
+SIGNER_INIT_DELAY_SECONDS="${MODEL_INTAKE_SIGNER_INIT_DELAY_SECONDS:-2}"
+attempt=1
+until psql -h postgres -U scanner -d scanner -v ON_ERROR_STOP=1 -X -q -c 'SELECT 1' >/dev/null 2>&1; do
+  if [ "$attempt" -ge "$SIGNER_INIT_ATTEMPTS" ]; then
+    echo "model-intake-signer-db-init: PostgreSQL did not accept an authenticated scanner connection after ${SIGNER_INIT_ATTEMPTS} attempts" >&2
+    exit 2
+  fi
+  echo "model-intake-signer-db-init: waiting for PostgreSQL authentication (attempt ${attempt}/${SIGNER_INIT_ATTEMPTS})" >&2
+  attempt=$((attempt + 1))
+  sleep "$SIGNER_INIT_DELAY_SECONDS"
+done
+
 psql -h postgres -U scanner -d scanner -v ON_ERROR_STOP=1 \
   --set=signer_password="$MODEL_INTAKE_SIGNER_DATABASE_PASSWORD" <<'SQL'
 SELECT format(

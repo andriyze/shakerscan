@@ -56,6 +56,11 @@ try:
     from model_intake_authority import _invalidate_model_intake_authority_change
     from api_utils import _short_url_label, extract_root_domain
     from job_queue import enqueue_job
+    from worker_queue_policy import (
+        MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY,
+        MODEL_INTAKE_WORKER_REQUIRED_TOOLS,
+    )
+    from devices import router as _devices
     from model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
     from model_intake_agent import embedding_test_plan as _model_intake_embedding_test_plan, parse_planner_reply as _parse_model_intake_planner_reply, planner_prompt as _model_intake_planner_prompt
     from model_intake_components import component_identities as _model_intake_component_identities
@@ -85,6 +90,11 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..model_intake_authority import _invalidate_model_intake_authority_change
     from ..api_utils import _short_url_label, extract_root_domain
     from ..job_queue import enqueue_job
+    from ..worker_queue_policy import (
+        MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY,
+        MODEL_INTAKE_WORKER_REQUIRED_TOOLS,
+    )
+    from ..devices import router as _devices
     from ..model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
     from ..model_intake_agent import embedding_test_plan as _model_intake_embedding_test_plan, parse_planner_reply as _parse_model_intake_planner_reply, planner_prompt as _model_intake_planner_prompt
     from ..model_intake_components import component_identities as _model_intake_component_identities
@@ -256,6 +266,18 @@ def get_redis(*a: Any, **k: Any) -> Any:
     return _dep("get_redis")(*a, **k)
 
 
+def expected_build_fingerprint(*a: Any, **k: Any) -> Any:
+    return _dep("expected_build_fingerprint")(*a, **k)
+
+
+def current_scanner_version(*a: Any, **k: Any) -> Any:
+    return _dep("current_scanner_version")(*a, **k)
+
+
+def worker_build_current(*a: Any, **k: Any) -> Any:
+    return _dep("worker_build_current")(*a, **k)
+
+
 def _sanitize_scan_options(*a: Any, **k: Any) -> Any:
     return _dep("sanitize_scan_options")(*a, **k)
 
@@ -292,6 +314,106 @@ QUEUE_NAME = os.environ.get("SCAN_QUEUE_NAME", "scan_jobs")
 # by the isolated Model Intake worker -- never by a Web DAST worker. Keep this default aligned
 # with worker.py's MODEL_INTAKE_QUEUE_NAME.
 MODEL_INTAKE_QUEUE_NAME = os.environ.get("MODEL_INTAKE_QUEUE_NAME", "model_intake_jobs")
+
+
+def _enqueue_model_intake_job(redis_client: Any, job_data: dict[str, Any]) -> str:
+    """Queue a Model Intake job for the control-plane worker, never for a fleet route.
+
+    ``enqueue_job`` routes any payload that carries a ``placement`` to a
+    ``<queue>:route:<digest>`` stream that only a worker with matching labels consumes. Model
+    Intake has exactly one consumer -- the dedicated ``model-intake-worker`` on the control plane
+    (see worker_queue_policy) -- so a placement would park the job on a stream nobody reads and
+    the scan would stay ``pending`` forever. Model Intake never runs on fleet nodes: strip any
+    placement at this boundary, top-level or inside options, and enqueue on the base queue.
+    """
+    payload = dict(job_data)
+    stripped = payload.pop("placement", None) is not None
+    options = payload.get("options")
+    if isinstance(options, dict) and "placement" in options:
+        options = dict(options)
+        options.pop("placement", None)
+        payload["options"] = options
+        stripped = True
+    if stripped:
+        logger.warning(
+            "model intake job %s requested a placement; Model Intake runs only on the "
+            "control-plane worker (%s), placement ignored",
+            payload.get("job_id"), MODEL_INTAKE_PLACEMENT_REJECTED_REASON,
+        )
+    return enqueue_job(redis_client, MODEL_INTAKE_QUEUE_NAME, payload)
+
+
+MODEL_INTAKE_PLACEMENT_REJECTED_REASON = "model_intake_local_only"
+
+
+def _model_intake_worker_readiness() -> dict[str, Any]:
+    """Return fresh, build-current, tool-complete Model Intake worker capacity.
+
+    The dedicated worker registers in its own build registry
+    (``shakerscan:model_intake_worker_build``); before this the registry was written and read
+    by nothing, so a missing, stale, or tool-less Model Intake worker coexisted with a
+    successful startup while Model Intake jobs stayed queued. Mirrors the agent-tool pool:
+    a worker counts only when its report is fresh, its build matches the API, and every
+    toolchain path the dedicated image installs resolved on it.
+    """
+    expected_fingerprint = expected_build_fingerprint()
+    expected_version = current_scanner_version()
+    now = datetime.now(timezone.utc)
+    required_tools = set(MODEL_INTAKE_WORKER_REQUIRED_TOOLS)
+    reports: list[dict[str, Any]] = []
+    try:
+        raw_reports = get_redis().hgetall(MODEL_INTAKE_WORKER_BUILD_REGISTRY_KEY) or {}
+    except Exception:
+        raw_reports = {}
+    for raw_host, raw_payload in raw_reports.items():
+        host = raw_host.decode("utf-8", "replace") if isinstance(raw_host, bytes) else str(raw_host)
+        payload = raw_payload.decode("utf-8", "replace") if isinstance(raw_payload, bytes) else raw_payload
+        try:
+            report = json.loads(payload) if isinstance(payload, str) else dict(payload)
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            age_seconds = (now - reported_at.astimezone(timezone.utc)).total_seconds()
+            if not (-_devices._WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS <= age_seconds <= _devices._WORKER_BUILD_REPORT_MAX_AGE_SECONDS):
+                continue
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        tools = sorted({str(item).strip().lower() for item in report.get("tools", []) if str(item).strip()})
+        build_current = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fingerprint,
+            expected_version=expected_version,
+        )
+        reports.append({
+            "worker_id": host,
+            "build_current": build_current,
+            "tools": tools,
+            "missing_tools": sorted(required_tools - set(tools)),
+            "reported_at": report.get("reported_at"),
+            "capable": build_current is True and required_tools.issubset(tools),
+        })
+    capable_count = sum(1 for report in reports if report["capable"])
+    if capable_count:
+        status, reason = "ready", None
+    elif reports and any(report["build_current"] is False for report in reports):
+        status, reason = "not_ready", "model_intake_worker_build_stale"
+    elif reports and any(report["missing_tools"] for report in reports):
+        status, reason = "not_ready", "model_intake_worker_missing_toolchain"
+    elif reports:
+        status, reason = "not_ready", "model_intake_worker_build_identity_pending"
+    else:
+        status, reason = "not_ready", "no_fresh_model_intake_worker"
+    return {
+        "status": status,
+        "reason": reason,
+        "queue_name": MODEL_INTAKE_QUEUE_NAME,
+        "worker_count": len(reports),
+        "capable_worker_count": capable_count,
+        "required_tools": sorted(required_tools),
+        "workers": reports,
+        "expected_build_fingerprint": expected_fingerprint,
+    }
 
 @router.get("/model-intake/trust-anchors")
 async def list_model_intake_trust_anchors(active_only: bool = True):
@@ -2991,7 +3113,7 @@ async def scan_model_intake(request: ModelIntakeScanRequest):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    enqueue_job(r, MODEL_INTAKE_QUEUE_NAME, job_data)
+    _enqueue_model_intake_job(r, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     response = {
@@ -3290,7 +3412,7 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
         "options": options,
         "submitted_at": utc_now_iso(),
     }
-    enqueue_job(r, MODEL_INTAKE_QUEUE_NAME, job_data)
+    _enqueue_model_intake_job(r, job_data)
     r.hset(f"job:{job_id}", mapping={"status": "queued", "target": artifact_ref})
 
     return {
@@ -3305,6 +3427,16 @@ async def rescan_model_intake_target(target_id: str, http_request: Request):
     }
 class ModelIntakeScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_remote_placement(cls, value: Any) -> Any:
+        """Model Intake is a control-plane-only workload, never a fleet-routed request."""
+        if isinstance(value, dict):
+            options = value.get("options")
+            if "placement" in value or (isinstance(options, dict) and "placement" in options):
+                raise ValueError(MODEL_INTAKE_PLACEMENT_REJECTED_REASON)
+        return value
 
     artifact_url: str
     name: Optional[str] = None
@@ -5822,7 +5954,7 @@ def _prepare_model_intake_rescan_options(raw_options: Any) -> tuple[dict[str, An
     """Drop stale authority and force legacy target rechecks back to preflight."""
     options = dict(raw_options) if isinstance(raw_options, dict) else {}
     approval_receipt_id = str(options.pop("approval_receipt_id", "") or "").strip() or None
-    for key in ("scope_receipt_id", "approved_by", "risk_tier", "runtime_scope_guard"):
+    for key in ("scope_receipt_id", "approved_by", "risk_tier", "runtime_scope_guard", "placement"):
         options.pop(key, None)
     authority_bearing = bool(
         approval_receipt_id

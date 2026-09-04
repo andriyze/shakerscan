@@ -10,6 +10,11 @@ from pathlib import Path
 import re
 import sys
 from typing import Any, Mapping
+
+try:
+    from release_image_inventory import IMAGE_KEYS
+except ModuleNotFoundError:
+    from scripts.release_image_inventory import IMAGE_KEYS
 import xml.etree.ElementTree as ET
 
 
@@ -195,7 +200,7 @@ def build_receipt(
         raise PreservationError("unsupported preservation matrix schema")
     if not SOURCE_SHA.fullmatch(source_sha):
         raise PreservationError("source SHA must be a full lowercase commit identity")
-    required_images = {"scanner", "api", "ui", "signer", "model_intake"}
+    required_images = set(IMAGE_KEYS)
     if set(images) != required_images or not all(
         SHA256.fullmatch(str(value)) for value in images.values()
     ):

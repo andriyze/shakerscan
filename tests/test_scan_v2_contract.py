@@ -18,8 +18,8 @@ def test_canonical_scan_defaults_to_balanced_passive_v2():
     contract = resolve_scan_contract()
     assert contract.generation == "v2"
     assert contract.budget_profile == "balanced"
-    assert contract.budget.max_duration_seconds == 1_200
-    assert contract.budget.max_http_requests == 5_000
+    assert contract.budget.max_duration_seconds == 3_600
+    assert contract.budget.max_http_requests == 20_000
     assert contract.policy.active_testing is False
     assert contract.execution_plan.engine == "scan"
     assert contract.execution_plan.generation == "v2"
@@ -89,7 +89,7 @@ def test_advanced_limits_are_resolved_and_bounded():
     assert contract.budget.max_endpoints == 1_000
     with pytest.raises(ValueError, match="profile ceiling"):
         resolve_scan_contract(
-            budget_profile="balanced", advanced={"max_http_requests": 7_500},
+            budget_profile="balanced", advanced={"max_http_requests": 25_000},
         )
     with pytest.raises(ValueError):
         resolve_scan_contract(advanced={"max_workers": 129})
@@ -208,7 +208,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
 
     assert contract["schema_version"] == "scan-public-contract/v1"
     assert contract["engine"] == "scan"
-    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
+    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough", "deep"]
     assert [item["name"] for item in contract["families"]] == [
         "recon", "nuclei_passive", "nuclei_active", "xss", "sqli", "bola",
         "sensitive_exposure", "nosqli", "authz_surface",
@@ -227,7 +227,7 @@ def test_public_scan_contract_generates_ui_vocabulary_from_server_sources():
         if item["name"] == "max_state_changing_requests"
     )
     assert state_limit["minimum"] == 0
-    assert state_limit["profile_ceilings"]["balanced"] == 800
+    assert state_limit["profile_ceilings"]["balanced"] == 2_000
 
 
 def test_network_discovery_is_explicitly_authorized_and_unknown_profiles_reject():
@@ -251,7 +251,7 @@ def test_resolved_metadata_contains_only_canonical_plan_and_deprecation_data():
     assert metadata["scan_generation"] == "v2"
     assert metadata["scan_engine"] == "scan"
     assert metadata["scan_policy"]["approval_receipt_id"] == "approval-1"
-    assert metadata["resolved_scan_budget"]["max_duration_seconds"] == 300
+    assert metadata["resolved_scan_budget"]["max_duration_seconds"] == 1_800
     assert metadata["resolved_scan_budget"] == {
         **BUDGET_PROFILES["fast"].__dict__,
         "max_state_changing_requests": 0,

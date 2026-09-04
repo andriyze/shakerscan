@@ -2444,6 +2444,15 @@ export interface FleetFeatureState {
   reason?: string | null
 }
 
+export interface WorkerPoolSummary {
+  count: number
+  current: number
+  stale: number
+  pending: number
+  status: 'ready' | 'not_ready' | 'disabled'
+  reason?: string | null
+}
+
 export interface WorkerStats {
   count: number
   current_count?: number
@@ -2468,6 +2477,7 @@ export interface WorkerStats {
     remote_inventory_available: boolean
   }
   fleet?: FleetFeatureState
+  pools?: Record<'web_dast' | 'agent_tool' | 'device' | 'model_intake', WorkerPoolSummary>
   error?: string
 }
 

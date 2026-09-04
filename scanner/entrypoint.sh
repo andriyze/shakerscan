@@ -1,5 +1,9 @@
 #!/bin/bash
 # Entrypoint script for ShakerScan
+# Result directories are setgid to the API's runtime group by the released
+# storage init service. Keep newly created worker directories group-writable so
+# the non-root API can read, expire, and remove durable artifacts.
+umask 0002
 # Configure DNS resolution
 configure_dns() {
 echo "Configuring DNS resolvers..."

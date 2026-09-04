@@ -16,6 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2.2.0 | pending candidate | pending | pending | pending | pending | pending |
 | 2.1.0 | `00f44559a33d12afa8e144ea98be297fa10af86e` | `shakerscan/shakerscan-scanner:2.1.0` (`sha256:e689fd24577d2b731a28e5bfeb15eb355e00328cc9f7104cadc7b045e1521766`) | `shakerscan/shakerscan-api:2.1.0` (`sha256:05fc06263dfeaec933831986a58636c6525270e46cf5bf6ab6acf266e3a65d40`) | `shakerscan/shakerscan-ui:2.1.0` (`sha256:fddf5bdc552a37e770f7a1ed4d6d0fbacb72236bc8367091700fbef1e284082a`) | `shakerscan/shakerscan-model-intake-signer:2.1.0` (`sha256:fcb113657a38c96ecf0c3aa03e36f2e73b9a6d50a63a7362df15e30f5a4093c7`) | `shakerscan/shakerscan-model-intake:2.1.0` (`sha256:c263c98e46d5274614efe48ae3569efa4c291773436b36cc0a658e1697824f8f`) |
 | 2.0.1 | `8aaef980bed5055685d822a6090ffd12f2b3907f` | `shakerscan/shakerscan-scanner:2.0.1` (`sha256:10a58062ca136c9ab7e3ad2c8fe9f6a67fda939f994f1a2474371962011c74fe`) | `shakerscan/shakerscan-api:2.0.1` (`sha256:0c332fea30c1f679874aaa0ac4cd7b4ea2ac9605d08ba408e67a0295e250ca18`) | `shakerscan/shakerscan-ui:2.0.1` (`sha256:c24730c30fc4360b023625bc5917cac9fd99f5dbffaacd32ae7c268432ad36ee`) | `shakerscan/shakerscan-model-intake-signer:2.0.1` (`sha256:ededba53b317ef216f21818aa7aabb19b7ba07300a0e15999efa0dfe3cde5dbd`) |
 | 2.0.0 | `9d207661e88372e00ab482d347ac53e6c1c9980f` | `shakerscan/shakerscan-scanner:2.0.0` (`sha256:f278d4b1e83836cd43d1c1ef90314d8a96a9f3c3e9a47a5a84551d7faaad6341`) | `shakerscan/shakerscan-api:2.0.0` (`sha256:2dda54dd8858fc536778679bd09efcae3d5b04c4459a8f0a64c09ba1d31f9894`) | `shakerscan/shakerscan-ui:2.0.0` (`sha256:d7d49c71e1b4985de77ae502e2f540391ab9e9e3bdfb0ba59e7c727c866bc085`) | `shakerscan/shakerscan-model-intake-signer:2.0.0` (`sha256:6f316f3fbbb75ea6b1dc7cff830388f44164f2e7cfc1586ba3b1689298daf4cd`) |
@@ -59,35 +60,10 @@ The release process itself is documented once, in
 checks, one immutable **Release candidate** build per exact SHA, **Promote release** by digest,
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
-Version 2.1.0 is the pending candidate: the Model Intake image split, which raises the installer
-contract from four published images to five. It has not been published or promoted.
-Version 2.0.1 was published on 2026-09-03 from candidate run 33808649173 (its third candidate;
-the first two failed certification on release-harness effects of the first V2-to-V2 upgrade, fixed in
-#63 and #64) and promoted by digest in run 33812995837; the public install smoke passed and the stable
-installer channel moved to 2.0.1 the same day (#65). Version 2.0.0 is the previous stable release and
-the upgrade baseline; it was published on 2026-09-03 from candidate run 33714172205 (the first
-candidate to pass exact-manifest certification) and promoted by digest in run 33717500565.
-Version 0.8.18 is the stable release before the V2 platform. Version 0.8.9 was published but deliberately not
-promoted after the installed-runtime audit found a remote-mode agent/MCP routing defect; 0.8.10 was
-cancelled before publication when the same audit found remaining hard-coded loopback guidance;
-0.8.11 was cancelled before publication when the final audit found a host-world-writable Model
-Intake sandbox evidence queue; 0.8.12 failed its clean Linux/root suite before publication because
-the new ownership path called a nonexistent `Path.chown` method. Version 0.8.13 corrected that path,
-passed the exact-candidate release gate, and published matching `linux/amd64` and `linux/arm64`
-manifests. Its clean fleet conversion then exposed a transient MinIO bucket-readiness race. Version
-0.8.14 added a bounded retry around the real artifact write/read/delete probe, but its validation
-stopped before publication because a runtime test hardcoded an obsolete stable-channel version.
-Version 0.8.15 carries the Fleet fix, makes that test validate the published release ledger
-contract instead of a historical number, and published matching `linux/amd64` and `linux/arm64`
-manifests for all four images. Clean post-publication acceptance then found three release-truth
-defects: broker workers stamped DAST reports as `dev`, ModelScan inspected only the preferred
-safetensors artifact instead of co-published serialized alternates, and Model Intake implementation
-rows remained in the default DAST scan list. Version 0.8.16 corrected those boundaries, but its
-official build workflow omitted the new release-version argument, so a clean broker result still
-reported `scanner dev`. Version 0.8.17 supplied and verified that build input and carried the final
-clean-acceptance UI/documentation corrections. Complete
-[`docs/release-readiness.md`](docs/release-readiness.md), freeze the exact commit, and record its
-validation evidence before publishing a later release.
+Version 2.2.0 is the pending candidate: safe upgrades (ordered secrets, foreign-install refusal, the
+release image lock honored by the launcher itself), the fifth image handled by every lifecycle and
+release path, and the DAST profile ladder, per-attempt calibration, and bounded continuation rounds.
+It has not been published or promoted.
 
 Ledger rules:
 

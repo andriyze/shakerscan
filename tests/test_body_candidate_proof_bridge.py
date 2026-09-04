@@ -116,7 +116,7 @@ def test_nosqli_reservation_funds_more_than_two_body_fields():
     """
     from scan.action_plan import _BATCH_PROFILES
 
-    for profile in ("fast", "balanced", "thorough"):
+    for profile in ("fast", "balanced", "thorough", "deep"):
         count, budget = _BATCH_PROFILES[profile]["nosqli.verify_batch"]
         per_candidate = budget["http_requests"] // count
         assert per_candidate >= 16, (profile, per_candidate)

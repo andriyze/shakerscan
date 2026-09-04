@@ -51,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("target", help="Authorized HTTP(S) target")
     parser.add_argument(
-        "--budget-profile", choices=("fast", "balanced", "thorough"), default=None,
+        "--budget-profile", choices=("fast", "balanced", "thorough", "deep"), default=None,
     )
     parser.add_argument("--target-kind", choices=("web", "api"), default="web")
     parser.add_argument("--active-testing", action="store_true")

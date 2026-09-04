@@ -2666,7 +2666,7 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--capability", action="append", default=[])
     join.add_argument(
         "--budget-profile",
-        choices=("fast", "balanced", "thorough"),
+        choices=("fast", "balanced", "thorough", "deep"),
         action="append",
         default=[],
     )

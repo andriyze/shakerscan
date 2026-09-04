@@ -315,15 +315,7 @@ def run_model_intake() -> H.Scorecard:
             f"status={after_revoke.get('signature_verification_status')} trusted={after_revoke.get('signature_trusted_root')}",
         )
     except Exception as e:
-        # Model Intake is a preview surface outside this release's shipping scope;
-        # its durable operator lifecycle is recorded as a declared exclusion rather
-        # than a hard gate. The trust-anchor SELECTION security boundary (a caller
-        # cannot supply its own anchor) is proven above and stays a hard check.
-        if RELEASE_DECLARED_DEBT:
-            sc.xfail("MI-6 durable trust-anchor lifecycle", False,
-                     _MODEL_INTAKE_PREVIEW_DEBT, f"exception: {e}")
-        else:
-            sc.error("MI-6 durable trust-anchor lifecycle", e)
+        sc.error("MI-6 durable trust-anchor lifecycle", e)
     finally:
         try:
             cleanup_headers = H.model_intake_operator_headers()
@@ -413,17 +405,6 @@ _ADAPTIVE_XSS_DEBT = (
     "adaptive real-target headless DOM-XSS verification does not settle to "
     "deterministic proof under the packaged smoke stack (2.0.x debt)"
 )
-_INSTALLED_CLI_DEBT = (
-    "the installed CLI wrapper cannot complete hunt start/call in the packaged "
-    "smoke stack; the same start/call authority is proven server-side by "
-    "H-16/H-17 through the API (2.0.x debt)"
-)
-_MODEL_INTAKE_PREVIEW_DEBT = (
-    "the Model Intake durable trust-anchor operator lifecycle is a preview surface "
-    "outside the shipping scope of this release (declared exclusion)"
-)
-
-
 import time as _time
 
 # Unique per run so the endpoint_url uniqueness constraint never collides with a
@@ -510,16 +491,34 @@ def run_platform() -> H.Scorecard:
         sc.error("P-3 Connected Devices surfaces", exc)
 
     try:
-        workers = H.get("/workers")
+        workers = {}
+        readiness_deadline = _time.monotonic() + 60
+        while _time.monotonic() < readiness_deadline:
+            workers = H.get("/workers")
+            pools = workers.get("pools") or {}
+            # Web DAST, agent-tool, and Model Intake are the always-on execution pools. The device
+            # pool is opt-in capacity behind a Compose profile, so a default stack legitimately
+            # reports it not_ready; enabling or omitting devices must never gate Web DAST readiness.
+            required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+            if all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools):
+                break
+            _time.sleep(2)
         fleet = health.get("fleet") or H.get("/health").get("fleet") or {}
+        pools = workers.get("pools") or {}
+        required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+        device_pool = pools.get("device") or {}
         sc.check(
-            "P-4 worker and Fleet state remain explicit",
+            "P-4 worker pools and Fleet state remain explicit",
             isinstance(workers.get("workers"), list)
             and isinstance(workers.get("stale_count"), int)
+            and all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
+            # The device pool is opt-in capacity; it must be reported with a status but is not
+            # required to be running, so an absent device worker never fails this Web DAST gate.
+            and isinstance(device_pool.get("status"), str)
             and fleet.get("status") in {
                 "enabled", "ready", "configured", "disabled", "unsupported", "not_ready",
             },
-            f"workers={workers.get('count')} fleet_status={fleet.get('status')}",
+            f"pools={pools} fleet_status={fleet.get('status')}",
         )
     except Exception as exc:
         sc.error("P-4 Fleet and workers surfaces", exc)
@@ -1450,12 +1449,10 @@ def run_hunt() -> H.Scorecard:
         )
         # A misspelled server dimension must fail locally and preserve a stable
         # non-zero exit before the valid wrapper acceptance below.
-        _release_debt_check(
-            sc,
+        sc.check(
             "H-10 installed CLI rejects contract drift with stable exit code",
             cli_start.returncode == 2
             and "budget dimension" in cli_start.stderr.lower(),
-            _INSTALLED_CLI_DEBT,
             f"exit={cli_start.returncode}",
         )
         valid_cli_start = subprocess.run(
@@ -1491,14 +1488,12 @@ def run_hunt() -> H.Scorecard:
             check=False,
         )
         cli_action = json.loads(cli_call.stdout or "{}")
-        _release_debt_check(
-            sc,
+        sc.check(
             "H-11 installed CLI start and call produce valid V2 authority",
             valid_cli_start.returncode == cli_call.returncode == 0
             and bool(cli_hunt_id)
             and canonical_action_status(cli_action.get("response")) == "success"
             and bool(action_receipt_id(cli_action.get("response"))),
-            _INSTALLED_CLI_DEBT,
             f"start_exit={valid_cli_start.returncode} call_exit={cli_call.returncode}",
         )
         if cli_hunt_id:
@@ -1506,15 +1501,7 @@ def run_hunt() -> H.Scorecard:
                 "summary": "Installed CLI acceptance completed.", "next_actions": [],
             })
     except Exception as exc:
-        # In a declared-debt release the packaged-wrapper failure is tracked debt,
-        # not a hard gate failure; the same authority is proven by H-16/H-17.
-        if RELEASE_DECLARED_DEBT:
-            sc.xfail(
-                "H-11 installed CLI start and call produce valid V2 authority",
-                False, _INSTALLED_CLI_DEBT, f"exception: {exc}",
-            )
-        else:
-            sc.error("H-10 through H-11 installed CLI acceptance", exc)
+        sc.error("H-10 through H-11 installed CLI acceptance", exc)
 
     # MCP adapter: invoke its real client implementation against this API, then
     # compare the same canonical policy/manifest/action lifecycle.

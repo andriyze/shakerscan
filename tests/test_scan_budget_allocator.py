@@ -174,21 +174,27 @@ def test_thorough_allocator_funds_full_verifiers_before_template_breadth():
     allocation = allocate_scan_action_plan(_compile(budget), budget)
     rows = {action.action_id: action for action in allocation.plan.actions}
 
-    # One candidate funded at the per-attempt floor. The old table produced 80
-    # requests for sqlmap and 20 for dalfox, neither of which can reach a verdict,
-    # so the verifier was never actually "fully funded" despite this test's name.
-    assert rows["verify.sqli"].requested_budget == {
-        "http_requests": 160,
-        "tool_wall_seconds": 30,
-    }
-    assert rows["verify.xss"].requested_budget == {
-        "http_requests": 120,
-        "tool_wall_seconds": 30,
-    }
-    assert rows["active.templates"].requested_budget == {
-        "http_requests": 80,
-        "tool_wall_seconds": 30,
-    }
+    # One candidate per verifier, funded at what its tool was measured to need rather than
+    # at the 30-second attempt floor the old table used (80 requests for sqlmap and 20 for
+    # dalfox, neither of which can reach a verdict): a fast Scan verifies fewer candidates
+    # but every one of them gets its full time.
+    from api.scan.action_plan import _BATCH_ATTEMPT_COSTS, batch_profile_shape
+
+    for action_id, capability in (
+        ("verify.sqli", "sqli.verify_batch"),
+        ("verify.xss", "xss.verify_batch"),
+        ("active.templates", "templates.active_batch"),
+    ):
+        requested = dict(rows[action_id].requested_budget)
+        slice_count = int(rows[action_id].capability_args["slice"]["count"])
+        cost = _BATCH_ATTEMPT_COSTS[capability]
+        assert rows[action_id].admission_status == "planned", action_id
+        for dimension, per_attempt in cost.items():
+            assert requested[dimension] >= per_attempt * slice_count, (action_id, dimension)
+        size, shape = batch_profile_shape("fast", capability)
+        assert slice_count <= size
+    assert rows["verify.sqli"].requested_budget["tool_wall_seconds"] >= 180
+    assert rows["verify.xss"].requested_budget["tool_wall_seconds"] >= 200
 
 
 def test_allocator_preserves_required_passive_pack_inside_parallel_child_budget():

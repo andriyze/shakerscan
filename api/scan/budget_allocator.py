@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping, Protocol
@@ -121,6 +123,10 @@ _TEMPLATE_BREADTH_CAPABILITIES = frozenset({
 })
 
 
+# A three-digit occurrence marker names an additional slice of the same lane.
+_BATCH_OCCURRENCE_SUFFIX = re.compile(r"\.\d{3}(?:\.r\d{2})?$")
+
+
 def _allocation_priority(action: ScanAction) -> int:
     """Fund useful proof attempts before optional breadth.
 
@@ -142,7 +148,10 @@ def _allocation_priority(action: ScanAction) -> int:
     # proof promotes a finding to verified, so it is funded before candidate breadth
     # and well before a template sweep that proves nothing.
     if action.capability_name in _ACTIVE_PROOF_CAPABILITIES:
-        return 4
+        # The FIRST proof slice of each family is the proof tier. Extra proof
+        # breadth ranks with verifier breadth: five spare sqli.prove slices used to
+        # sort ahead of the first prove.xss and eat the wall it needed.
+        return 4 if not _BATCH_OCCURRENCE_SUFFIX.search(action.action_id) else 5
     if action.capability_name in _ACTIVE_VERIFIER_CAPABILITIES:
         return 5
     if action.capability_name in _TEMPLATE_BREADTH_CAPABILITIES:

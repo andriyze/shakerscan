@@ -55,11 +55,14 @@ jobs:
     permissions:
       contents: read
       actions: read
+      attestations: read
+      packages: read
     outputs:
       version: ${{ steps.meta.outputs.version }}
       created: ${{ steps.meta.outputs.created }}
       candidate_sha: ${{ steps.meta.outputs.candidate_sha }}
       workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
+      prebuilt_run_id: ${{ steps.prebuilt.outputs.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -125,6 +128,63 @@ jobs:
             exit 1
           }
 
+      - name: Find an attested exact-SHA image set
+        id: prebuilt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ steps.meta.outputs.candidate_sha }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          artifact="release-candidate-uncertified-${VERSION}-${CANDIDATE_SHA}"
+          runtime_manifest="$(sha256sum install/MANIFEST.sha256 | awk '{print $1}')"
+
+          validate_run() {
+            run_id="$1"
+            work="$(mktemp -d)"
+            gh run download "$run_id" -n "$artifact" -D "$work" >/dev/null 2>&1 || return 1
+            receipt="$work/release-candidate-receipt.json"
+            jq -e \
+              --arg version "$VERSION" \
+              --arg sha "$CANDIDATE_SHA" \
+              --arg run_id "$run_id" \
+              --arg runtime_manifest "$runtime_manifest" '
+                .schema_version == "shakerscan-release-candidate/v1" and
+                .version == $version and .candidate_sha == $sha and
+                .runtime_manifest_sha256 == $runtime_manifest and
+                .provenance.verified == true and
+                (.workflow_run | endswith("/" + $run_id)) and
+                ([.images.scanner, .images.api, .images.ui, .images.signer, .images.model_intake]
+                  | all(test("^sha256:[0-9a-f]{64}$")))
+              ' "$receipt" >/dev/null || return 1
+            for binding in \
+              "${SCANNER_IMAGE}:$(jq -r '.images.scanner' "$receipt")" \
+              "${API_IMAGE}:$(jq -r '.images.api' "$receipt")" \
+              "${UI_IMAGE}:$(jq -r '.images.ui' "$receipt")" \
+              "${SIGNER_IMAGE}:$(jq -r '.images.signer' "$receipt")" \
+              "${MODEL_INTAKE_IMAGE}:$(jq -r '.images.model_intake' "$receipt")"; do
+              repository="${binding%%:*}"
+              digest="${binding#*:}"
+              gh attestation verify "oci://docker.io/${repository}@${digest}" \
+                --repo "$GITHUB_REPOSITORY" >/dev/null || return 1
+            done
+          }
+
+          while read -r run_id; do
+            [[ -n "$run_id" ]] || continue
+            if validate_run "$run_id"; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              echo "Reusing attested image manifests from build-on-main run $run_id"
+              exit 0
+            fi
+            echo "::notice::build-on-main run $run_id has no reusable exact-SHA image receipt"
+          done < <(gh run list --workflow=build-on-main.yml --branch main \
+            --commit "$CANDIDATE_SHA" --status success --limit 20 \
+            --json databaseId --jq '.[].databaseId')
+
+          echo "run_id=" >> "$GITHUB_OUTPUT"
+          echo "::notice::no reusable image set for $CANDIDATE_SHA; candidate jobs will build it"
+
   validate:
     name: Validate exact release candidate
     needs: meta
@@ -142,6 +202,18 @@ jobs:
           # commit. A depth-one checkout can resolve the frozen candidate but
           # cannot provide that baseline tree.
           fetch-depth: 0
+
+      - name: Download the reusable image receipt
+        if: needs.meta.outputs.prebuilt_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILT_RUN_ID: ${{ needs.meta.outputs.prebuilt_run_id }}
+        shell: bash
+        run: |
+          mkdir -p artifacts/prebuilt
+          gh run download "$PREBUILT_RUN_ID" \
+            -n "release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}" \
+            -D artifacts/prebuilt
 
       - name: Verify generated documentation and the installer manifest
         run: |
@@ -209,7 +281,11 @@ jobs:
       - name: Smoke-test frozen-source installer
         run: make installer-smoke
 
+      - name: Smoke-test installer-driven upgrades and ownership guards
+        run: make installer-upgrade-smoke
+
       - name: Pre-pull checksum-pinned scanner bases
+        if: needs.meta.outputs.prebuilt_run_id == ''
         run: |
           scripts/retry-command.sh timeout 300 docker pull \
             golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
@@ -217,24 +293,51 @@ jobs:
             mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
       - name: Build locked scanner image
+        if: needs.meta.outputs.prebuilt_run_id == ''
         run: >-
           docker build
           --build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }}
           --build-arg SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}
           -f scanner/Dockerfile -t shakerscan-scanner:release-candidate .
 
-      - name: Build and verify locked API control-plane image
+      - name: Build locked API control-plane image
+        if: needs.meta.outputs.prebuilt_run_id == ''
         run: |
           docker build \
             --build-arg SCANNER_RUNTIME_IMAGE=shakerscan-scanner:release-candidate \
             -f scanner/Dockerfile.api -t shakerscan-api:release-candidate .
+
+      - name: Pull exact reusable scanner and API manifests
+        if: needs.meta.outputs.prebuilt_run_id != ''
+        shell: bash
+        run: |
+          receipt=artifacts/prebuilt/release-candidate-receipt.json
+          scanner_digest="$(jq -r '.images.scanner' "$receipt")"
+          api_digest="$(jq -r '.images.api' "$receipt")"
+          docker pull "${SCANNER_IMAGE}@${scanner_digest}"
+          docker pull "${API_IMAGE}@${api_digest}"
+          docker tag "${SCANNER_IMAGE}@${scanner_digest}" shakerscan-scanner:release-candidate
+          docker tag "${API_IMAGE}@${api_digest}" shakerscan-api:release-candidate
+
+      - name: Verify locked API control-plane image
+        run: |
           docker run --rm --entrypoint sh shakerscan-scanner:release-candidate -ceu \
             'if command -v docker >/dev/null 2>&1; then echo "worker image must not contain Docker" >&2; exit 1; fi'
           docker run --rm --entrypoint docker shakerscan-api:release-candidate --version
           docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu \
             'if docker buildx version >/dev/null 2>&1; then echo "runtime API must not carry Buildx" >&2; exit 1; fi'
+          docker run --rm --entrypoint sh shakerscan-api:release-candidate -ceu '
+            test ! -e /opt/tools
+            for binary in nmap masscan hydra medusa nikto dirb gobuster dnsrecon; do
+              if command -v "$binary" >/dev/null 2>&1; then
+                echo "runtime API unexpectedly contains $binary" >&2
+                exit 1
+              fi
+            done
+          '
+          test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10002:10002"
           test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
-          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
+          test "$(docker run --rm --entrypoint sh shakerscan-api:release-candidate -c 'python3 -c '\''import json; print(json.load(open("/opt/shakerscan/release-manifest.json"))["version"])'\'')" = "${{ needs.meta.outputs.version }}"
 
       - name: Enforce candidate-image external wire ceilings
         env:
@@ -331,6 +434,7 @@ jobs:
   build-runtime:
     name: Build scanner/API ${{ matrix.platform }}
     needs: [meta, validate]
+    if: needs.meta.outputs.prebuilt_run_id == ''
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -499,6 +603,7 @@ jobs:
   build-ui:
     name: Build UI ${{ matrix.platform }}
     needs: [meta, validate]
+    if: needs.meta.outputs.prebuilt_run_id == ''
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -580,6 +685,7 @@ jobs:
   build-signer:
     name: Build signer ${{ matrix.platform }}
     needs: [meta, validate]
+    if: needs.meta.outputs.prebuilt_run_id == ''
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -656,32 +762,46 @@ jobs:
   # Combine the per-arch digests into one multi-arch manifest list per image.
   merge:
     name: Create multi-arch manifests
-    needs: [meta, build-runtime, build-ui, build-signer]
+    needs: [meta, validate, build-runtime, build-ui, build-signer]
+    if: ${{ always() && needs.meta.result == 'success' && needs.validate.result == 'success' && (needs.meta.outputs.prebuilt_run_id != '' || (needs.build-runtime.result == 'success' && needs.build-ui.result == 'success' && needs.build-signer.result == 'success')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       packages: write
       id-token: write
       attestations: write
     outputs:
       version: ${{ needs.meta.outputs.version }}
-      scanner_image: shakerscan/shakerscan-scanner:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
-      api_image: shakerscan/shakerscan-api:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
-      ui_image: shakerscan/shakerscan-ui:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
-      signer_image: shakerscan/shakerscan-model-intake-signer:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
-      model_intake_image: shakerscan/shakerscan-model-intake:candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
-      scanner_digest: ${{ steps.receipt.outputs.scanner_digest }}
-      api_digest: ${{ steps.receipt.outputs.api_digest }}
-      ui_digest: ${{ steps.receipt.outputs.ui_digest }}
-      signer_digest: ${{ steps.receipt.outputs.signer_digest }}
-      model_intake_digest: ${{ steps.receipt.outputs.model_intake_digest }}
+      scanner_image: shakerscan/shakerscan-scanner:${{ steps.receipt_values.outputs.candidate_tag }}
+      api_image: shakerscan/shakerscan-api:${{ steps.receipt_values.outputs.candidate_tag }}
+      ui_image: shakerscan/shakerscan-ui:${{ steps.receipt_values.outputs.candidate_tag }}
+      signer_image: shakerscan/shakerscan-model-intake-signer:${{ steps.receipt_values.outputs.candidate_tag }}
+      model_intake_image: shakerscan/shakerscan-model-intake:${{ steps.receipt_values.outputs.candidate_tag }}
+      scanner_digest: ${{ steps.receipt_values.outputs.scanner_digest }}
+      api_digest: ${{ steps.receipt_values.outputs.api_digest }}
+      ui_digest: ${{ steps.receipt_values.outputs.ui_digest }}
+      signer_digest: ${{ steps.receipt_values.outputs.signer_digest }}
+      model_intake_digest: ${{ steps.receipt_values.outputs.model_intake_digest }}
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ needs.meta.outputs.candidate_sha }}
 
+      - name: Download reusable exact-SHA receipt
+        if: needs.meta.outputs.prebuilt_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILT_RUN_ID: ${{ needs.meta.outputs.prebuilt_run_id }}
+        shell: bash
+        run: |
+          gh run download "$PREBUILT_RUN_ID" \
+            -n "release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}" \
+            -D .
+
       - name: Download digests
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: /tmp/digests
@@ -689,15 +809,18 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
 
       - name: Login to Docker Hub
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Create scanner manifest list
+        if: needs.meta.outputs.prebuilt_run_id == ''
         working-directory: /tmp/digests/scanner
         env:
           CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
@@ -708,6 +831,7 @@ jobs:
           docker buildx imagetools inspect "${SCANNER_IMAGE}:${CANDIDATE_TAG}"
 
       - name: Create API control-plane manifest list
+        if: needs.meta.outputs.prebuilt_run_id == ''
         working-directory: /tmp/digests/api
         env:
           CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
@@ -718,6 +842,7 @@ jobs:
           docker buildx imagetools inspect "${API_IMAGE}:${CANDIDATE_TAG}"
 
       - name: Create UI manifest list
+        if: needs.meta.outputs.prebuilt_run_id == ''
         working-directory: /tmp/digests/ui
         env:
           CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
@@ -728,6 +853,7 @@ jobs:
           docker buildx imagetools inspect "${UI_IMAGE}:${CANDIDATE_TAG}"
 
       - name: Create Model Intake signer manifest list
+        if: needs.meta.outputs.prebuilt_run_id == ''
         working-directory: /tmp/digests/signer
         env:
           CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
@@ -738,6 +864,7 @@ jobs:
           docker buildx imagetools inspect "${SIGNER_IMAGE}:${CANDIDATE_TAG}"
 
       - name: Create Model Intake manifest list
+        if: needs.meta.outputs.prebuilt_run_id == ''
         working-directory: /tmp/digests/model-intake
         env:
           CANDIDATE_TAG: candidate-${{ needs.meta.outputs.candidate_sha }}-${{ github.run_id }}
@@ -748,6 +875,7 @@ jobs:
           docker buildx imagetools inspect "${MODEL_INTAKE_IMAGE}:${CANDIDATE_TAG}"
 
       - name: Write immutable candidate receipt
+        if: needs.meta.outputs.prebuilt_run_id == ''
         id: receipt
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -785,7 +913,30 @@ jobs:
             '{schema_version:"shakerscan-release-candidate/v1",version:$version,candidate_sha:$candidate_sha,candidate_tag:$candidate_tag,workflow_run:$workflow_run,images:{scanner:$scanner,api:$api,ui:$ui,signer:$signer,model_intake:$model_intake},runtime_manifest_sha256:$runtime_manifest}' \
             > release-candidate-receipt.json
 
+      - name: Bind merge outputs to the selected immutable receipt
+        id: receipt_values
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
+        shell: bash
+        run: |
+          receipt=release-candidate-receipt.json
+          runtime_manifest="$(sha256sum install/MANIFEST.sha256 | awk '{print $1}')"
+          jq -e --arg version "$VERSION" --arg sha "$CANDIDATE_SHA" \
+            --arg runtime_manifest "$runtime_manifest" '
+              .schema_version == "shakerscan-release-candidate/v1" and
+              .version == $version and .candidate_sha == $sha and
+              .runtime_manifest_sha256 == $runtime_manifest and
+              ([.images.scanner, .images.api, .images.ui, .images.signer, .images.model_intake]
+                | all(test("^sha256:[0-9a-f]{64}$")))
+            ' "$receipt" >/dev/null
+          echo "candidate_tag=$(jq -r '.candidate_tag' "$receipt")" >> "$GITHUB_OUTPUT"
+          for key in scanner api ui signer model_intake; do
+            echo "${key}_digest=$(jq -r ".images.${key}" "$receipt")" >> "$GITHUB_OUTPUT"
+          done
+
       - name: Attest final scanner manifest provenance
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.SCANNER_IMAGE }}
@@ -794,6 +945,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final API manifest provenance
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.API_IMAGE }}
@@ -802,6 +954,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final UI manifest provenance
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.UI_IMAGE }}
@@ -810,6 +963,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final signer manifest provenance
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.SIGNER_IMAGE }}
@@ -818,6 +972,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest final Model Intake manifest provenance
+        if: needs.meta.outputs.prebuilt_run_id == ''
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-name: docker.io/${{ env.MODEL_INTAKE_IMAGE }}
@@ -828,11 +983,11 @@ jobs:
       - name: Verify signed candidate provenance
         env:
           GH_TOKEN: ${{ github.token }}
-          SCANNER_DIGEST: ${{ steps.receipt.outputs.scanner_digest }}
-          API_DIGEST: ${{ steps.receipt.outputs.api_digest }}
-          UI_DIGEST: ${{ steps.receipt.outputs.ui_digest }}
-          SIGNER_DIGEST: ${{ steps.receipt.outputs.signer_digest }}
-          MODEL_INTAKE_DIGEST: ${{ steps.receipt.outputs.model_intake_digest }}
+          SCANNER_DIGEST: ${{ steps.receipt_values.outputs.scanner_digest }}
+          API_DIGEST: ${{ steps.receipt_values.outputs.api_digest }}
+          UI_DIGEST: ${{ steps.receipt_values.outputs.ui_digest }}
+          SIGNER_DIGEST: ${{ steps.receipt_values.outputs.signer_digest }}
+          MODEL_INTAKE_DIGEST: ${{ steps.receipt_values.outputs.model_intake_digest }}
         shell: bash
         run: |
           gh attestation verify "oci://docker.io/${SCANNER_IMAGE}@${SCANNER_DIGEST}" --repo "$GITHUB_REPOSITORY"
@@ -879,13 +1034,11 @@ jobs:
             digest: ${{ needs.merge.outputs.api_digest }}
             skip_dirs: ""
             skip_files: /usr/local/bin/docker
-          # The Model Intake toolchain moved out of the scanner and API images into this one. Its
-          # isolated tool environments keep the same scope exclusion they had before the split.
           - name: model-intake
             image: shakerscan/shakerscan-model-intake
             digest: ${{ needs.merge.outputs.model_intake_digest }}
-            skip_dirs: /opt/model-intake-tools
-            skip_files: /opt/tools/trivy,/opt/tools/osv-scanner
+            skip_dirs: ""
+            skip_files: ""
           - name: ui
             image: shakerscan/shakerscan-ui
             digest: ${{ needs.merge.outputs.ui_digest }}
@@ -907,6 +1060,8 @@ jobs:
           python3 scripts/validate_vulnerability_waivers.py \
             --file security/image-vulnerability-waivers.json \
             --image "${{ matrix.target.name }}" \
+            --skip-dirs "${{ matrix.target.skip_dirs }}" \
+            --skip-files "${{ matrix.target.skip_files }}" \
             --output .trivyignore
 
       - name: Reject high or critical image vulnerabilities
@@ -1043,7 +1198,7 @@ jobs:
             "${SCANNER_IMAGE}@${scanner_digest}" \
             /tmp/verify-installed-runtime.py
 
-      - name: Prove previous-stable upgrade, restart, and rollback
+      - name: Prove supported upgrades, restart, and rollback
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
@@ -1052,14 +1207,22 @@ jobs:
           scanner_digest="$(jq -r '.images.scanner' "$receipt")"
           api_digest="$(jq -r '.images.api' "$receipt")"
           ui_digest="$(jq -r '.images.ui' "$receipt")"
-          SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
-            CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
-            CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
-            CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
-            CANDIDATE_API_IMAGE_DIGEST="$api_digest" \
-            CANDIDATE_UI_IMAGE_DIGEST="$ui_digest" \
-            UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt.json" \
-            scripts/upgrade_smoke.sh
+          model_intake_digest="$(jq -r '.images.model_intake' "$receipt")"
+          for baseline in \
+            "$(tr -d '[:space:]' < install/STABLE_VERSION)" \
+            "$(tr -d '[:space:]' < install/OLDEST_SUPPORTED_UPGRADE_BASE)"; do
+            SCANNER_IMAGE="${SCANNER_IMAGE}@${scanner_digest}" \
+              CANDIDATE_API_IMAGE="${API_IMAGE}@${api_digest}" \
+              CANDIDATE_UI_IMAGE="${UI_IMAGE}@${ui_digest}" \
+              CANDIDATE_MODEL_INTAKE_IMAGE="${MODEL_INTAKE_IMAGE}@${model_intake_digest}" \
+              CANDIDATE_IMAGE_DIGEST="$scanner_digest" \
+              CANDIDATE_API_IMAGE_DIGEST="$api_digest" \
+              CANDIDATE_UI_IMAGE_DIGEST="$ui_digest" \
+              CANDIDATE_MODEL_INTAKE_IMAGE_DIGEST="$model_intake_digest" \
+              BASELINE_VERSION="$baseline" \
+              UPGRADE_RECEIPT_PATH="$PWD/artifacts/certification/upgrade-receipt-${baseline}.json" \
+              scripts/upgrade_smoke.sh
+          done
 
       - name: Set up supported Node browser runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -1124,7 +1287,8 @@ jobs:
         run: |
           certification_args=(
             --candidate artifacts/uncertified/release-candidate-receipt.json \
-            --upgrade artifacts/certification/upgrade-receipt.json \
+            --upgrade artifacts/certification/upgrade-receipt-$(tr -d '[:space:]' < install/STABLE_VERSION).json \
+            --upgrade artifacts/certification/upgrade-receipt-$(tr -d '[:space:]' < install/OLDEST_SUPPORTED_UPGRADE_BASE).json \
             --preservation artifacts/certification/preservation-receipt.json \
             --e2e-scorecard artifacts/certification/e2e-scorecard.json \
             --dast-quality artifacts/certification/dast-recall.json \

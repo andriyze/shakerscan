@@ -129,7 +129,7 @@ def test_sensitive_exposure_is_a_registered_canonical_family():
     spec = CAPABILITY_REGISTRY.require("exposure.verify_batch")
     assert spec.required_approval == "active_testing"
     assert "sensitive_exposure_proof" in spec.evidence_contract
-    for profile in ("fast", "balanced", "thorough"):
+    for profile in ("fast", "balanced", "thorough", "deep"):
         assert SCAN_MINIMUM_FAMILY_QUOTAS[profile]["sensitive_exposure"] >= 5
     contract = public_scan_contract()
     families = {item["name"] for item in contract["families"]}

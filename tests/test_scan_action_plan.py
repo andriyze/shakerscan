@@ -159,7 +159,8 @@ def test_allocation_and_compilation_share_one_rule():
     from api.scan.action_plan import interactive_auth_input_action_ids
     import pathlib
 
-    for module in ("api/worker.py", "api/fleet_routes/router.py"):
+    # The worker delegates continuation compilation to scan.continuation_rounds.
+    for module in ("api/scan/continuation_rounds.py", "api/fleet_routes/router.py"):
         source = (
             pathlib.Path(__file__).resolve().parent.parent / module
         ).read_text(encoding="utf-8")

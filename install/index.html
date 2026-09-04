@@ -298,7 +298,13 @@ install_command() {
 #!/bin/sh
 : "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
 export SCANNER_IMAGE_TAG
-if [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
+use_release_image_lock=1
+for arg in "\$@"; do
+    case "\$arg" in
+        --image-tag|--image-tag=*) use_release_image_lock=0 ;;
+    esac
+done
+if [ "\$use_release_image_lock" = "1" ] && [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
     while IFS='=' read -r key value; do
         case "\$key" in
             SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|MODEL_INTAKE_IMAGE)
@@ -424,6 +430,44 @@ say "Command path:      $BIN_DIR/shakerscan"
 say "Source:            $REPO_RAW_BASE"
 say ""
 
+# An install directory is where .env secrets, results/ evidence, and the Docker volumes' recorded
+# password live together. Installing into a NEW directory while another directory already owns
+# this Compose project's containers or data volume would adopt those volumes, rotate the database
+# password out from under the other install, and hide its results/ evidence. Refuse unless the
+# operator named the directory (SHAKERSCAN_HOME) or asked to adopt the data explicitly.
+refuse_foreign_install() {
+    [ -z "${SHAKERSCAN_HOME:-}" ] || return 0
+    [ "${SHAKERSCAN_ADOPT_EXISTING_DATA:-0}" != "1" ] || return 0
+    [ ! -f "$INSTALL_DIR/$OWNED_MANIFEST_NAME" ] || return 0
+    have docker || return 0
+    project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    working_dirs="$(docker ps -a --filter "label=com.docker.compose.project=$project" \
+        --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null \
+        | grep -v '^$' | sort -u || true)"
+    # Releases before the installer-owned manifest existed can still prove ownership through
+    # Compose's recorded working directory. Treat that as an in-place upgrade instead of rejecting
+    # the install merely because its data volume already exists.
+    if printf '%s\n' "$working_dirs" | grep -Fxq "$INSTALL_DIR"; then
+        return 0
+    fi
+    other_dir="$(printf '%s\n' "$working_dirs" | head -n 1)"
+    if [ -n "$other_dir" ]; then
+        say "Error: a ShakerScan install already exists in $other_dir (Compose project '$project')." >&2
+        say "Installing into $INSTALL_DIR as well would take over that install's Docker volumes and rotate its database password." >&2
+        say "Upgrade the existing install in place instead:" >&2
+        say "  SHAKERSCAN_HOME=$other_dir sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
+        say "To adopt the data volumes from $INSTALL_DIR anyway (that install's results/ evidence will not be visible here), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
+        exit 1
+    fi
+    if docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
+        say "Error: a PostgreSQL data volume for Compose project '$project' already exists, but $INSTALL_DIR is not the install that created it." >&2
+        say "If that install lives in another directory, upgrade it in place: SHAKERSCAN_HOME=<that directory> sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
+        say "To adopt the volume from $INSTALL_DIR (its database password will be rotated), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
+        exit 1
+    fi
+}
+refuse_foreign_install
+
 install_parent="$(dirname "$INSTALL_DIR")"
 install_name="$(basename "$INSTALL_DIR")"
 mkdir -p "$install_parent"
@@ -503,6 +547,8 @@ download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
 download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
 download "$REPO_RAW_BASE/.dockerignore" "$INSTALL_DIR/.dockerignore"
+download "$REPO_RAW_BASE/install/release-images.json" "$INSTALL_DIR/install/release-images.json"
+download "$REPO_RAW_BASE/install/release-images.sh" "$INSTALL_DIR/install/release-images.sh"
 download "$REPO_RAW_BASE/scripts/shakerscan_mcp.py" "$INSTALL_DIR/scripts/shakerscan_mcp.py"
 download "$REPO_RAW_BASE/scripts/local_planner_adapter.py" "$INSTALL_DIR/scripts/local_planner_adapter.py"
 download "$REPO_RAW_BASE/scripts/planner_evals.py" "$INSTALL_DIR/scripts/planner_evals.py"
@@ -564,6 +610,7 @@ download "$REPO_RAW_BASE/scanner/redaction.py" "$INSTALL_DIR/scanner/redaction.p
 download "$REPO_RAW_BASE/scanner/risk_scoring.py" "$INSTALL_DIR/scanner/risk_scoring.py"
 download "$REPO_RAW_BASE/scanner/score_bands.py" "$INSTALL_DIR/scanner/score_bands.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/__init__.py" "$INSTALL_DIR/scanner/scanner_tools/__init__.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/browser_profile.py" "$INSTALL_DIR/scanner/scanner_tools/browser_profile.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/build_fingerprint.py" "$INSTALL_DIR/scanner/scanner_tools/build_fingerprint.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_postman.py" "$INSTALL_DIR/scanner/scanner_tools/device_postman.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/request_replay.py" "$INSTALL_DIR/scanner/scanner_tools/request_replay.py"
@@ -679,6 +726,12 @@ chmod +x "$INSTALL_STAGE/db/configure-model-intake-signer-role.sh"
 chmod +x "$INSTALL_STAGE/scripts/build-model-intake-guest-rootfs.sh"
 chmod +x "$INSTALL_STAGE/scripts/provision-model-intake-firecracker.sh"
 chmod +x "$INSTALL_STAGE/.claude/hooks/session-start.sh"
+
+# This runtime is the certified release image set. Record that beside the launcher so a later
+# `shakerscan start` from this directory never builds the scanner from a source tree that happens
+# to share it (the installer run over a checkout used to keep local-build mode and rebuild the
+# 5.7 GB scanner image), and so `./scanner.sh` run directly here resolves the same mode.
+printf 'prebuilt\n' > "$INSTALL_STAGE/.shakerscan-local-build"
 commit_staged_downloads
 
 install_command
@@ -702,9 +755,9 @@ say ""
 cd "$INSTALL_DIR"
 start_rc=0
 if [ "$REMOTE_ACCESS" = "1" ]; then
-    "$BIN_DIR/shakerscan" start -y --remote || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y --prebuilt --remote || start_rc=$?
 else
-    "$BIN_DIR/shakerscan" start -y || start_rc=$?
+    "$BIN_DIR/shakerscan" start -y --prebuilt || start_rc=$?
 fi
 
 if [ "$start_rc" -ne 0 ]; then

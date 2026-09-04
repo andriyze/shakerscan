@@ -2979,7 +2979,7 @@ class TargetScanRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
     policy: Optional[dict[str, Any]] = None
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None

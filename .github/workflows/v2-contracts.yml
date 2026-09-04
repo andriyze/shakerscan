@@ -66,6 +66,7 @@ jobs:
           SCANNER_IMAGE=shakerscan-worker:local \
             CANDIDATE_API_IMAGE=shakerscan-api:latest \
             CANDIDATE_UI_IMAGE=shakerscan-ui:latest \
+            CANDIDATE_MODEL_INTAKE_IMAGE=shakerscan-model-intake-sandbox:local \
             scripts/upgrade_smoke.sh
 
       - name: Enforce external adapter wire ceilings

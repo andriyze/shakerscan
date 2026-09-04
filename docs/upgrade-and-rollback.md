@@ -43,7 +43,29 @@ shakerscan backup /secure/path/shakerscan-backups
 
 ## Upgrade
 
+The oldest directly supported upgrade base is **0.8.18**. Installations older than that must first
+upgrade to 0.8.18, confirm health and create a fresh backup, then upgrade to the current stable
+release. Release certification exercises both the immediately previous stable version and 0.8.18;
+versions older than the pinned minimum are not covered by the direct-migration guarantee.
+
 Download the runtime first without starting it, then start explicitly:
+
+### Installs that live in another directory
+
+The hosted installer defaults to `~/.shakerscan`. If your existing install lives elsewhere (for
+example a source checkout you started with `./scanner.sh start`), upgrade it in place by naming that
+directory, so its `.env` secrets, `results/` evidence, and Docker volumes stay together:
+
+```bash
+SHAKERSCAN_HOME=/path/to/your/install sh -c 'curl -fsSL https://install.shakerscan.com | sh'
+```
+
+Running the installer into a new directory while an older install's Docker volumes exist under the
+same Compose project fails closed with `a PostgreSQL data volume ... already exists, but .env has no
+POSTGRES_PASSWORD`. That volume belongs to the other directory. Either upgrade that directory as
+above, or set `SHAKERSCAN_ADOPT_EXISTING_DATA=1` to take the volume over from the new directory; the
+database password is then rotated and the old directory's `results/` evidence is not visible to the
+new install.
 
 ```bash
 curl -fsSL https://install.shakerscan.com | SHAKERSCAN_START=0 sh

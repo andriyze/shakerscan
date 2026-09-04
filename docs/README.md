@@ -23,6 +23,8 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Short future-only roadmap; completed plans move to the archive |
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`release-process.md`](release-process.md) | Enforced candidate, required exact-SHA physical gates, digest promotion, public smoke, and stable-channel sequence |
+| [`release-2.2.0-plan.md`](release-2.2.0-plan.md) | 2.2.0 audit verdicts and improvement plan: upgrade safety, the fifth image everywhere, DAST depth, release pipeline |
+| [`api-image-boundary.md`](api-image-boundary.md) | What the control-plane process executes and why the slim API image keeps Chromium and the Docker client but no scanner toolset |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Operate the supported outbound-HTTPS Fleet; WireGuard is preview-only |
 | [`releases/README.md`](releases/README.md) | Immutable release-note index, including published and failed/cancelled candidates |

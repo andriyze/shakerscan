@@ -1,13 +1,13 @@
 """A workflow that composes this stack must build the scanner runtime first.
 
-The API image builds FROM `shakerscan-worker:local`. That is a Dockerfile base, not a
+The API image copies FROM `shakerscan-worker:local`. That is a Dockerfile stage, not a
 compose dependency, so `docker compose up --build` does not build it -- on a clean runner
 it tries to PULL it and fails with "pull access denied, repository does not exist". The
 E2E release gate died there before running a single check, and the failure looks like a
 registry permissions problem rather than a build-order one.
 
-`scanner.sh build` builds the shared runtime once and binds the sandbox and API images to
-that exact image, which docker-compose.yml's own comment states is required.
+`scanner.sh build` builds the shared runtime once, then derives the sandbox and slim API
+images from that exact content-addressed source.
 """
 
 import re
@@ -31,7 +31,7 @@ def _composing_workflows():
             yield path, text
 
 
-def test_the_api_image_still_builds_from_the_worker_image():
+def test_the_api_image_still_derives_from_the_worker_image():
     """If this stops being true, the rule below is no longer needed."""
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "SCANNER_RUNTIME_IMAGE" in compose

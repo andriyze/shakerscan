@@ -43,9 +43,10 @@ def _evidence(tmp_path: Path):
     upgrade = {
         "schema_version": "stateful-upgrade-acceptance/v2",
         "status": "pass",
+        "baseline": {"version": "2.1.0"},
         "candidate": {
             "source_sha": SOURCE,
-            "images": {key: IMAGES[key] for key in ("scanner", "api", "ui")},
+            "images": {key: IMAGES[key] for key in ("scanner", "api", "ui", "model_intake")},
         },
         "rollback_boundary": "pre-upgrade pg_dump restore",
         "checks": checks,
@@ -136,13 +137,27 @@ def test_certification_binds_exact_manifests_and_all_acceptance_evidence(tmp_pat
     assert len(receipt["receipt_sha256"]) == 64
     assert set(receipt["certification"]["evidence_sha256"]) == {
         "uncertified_candidate_receipt",
-        "stateful_upgrade_receipt",
+        "stateful_upgrade_receipt_2_1_0",
         "preservation_receipt",
         "exact_manifest_e2e_scorecard",
         *paths["external_evidence"].keys(),
     }
     assert receipt["certification"]["checks"]["complete_dast_quality_bar"] == "pass"
     validate_certification_checks(receipt)
+
+
+def test_release_cli_contract_requires_both_upgrade_baselines(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    with pytest.raises(CertificationError, match="cover exactly these baselines"):
+        certify_receipt(
+            candidate=candidate,
+            upgrade=upgrade,
+            preservation=preservation,
+            e2e=e2e,
+            source_sha=SOURCE,
+            required_upgrade_baselines={"2.1.0", "0.8.18"},
+            **paths,
+        )
 
 
 def test_optional_physical_boundaries_are_recorded_as_not_run(tmp_path):

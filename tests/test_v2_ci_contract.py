@@ -109,6 +109,22 @@ def test_candidate_validate_reuses_the_main_suite_report_instead_of_rerunning():
     assert "INSTALLED_STACK_SMOKE_E2E" in release
 
 
+def test_installed_stack_smoke_forwards_its_random_api_port_to_the_cli():
+    smoke = (ROOT / "scripts" / "installed_stack_smoke.sh").read_text(encoding="utf-8")
+    invocation = smoke[smoke.index('SHAKERSCAN_API="http://127.0.0.1:$API_PORT"'):]
+    assert 'SHAKERSCAN_API_PORT="$API_PORT"' in invocation[:500]
+    assert 'SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan"' in invocation[:500]
+
+
+def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
+    e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    lifecycle = e2e[e2e.index("# MI-6A/B/C:"):e2e.index("# MI-7:")]
+    assert "sc.xfail" not in lifecycle
+    assert 'sc.error("MI-6 durable trust-anchor lifecycle", e)' in lifecycle
+    assert "MI-6 durable trust-anchor lifecycle | Ship as release-gated" in readiness
+
+
 def test_full_release_e2e_accepts_only_exact_main_candidates():
     text = _text("e2e.yml")
     # The candidate must be reachable from the protected default branch; the historical `v2`
@@ -127,3 +143,21 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert "artifacts/release-external-wire.json" in text
     assert 'test "$(jq -r \'.status\' artifacts/release-external-wire.json)" = passed' in text
     assert 'test "$(jq -r \'.tool_count\' artifacts/release-external-wire.json)" = 9' in text
+
+
+def test_platform_pool_gate_requires_always_on_pools_but_not_opt_in_devices():
+    """P-4 gates on the three always-on execution pools and never on opt-in device capacity.
+
+    Web DAST, agent-tool, and Model Intake workers start with every stack, so the platform smoke
+    requires each of them current and ready. The device worker is opt-in behind a Compose profile,
+    so a default `docker compose up -d` legitimately reports the device pool not_ready; requiring it
+    ready or disabled failed the pre-merge smoke on exactly that expected state. The device pool must
+    be reported with a status but must never gate Web DAST readiness.
+    """
+    e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
+    gate = e2e[e2e.index("readiness_deadline = _time.monotonic()"):]
+    gate = gate[:gate.index("P-4 Fleet and workers surfaces")]
+    assert '"web_dast", "agent_tool", "model_intake"' in gate
+    assert 'all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)' in gate
+    assert 'isinstance(device_pool.get("status"), str)' in gate
+    assert 'device_pool.get("status") in {"ready", "disabled"}' not in gate

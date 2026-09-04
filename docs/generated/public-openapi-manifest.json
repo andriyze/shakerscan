@@ -49,9 +49,9 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
-    "CredentialProfileCreate": "5ce497f517c995a974fdd8cd8525f0d020a5268254c957a7c62b587ecadaa82b",
+    "CredentialProfileCreate": "e2efce93a3c40faa60d6273d33db220598fffe48be6a39f52968157c1c1d44a4",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
-    "CredentialProfileRotate": "9a29e2246008a2ac8143b0d245a4869ca6f4b5daaea156fe8265254401d806b5",
+    "CredentialProfileRotate": "f023ee42779be3169d7f816b6172c0831e7a8fdde4a450720996279893b870ba",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
     "DeviceCredentialProfileCreate": "b25505648ad3d2e27de4afb54586d228485d92f256a42418acb2ace596582813",
@@ -143,9 +143,9 @@
     "ResearchObservationRequest": "df21e818632dea54ab50599fbc2928875f1031f4745ad94b0d6dd3f412040095",
     "ScanAdvancedLimits": "fa65891f9d6c4246fd33f557a45842cc04624d02998fc4ddcec07d3f49b97469",
     "ScanExecutionSettingsUpdate": "8c4659d76962d531391fe7e9631bc1fe46106aeb0e1b9b39aa05b1bede9ae5a6",
-    "ScanFamilyPreviewRequest": "a55203c1dc8757ada57f4ccf950ced3f14a94c465bd9b274a195b0e485a13c18",
+    "ScanFamilyPreviewRequest": "6eab0d4bd7f56d14592ac980ff0ae1bfdb7fa9940e19a141cb5f61f6908dbc92",
     "ScanPublicCompatibilityOptions": "7529119d6bc845fd0f87c41d50f09e24cd74763242d14c7beb09a4b5e92fea30",
-    "ScanPublicPlacement": "c4e5d7fecd6812e56a62f94fb639b7b792cfb9f904e75f7ae500b1d0597dc125",
+    "ScanPublicPlacement": "ffe892bcf7b67ff35dfde48ba80b47c081da4860cf82854371a6ae9b099b23e9",
     "ScheduleCreate": "7230e00073484dc22b21ab387323ec1c8a2f3596134b7712e04e892052d7d731",
     "ScheduleUpdate": "9f5f80c7c72b527f331d60e33ff63dcc73f96dc510d5c97333ce01bb1df704ad",
     "ScopePreviewRequest": "c9d558119d4bec6e7ce3004de47ff76117a0e18331c77ef0034568525354fade",
@@ -168,13 +168,13 @@
     "TargetPrincipalAutoProvisionRequest": "a3bad47d5f9d5216f07a41baff48fd43330a24a4670434528fde9f6b468d8ddb",
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
-    "TargetScanRequest": "e68dcb516b9d67c273c0eb54edb5d5fbee2024f2e01630c1b8e31564a4f613cb",
+    "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "f367702d496072090b97b4c3c59123ad31209867f9a7b184a428a371c2f351aa",
+  "contract_sha256": "62bd5ae8b08fe2e8ddbdaaf8ce60a96b4ae7ab1f9a8e4a60c57e5dcf8e188826",
   "openapi": "3.1.0",
   "operation_count": 394,
   "operations": {
@@ -4858,7 +4858,7 @@
       "deprecated": false,
       "operation_id": "submit_scan_scans_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "b76a10cb44d6739cc77ab34868be064bf95aa7cb0255a00bb5b6c42e34a0344e",
+      "request_schema_sha256": "ffea994e0a8c4019bbb64cc4f2a35edeb310b3f962dd9e14e8ed71ef08ff4aee",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
@@ -4870,7 +4870,7 @@
       "deprecated": false,
       "operation_id": "submit_batch_scans_batch_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "f6da7717effe54ba58e82d3a3f54fa489426f6a97b15d9e950bbc572d3174a9e",
+      "request_schema_sha256": "d7f906c5a656f9af3bae8ca68ebb10652da673f2b0f820c8630f592a64e655b5",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },

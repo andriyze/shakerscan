@@ -144,8 +144,17 @@ V2 has exactly one deterministic engine: `scan`. Three independent inputs shape 
 
 - **Policy** grants permission: passive-only versus active testing, state-changing HTTP, network or
   subdomain discovery, and family include/exclude constraints.
-- **Budget profile** selects hard ceilings: `fast`, `balanced`, or `thorough`.
+- **Budget profile** selects hard ceilings: `fast` (30 minutes), `balanced` (60 minutes),
+  `thorough` (180 minutes), or opt-in `deep` (360 minutes).
 - **Opaque references** select exact-target credential profiles and request-collection selections.
+
+Cookie profiles admitted for `web.browser_crawl` seed the primary cookie jar in a fresh,
+owner-only Chromium profile. Bearer profiles may additionally declare a nonsecret
+`browser_storage_key`; when present, the worker seeds that localStorage key at the exact target
+origin. Bootstrap navigation is fulfilled locally, the token never enters process arguments or
+public receipts, and the ephemeral profile is deleted after Katana exits. Other bearer profiles
+continue to authenticate HTTP-aware capabilities without guessing an application-specific browser
+storage convention.
 
 The typed budget covers duration, HTTP requests, state-changing requests, endpoints, hosts, browser
 actions, TCP attempts, tool wall time, and workers. A custom value may only lower the selected
@@ -813,6 +822,11 @@ Checks include:
   the safe, review, and malicious fixtures expected for the applicable adapters. `GET
   /model-intake/scanners/readiness` exposes versions, applicability, rules/database identity, and the last
   functional receipt.
+- **Advisory-data cadence** — the dedicated Model Intake worker attempts a bounded Trivy database
+  refresh at startup when registry egress is available and retains the image's baked database on
+  failure or in offline environments. Generated static evidence and every frozen evidence manifest
+  record `trivy_db_updated_at`, so operators can judge database age instead of inferring freshness
+  from the image build date.
 - **Typed non-scanner providers** — `GET /model-intake/providers/readiness` separately reports sandbox
   execution, embedding evaluation, embedded/OPA policy, and core report providers. OPA remains explicitly
   `NOT_IMPLEMENTED`; an installed or configured label does not imply an enforcing decision contract.
@@ -1289,7 +1303,10 @@ profiles receive bounded replay/probe capabilities.
 `POST /credential-profiles/{profile_id}/rotate`. These exact-target Web, API, network, and device
 profiles use immutable encrypted versions, metadata-only responses, capability bounds, expiry, and
 primary/secondary/service/SSH slots. Scan and Hunt queue only opaque IDs; workers revalidate the
-target-bound approval and decrypt the admitted version immediately before execution.
+target-bound approval and decrypt the admitted version immediately before execution. A bearer
+profile may expose a nonsecret `browser_storage_key` for authenticated SPA crawling; cookie values
+and bearer tokens remain worker-private, are placed only in an ephemeral browser profile, and are
+never returned or passed on the scanner command line.
 
 **Legacy target credentials and principals**: `GET|POST /targets/{id}/credential-profiles` ·
 `PATCH|DELETE /targets/{id}/credential-profiles/{profile_id}` ·
@@ -1502,11 +1519,11 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 31 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
-| Make targets | 18 | `Makefile` |
+| Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 370 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 119 | `scanner/scanner_tools/` |
-| UI pages | 37 | `ui/src/app/` |
+| Runtime environment keys | 377 | Python sources + Compose manifests |
+| Internal compatibility scanner modules | 120 | `scanner/scanner_tools/` |
+| UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 13 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2220,7 +2237,7 @@ opaque profile, and collection-reference fields.
 | Surface | Names |
 |---|---|
 | Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory
@@ -2421,15 +2438,15 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_QUEUE_DIR` | `scanner/scanner_tools/model_intake.py`, `scanner/scanner_tools/model_intake_providers.py` |
 | `MODEL_INTAKE_SANDBOX_READ_ONLY` | `scanner/scanner_tools/model_intake_sandbox.py` |
-| `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
-| `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_UID` | `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_ADAPTERS_JSON` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_providers.py`, `scanner/scanner_tools/model_intake_sandbox.py` |
+| `MODEL_INTAKE_SANDBOX_RUNTIME_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_UID` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_ALLOW_LOCAL_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_KMS_KEY_ID` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_SIGNER_AWS_REGION` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2514,7 +2531,9 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_UID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_BIND_HOST` | `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2539,6 +2558,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
+| `SHAKERSCAN_DOCKER_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
@@ -2581,8 +2601,12 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_STREAM_SCANNER_LOGS` | `api/worker.py` |
+| `SHAKERSCAN_TRIVY_CACHE_DIR` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_WORKER_MEM_LIMIT_GB` | `api/api.py` |
@@ -2641,6 +2665,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
 | `/timeline` | `ui/src/app/timeline/page.tsx` |
+| `/workers` | `ui/src/app/workers/page.tsx` |
 
 ### Skills, Slash Commands, And Subagents
 
@@ -2684,7 +2709,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`
 
 ### Durable Storage Inventory
 

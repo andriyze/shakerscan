@@ -112,6 +112,9 @@ services:
         # build_local_scanner_family builds this exact runtime first. The API
         # adds only the checksum-pinned Docker client used for guest staging.
         SCANNER_RUNTIME_IMAGE: ${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}
+    # Development source sync copies bind-mounted modules into /app. Released
+    # deployments use docker-compose.release.yml and run as the host identity.
+    user: "0:0"
     # Resolve host-published services (e2e fixtures / honey targets) from inside the
     # container on Linux CI too. No-op on Docker Desktop, where it already resolves.
     extra_hosts:

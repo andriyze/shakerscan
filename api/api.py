@@ -4232,6 +4232,7 @@ app.include_router(settings_router)
 try:
     from model_intake.router import (
         POLICY_PROFILES,
+        _model_intake_worker_readiness,
         configure_model_intake_router,
         _model_intake_auto_runner_memory_ready,
         _model_intake_auto_runner_readiness_grace_active,
@@ -4407,6 +4408,7 @@ try:
 except ModuleNotFoundError:  # package import in host-side tests
     from api.model_intake.router import (
         POLICY_PROFILES,
+        _model_intake_worker_readiness,
         configure_model_intake_router,
         _model_intake_auto_runner_memory_ready,
         _model_intake_auto_runner_readiness_grace_active,
@@ -4582,6 +4584,9 @@ except ModuleNotFoundError:  # package import in host-side tests
 configure_model_intake_router(
     lambda: db_pool,
     get_redis=lambda *a, **k: get_redis(*a, **k),
+    expected_build_fingerprint=lambda *a, **k: expected_build_fingerprint(*a, **k),
+    current_scanner_version=lambda *a, **k: current_scanner_version(*a, **k),
+    worker_build_current=lambda *a, **k: worker_build_current(*a, **k),
     sanitize_scan_options=lambda *a, **k: _sanitize_scan_options(*a, **k),
     model_intake_json_object=lambda *a, **k: _model_intake_json_object(*a, **k),
     results_dir=lambda: RESULTS_DIR,
@@ -7023,6 +7028,7 @@ try:
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
+    from worker_pools import worker_pool_summaries
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
         configure_agent_router,
@@ -7077,6 +7083,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
+    from api.worker_pools import worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
     AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
@@ -7344,7 +7351,7 @@ class _BatchRequestBase(BaseModel):
 
     targets: list[str] = Field(min_length=1, max_length=50)
     target_kind: Literal["web", "api"] = "web"
-    budget_profile: Optional[Literal["fast", "balanced", "thorough"]] = None
+    budget_profile: Optional[Literal["fast", "balanced", "thorough", "deep"]] = None
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
@@ -8759,6 +8766,7 @@ async def health():
         "legacy_compatibility": legacy_compatibility,
         "device_worker": _device_worker_readiness(),
         "agent_tool_worker": _agent_tool_worker_readiness(),
+        "model_intake_worker": _model_intake_worker_readiness(),
         "fleet": fleet_feature_state(),
     }
 
@@ -20943,6 +20951,12 @@ async def get_workers():
             "expected_scanner_version": expected_version,
             "execution_capacity": execution_capacity,
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                summary,
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
     except FileNotFoundError:
         return {
@@ -20955,6 +20969,12 @@ async def get_workers():
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
@@ -20968,6 +20988,12 @@ async def get_workers():
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
 
 

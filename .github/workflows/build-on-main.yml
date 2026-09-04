@@ -7,18 +7,24 @@ name: Build candidate on main
 # tag, and no GitHub Release; the release candidate remains the only path that certifies and the
 # promotion workflows remain the only paths that publish a version.
 #
-# Docs-only pushes are skipped: they cannot change any image. A release candidate whose SHA has no
-# pre-built set still builds on demand, so skipping here can never block a release.
+# Documentation, tests, and non-image GitHub metadata are skipped: they cannot change any image. A
+# release candidate whose SHA has no pre-built set still builds on demand, so skipping here can
+# never block a release.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
-      - ".github/rulesets/**"
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!docs/**"
+      - "!tests/**"
+      - "!LICENSE"
+      - "!.gitignore"
+      - "!.github/**"
+      - ".github/workflows/_build-images.yml"
+      - ".github/workflows/build-on-main.yml"
+      - ".github/workflows/release-candidate.yml"
   workflow_dispatch:
     inputs:
       sha:

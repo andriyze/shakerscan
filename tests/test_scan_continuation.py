@@ -6,9 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from api.runtime.models import TargetBinding
-from api.scan.action_plan import ScanActionPlanCompiler
+from api.scan.action_plan import ScanActionPlan, ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
+    MAX_SCAN_PLAN_REVISION,
     reconciled_continuation_ceiling,
     ContinuationBudgetCeiling,
     SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
@@ -18,6 +19,7 @@ from api.scan.continuation import (
     amended_scan_plan_revision,
     absent_receipt_summary,
     build_discovery_continuation_manifests,
+    continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     endpoint_worklist_from_manifest_entries,
     merge_scan_action_continuation,
@@ -255,6 +257,125 @@ def test_plan_revision_chain_is_reproducible_and_binds_discovery_receipts():
     assert first.revision_digest != changed.revision_digest
     assert first.continuation_plan_digest == continuation.plan_digest
     assert ScanPlanRevision.from_dict(first.canonical_dict()) == first
+
+
+def test_plan_revision_chain_accepts_bounded_later_revisions():
+    parent, continuation, allocation = _plans()
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=allocation,
+    )
+    results = {
+        action.action_id: _result(
+            action, status=CapabilityResultStatus.SUCCESS, namespace="later-revision",
+        )
+        for action in parent.actions
+    }
+    revision = amended_scan_plan_revision(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=results,
+        work_manifest_references=unique_work_manifest_reference_dicts(
+            action.capability_args for action in continuation.actions
+        ),
+        revision=MAX_SCAN_PLAN_REVISION,
+    )
+    assert revision.revision == MAX_SCAN_PLAN_REVISION
+    with pytest.raises(ScanContinuationError, match="between zero"):
+        replace(revision, revision=MAX_SCAN_PLAN_REVISION + 1, revision_digest=None)
+
+
+def test_work_revision_can_append_without_terminal_finalizer():
+    parent, continuation, allocation = _plans()
+    work_only = ScanActionPlan(
+        scan_id=continuation.scan_id,
+        execution_plan_digest=continuation.execution_plan_digest,
+        target_binding_digest=continuation.target_binding_digest,
+        actions=tuple(
+            replace(action, ordinal=index, action_digest=None)
+            for index, action in enumerate(
+                action for action in continuation.actions
+                if action.action_id != "finalize.report"
+            )
+        ),
+    )
+
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=work_only,
+        allocation=allocation,
+        include_finalizer=False,
+    )
+
+    assert amended.actions[:len(parent.actions)] == parent.actions
+    assert "finalize.report" not in {action.action_id for action in amended.actions}
+    assert len(amended.actions) > len(parent.actions)
+
+
+def test_continuation_round_ids_and_offsets_are_monotonic():
+    _parent, continuation, _allocation = _plans()
+    endpoint_ref = next(
+        action.capability_args["target_manifest_ref"]
+        for action in continuation.actions
+        if action.capability_name == "templates.passive_batch"
+    )
+    candidate_action = next(
+        action for action in continuation.actions
+        if action.capability_name == "xss.verify_batch"
+    )
+    candidate_ref = candidate_action.capability_args["candidate_manifest_ref"]
+    template_ref = next(
+        action.capability_args["template_manifest_ref"]
+        for action in continuation.actions
+        if action.capability_name == "templates.passive_batch"
+    )
+    # Reference identity stays content-addressed; the enlarged count models a
+    # ranked manifest whose tail cannot fit in one bounded 32-batch revision.
+    endpoint_ref = {**dict(endpoint_ref), "entry_count": 5_000}
+    candidate_ref = {**dict(candidate_ref), "entry_count": 5_000}
+    contract = resolve_scan_contract(
+        budget_profile="balanced",
+        policy={"active_testing": True, "include_families": ["xss"]},
+    )
+
+    first = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=_target(),
+        action_scope="endpoint",
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=template_ref,
+        continuation_round=1,
+        require_family_minimums=False,
+    )
+    offsets = continuation_manifest_offsets(first)
+    second = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=contract.execution_plan,
+        target_binding=_target(),
+        action_scope="endpoint",
+        endpoint_manifest_ref=endpoint_ref,
+        candidate_manifest_ref=candidate_ref,
+        template_manifest_ref=template_ref,
+        continuation_round=2,
+        manifest_offsets=offsets,
+        require_family_minimums=False,
+    )
+
+    second_work = tuple(
+        action for action in second.actions
+        if action.action_id != "finalize.report"
+    )
+    assert second_work
+    assert all(action.action_id.endswith(".r02") for action in second_work)
+    for action in second_work:
+        key = action.capability_args.get("continuation_work_key")
+        if key:
+            assert action.capability_args["slice"]["start"] >= offsets[key]
 
 
 def test_continuation_request_verifier_binds_parent_collection_replay():
@@ -963,3 +1084,32 @@ def test_continuation_ceiling_reclaims_what_settled_root_actions_did_not_spend()
             )
     # A result cannot consume more than it reserved (the result model rejects it), so the
     # reconciliation only ever returns budget; it never has to charge an overrun.
+
+
+def test_continuation_ceiling_subtracts_cumulative_work_round_usage():
+    parent, continuation, allocation = _plans()
+    root_results = {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in parent.actions
+    }
+    work_action = next(
+        action for action in continuation.actions
+        if action.action_id != "finalize.report" and action.requested_budget
+    )
+    reclaimed = reconciled_continuation_ceiling(allocation, root_results)
+    with_work = {
+        **root_results,
+        work_action.action_id: _result(
+            work_action,
+            status=CapabilityResultStatus.SUCCESS,
+            charge_full=True,
+            namespace="work-round",
+        ),
+    }
+
+    residual = reconciled_continuation_ceiling(allocation, with_work)
+
+    assert residual == {
+        name: max(0, amount - int(work_action.requested_budget.get(name, 0)))
+        for name, amount in reclaimed.items()
+    }

@@ -28,9 +28,10 @@ import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation
 import { usableWebTargets } from '@/lib/targetChoices'
 
 const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
-  { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '5 min · 1,000 requests' },
-  { value: 'balanced', label: 'Balanced', description: 'The default coverage and runtime.', limits: '20 min · 5,000 requests' },
-  { value: 'thorough', label: 'Thorough', description: 'Deeper release and staging coverage.', limits: '60 min · 20,000 requests' },
+  { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '30 min · 5,000 requests' },
+  { value: 'balanced', label: 'Balanced', description: 'The default coverage and runtime.', limits: '60 min · 20,000 requests' },
+  { value: 'thorough', label: 'Thorough', description: 'Deeper release and staging coverage.', limits: '180 min · 60,000 requests' },
+  { value: 'deep', label: 'Deep', description: 'Opt-in maximum-depth examination.', limits: '360 min · 150,000 requests' },
 ]
 
 const ADVANCED_LIMITS = [

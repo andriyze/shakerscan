@@ -217,11 +217,11 @@ def test_upgrade_smoke_proves_stateful_backup_rollback():
     assert "pg_restore" in script
     assert "run_scenario scanner_dirty rollback" in script
     assert 'STABLE_VERSION="$(tr -d' in script
-    assert 'BASELINE_REF:-v${STABLE_VERSION}' in script
+    assert 'BASELINE_REF:-v${BASELINE_VERSION}' in script
     assert "previous-stable API/UI did not become healthy" in script
     # The previous-stable images are read from the RELEASES.md ledger row for the stable channel,
     # never hardcoded, so advancing install/STABLE_VERSION cannot leave the smoke on stale digests.
-    assert 'BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$STABLE_VERSION" --image scanner)}"' in script
+    assert 'BASELINE_IMAGE="${BASELINE_IMAGE:-$(python3 "$REPO_ROOT/scripts/release_ledger.py" --version "$BASELINE_VERSION" --image scanner)}"' in script
     ledger = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "release_ledger.py"), "--version",
          (ROOT / "install" / "STABLE_VERSION").read_text(encoding="utf-8").strip(), "--image", "scanner"],
@@ -633,20 +633,20 @@ exit 0
     assert "22 GiB required" in payload["detail"]
 
 
-def test_api_overlay_smoke_proves_shared_layers_identity_and_role_isolation():
+def test_api_boundary_smoke_proves_shared_identity_and_role_isolation():
     smoke = (ROOT / "scripts" / "docker_api_overlay_smoke.sh").read_text()
     makefile = (ROOT / "Makefile").read_text()
 
     assert 'SCANNER_RUNTIME_IMAGE=$WORKER_IMAGE' in smoke
     assert 'SHAKERSCAN_API_OVERLAY_PREBUILT' in smoke
     assert 'docker image inspect "$API_IMAGE"' in smoke
-    assert '($api | length) == (($worker | length) + 1)' in smoke
-    assert '$api[0:($worker | length)] == $worker' in smoke
     assert 'worker image must not contain Docker' in smoke
     assert 'Docker version 27.5.1, build 9f9e405' in smoke
     assert 'runtime API must not carry Buildx' in smoke
+    assert 'test "$(id -u)" != 0' in smoke
+    assert 'test ! -e /opt/tools' in smoke
     assert 'release-manifest.json' in smoke
-    assert '64 * 1024 * 1024' in smoke
+    assert 'saved_bytes=$((worker_size - api_size))' in smoke
     assert "e2e-api-overlay:" in makefile
     assert "scripts/docker_api_overlay_smoke.sh" in makefile
 
@@ -774,6 +774,9 @@ UI_IMAGE_REPO=release-ui
 SCANNER_IMAGE_TAG=release-tag
 prepare_runtime_files() { :; }
 persist_remote_access_env() { :; }
+warn_if_ui_port_has_foreign_listener() { :; }
+resolve_docker_socket_gid() { printf '0\n'; }
+write_dotenv_value() { :; }
 resolve_start_workers() { printf '1\n'; }
 set_build_env() { :; }
 pull_prebuilt_images() { printf 'pull-prebuilt\n'; }
@@ -831,6 +834,48 @@ start_services
     assert outputs[(1, 1)].count("pull-prebuilt") == 1
     assert "record:prebuilt" in outputs[(1, 1)]
     assert "compose:up --no-build -d --scale worker=1" in outputs[(1, 1)]
+
+
+def test_start_warns_only_when_the_ui_port_is_owned_outside_the_compose_project():
+    script = (ROOT / "scanner.sh").read_text()
+    warning = script.split("warn_if_ui_port_has_foreign_listener() {", 1)[1].split("\n}", 1)[0]
+    harness = r'''
+set -eu
+YELLOW=''
+NC=''
+SHAKERSCAN_BIND_HOST=127.0.0.1
+SHAKERSCAN_UI_PORT=3000
+COMPOSE_PROJECT_NAME=expected-project
+docker() {
+    if [ "${OWNED:-0}" = 1 ]; then
+        printf 'owned-ui\n'
+    fi
+}
+host_port_is_occupied() { [ "${OCCUPIED:-0}" = 1 ]; }
+warn_if_ui_port_has_foreign_listener() {
+__WARNING__
+}
+warn_if_ui_port_has_foreign_listener
+'''.replace("__WARNING__", warning)
+
+    free = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "0", "OWNED": "0"}, check=False,
+    )
+    foreign = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "1", "OWNED": "0"}, check=False,
+    )
+    owned = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True,
+        env={**os.environ, "OCCUPIED": "1", "OWNED": "1"}, check=False,
+    )
+
+    assert free.returncode == foreign.returncode == owned.returncode == 0
+    assert free.stderr == ""
+    assert "outside Compose project 'expected-project'" in foreign.stderr
+    assert "ShakerScan will not stop that process" in foreign.stderr
+    assert owned.stderr == ""
 
 
 def test_build_receipt_scopes_prevent_partial_rebuilds_from_authorizing_startup():
@@ -972,14 +1017,14 @@ def test_model_intake_sandbox_queue_is_private_and_runs_as_its_owner():
     assert "MODEL_INTAKE_SANDBOX_GID" in prepare_body
     assert "ensure_directory_mode results/model-intake-sandbox 700" in prepare_body
     assert "ensure_directory_mode results/model-intake-sandbox 777" not in prepare_body
-    for compose_name in (
-        "docker-compose.yml",
-        "docker-compose.release.yml",
-        "docker-compose.worker.yml",
-        "docker-compose.broker-worker.yml",
-    ):
+    # The sandbox exists only on the control plane: fleet overlays carry no Model Intake
+    # service (its toolchain lives in the dedicated image, and fleet workers never consume
+    # the Model Intake queue), so only the two main Compose files pin the sandbox user.
+    for compose_name in ("docker-compose.yml", "docker-compose.release.yml"):
         compose = (ROOT / compose_name).read_text()
         assert 'user: "${MODEL_INTAKE_SANDBOX_UID:-10001}:${MODEL_INTAKE_SANDBOX_GID:-10001}"' in compose
+    for compose_name in ("docker-compose.worker.yml", "docker-compose.broker-worker.yml"):
+        assert "model-intake-sandbox" not in (ROOT / compose_name).read_text()
 
     dockerfile = (ROOT / "scanner" / "Dockerfile").read_text()
     assert "useradd --uid 10001 --user-group --create-home scanner" in dockerfile
@@ -1092,6 +1137,9 @@ UI_IMAGE_REPO=release-ui
 SCANNER_IMAGE_TAG=release-tag
 prepare_runtime_files() { printf 'prepare\n'; }
 persist_remote_access_env() { :; }
+warn_if_ui_port_has_foreign_listener() { :; }
+resolve_docker_socket_gid() { printf '0\n'; }
+write_dotenv_value() { :; }
 resolve_start_workers() { printf '1\n'; }
 restart_worker_count() { printf '3\n'; }
 set_build_env() { :; }

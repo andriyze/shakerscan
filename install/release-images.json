@@ -1,0 +1,45 @@
+{
+  "schema_version": "shakerscan-release-images/v1",
+  "images": [
+    {
+      "key": "scanner",
+      "lock_key": "SCANNER_IMAGE",
+      "repository": "shakerscan/shakerscan-scanner",
+      "role": "web_dast_and_specialized_workers",
+      "dockerfile": "scanner/Dockerfile",
+      "compose_services": ["fleet-edge", "worker", "agent-tool-worker", "device-worker", "gungnir-worker"]
+    },
+    {
+      "key": "api",
+      "lock_key": "API_IMAGE",
+      "repository": "shakerscan/shakerscan-api",
+      "role": "control_plane",
+      "dockerfile": "scanner/Dockerfile.api",
+      "compose_services": ["api"]
+    },
+    {
+      "key": "ui",
+      "lock_key": "UI_IMAGE",
+      "repository": "shakerscan/shakerscan-ui",
+      "role": "web_ui",
+      "dockerfile": "ui/Dockerfile",
+      "compose_services": ["ui"]
+    },
+    {
+      "key": "signer",
+      "lock_key": "SIGNER_IMAGE",
+      "repository": "shakerscan/shakerscan-model-intake-signer",
+      "role": "model_intake_admission_signer",
+      "dockerfile": "api/model_intake_signer.Dockerfile",
+      "compose_services": ["model-intake-signer"]
+    },
+    {
+      "key": "model_intake",
+      "lock_key": "MODEL_INTAKE_IMAGE",
+      "repository": "shakerscan/shakerscan-model-intake",
+      "role": "model_intake_artifact_scanning",
+      "dockerfile": "scanner/Dockerfile.model-intake",
+      "compose_services": ["model-intake-worker", "model-intake-sandbox"]
+    }
+  ]
+}

@@ -1014,6 +1014,27 @@ def build_enforced_scanner_plan(
         }
     elif scanner == "katana_headless":
         http = int(reservation.get("http_requests") or 0)
+        chrome_data_dir = str(runtime.get("chrome_data_dir") or "")
+        if chrome_data_dir:
+            try:
+                profile_stat = os.stat(chrome_data_dir, follow_symlinks=False)
+            except OSError as exc:
+                raise AgentToolError(
+                    "headless browser profile must be a worker-owned directory"
+                ) from exc
+            if (
+                not os.path.isabs(chrome_data_dir)
+                or not os.path.isdir(chrome_data_dir)
+                or os.path.islink(chrome_data_dir)
+                or profile_stat.st_uid != os.geteuid()
+                or profile_stat.st_mode & 0o077
+            ):
+                raise AgentToolError(
+                    "headless browser profile must be a worker-owned directory"
+                )
+            argv.extend([
+                "-no-incognito", "-chrome-data-dir", chrome_data_dir,
+            ])
         # A browser needs a longer teardown window than the bare crawler: it has
         # a Chromium process group to close before katana can exit cleanly.
         if wall < 12:
@@ -1047,6 +1068,7 @@ def build_enforced_scanner_plan(
             "redirects": 0, "form_fill": False, "depth": 2, "concurrency": 4,
             "shutdown_grace_seconds": shutdown_grace,
             "browser": "system_chromium",
+            "browser_profile_seeded": bool(chrome_data_dir),
         }
     elif scanner == "ffuf":
         wordlist_path = str(runtime.get("ffuf_wordlist") or "")

@@ -125,14 +125,14 @@ class Backend:
 
 def _dispatcher(
     plan, backend, *, target=TARGET, policy=None, private_inputs=None,
-    private_replay_plan_loader=None,
+    private_replay_plan_loader=None, options=None,
 ):
     async def process_runner(*_args, **_kwargs):
         raise AssertionError("process runner must not be used")
 
     return DatabaseNeutralScanActionDispatcher(
         target_url="https://app.example.test/",
-        options={},
+        options=dict(options or {}),
         target=target,
         policy=policy or ScanPolicy(),
         scan_id=plan.scan_id,
@@ -145,6 +145,47 @@ def _dispatcher(
         private_inputs=private_inputs,
         private_replay_plan_loader=private_replay_plan_loader,
     )
+
+
+def test_browser_crawl_forwards_only_worker_private_browser_storage(monkeypatch):
+    scan_id = str(uuid.uuid4())
+    action = _action("discover.browser_crawl", "web.browser_crawl", 0)
+    plan = ScanActionPlan(
+        scan_id=scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    seed = {
+        "schema_version": "scan-browser-storage/v1",
+        "kind": "local_storage",
+        "key": "auth.token",
+        "value": "worker-private-token",
+    }
+    captured = {}
+
+    async def execute(_self, context, adapter, **_kwargs):
+        captured.update(adapter._process_payload)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=(),
+            execution_started=True,
+            parser_version="katana-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    dispatcher = _dispatcher(
+        plan,
+        Backend(),
+        options={"auth_browser_storage": seed},
+    )
+
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert receipt.status == "success"
+    assert captured["browser_storage"] == seed
+    assert "worker-private-token" not in json.dumps(receipt.redacted_execution)
 
 
 def _principal(lane):

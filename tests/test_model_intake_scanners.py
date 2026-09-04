@@ -49,6 +49,42 @@ def test_missing_required_external_scanner_is_unsupported_and_fail_closed(monkey
     assert summary["required_non_pass"] == ["required-tool"]
 
 
+def test_trivy_refresh_keeps_the_baked_database_when_egress_fails(monkeypatch):
+    states = iter([
+        {"database": {"present": True, "fresh": True, "updated_at": "2026-08-30T00:00:00+00:00"}},
+        {"database": {"present": True, "fresh": True, "updated_at": "2026-08-30T00:00:00+00:00"}},
+    ])
+    monkeypatch.setattr(scanners, "_scanner_material_state", lambda _spec: next(states))
+    monkeypatch.setattr(scanners.shutil, "which", lambda _name: "/opt/tools/trivy")
+    monkeypatch.setattr(
+        scanners.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Completed", (), {"returncode": 1})(),
+    )
+
+    receipt = scanners.refresh_trivy_database_at_worker_start()
+
+    assert receipt["status"] == "baked_fallback"
+    assert receipt["error"] == "trivy_exit_1"
+    assert receipt["database_ready"] is True
+    assert receipt["trivy_db_updated_at"] == "2026-08-30T00:00:00+00:00"
+
+
+def test_generated_evidence_records_the_trivy_database_timestamp():
+    result = {
+        "scanner": {"name": "trivy"},
+        "execution": {
+            "status": "PASS",
+            "required": True,
+            "database_updated_at": "2026-09-04T00:00:00+00:00",
+        },
+        "findings": [],
+        "evidence_sha256": "e" * 64,
+    }
+    summary = scanners.generated_evidence_summary([result])
+    assert summary["trivy_db_updated_at"] == "2026-09-04T00:00:00+00:00"
+
+
 def test_trivy_full_license_mode_is_limited_to_complete_repository(monkeypatch, tmp_path):
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()

@@ -132,7 +132,7 @@ def main() -> int:
     parser.add_argument("--benchmarks", default="tests/benchmark/honey_benchmarks.json")
     parser.add_argument("--benchmark", action="append", default=[], help="Benchmark name to run from config.")
     parser.add_argument("--target", action="append", default=[], help="Ad hoc benchmark target as name=url.")
-    parser.add_argument("--budget-profile", choices=["fast", "balanced", "thorough"])
+    parser.add_argument("--budget-profile", choices=["fast", "balanced", "thorough", "deep"])
     parser.add_argument("--active-testing", action="store_true", help="Authorize active DAST for selected targets.")
     parser.add_argument("--custom-budget", help="JSON custom_budget override.")
     parser.add_argument("--public", action="store_true", help="Force public-only option on queued scans.")

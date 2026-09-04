@@ -446,7 +446,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "properties": {
                     "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                     "include_web_dast": {"type": "boolean"},
-                    "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
+                    "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough", "deep"]},
                     "include_imported_requests": {"type": "boolean"},
                     "reason": {"type": "string", "maxLength": 500},
                     "capability_ids": {
@@ -652,7 +652,7 @@ def validate_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         web_budget_profile = str(
             args.get("web_budget_profile") or "balanced"
         ).lower()
-        if web_budget_profile not in {"fast", "balanced", "thorough"}:
+        if web_budget_profile not in {"fast", "balanced", "thorough", "deep"}:
             raise ValueError("queue_device_scan web_budget_profile is invalid")
         reason = str(args.get("reason") or "").strip()
         if not reason:

@@ -1547,7 +1547,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "coverage_profile": {"type": "string", "enum": ["inventory", "posture", "thorough"]},
                 "include_web_dast": {"type": "boolean"},
-                "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough"]},
+                "web_budget_profile": {"type": "string", "enum": ["fast", "balanced", "thorough", "deep"]},
                 "include_imported_requests": {"type": "boolean"},
                 "reason": {"type": "string", "maxLength": 500},
                 "capability_ids": {"type": "array", "items": {"type": "string", "enum": ["ssh-authenticated-host-review"]}, "maxItems": 1},

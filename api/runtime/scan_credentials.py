@@ -704,6 +704,41 @@ def bind_resolved_scan_credential(
             result["auth_headers_json"] = json.dumps(
                 headers, sort_keys=True, separators=(",", ":")
             )
+        if lane == "primary" and scan_credential_allows_capability(
+            getattr(resolved.profile, "allowed_capabilities", ()),
+            "web.browser_crawl",
+        ):
+            if kind == "cookie":
+                cookie = str(headers.get(lowered.get("cookie", "")) or "")
+                if cookie:
+                    result["auth_browser_storage"] = {
+                        "schema_version": "scan-browser-storage/v1",
+                        "kind": "cookie_header",
+                        "value": cookie,
+                    }
+            elif kind == "bearer_token":
+                authorization = str(
+                    headers.get(lowered.get("authorization", "")) or ""
+                )
+                scheme, separator, token = authorization.partition(" ")
+                storage_key = str(
+                    getattr(resolved.profile, "configuration", {}).get(
+                        "browser_storage_key"
+                    )
+                    or ""
+                ).strip()
+                if (
+                    scheme.lower() == "bearer"
+                    and separator
+                    and token
+                    and storage_key
+                ):
+                    result["auth_browser_storage"] = {
+                        "schema_version": "scan-browser-storage/v1",
+                        "kind": "local_storage",
+                        "key": storage_key,
+                        "value": token,
+                    }
         return result
 
     interactive = resolved.interactive_http()

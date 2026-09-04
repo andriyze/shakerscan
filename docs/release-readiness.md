@@ -1,19 +1,35 @@
-# ShakerScan 2.0.0 Release Readiness
+# ShakerScan 2.2.0 Release Readiness
 
-**Status (2026-09-03): 2.0.0 published and promoted.** Candidate run 33714172205 on `9d207661`
-passed exact-manifest certification with the authorized declared-debt waivers, promotion run
-33717500565 published the digests and the GitHub Release, the public install smoke passed, and
-`install/STABLE_VERSION` moved to 2.0.0. The checklist below is retained as the template for the
-next release; its unchecked items describe work that was deliberately declared as debt, not gates
-that were skipped.
+**Status (2026-09-04): 2.2.0 candidate metadata prepared on `fix/start-secrets-before-rotation`
+(PR #76); certification not yet run.** 2.1.0 is published and is the stable upgrade base. The branch
+was audited and retested after its implementation pass: the complete partitioned Python suite, the
+UI unit suite, the source gates (module-size ratchet, capability inventory, install manifest, scan
+and hunt contracts, image inventory, import closure), both offline installer smokes, a local build
+of the slim non-root API image with socket access proven through the in-container group, and a
+local build of the Model Intake image with `pip` and `setuptools` stripped from its tool
+environments. Live retest on the rebuilt local fleet (2026-09-04, honey, balanced, active): the single-worker
+Scan ran three appended continuation revisions before the finalizer (plan revision 4), spent 1,891 of
+3,600 tool-wall seconds and 8,678 requests, and stopped because the template manifest was exhausted,
+not the budget; the pre-fix thorough Scan of the same target had spent 26% of its wall after one
+round. Every active template batch still timed out at its slice at 18 s per template, so the
+per-template wall is now 45 s (12 s passive). The verifier batches settling their reservation in one
+second is the open DAST-1 item. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
+both upgrade receipts, the five image scans), a current-fleet authenticated Juice Shop and crAPI
+measurement against the DAST-8 exit bar, and the installed-stack run of H-10/H-11 and MI-6.
 
 This is the live release checklist. Source, migrations, generated inventories, immutable runtime
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
-useful regression evidence, but do not qualify the frozen 2.0.0 candidate.
+useful regression evidence, but do not qualify the frozen 2.2.0 candidate.
+
+## 2.2.0 decision record
+
+| Control | Decision | Owner | Date | Release consequence |
+|---|---|---|---|---|
+| MI-6 durable trust-anchor lifecycle | Ship as release-gated, not as a preview exclusion. | Release owner | 2026-09-04 | Caller-supplied anchors remain rejected; expiry, wrong-key, exact active-key, and deactivation checks are hard installed-stack gates and cannot be converted to declared-debt XFAILs. |
 
 ## Supported product boundary
 
-ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
+ShakerScan 2.2.0 remains a trusted-operator, self-hosted security scanner.
 
 - Localhost is the default. Remote UI/API access must remain behind Tailscale, a VPN, a firewall, or
   an operator-managed authenticated reverse proxy. Direct public exposure is unsupported.
@@ -34,8 +50,8 @@ ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.
 - Model Intake is release-gated for deterministic static review, artifacts/reports, and the opt-in
   AMD64 Linux/KVM Firecracker tier. Incomplete evidence or unavailable required controls fail closed.
 - Fleet production support is the outbound-only HTTPS `broker` transport. WireGuard remains preview
-  code outside the 2.0.0 support boundary pending its own physical acceptance.
-- AI Gate remains preview in 2.0.0.
+  code outside the 2.2.0 support boundary pending its own physical acceptance.
+- AI Gate remains preview in 2.2.0.
 
 ## Stop-ship contract
 
@@ -67,8 +83,8 @@ backlog reaches zero.
 
 ## Preliminary preparation evidence
 
-These checks were run during the working audit and must be repeated if product/runtime code changes
-after the candidate is frozen:
+These checks are historical 2.0.0 preparation evidence. They must not be checked off for 2.2.0
+until repeated against the frozen 2.2.0 candidate:
 
 - [x] Complete candidate-runtime Python suite: 1,143 package-native and 3,686 compatibility tests
   (4,829 total).
@@ -138,7 +154,7 @@ exact candidate is intentional.
 
 ## Frozen-candidate validation
 
-Run every item against the exact commit intended for `v2.0.0`. Any product, migration, runtime,
+Run every item against the exact commit intended for `v2.2.0`. Any product, migration, runtime,
 test, workflow, or operational change creates a new candidate and invalidates earlier candidate
 receipts.
 
@@ -210,7 +226,7 @@ receipts.
 2. Freeze one exact candidate SHA after all implementation and manual fixes.
 3. Obtain successful exact-SHA CodeQL. Attach optional physical-boundary receipts only for support
    tiers being qualified.
-4. Run **Release candidate** for 2.0.0; publish only immutable candidate tags and preserve receipts.
+4. Run **Release candidate** for 2.2.0; publish only immutable candidate tags and preserve receipts.
 5. Complete candidate-image, upgrade, UI/API/CLI/MCP, and public-install acceptance.
 6. Run **Promote release** to map version tags to accepted digests, create the annotated tag, and
    attach the lock and certified receipt to the GitHub Release without rebuilding.

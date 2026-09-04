@@ -28,6 +28,7 @@ export interface CredentialProfile {
     scope_count: number
     custom_header_names: string[]
     parameter_name?: string | null
+    browser_storage_key?: string | null
     interactive_exchange_required: boolean
     secret_values_visible: false
   }

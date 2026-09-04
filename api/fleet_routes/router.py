@@ -3253,7 +3253,7 @@ def _control_plane_broker_ingest_payload(job_payload: Mapping[str, Any]) -> dict
     if isinstance(options, dict):
         options.pop("placement", None)
     return ingest_payload
-SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough"}
+SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough", "deep"}
 
 
 BROKER_LEASE_SECONDS = max(60, int(os.environ.get("SHAKERSCAN_BROKER_LEASE_SECONDS", "300")))

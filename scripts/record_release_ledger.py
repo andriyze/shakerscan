@@ -24,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_ledger import COLUMNS  # noqa: E402
+from release_image_inventory import LOCK_KEYS  # noqa: E402
 
-LOCK_KEYS = {"scanner": "SCANNER_IMAGE", "api": "API_IMAGE", "ui": "UI_IMAGE", "signer": "SIGNER_IMAGE", "model_intake": "MODEL_INTAKE_IMAGE"}
 _IMAGE_REF = re.compile(r"^([a-z0-9][a-z0-9._/-]*)@(sha256:[0-9a-f]{64})$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")

@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +71,7 @@ import parallel_scan
 import asm_inventory
 import family_proof
 import agent_tools
+import worker_queue_policy as worker_queue_policy_module
 from capabilities.network import (
     CapabilityInputError,
     NetworkExecutionAdapter,
@@ -216,6 +218,7 @@ from scan.budget_allocator import (
 )
 from scan.continuation import (
     ContinuationBudgetCeiling,
+    MAX_SCAN_CONTINUATION_ROUNDS,
     reconciled_continuation_ceiling,
     ScanContinuationAllocation,
     ScanContinuationError,
@@ -223,11 +226,18 @@ from scan.continuation import (
     amended_scan_plan_revision,
     absent_receipt_summary,
     build_discovery_continuation_manifests,
+    continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     load_discovery_shard_receipts,
     merge_scan_action_continuation,
 )
 from scan.manifest_store import PostgresScanManifestStore
+from scan.continuation_rounds import (
+    ContinuationRuntime,
+    load_continuation_request_manifests,
+    materialize_local_scan_continuation,
+    run_continuation_rounds,
+)
 from scan.parallel_inputs import (
     ParallelScanInputError,
 )
@@ -269,6 +279,7 @@ from scan.execution_backend import (
 from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
+from scanner_tools.browser_profile import seed_browser_profile
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -313,7 +324,7 @@ from runtime.reservation_store import (
 )
 from pinned_socks_proxy import PinnedSocksProxy
 import investigation_candidates
-from worker_queue_policy import base_worker_queue_keys, worker_role
+from worker_queue_policy import base_worker_queue_keys, worker_role, worker_tool_commands
 from model_intake_admissions import persist_from_result as persist_model_intake_admission
 from job_queue import (
     DEFAULT_WORKER_TOOL_COMMANDS,
@@ -415,6 +426,7 @@ SCAN_LOG_TAIL = int(os.environ.get('SCAN_LOG_TAIL', '200'))
 SCAN_LOG_TTL_SECONDS = int(os.environ.get('SCAN_LOG_TTL_SECONDS', '86400'))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get('HEARTBEAT_INTERVAL_SECONDS', '30'))
 WORKER_QUEUE_BLOCK_SECONDS = max(1, int(os.environ.get("WORKER_QUEUE_BLOCK_SECONDS", "30")))
+WORKER_BUILD_REPORT_INTERVAL_SECONDS = max(5, int(os.environ.get("SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS", "30")))
 QUEUE_VISIBILITY_TIMEOUT_SECONDS = max(
     60,
     int(os.environ.get("SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS", "300")),
@@ -454,7 +466,7 @@ TOOL_RECEIPT_ADAPTER_VERSION = "2026-07-05.v1"
 DEVICE_SSH_AUTH_COOLDOWN_SECONDS = max(60, int(os.environ.get("DEVICE_SSH_AUTH_COOLDOWN_SECONDS", "1800")))
 DEVICE_SSH_AUTH_DAILY_FAILURE_CAP = max(1, int(os.environ.get("DEVICE_SSH_AUTH_DAILY_FAILURE_CAP", "3")))
 
-SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough"}
+SCAN_BUDGET_PROFILES = {"fast", "balanced", "thorough", "deep"}
 DEVICE_RUN_KINDS = {"device_posture", "device_probe", "device_web_dast"}
 SCANNER_AUTH_CONFIG_KEYS = {
     "api_token",
@@ -1505,6 +1517,7 @@ def run_worker_preflight() -> None:
     if os.environ.get("WORKER_PREFLIGHT_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         print("[preflight] worker preflight disabled", flush=True)
         return
+    worker_queue_policy_module.refresh_model_intake_scanner_data(MODEL_INTAKE_ONLY_WORKER)
 
     try:
         try:
@@ -11560,38 +11573,14 @@ async def _load_scan_continuation_request_manifests(
     target_binding_digest: str,
     options: Mapping[str, Any],
 ) -> tuple[ScanWorkManifest, ...]:
-    raw_refs = options.get("request_manifest_refs")
-    if not isinstance(raw_refs, Mapping):
-        return ()
-    references: list[ScanWorkManifestReference] = []
-    for raw in raw_refs.values():
-        if not isinstance(raw, Mapping):
-            continue
-        reference = ScanWorkManifestReference.from_dict(raw)
-        if reference.kind is not ScanWorkManifestKind.REQUEST:
-            raise ScanCapabilityContractError(
-                "continuation request manifest has the wrong kind"
-            )
-        references.append(reference)
-    manifests: list[ScanWorkManifest] = []
-    async with db_pool.acquire() as conn:
-        store = PostgresScanManifestStore()
-        for reference in references:
-            manifest = await store.load(
-                conn,
-                manifest_id=reference.manifest_id,
-                scan_id=scan_id,
-                expected_kind=reference.kind,
-                expected_digest=reference.manifest_digest,
-                expected_target_binding_digest=target_binding_digest,
-            )
-            if manifest is None or manifest.reference() != reference:
-                record_operational_event(get_redis(), "manifest_download_failure")
-                raise ScanCapabilityContractError(
-                    "continuation request manifest is unavailable"
-                )
-            manifests.append(manifest)
-    return tuple(manifests)
+    return await load_continuation_request_manifests(
+        db_pool=db_pool,
+        scan_id=scan_id,
+        target_binding_digest=target_binding_digest,
+        options=options,
+        on_missing=lambda: record_operational_event(get_redis(), "manifest_download_failure"),
+        manifest_store_factory=lambda: PostgresScanManifestStore(),
+    )
 
 
 async def _materialize_local_scan_continuation(
@@ -11601,164 +11590,28 @@ async def _materialize_local_scan_continuation(
     parent_results: Mapping[str, CapabilityResultReference],
     dispatcher: DatabaseNeutralScanActionDispatcher,
     execution_plan: Any,
-) -> tuple[ScanActionPlan, ScanPlanRevision]:
-    observations = {
-        action.action_id: await dispatcher._observations(action.action_id)
-        for action in parent_plan.actions
-    }
-    request_manifests = await _load_scan_continuation_request_manifests(
-        scan_id=dispatcher.scan_id,
-        target_binding_digest=dispatcher.target.digest,
-        options=dispatcher.options,
-    )
-    endpoints, candidates = build_discovery_continuation_manifests(
-        allocation=allocation,
-        target_url=dispatcher.target_url,
-        target=dispatcher.target,
-        options=dispatcher.options,
-        action_results=parent_results,
-        observations=observations,
-        request_manifests=request_manifests,
-    )
-    request_candidates = (
-        build_request_candidate_manifest(
-            request_manifests,
-            source_action_ids=tuple(dict.fromkeys(
-                action_id
-                for manifest in request_manifests
-                for action_id in manifest.source_action_ids
-            )),
-            maximum=max(
-                1,
-                min(2_000, allocation.budget_ceiling.get(
-                    "state_changing_requests", 0,
-                )),
-            ),
-        )
-        if request_manifests else None
-    )
-    credential_refs = [
-        dict(item)
-        for item in dispatcher.options.get("credential_profile_refs") or ()
-        if isinstance(item, Mapping)
-    ]
-    collection_refs = [
-        dict(item)
-        for item in dispatcher.options.get("request_collections") or ()
-        if isinstance(item, Mapping)
-    ]
-    request_refs = dispatcher.options.get("request_manifest_refs")
-    template_ref = dispatcher.options.get("template_manifest_ref")
-    # Derived from the compiler's own rule: only an interactive credential gets
-    # an inputs.auth_* action, so allocating one per credential named actions
-    # that were never created and the plan was rejected outright.
-    zero_cost_existing_inputs = {
-        action_id: {}
-        for action_id in interactive_auth_input_action_ids(credential_refs)
-    }
-    zero_cost_existing_inputs.update({
-        f"inputs.collection_{index:02d}": {}
-        for index, _item in enumerate(collection_refs)
-    })
-    continuation_raw = ScanActionPlanCompiler().compile(
-        scan_id=dispatcher.scan_id,
-        execution_plan=execution_plan,
-        target_binding=dispatcher.target,
-        credential_profile_refs=credential_profile_action_refs(credential_refs),
-        request_collection_refs=request_collection_action_refs(collection_refs),
-        request_manifest_refs=(
-            {
-                str(key): dict(value)
-                for key, value in request_refs.items()
-                if isinstance(value, Mapping)
-            }
-            if isinstance(request_refs, Mapping) else None
+    revision_number: int = 1,
+    include_finalizer: bool = True,
+    finalize_only: bool = False,
+) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+    """Compile and persist one continuation revision (see scan.continuation_rounds)."""
+    return await materialize_local_scan_continuation(
+        ContinuationRuntime(
+            db_pool=db_pool,
+            dispatcher=dispatcher,
+            execution_plan=execution_plan,
+            load_request_manifests=_load_scan_continuation_request_manifests,
+            record_event=lambda name: record_operational_event(get_redis(), name),
+            manifest_store_factory=lambda: PostgresScanManifestStore(),
+            action_store_factory=lambda: PostgresScanActionStore(),
         ),
-        endpoint_manifest_ref=endpoints.reference().canonical_dict(),
-        candidate_manifest_ref=candidates.reference().canonical_dict(),
-        request_candidate_manifest_ref=(
-            request_candidates.reference().canonical_dict()
-            if request_candidates is not None and request_candidates.entries
-            else None
-        ),
-        template_manifest_ref=(
-            dict(template_ref) if isinstance(template_ref, Mapping) else None
-        ),
-        action_scope="endpoint",
-        action_budgets=zero_cost_existing_inputs,
-    )
-    continuation_plan = allocate_scan_action_plan(
-        continuation_raw,
-        # Admit against what the settled root actions actually left, not the
-        # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
-        ContinuationBudgetCeiling(
-            reconciled_continuation_ceiling(allocation, parent_results),
-        ),
-    ).plan
-    amended = merge_scan_action_continuation(
         parent_plan=parent_plan,
-        continuation_plan=continuation_plan,
         allocation=allocation,
         parent_results=parent_results,
+        revision_number=revision_number,
+        include_finalizer=include_finalizer,
+        finalize_only=finalize_only,
     )
-    revision = amended_scan_plan_revision(
-        parent_plan=parent_plan,
-        continuation_plan=continuation_plan,
-        amended_plan=amended,
-        allocation=allocation,
-        discovery_results=parent_results,
-        work_manifest_references=unique_work_manifest_reference_dicts(
-            action.capability_args for action in continuation_plan.actions
-        ),
-    )
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            manifest_store = PostgresScanManifestStore()
-            await manifest_store.persist(conn, manifest=endpoints)
-            await manifest_store.persist(conn, manifest=candidates)
-            if request_candidates is not None:
-                await manifest_store.persist(conn, manifest=request_candidates)
-            await PostgresScanActionStore().amend_plan(
-                conn,
-                parent_plan=parent_plan,
-                amended_plan=amended,
-                allocation=allocation,
-                revision=revision,
-            )
-            await conn.execute(
-                """
-                UPDATE scans
-                SET options=options || $2::jsonb
-                WHERE id=$1 AND status NOT IN ('cancelled','cancelling')
-                """,
-                uuid.UUID(dispatcher.scan_id),
-                json.dumps({
-                    "endpoint_manifest_id": str(endpoints.manifest_id),
-                    "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-                    "candidate_manifest_ref": candidates.reference().canonical_dict(),
-                    "request_candidate_manifest_ref": (
-                        request_candidates.reference().canonical_dict()
-                        if request_candidates is not None and request_candidates.entries
-                        else None
-                    ),
-                    "scan_continuation_plan_digest": amended.plan_digest,
-                    "scan_plan_revision": revision.canonical_dict(),
-                }),
-            )
-    dispatcher.options.update({
-        "endpoint_manifest_id": str(endpoints.manifest_id),
-        "endpoint_manifest_ref": endpoints.reference().canonical_dict(),
-        "candidate_manifest_ref": candidates.reference().canonical_dict(),
-        "request_candidate_manifest_ref": (
-            request_candidates.reference().canonical_dict()
-            if request_candidates is not None and request_candidates.entries
-            else None
-        ),
-        "scan_continuation_plan_digest": amended.plan_digest,
-        "scan_plan_revision": revision.canonical_dict(),
-    })
-    record_operational_event(get_redis(), "continuation_compiled")
-    return amended, revision
 
 
 async def _execute_reserved_deterministic_scan(
@@ -11878,7 +11731,7 @@ async def _execute_reserved_deterministic_scan(
             scan_id=scan_id,
             job_id=job_id,
             progress_start=5,
-            progress_end=95 if initial_has_finalizer else 45,
+            progress_end=95 if initial_has_finalizer else 40,
             backend=backend,
         ),
     ).run(plan)
@@ -11898,50 +11751,67 @@ async def _execute_reserved_deterministic_scan(
             raise ScanCapabilityContractError(
                 "active Scan has no upfront continuation allocation"
             )
-        try:
-            plan, plan_revision = await _materialize_local_scan_continuation(
-                parent_plan=plan,
+        async def run_amended_plan(
+            amended_plan: ScanActionPlan,
+            amended_revision: ScanPlanRevision,
+            *,
+            progress_start: int,
+            progress_end: int,
+        ) -> Any:
+            nonlocal backend
+            backend = PostgresScanExecutionBackend(
+                pool=db_pool,
+                plan=amended_plan,
+                worker_id=worker_id,
+                backend_name="local",
+                aggregate_owner_id=(
+                    str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
+                    or None
+                ),
+            )
+            dispatcher.plan = amended_plan
+            dispatcher.plan_revision = amended_revision
+            dispatcher.backend = backend
+            amended_executor = ReceiptScanActionExecutor(
+                scan_id=scan_id,
+                target_id=execution.target_binding.target_id,
+                worker_id=worker_id,
+                dispatcher=dispatcher,
+                scope_receipt_id=execution.target_binding.scope_receipt_id,
+                approval_receipt_id=admission.plan.policy.approval_receipt_id,
+            )
+            return await ScanOrchestrator(
+                backend=backend,
+                executor=amended_executor,
+                event_callback=_local_scan_action_activity_callback(
+                    plan=amended_plan,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    progress_start=progress_start,
+                    progress_end=progress_end,
+                    backend=backend,
+                ),
+            ).run(amended_plan)
+
+        async def materialize_round(**kwargs: Any) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+            return await _materialize_local_scan_continuation(
                 allocation=continuation_allocation,
-                parent_results=orchestration.action_results,
                 dispatcher=dispatcher,
                 execution_plan=execution.execution_plan,
+                **kwargs,
+            )
+
+        try:
+            plan, plan_revision, orchestration = await run_continuation_rounds(
+                plan=plan,
+                plan_revision=plan_revision,
+                initial_results=orchestration.action_results,
+                materialize=materialize_round,
+                run_round=run_amended_plan,
             )
         except ScanContinuationError as exc:
             record_operational_event(get_redis(), "continuation_rejected")
             raise ScanCapabilityContractError(str(exc)) from exc
-        backend = PostgresScanExecutionBackend(
-            pool=db_pool,
-            plan=plan,
-            worker_id=worker_id,
-            backend_name="local",
-            aggregate_owner_id=(
-                str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
-                or None
-            ),
-        )
-        dispatcher.plan = plan
-        dispatcher.plan_revision = plan_revision
-        dispatcher.backend = backend
-        executor = ReceiptScanActionExecutor(
-            scan_id=scan_id,
-            target_id=execution.target_binding.target_id,
-            worker_id=worker_id,
-            dispatcher=dispatcher,
-            scope_receipt_id=execution.target_binding.scope_receipt_id,
-            approval_receipt_id=admission.plan.policy.approval_receipt_id,
-        )
-        orchestration = await ScanOrchestrator(
-            backend=backend,
-            executor=executor,
-            event_callback=_local_scan_action_activity_callback(
-                plan=plan,
-                scan_id=scan_id,
-                job_id=job_id,
-                progress_start=45,
-                progress_end=95,
-                backend=backend,
-            ),
-        ).run(plan)
     final_result = orchestration.action_results.get("finalize.report")
     if final_result is not None and final_result.status.value == "cancelled":
         raise ValueError("Cancelled by user")
@@ -18916,6 +18786,7 @@ async def _execute_agent_scanner_process(
     process_started = False
     execution_uncertain = False
     process_enforcement: dict[str, Any] = {}
+    browser_profile_receipt: dict[str, Any] = {}
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
@@ -18965,7 +18836,13 @@ async def _execute_agent_scanner_process(
                 max_connections=connection_ceiling,
             ).start()
         runtime_paths: dict[str, Any] = {}
-        if name in {"ffuf", "sqlmap"}:
+        browser_storage = (
+            dict(job_data.get("browser_storage") or {})
+            if isinstance(job_data.get("browser_storage"), Mapping) else {}
+        )
+        if name in {"ffuf", "sqlmap"} or (
+            name == "katana_headless" and browser_storage
+        ):
             scratch_dir = tempfile.mkdtemp(
                 prefix=f"shakerscan-{name}-{job_id[:8]}-"
             )
@@ -18982,6 +18859,38 @@ async def _execute_agent_scanner_process(
             })
         if name == "sqlmap":
             runtime_paths["sqlmap_output_dir"] = str(scratch_dir)
+        if name == "katana_headless" and browser_storage:
+            if pinned_proxy is None or not scratch_dir:
+                raise agent_tools.AgentToolError(
+                    "authenticated headless crawl requires the pinned browser transport"
+                )
+            browser_profile_dir = str(Path(scratch_dir) / "chrome-profile")
+            seed_timeout = min(
+                20,
+                max(1, int(reserved_budget.get("tool_wall_seconds") or 0) - 1),
+            )
+            try:
+                browser_profile_receipt = await asyncio.wait_for(
+                    seed_browser_profile(
+                        user_data_dir=browser_profile_dir,
+                        target_origin=urllib.parse.urlunsplit((
+                            parsed_execution.scheme,
+                            parsed_execution.netloc,
+                            "", "", "",
+                        )),
+                        seed=browser_storage,
+                        chromium_path=str(agent_tools._SYSTEM_CHROME_PATH),
+                        proxy_url=pinned_proxy.proxy_url,
+                    ),
+                    timeout=seed_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # browser API errors stay private and fail before traffic
+                raise agent_tools.AgentToolError(
+                    "authenticated browser profile could not be seeded"
+                ) from exc
+            runtime_paths["chrome_data_dir"] = browser_profile_dir
         process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,
@@ -19000,7 +18909,22 @@ async def _execute_agent_scanner_process(
         argv = list(process_plan.argv)
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
-        timeout_ms = max(1_000, min(process_plan.timeout_ms, requested_timeout))
+        elapsed_before_process_ms = max(
+            0, int((time.monotonic() - monotonic_started) * 1_000),
+        )
+        remaining_wall_ms = (
+            int(reserved_budget.get("tool_wall_seconds") or 0) * 1_000
+            - elapsed_before_process_ms
+        )
+        if remaining_wall_ms < 1_000:
+            raise agent_tools.AgentToolError(
+                "scanner setup exhausted its reserved wall-clock budget"
+            )
+        timeout_ms = min(
+            process_plan.timeout_ms,
+            requested_timeout,
+            remaining_wall_ms,
+        )
         process_environment = {
             key: value
             for key, value in os.environ.items()
@@ -19196,6 +19120,7 @@ async def _execute_agent_scanner_process(
         "settlement": settlement,
         "process_enforcement": process_enforcement,
         "network_telemetry": network_telemetry,
+        "browser_profile": browser_profile_receipt,
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
     }
@@ -23266,6 +23191,9 @@ async def async_main():
     loop = asyncio.get_event_loop()
     last_stale_check_monotonic = 0.0
     last_reservation_sweep_monotonic = 0.0
+    build_report_task = asyncio.create_task(worker_queue_policy_module.heartbeat_worker_build_report(
+        report_worker_build_fingerprint, interval_seconds=WORKER_BUILD_REPORT_INTERVAL_SECONDS,
+    ))
 
     try:
         while True:
@@ -23324,14 +23252,6 @@ async def async_main():
                     ),
                 )
                 if lease is None:
-                    # Re-report build identity while idle so the per-worker version
-                    # label converges to the API-published commit after a deploy (the
-                    # startup report can run before the API publishes). build_current
-                    # already uses the source fingerprint; this just freshens the label.
-                    try:
-                        report_worker_build_fingerprint()
-                    except Exception:
-                        pass
                     continue  # Timeout, continue polling
 
                 source_queue = lease.queue_name
@@ -23363,6 +23283,8 @@ async def async_main():
         # Clean shutdown
         pass
     finally:
+        build_report_task.cancel()
+        await worker_queue_policy_module.finish_cancelled_task(build_report_task)
         # A clean container replacement should disappear from lightweight fleet identity
         # immediately. Crash/kill remnants still age out server-side, while graceful rebuilds do
         # not leave a transient false mismatch in the sidebar.
@@ -23439,7 +23361,7 @@ def _worker_build_hostname() -> str:
 
 def _worker_build_report_payload() -> tuple[str, str]:
     hostname = _worker_build_hostname()
-    tool_commands = dict(DEFAULT_WORKER_TOOL_COMMANDS)
+    tool_commands = worker_tool_commands(DEFAULT_WORKER_TOOL_COMMANDS, model_intake_only=MODEL_INTAKE_ONLY_WORKER)
     if AGENT_TOOL_ONLY_WORKER:
         tool_commands.update({
             str(spec.process_tool_name): str(spec.binary or spec.process_tool_name)

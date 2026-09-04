@@ -2560,6 +2560,10 @@ class DatabaseNeutralScanActionDispatcher:
                 "registered_target": registered_target,
                 "scanner_options": scanner_options,
                 "trusted_headers": primary.headers(),
+                "browser_storage": (
+                    self.options.get("auth_browser_storage")
+                    if tool == "katana_headless" else None
+                ),
                 "timeout_ms": int(action.requested_budget.get("tool_wall_seconds") or 1) * 1_000,
                 "pinned_address": socket_factory.primary_address,
                 "authorized_addresses": list(self.target.allowed_addresses),

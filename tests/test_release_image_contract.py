@@ -27,6 +27,9 @@ def test_release_images_keep_docker_client_at_control_plane_boundary():
     assert "DOCKER_CLI_SHA256" not in dockerfile
     assert "ARG SCANNER_RUNTIME_IMAGE=" in api_dockerfile
     assert "FROM ${SCANNER_RUNTIME_IMAGE}" in api_dockerfile
+    assert "AS scanner-runtime" in api_dockerfile
+    assert "USER 10002:10002" in api_dockerfile
+    assert "COPY --from=scanner-runtime /opt/tools" not in api_dockerfile
     assert "DOCKER_CLI_SHA256_X86_64" in api_dockerfile
     assert "DOCKER_CLI_SHA256_AARCH64" in api_dockerfile
     assert "BUILDX_VERSION" not in dockerfile
@@ -68,7 +71,9 @@ def test_release_images_publish_sboms_and_verified_final_digest_provenance():
     assert len(set(attest_uses)) == 1
     assert workflow.count("push-to-registry: true") == 5
     assert workflow.count("create-storage-record: false") == 5
-    assert workflow.count("gh attestation verify") == 5
+    # merge verifies the five final manifests; meta additionally verifies a reusable
+    # build-on-main set inside one loop before certifying by digest.
+    assert workflow.count("gh attestation verify") == 6
     assert "github-actions-sigstore" in workflow
     assert "final-multiarch-image-digests" in workflow
     assert "attestations: write" in workflow
@@ -93,12 +98,13 @@ def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
     assert "ignore-unfixed: true" in workflow
     assert "skip-dirs: ${{ matrix.target.skip_dirs }}" in workflow
     assert "skip-files: ${{ matrix.target.skip_files }}" in workflow
-    # The toolchain scope exclusion follows the toolchain into the Model Intake image; the
-    # scanner and API images are scanned in full (api still skips only its Docker client).
-    assert "skip_dirs: /opt/model-intake-tools" in workflow
-    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner" in workflow
-    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" not in workflow
-    assert workflow.index("- name: model-intake") < workflow.index("skip_dirs: /opt/model-intake-tools")
+    model_intake = workflow.split("- name: model-intake", 1)[1].split("- name: ui", 1)[0]
+    assert 'skip_dirs: ""' in model_intake
+    assert 'skip_files: ""' in model_intake
+    assert "/opt/model-intake-tools" not in workflow
+    assert "/opt/tools/trivy,/opt/tools/osv-scanner" not in workflow
+    assert '--skip-dirs "${{ matrix.target.skip_dirs }}"' in workflow
+    assert '--skip-files "${{ matrix.target.skip_files }}"' in workflow
     assert "exit-code: 1" in workflow
     assert "scanners: vuln" in workflow
     assert "TRIVY_PLATFORM: ${{ matrix.platform.value }}" in workflow
@@ -150,7 +156,7 @@ def test_release_component_builds_have_independent_retry_domains():
 
     assert {"build-runtime", "build-ui", "build-signer"} <= set(jobs)
     assert jobs["merge"]["needs"] == [
-        "meta", "build-runtime", "build-ui", "build-signer",
+        "meta", "validate", "build-runtime", "build-ui", "build-signer",
     ]
     runtime_steps = "\n".join(step.get("name", "") for step in jobs["build-runtime"]["steps"])
     ui_steps = "\n".join(step.get("name", "") for step in jobs["build-ui"]["steps"])

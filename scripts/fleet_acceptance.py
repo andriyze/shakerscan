@@ -613,7 +613,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--authorized", action="store_true", help="confirm authorization to scan --target")
     parser.add_argument(
         "--budget-profile",
-        choices=["fast", "balanced", "thorough"],
+        choices=["fast", "balanced", "thorough", "deep"],
         default="balanced",
         help="passive acceptance resource ceiling (default: balanced)",
     )

@@ -30,7 +30,7 @@ def test_generated_scan_types_match_the_server_contract():
     )
     contract = public_scan_contract()
 
-    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough"]
+    assert list(contract["budget_profiles"]) == ["fast", "balanced", "thorough", "deep"]
     assert "SubmitScanScansPostRequest as ScanStartRequest" in generated
     assert "export interface ScanPublicContract" in generated
     assert "legacy_capability" not in generated

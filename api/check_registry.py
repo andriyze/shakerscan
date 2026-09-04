@@ -19,7 +19,7 @@ class CheckFamilySpec:
     phase: str
     family: str
     label: str
-    default_profiles: tuple[str, ...] = ("balanced", "thorough", "exhaustive")
+    default_profiles: tuple[str, ...] = ("balanced", "thorough", "deep", "exhaustive")
     is_active: bool = False
     requires_auth_states: bool = False
     requires_credentials: bool = False
@@ -49,7 +49,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         phase="recon",
         family="passive",
         label="Recon",
-        default_profiles=("fast", "balanced", "thorough", "exhaustive"),
+        default_profiles=("fast", "balanced", "thorough", "deep", "exhaustive"),
         telemetry_schema="discovery",
         proof_contract=("source_url", "discovery_method", "normalized_endpoint"),
         severity_rules={"finding_ceiling_without_concrete_evidence": "info"},
@@ -62,7 +62,7 @@ CHECK_REGISTRY: tuple[CheckFamilySpec, ...] = (
         phase="template",
         family="nuclei",
         label="Nuclei (passive reviewed pack)",
-        default_profiles=("fast", "balanced", "thorough", "exhaustive"),
+        default_profiles=("fast", "balanced", "thorough", "deep", "exhaustive"),
         is_active=False,
         risk_level="low",
         telemetry_schema="nuclei_template",

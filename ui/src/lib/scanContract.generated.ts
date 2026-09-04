@@ -8,9 +8,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_duration_seconds",
       "profile_ceilings": {
-        "balanced": 1200,
-        "fast": 300,
-        "thorough": 5400
+        "balanced": 3600,
+        "deep": 21600,
+        "fast": 1800,
+        "thorough": 10800
       }
     },
     {
@@ -18,9 +19,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_http_requests",
       "profile_ceilings": {
-        "balanced": 5000,
-        "fast": 1000,
-        "thorough": 20000
+        "balanced": 20000,
+        "deep": 150000,
+        "fast": 5000,
+        "thorough": 60000
       }
     },
     {
@@ -28,9 +30,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_endpoints",
       "profile_ceilings": {
-        "balanced": 2000,
-        "fast": 500,
-        "thorough": 10000
+        "balanced": 10000,
+        "deep": 75000,
+        "fast": 2500,
+        "thorough": 30000
       }
     },
     {
@@ -38,9 +41,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_browser_actions",
       "profile_ceilings": {
-        "balanced": 200,
-        "fast": 50,
-        "thorough": 1000
+        "balanced": 1000,
+        "deep": 7500,
+        "fast": 250,
+        "thorough": 3000
       }
     },
     {
@@ -48,9 +52,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_tcp_ports",
       "profile_ceilings": {
-        "balanced": 5000,
-        "fast": 1000,
-        "thorough": 20000
+        "balanced": 20000,
+        "deep": 150000,
+        "fast": 5000,
+        "thorough": 60000
       }
     },
     {
@@ -58,9 +63,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_tool_wall_seconds",
       "profile_ceilings": {
-        "balanced": 900,
-        "fast": 180,
-        "thorough": 7200
+        "balanced": 3600,
+        "deep": 21600,
+        "fast": 1500,
+        "thorough": 10800
       }
     },
     {
@@ -69,6 +75,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "name": "max_workers",
       "profile_ceilings": {
         "balanced": 4,
+        "deep": 16,
         "fast": 2,
         "thorough": 8
       }
@@ -78,9 +85,10 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 0,
       "name": "max_state_changing_requests",
       "profile_ceilings": {
-        "balanced": 800,
-        "fast": 200,
-        "thorough": 2000
+        "balanced": 2000,
+        "deep": 15000,
+        "fast": 500,
+        "thorough": 6000
       }
     },
     {
@@ -88,44 +96,56 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "minimum": 1,
       "name": "max_hosts",
       "profile_ceilings": {
-        "balanced": 100,
-        "fast": 25,
-        "thorough": 500
+        "balanced": 200,
+        "deep": 2500,
+        "fast": 50,
+        "thorough": 1000
       }
     }
   ],
   "budget_profiles": {
     "balanced": {
-      "max_browser_actions": 200,
-      "max_duration_seconds": 1200,
-      "max_endpoints": 2000,
-      "max_hosts": 100,
-      "max_http_requests": 5000,
-      "max_state_changing_requests": 800,
-      "max_tcp_ports": 5000,
-      "max_tool_wall_seconds": 900,
-      "max_workers": 4
-    },
-    "fast": {
-      "max_browser_actions": 50,
-      "max_duration_seconds": 300,
-      "max_endpoints": 500,
-      "max_hosts": 25,
-      "max_http_requests": 1000,
-      "max_state_changing_requests": 200,
-      "max_tcp_ports": 1000,
-      "max_tool_wall_seconds": 180,
-      "max_workers": 2
-    },
-    "thorough": {
       "max_browser_actions": 1000,
-      "max_duration_seconds": 5400,
+      "max_duration_seconds": 3600,
       "max_endpoints": 10000,
-      "max_hosts": 500,
+      "max_hosts": 200,
       "max_http_requests": 20000,
       "max_state_changing_requests": 2000,
       "max_tcp_ports": 20000,
-      "max_tool_wall_seconds": 7200,
+      "max_tool_wall_seconds": 3600,
+      "max_workers": 4
+    },
+    "deep": {
+      "max_browser_actions": 7500,
+      "max_duration_seconds": 21600,
+      "max_endpoints": 75000,
+      "max_hosts": 2500,
+      "max_http_requests": 150000,
+      "max_state_changing_requests": 15000,
+      "max_tcp_ports": 150000,
+      "max_tool_wall_seconds": 21600,
+      "max_workers": 16
+    },
+    "fast": {
+      "max_browser_actions": 250,
+      "max_duration_seconds": 1800,
+      "max_endpoints": 2500,
+      "max_hosts": 50,
+      "max_http_requests": 5000,
+      "max_state_changing_requests": 500,
+      "max_tcp_ports": 5000,
+      "max_tool_wall_seconds": 1500,
+      "max_workers": 2
+    },
+    "thorough": {
+      "max_browser_actions": 3000,
+      "max_duration_seconds": 10800,
+      "max_endpoints": 30000,
+      "max_hosts": 1000,
+      "max_http_requests": 60000,
+      "max_state_changing_requests": 6000,
+      "max_tcp_ports": 60000,
+      "max_tool_wall_seconds": 10800,
       "max_workers": 8
     }
   },
@@ -336,7 +356,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
   "schema_version": "scan-public-contract/v1"
 } as const
 
-export type ScanBudgetProfile = "fast" | "balanced" | "thorough"
+export type ScanBudgetProfile = "fast" | "balanced" | "thorough" | "deep"
 export type ScanCredentialAuthKind = "api_key_header" | "authorization_header" | "basic_auth" | "bearer_token" | "cookie" | "custom_headers" | "form_login" | "oauth_client_credentials" | "oauth_password"
 export type ScanReplayPolicy = "confirmed_active" | "discovery_only" | "safe_authentication" | "safe_reads"
 export type ScanTargetKind = 'web' | 'api'

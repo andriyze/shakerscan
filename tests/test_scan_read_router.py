@@ -53,7 +53,8 @@ def test_family_preview_resolves_standard_active_without_ai_or_implicit_families
         "recon", "nuclei_passive", "xss", "sqli",
     ]
     assert preview["requested_families"] == []
-    assert preview["minimum_family_quotas"] == {"xss": 20, "sqli": 10}
+    # Quotas are what balanced executes at the measured per-attempt cost, not a breadth promise.
+    assert preview["minimum_family_quotas"] == {"xss": 4, "sqli": 4}
     assert preview["execution_topology"] == "single_worker"
     assert preview["ai_used"] is False
 

@@ -10,7 +10,7 @@ Compatibility code may read historical scan-mode names, old finding-source value
 routes, and legacy credential rows so an existing installation can upgrade without losing history.
 Those inputs are translated at the API/read boundary only:
 
-- old scan-mode names map to a `fast`, `balanced`, or `thorough` resource ceiling plus explicit
+- old scan-mode names map to a `fast`, `balanced`, `thorough`, or `deep` resource ceiling plus explicit
   policy; they cannot select another engine or module registry;
 - retired Hunt write routes return `410 Gone`, while bounded historical reads and cancellation stay
   available during the migration window;

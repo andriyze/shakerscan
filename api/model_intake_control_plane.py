@@ -244,6 +244,7 @@ def freeze_evidence_manifest(
     if not evidence_records:
         raise AdmissionContractError("at least one evidence record is required")
     normalized_records: list[dict[str, Any]] = []
+    trivy_database_updates: list[str] = []
     seen: set[str] = set()
     for record in evidence_records:
         record_id = str(uuid.UUID(str(record.get("id"))))
@@ -272,6 +273,16 @@ def freeze_evidence_manifest(
             except (TypeError, ValueError, json.JSONDecodeError):
                 payload = {}
         if isinstance(payload, dict) and str(record.get("evidence_type") or "") == "static_analysis":
+            generated = payload.get("generated_evidence")
+            if not isinstance(generated, dict):
+                generated = payload
+            trivy_updated_at = str(generated.get("trivy_db_updated_at") or "").strip()
+            if trivy_updated_at:
+                try:
+                    datetime.fromisoformat(trivy_updated_at.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise AdmissionContractError("Trivy database timestamp is invalid") from exc
+                trivy_database_updates.append(trivy_updated_at)
             license_compliance = payload.get("license_compliance")
             if (
                 isinstance(license_compliance, dict)
@@ -304,6 +315,7 @@ def freeze_evidence_manifest(
         "evidence": sorted(normalized_records, key=lambda item: item["id"]),
         "frozen_at": (frozen_at or utc_now()).isoformat(),
         "frozen_by": str(frozen_by or "").strip(),
+        "trivy_db_updated_at": max(trivy_database_updates, default=None),
     }
     if not manifest["frozen_by"]:
         raise AdmissionContractError("frozen_by authenticated identity is required")

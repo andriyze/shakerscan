@@ -18,6 +18,7 @@ def main() -> int:
     for plane in ("scanner", "api", "ui"):
         parser.add_argument(f"--baseline-{plane}-image", required=True)
         parser.add_argument(f"--candidate-{plane}-image", required=True)
+    parser.add_argument("--candidate-model-intake-image", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     for value in (args.baseline_source_sha, args.candidate_source_sha):
@@ -27,7 +28,8 @@ def main() -> int:
         plane: getattr(args, f"baseline_{plane}_image") for plane in ("scanner", "api", "ui")
     }
     candidate_images = {
-        plane: getattr(args, f"candidate_{plane}_image") for plane in ("scanner", "api", "ui")
+        plane: getattr(args, f"candidate_{plane}_image")
+        for plane in ("scanner", "api", "ui", "model_intake")
     }
     for value in (*baseline_images.values(), *candidate_images.values()):
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
@@ -47,6 +49,7 @@ def main() -> int:
         "database_restart_preserved_state": "pass",
         "backup_restore_rollback_boundary": "pass",
         "previous_stable_api_ui_worker_boot_after_restore": "pass",
+        "candidate_model_intake_worker_boot_after_upgrade": "pass",
         "redis_queue_and_lease_survive_upgrade_and_rollback": "pass",
     }
     receipt = {

@@ -6,6 +6,7 @@ import pytest
 
 from api.runtime.credentials import (
     CREDENTIAL_SECRET_SCHEMA,
+    CREDENTIAL_SECRET_SCHEMA_V2,
     IDENTITY_PAIR_KINDS,
     SSH_CREDENTIAL_KINDS,
     CredentialContractError,
@@ -135,6 +136,38 @@ def test_query_parameter_configuration_exposes_only_the_parameter_name():
 def test_query_parameter_requires_a_bounded_name():
     with pytest.raises(CredentialContractError, match="parameter_name is required"):
         build_credential_secret("query_parameter", secret="opaque-query-token")
+
+
+def test_bearer_browser_storage_key_is_public_but_token_stays_private():
+    encoded = build_credential_secret(
+        "bearer_token", secret="opaque-token", browser_storage_key="auth.token",
+    )
+    material = parse_credential_secret("bearer_token", encoded)
+    public = public_credential_configuration(material)
+
+    assert material["browser_storage_key"] == "auth.token"
+    assert public["browser_storage_key"] == "auth.token"
+    assert "opaque-token" not in json.dumps(public)
+
+
+@pytest.mark.parametrize(
+    ("kind", "key"),
+    [("cookie", "token"), ("bearer_token", "bad key"), ("bearer_token", "x" * 201)],
+)
+def test_browser_storage_key_is_bearer_only_and_bounded(kind, key):
+    with pytest.raises(CredentialContractError, match="browser_storage_key"):
+        build_credential_secret(kind, secret="opaque", browser_storage_key=key)
+
+
+def test_v2_envelope_remains_readable_after_browser_storage_schema_upgrade():
+    legacy = json.loads(build_credential_secret("bearer_token", secret="opaque"))
+    legacy["schema_version"] = CREDENTIAL_SECRET_SCHEMA_V2
+    legacy.pop("browser_storage_key")
+
+    parsed = parse_credential_secret("bearer_token", json.dumps(legacy))
+
+    assert parsed["schema_version"] == CREDENTIAL_SECRET_SCHEMA
+    assert parsed["browser_storage_key"] is None
 
 
 @pytest.mark.parametrize("header_name", ["Host", "Content-Length", "Proxy-Authorization"])

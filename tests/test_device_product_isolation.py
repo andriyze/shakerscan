@@ -18,7 +18,7 @@ def test_device_children_are_hidden_from_the_default_scan_list():
 def test_device_run_kind_is_not_a_scan_budget_profile():
     assert "device_posture" not in api_module.SCAN_BUDGET_PROFILES
     assert api_module.SCAN_BUDGET_PROFILES == {
-        "fast", "balanced", "thorough",
+        "fast", "balanced", "thorough", "deep",
     }
 
 

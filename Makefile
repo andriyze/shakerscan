@@ -4,7 +4,7 @@ UV ?= uv
 UVX ?= uvx
 
 .PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-hunt e2e-platform e2e-scan-parity e2e-wire e2e-api-overlay test \
-	release-gates dependency-lock dependency-audit installer-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
+	release-gates dependency-lock dependency-audit installer-smoke installer-upgrade-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
 dependency-lock:
@@ -22,6 +22,9 @@ installer-smoke:
 	scripts/installer_smoke.sh
 	scripts/installer_channel_smoke.sh
 
+installer-upgrade-smoke:
+	scripts/installer_upgrade_smoke.sh
+
 ## Start the exact curl-installed release stack and verify user-visible contracts.
 installed-stack-smoke:
 	scripts/installed_stack_smoke.sh
@@ -31,10 +34,13 @@ upgrade-smoke:
 	docker build -f scanner/Dockerfile -t shakerscan-scanner:upgrade-smoke .
 	docker build --build-arg SCANNER_RUNTIME_IMAGE=shakerscan-scanner:upgrade-smoke \
 		-f scanner/Dockerfile.api -t shakerscan-api:upgrade-smoke .
+	docker build --build-arg SCANNER_RUNTIME_IMAGE=shakerscan-scanner:upgrade-smoke \
+		-f scanner/Dockerfile.model-intake -t shakerscan-model-intake:upgrade-smoke .
 	docker build -f ui/Dockerfile -t shakerscan-ui:upgrade-smoke ui
 	SCANNER_IMAGE=shakerscan-scanner:upgrade-smoke \
 		CANDIDATE_API_IMAGE=shakerscan-api:upgrade-smoke \
 		CANDIDATE_UI_IMAGE=shakerscan-ui:upgrade-smoke \
+		CANDIDATE_MODEL_INTAKE_IMAGE=shakerscan-model-intake:upgrade-smoke \
 		scripts/upgrade_smoke.sh
 
 ## Full manual/release end-to-end suite against the live stack + honey targets.

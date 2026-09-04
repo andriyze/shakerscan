@@ -16,9 +16,14 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    from release_image_inventory import IMAGE_KEYS
+except ModuleNotFoundError:
+    from scripts.release_image_inventory import IMAGE_KEYS
+
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "RELEASES.md"
-COLUMNS = {"scanner": 2, "api": 3, "ui": 4, "signer": 5, "model_intake": 6}
+COLUMNS = {name: index + 2 for index, name in enumerate(IMAGE_KEYS)}
 _REF = re.compile(r"`([^`@]+)`\s*\(`(sha256:[0-9a-f]{64})`\)")
 
 
