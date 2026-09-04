@@ -38,7 +38,16 @@ requests only. Store Docker Hub credentials as repository secrets.
 ## 1. Freeze and build a candidate
 
 Merge the intended commit through protected `main`, obtain successful exact-SHA CodeQL, then run
-**Release candidate** with `version`, the exact 40-character SHA, and the CodeQL run ID. Optional
+**Release candidate** with `version`, the exact 40-character SHA, and the CodeQL run ID. The
+workflow is named **CodeQL analysis**; look the run up by name for the exact SHA, because a stale
+default-setup record called "CodeQL" also exists and makes the bare name ambiguous:
+
+```bash
+gh run list --commit "$SHA" --json databaseId,workflowName,conclusion \
+  --jq '.[] | select(.workflowName == "CodeQL analysis" and .conclusion == "success") | .databaseId'
+```
+
+Optional
 real-fleet Scan parity, Model Intake physical acceptance, and Connected Device physical acceptance
 run IDs may be supplied when those support boundaries are being qualified.
 
@@ -100,6 +109,10 @@ Then run **Promote stable channel** with the version and smoke receipt. In this 
 2. moves each `latest` alias to the already-published version digest without rebuilding;
 3. pushes a `release/stable-<version>` branch that bumps `install/STABLE_VERSION` and prints the
    `gh pr create` command in the run summary.
+   The same commit records the version's RELEASES.md ledger row via
+   `scripts/record_release_ledger.py`, from the release's `release-image-lock.env` and source
+   commit, so the channel never moves ahead of the ledger the upgrade smoke reads its
+   baseline from.
 
 Open and merge that pull request last. The hosted installer resolves `install/STABLE_VERSION`
 from `main` at request time, so the merge is the public promotion; every gate above has already

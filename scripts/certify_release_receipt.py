@@ -42,6 +42,17 @@ class CertificationError(RuntimeError):
     """Release evidence is incomplete, inconsistent, or not candidate-bound."""
 
 
+
+def _measured_recall(dast):
+    targets = dast.get("targets")
+    if not isinstance(targets, list) or not targets or not isinstance(targets[0], dict):
+        return None
+    for key in ("expected_recall", "recall"):
+        value = targets[0].get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return None
+
 def _read(path: Path) -> Mapping[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -310,9 +321,11 @@ def certify_receipt(
                 {
                     "boundary": "complete_dast_quality_bar",
                     "state": "waived_declared_debt",
-                    "measured_recall": dast.get("targets", [{}])[0].get("recall")
-                    if isinstance(dast.get("targets"), list) and dast.get("targets")
-                    else None,
+                    # The benchmark scorecard names its recall "expected_recall" (the share of
+                    # the fixture's expected findings that were found); "recall" is accepted
+                    # for older scorecards. The 2.0.1 receipt recorded None here while the
+                    # evidence held 0.44 because only the old key was read.
+                    "measured_recall": _measured_recall(dast),
                     "regression_gates_passed": True,
                     "quality_bar_enforced": True,
                     "quality_bar_passed": False,

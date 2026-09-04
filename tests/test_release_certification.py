@@ -225,7 +225,8 @@ def test_release_owner_can_waive_a_measured_quality_shortfall_as_declared_debt(t
     dast["quality_bar_passed"] = False
     dast["regression_gates_passed"] = True
     dast["quality_bar_enforced"] = True
-    dast["targets"] = [{"recall": 0.44}]
+    # The scorecard's real key; the receipt used to read "recall" and record None.
+    dast["targets"] = [{"expected_recall": 0.44, "quality_gates": []}]
     paths["external_evidence"]["dast_quality"] = (
         dast, _write(tmp_path, dast_path.name, dast),
     )
