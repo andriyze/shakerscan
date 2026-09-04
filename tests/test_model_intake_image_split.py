@@ -22,7 +22,6 @@ MI = (ROOT / "scanner" / "Dockerfile.model-intake").read_text(encoding="utf-8")
 
 def test_the_scanner_image_no_longer_builds_the_model_intake_toolchain():
     for token in (
-        "COPY scanner/model_intake_tools",
         "/opt/model-intake-tools/${tool}",
         "ARG TRIVY_VERSION",
         "ARG OSV_SCANNER_VERSION",
@@ -34,6 +33,10 @@ def test_the_scanner_image_no_longer_builds_the_model_intake_toolchain():
     # The web/DAST toolchain stays and is still verified.
     assert "/opt/tools/katana -version" in SCANNER
     assert "/opt/tools/gungnir -h | head -1" in SCANNER
+    # The tiny Model Intake dependency locks stay in the scanner image: the runtime build
+    # fingerprint hashes /opt/model-intake-locks, so all three images must carry them to stay on one
+    # fingerprint. The heavy toolchain that consumes them does not.
+    assert "COPY scanner/model_intake_tools /opt/model-intake-locks" in SCANNER
 
 
 def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():

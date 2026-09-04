@@ -196,6 +196,16 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed --requ
     pip check && \
     test -z "$(python -c 'pass' 2>&1)"
 
+# The Model Intake dependency locks and Firecracker guest inputs stay in the scanner image even
+# though the toolchain that consumes them lives in the Model Intake image. They are tiny, and the
+# runtime build fingerprint hashes /opt/model-intake-locks -- keeping them here keeps the scanner,
+# API, and Model Intake images on one fingerprint so the web-DAST fleet reads as uniform.
+COPY scanner/model_intake_tools /opt/model-intake-locks
+COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
+COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
+COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
+COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
+
 # Compiler headers are build-only. Keeping them in the scanner runtime both
 # enlarges the release image and exposes kernel-header packages that no scan
 # path executes.
