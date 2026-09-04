@@ -1504,7 +1504,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 18 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 367 | Python sources + Compose manifests |
+| Runtime environment keys | 370 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 119 | `scanner/scanner_tools/` |
 | UI pages | 37 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2402,13 +2402,16 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_AUTO_MAX_MEMORY_MIB` | `api/api.py` |
 | `MODEL_INTAKE_CONTROL_PLANE_SIGNING_KEY_PEM` | `api/model_intake_signer_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN` | `api/model_intake_admission_webhook.py` |
+| `MODEL_INTAKE_IMAGE` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_LOCAL_SESSION_SECRET` | `api/model_intake/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OCI_REGISTRY_REPOSITORY` | `scripts/model_intake_push_oci.py` |
+| `MODEL_INTAKE_ONLY_WORKER` | `api/worker.py` |
 | `MODEL_INTAKE_OPERATOR_CREDENTIALS_JSON` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_ROLES` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_OPERATOR_TOKEN` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_POLICY_BUNDLE_SHA256` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_QUARANTINE_DIR` | `api/model_intake/router.py`, `scanner/scanner_tools/model_intake.py` |
+| `MODEL_INTAKE_QUEUE_NAME` | `api/model_intake/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_AUTO_CLEANUP` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_HOST_RESULTS_ROOT` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `MODEL_INTAKE_RUNNER_INTERNAL_TOKEN` | `api/model_intake/router.py`, `api/model_intake_runner_service.py`, `docker-compose.release.yml`, `docker-compose.yml` |
