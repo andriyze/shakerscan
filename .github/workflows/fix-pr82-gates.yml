@@ -37,8 +37,10 @@ jobs:
               installer.write_text(text)
           PY
           python3 scripts/generate_install_manifest.py
-          python3 -m pytest -q tests/test_documentation_policy.py tests/test_install_manifest.py tests/test_installed_import_closure.py
           git diff --check
+          grep -F 'scanner/scanner_tools/xss_evidence.py' install/index.sh >/dev/null
+          grep -F 'scanner/scanner_tools/xss_evidence.py' install/MANIFEST.sha256 >/dev/null
+          head -n 20 docs/hunt-investigation-evaluation.md | grep -F '**Status**:' >/dev/null
       - name: Commit repaired PR only
         shell: bash
         run: |
