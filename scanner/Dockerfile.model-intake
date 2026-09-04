@@ -6,6 +6,7 @@
 # and sandbox run the identical code and tool paths they did when the toolchain shipped inside the
 # scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
 # removed after installation so it cannot require a runtime vulnerability waiver.
+ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 ARG MODEL_INTAKE_GO_BUILDER=golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
 FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
 ARG TRIVY_VERSION=0.73.0
@@ -26,7 +27,6 @@ RUN set -eux; \
     go version -m /out/trivy | grep -F 'oras.land/oras-go/v2	v2.6.2'; \
     go version -m /out/osv-scanner | grep -F 'google.golang.org/grpc	v1.83.1'
 
-ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 FROM ${SCANNER_RUNTIME_IMAGE}
 
 # The scanner base strips its C toolchain and pip/venv machinery. The Model Intake adapters compile
