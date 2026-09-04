@@ -510,16 +510,33 @@ def run_platform() -> H.Scorecard:
         sc.error("P-3 Connected Devices surfaces", exc)
 
     try:
-        workers = H.get("/workers")
+        workers = {}
+        readiness_deadline = _time.monotonic() + 60
+        while _time.monotonic() < readiness_deadline:
+            workers = H.get("/workers")
+            pools = workers.get("pools") or {}
+            required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+            device_pool = pools.get("device") or {}
+            if (
+                all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
+                and device_pool.get("status") in {"ready", "disabled"}
+            ):
+                break
+            _time.sleep(2)
         fleet = health.get("fleet") or H.get("/health").get("fleet") or {}
+        pools = workers.get("pools") or {}
+        required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+        device_pool = pools.get("device") or {}
         sc.check(
-            "P-4 worker and Fleet state remain explicit",
+            "P-4 worker pools and Fleet state remain explicit",
             isinstance(workers.get("workers"), list)
             and isinstance(workers.get("stale_count"), int)
+            and all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
+            and device_pool.get("status") in {"ready", "disabled"}
             and fleet.get("status") in {
                 "enabled", "ready", "configured", "disabled", "unsupported", "not_ready",
             },
-            f"workers={workers.get('count')} fleet_status={fleet.get('status')}",
+            f"pools={pools} fleet_status={fleet.get('status')}",
         )
     except Exception as exc:
         sc.error("P-4 Fleet and workers surfaces", exc)

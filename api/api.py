@@ -7028,6 +7028,7 @@ try:
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
+    from worker_pools import worker_pool_summaries
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
         configure_agent_router,
@@ -7082,6 +7083,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
+    from api.worker_pools import worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
     AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
@@ -20949,6 +20951,12 @@ async def get_workers():
             "expected_scanner_version": expected_version,
             "execution_capacity": execution_capacity,
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                summary,
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
     except FileNotFoundError:
         return {
@@ -20961,6 +20969,12 @@ async def get_workers():
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
@@ -20974,6 +20988,12 @@ async def get_workers():
                 {"count": 0, "current_count": 0}, [], remote_inventory_available=False
             ),
             "fleet": fleet_feature_state(),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
         }
 
 

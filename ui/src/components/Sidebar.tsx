@@ -18,6 +18,7 @@ import {
   PackageCheck,
   Radar,
   Router,
+  Server,
   ServerCog,
   ShieldCheck,
   TriangleAlert,
@@ -124,6 +125,7 @@ const navGroups: {
   {
     heading: 'Operations',
     items: [
+      { href: '/workers', label: 'Worker Pools', icon: <Server className="w-5 h-5" /> },
       { href: '/fleet', label: 'Fleet', icon: <ServerCog className="w-5 h-5" />, fleetOnly: true },
     ],
   },
