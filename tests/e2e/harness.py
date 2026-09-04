@@ -112,7 +112,11 @@ def model_intake_operator_headers() -> dict[str, str]:
             "Model Intake operator credential is unavailable; start ShakerScan or set "
             "SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN"
         )
-    return {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    origin = os.environ.get("SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_ORIGIN", "").strip()
+    if origin:
+        headers["Origin"] = origin
+    return headers
 
 
 def wait_for_scan(scan_id: str, timeout: int = 600, poll: int = 5, label: str = "") -> dict:

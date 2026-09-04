@@ -6,17 +6,32 @@
 # and sandbox run the identical code and tool paths they did when the toolchain shipped inside the
 # scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
 # removed after installation so it cannot require a runtime vulnerability waiver.
+ARG MODEL_INTAKE_GO_BUILDER=golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
+FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
+ARG TRIVY_VERSION=0.73.0
+ARG OSV_SCANNER_VERSION=2.5.1
+RUN set -eux; \
+    git clone --depth 1 --branch "v${TRIVY_VERSION}" https://github.com/aquasecurity/trivy.git /src/trivy; \
+    cd /src/trivy; \
+    go get github.com/go-git/go-git/v5@v5.19.2 golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1 oras.land/oras-go/v2@v2.6.2; \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/trivy ./cmd/trivy; \
+    git clone --depth 1 --branch "v${OSV_SCANNER_VERSION}" https://github.com/google/osv-scanner.git /src/osv-scanner; \
+    cd /src/osv-scanner; \
+    go get golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1; \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/osv-scanner ./cmd/osv-scanner; \
+    go version /out/trivy | grep -F 'go1.27.0'; \
+    go version /out/osv-scanner | grep -F 'go1.27.0'; \
+    go version -m /out/trivy | grep -F 'golang.org/x/crypto	v0.55.0'; \
+    go version -m /out/trivy | grep -F 'github.com/go-git/go-git/v5	v5.19.2'; \
+    go version -m /out/trivy | grep -F 'oras.land/oras-go/v2	v2.6.2'; \
+    go version -m /out/osv-scanner | grep -F 'google.golang.org/grpc	v1.83.1'
+
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 FROM ${SCANNER_RUNTIME_IMAGE}
 
 # The scanner base strips its C toolchain and pip/venv machinery. The Model Intake adapters compile
 # from source into hash-locked virtual environments, so restore the build dependencies for this
 # overlay and purge them again once the toolchain is built.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      make gcc libcurl4-openssl-dev libssl-dev python3-dev \
-      python3-venv python3-pip-whl python3-setuptools-whl \
- && rm -rf /var/lib/apt/lists/*
-
 # Model-intake evidence adapters live in separate, hash-locked virtual
 # environments. Their dependency graphs cannot alter the API/worker runtime.
 # The installer (pip, which vendors msgpack) and any seeded setuptools are removed
@@ -28,6 +43,8 @@ COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-work
 COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
 COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
 RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3-pip-whl python3-setuptools-whl; \
     for tool in modelscan fickling semgrep safetensors pip-audit; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \
       "/opt/model-intake-tools/${tool}/bin/pip" install \
@@ -66,73 +83,24 @@ RUN set -eu; \
       --lock /opt/model-intake-locks/firecracker-runtime.lock \
       --pip-audit /opt/model-intake-tools/pip-audit/bin/pip-audit \
       --output /opt/pip-audit-cache/runtime-audit.json \
-      --metadata /opt/pip-audit-cache/metadata.json
-
-# Trivy is a checksum-pinned native adapter. The vulnerability database is
-# captured in the image and scanned offline; readiness exposes its metadata.
-ARG TARGETARCH
-ARG TRIVY_VERSION=0.73.0
-ARG TRIVY_AMD64_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
-ARG TRIVY_ARM64_SHA256=13833d97e8a1a5367471c372a173180157f593bece570e20d5d925fef552f5dd
-ARG TRIVY_DOWNLOAD_ATTEMPTS=4
-# OSV Scanner 2.5 delegates offline matching to OSV-Scalibr, which appends
-# osv-scalibr/<ecosystem>/all.zip to the configured base path.
-ARG OSV_SCANNER_VERSION=2.5.0
-ARG OSV_SCANNER_AMD64_SHA256=edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
-ARG OSV_SCANNER_ARM64_SHA256=fe152e1a546af223e6c557cc3111a8bb3e5dc02fcbf7dbe95d26567c0f0041f2
-RUN set -eu; \
-    case "${TARGETARCH}" in \
-      amd64) trivy_arch="64bit"; trivy_sha="${TRIVY_AMD64_SHA256}"; osv_arch="amd64"; osv_sha="${OSV_SCANNER_AMD64_SHA256}" ;; \
-      arm64) trivy_arch="ARM64"; trivy_sha="${TRIVY_ARM64_SHA256}"; osv_arch="arm64"; osv_sha="${OSV_SCANNER_ARM64_SHA256}" ;; \
-      *) echo "Unsupported Trivy architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    trivy_archive="trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz"; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${trivy_archive}" \
-      -o "/tmp/${trivy_archive}"; \
-    echo "${trivy_sha}  /tmp/${trivy_archive}" | sha256sum -c -; \
-    tar -xzf "/tmp/${trivy_archive}" -C /opt/tools trivy; \
-    rm "/tmp/${trivy_archive}"; \
-    chmod 755 /opt/tools/trivy; \
-    mkdir -p /opt/trivy-cache; \
-    download_trivy_data() { \
-      /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && \
-      /opt/tools/trivy fs --scanners misconfig --format json \
-        --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; \
-    }; \
-    attempt=1; \
-    until download_trivy_data; do \
-      if [ "$attempt" -ge "${TRIVY_DOWNLOAD_ATTEMPTS}" ]; then \
-        echo "Trivy database/check bundle download failed after ${TRIVY_DOWNLOAD_ATTEMPTS} attempts" >&2; \
-        exit 1; \
-      fi; \
-      delay=$((attempt * 5)); \
-      echo "Trivy data download failed (attempt ${attempt}/${TRIVY_DOWNLOAD_ATTEMPTS}); retrying in ${delay}s" >&2; \
-      sleep "$delay"; \
-      attempt=$((attempt + 1)); \
-    done; \
-    osv_archive="osv-scanner_linux_${osv_arch}"; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/${osv_archive}" \
-      -o "/tmp/${osv_archive}"; \
-    echo "${osv_sha}  /tmp/${osv_archive}" | sha256sum -c -; \
-    install -m 0755 "/tmp/${osv_archive}" /opt/tools/osv-scanner; \
-    rm "/tmp/${osv_archive}"; \
-    mkdir -p /opt/osv-cache/osv-scalibr/PyPI; \
-    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL \
-      "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip" \
-      -o /opt/osv-cache/osv-scalibr/PyPI/all.zip; \
-    osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; \
-    osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
-    printf '{"UpdatedAt":"%s","Ecosystem":"PyPI","DatabaseSHA256":"%s"}\n' \
-      "$osv_updated" "$osv_db_sha" > /opt/osv-cache/metadata.json
-ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
-
-# The build dependencies restored above are not needed at runtime.
-RUN apt-get purge -y --auto-remove \
-      make gcc libcurl4-openssl-dev libssl-dev python3-dev \
-      python3-venv python3.12-venv python3-pip-whl python3-setuptools-whl && \
+      --metadata /opt/pip-audit-cache/metadata.json; \
+    apt-get purge -y --auto-remove make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3.12-venv python3-pip-whl python3-setuptools-whl; \
     rm -rf /var/lib/apt/lists/*
+
+# Native scanners are rebuilt from tagged upstream source using a patched Go toolchain.
+COPY --from=model-intake-go-tools /out/trivy /opt/tools/trivy
+COPY --from=model-intake-go-tools /out/osv-scanner /opt/tools/osv-scanner
+ARG TRIVY_DOWNLOAD_ATTEMPTS=4
+RUN set -eu; \
+    chmod 755 /opt/tools/trivy /opt/tools/osv-scanner; \
+    mkdir -p /opt/trivy-cache; \
+    download_trivy_data() { /opt/tools/trivy image --download-db-only --cache-dir /opt/trivy-cache && /opt/tools/trivy fs --scanners misconfig --format json --cache-dir /opt/trivy-cache /opt/model-intake-locks >/dev/null; }; \
+    attempt=1; until download_trivy_data; do [ "$attempt" -lt "${TRIVY_DOWNLOAD_ATTEMPTS}" ] || exit 1; sleep $((attempt*5)); attempt=$((attempt+1)); done; \
+    mkdir -p /opt/osv-cache/osv-scalibr/PyPI; \
+    curl --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -fsSL "https://osv-vulnerabilities.storage.googleapis.com/PyPI/all.zip" -o /opt/osv-cache/osv-scalibr/PyPI/all.zip; \
+    osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    printf '{"UpdatedAt":"%s","Ecosystem":"PyPI","DatabaseSHA256":"%s"}\n' "$osv_updated" "$osv_db_sha" > /opt/osv-cache/metadata.json
+ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
 
 # The official Rust parser boundary is a release-image gate, not an optional
 # test dependency or a monkeypatched unit-test seam.
