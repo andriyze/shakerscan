@@ -1023,6 +1023,10 @@ jobs:
   vulnerability-scan:
     name: Scan exact ${{ matrix.target.name }} ${{ matrix.platform.name }} runtime
     needs: [meta, merge]
+    # The default success() check walks the whole needs graph, so when the build jobs are
+    # skipped (an attested build-on-main set is reused) this job would be skipped too and the
+    # candidate would "succeed" without scanning anything. Gate on the direct needs only.
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1117,6 +1121,9 @@ jobs:
   certify:
     name: Certify final manifest digests
     needs: [meta, merge]
+    # Same reason as vulnerability-scan: certification must run whenever the manifests were
+    # created, whether the images were built here or reused from build-on-main.
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:

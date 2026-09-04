@@ -18702,6 +18702,7 @@ async def _read_agent_tool_streams(
 
 def _agent_scanner_request_settlement(
     scanner_name: str, stdout: str, stderr: bytes | str | None,
+    *, file_counter: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Settle scanner traffic without exposing diagnostic stderr to the planner."""
     normalized = str(scanner_name or "").strip().lower()
@@ -18713,7 +18714,9 @@ def _agent_scanner_request_settlement(
             else str(stderr)
         )
         settlement_input = f"{settlement_input}\n{diagnostics}"
-    return agent_tools.scanner_request_settlement(normalized, settlement_input)
+    return agent_tools.scanner_request_settlement(
+        normalized, settlement_input, file_counter=file_counter,
+    )
 
 
 def _materialize_bounded_ffuf_wordlist(
@@ -18787,6 +18790,7 @@ async def _execute_agent_scanner_process(
     execution_uncertain = False
     process_enforcement: dict[str, Any] = {}
     browser_profile_receipt: dict[str, Any] = {}
+    wire_log_counter: dict[str, Any] | None = None
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
@@ -18840,7 +18844,7 @@ async def _execute_agent_scanner_process(
             dict(job_data.get("browser_storage") or {})
             if isinstance(job_data.get("browser_storage"), Mapping) else {}
         )
-        if name in {"ffuf", "sqlmap"} or (
+        if name in {"ffuf", "sqlmap", "dalfox"} or (
             name == "katana_headless" and browser_storage
         ):
             scratch_dir = tempfile.mkdtemp(
@@ -18859,6 +18863,8 @@ async def _execute_agent_scanner_process(
             })
         if name == "sqlmap":
             runtime_paths["sqlmap_output_dir"] = str(scratch_dir)
+        if name in agent_tools.SCANNER_WIRE_LOG_FILES:
+            runtime_paths["scratch_dir"] = str(scratch_dir)
         if name == "katana_headless" and browser_storage:
             if pinned_proxy is None or not scratch_dir:
                 raise agent_tools.AgentToolError(
@@ -19038,6 +19044,12 @@ async def _execute_agent_scanner_process(
         if pinned_proxy is not None:
             await pinned_proxy.close()
         if scratch_dir:
+            # The tool's own wire log lives in the scratch directory; read it before the
+            # directory goes away so the reservation can settle on the exact count.
+            try:
+                wire_log_counter = agent_tools.scanner_file_request_counter(name, scratch_dir)
+            except Exception:  # noqa: BLE001 - an unreadable log keeps the full hold
+                wire_log_counter = None
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
     typed_output = agent_tools.parse_scanner_output(
@@ -19053,7 +19065,9 @@ async def _execute_agent_scanner_process(
             else None
         ),
     )
-    settlement = _agent_scanner_request_settlement(name, stdout, err)
+    settlement = _agent_scanner_request_settlement(
+        name, stdout, err, file_counter=wire_log_counter,
+    )
     if status in {"failed", "cancelled"} and not stdout.strip():
         if error == "scanner_not_available" or str(error or "").startswith("contract:"):
             settlement = {

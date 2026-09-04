@@ -12,8 +12,11 @@ Scan ran three appended continuation revisions before the finalizer (plan revisi
 3,600 tool-wall seconds and 8,678 requests, and stopped because the template manifest was exhausted,
 not the budget; the pre-fix thorough Scan of the same target had spent 26% of its wall after one
 round. Every active template batch still timed out at its slice at 18 s per template, so the
-per-template wall is now 45 s (12 s passive). The verifier batches settling their reservation in one
-second is the open DAST-1 item. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
+per-template wall is now 45 s (12 s passive). DAST-1 now settles the two external verifiers from
+their own complete wire logs: sqlmap's `-t` traffic file and dalfox's HAR record every request the
+tool sends (measured 471/471 and 1,225/1,225 against a counting origin), so continuation refunds
+their unused request hold instead of retaining it. The remaining DAST-1 tail is the crawlers, whose
+discovery feeds are not wire logs and stay conservative by design. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
 both upgrade receipts, the five image scans), a current-fleet authenticated Juice Shop and crAPI
 measurement against the DAST-8 exit bar, and the installed-stack run of H-10/H-11 and MI-6.
 
@@ -47,6 +50,11 @@ ShakerScan 2.2.0 remains a trusted-operator, self-hosted security scanner.
   `off` to record nothing.
 - Active DAST, Hunt, and connected-device testing require ownership or explicit authorization for
   the exact target. Silence, missing telemetry, and blocked work remain inconclusive.
+- Hunt verifies an unauthenticated `data_exposure` only for a narrow, entropy-screened set of
+  self-evident secret formats (the Tier-0 classes). JWTs, bearer tokens, SSNs, card numbers, and
+  Google API keys are deliberately outside it because public endpoints may legitimately issue them
+  or documentation samples match; such values remain observations. Widening the set is a
+  proof-contract change.
 - Model Intake is release-gated for deterministic static review, artifacts/reports, and the opt-in
   AMD64 Linux/KVM Firecracker tier. Incomplete evidence or unavailable required controls fail closed.
 - Fleet production support is the outbound-only HTTPS `broker` transport. WireGuard remains preview

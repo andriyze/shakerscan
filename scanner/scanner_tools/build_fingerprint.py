@@ -87,6 +87,12 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     Freshness must change for security rules, corpora, wordlists, dependency locks, the
     canonical V2 authority packages, and the fixed Firecracker runtime as well as Python.
     Otherwise a worker can report current source while executing stale policy or adapters.
+
+    Coupling recorded in 2.2.0 (plan item D4): the Model Intake tool locks are hashed under
+    ``model_intake_locks`` even though only the Model Intake image executes those tools, so the
+    slim API image must keep carrying ``/opt/model-intake-locks`` for its expected-worker
+    fingerprint to match the fleet. Dropping the locks from the API image without removing them
+    from this map would mark every worker stale. Revisit when the API image stops carrying them.
     """
     root = Path(workspace_root)
     files: dict[str, str] = {}

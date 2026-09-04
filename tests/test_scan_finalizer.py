@@ -728,6 +728,18 @@ def test_finalizer_promotes_only_structured_canonical_browser_xss_proof():
         "dom_marker_executed": True,
         "verifier_build": "Chromium test",
     }
+    # A proven execution carries an explicit CVSS (not the generic 6.1 reflection vector that
+    # capped browser-proven XSS at medium) and names the sink the verifier observed.
+    assert finding["severity"] == "high"
+    assert finding["cvss_score"] == 8.2
+    assert finding["evidence"]["cvss"]["vector"] == "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
+    assert finding["evidence"]["execution_sink"] == {
+        "location": "fragment",
+        "parameter": "q",
+        "signal": "dom_marker",
+        "verifier": "Chromium test",
+        "dom_marker_executed": True,
+    }
 
 
 def test_finalizer_explains_required_action_degradation():

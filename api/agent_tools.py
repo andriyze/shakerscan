@@ -449,7 +449,11 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     delay_ms, workers = ("0", "10") if headless else ("1000", "3")
     args = (["url", url, "--format", "jsonl", "--silence", "--no-color",
              "--timeout", "8", "--delay", delay_ms, "--worker", workers,
-             "--skip-bav", "--skip-grepping", "--skip-mining-all"]
+             "--skip-bav", "--skip-grepping", "--skip-mining-all",
+             # Dalfox records every request it sends in this HAR. The worker binds it into
+             # the job's private scratch directory and settles the wire reservation from
+             # the exact entry count (see SCANNER_WIRE_LOG_FILES).
+             "--har-file-path", "/tmp/shakerscan-dalfox/requests.har"]
             + headless_args + severity_args)
     injection = _injection_body(opts)
     if injection is not None:
@@ -472,6 +476,10 @@ def _tmpl_sqlmap(url: str, opts: dict[str, Any]) -> list[str]:
     args = ["-u", url, "--batch", "--technique", "BEUT", "--level", "2", "--risk", "2",
             "--threads", "1", "--timeout", "8", "--retries", "0", "--delay", "1",
             "--flush-session", "--output-dir", "/tmp/shakerscan-sqlmap",
+            # -t logs every HTTP transaction sqlmap sends. The worker binds it into the
+            # job's private scratch directory and settles the wire reservation from its
+            # exact count instead of retaining the full hold (see SCANNER_WIRE_LOG_FILES).
+            "-t", "/tmp/shakerscan-sqlmap/traffic.log",
             "--ignore-redirects", "--disable-coloring",
             "--user-agent", "shakerscan-sqlmap/1.0"]
     injection = _injection_body(opts)
@@ -1161,6 +1169,12 @@ def build_enforced_scanner_plan(
                 "nuclei active profile requires 4000 HTTP requests and 300 seconds"
             )
     elif scanner == "dalfox":
+        # Bind the HAR into the job's private scratch directory when the worker supplied one.
+        # Plan-construction callers that only validate the reservation pass none and keep the
+        # template default; the worker always supplies it (see SCANNER_WIRE_LOG_FILES).
+        dalfox_scratch = str(runtime.get("scratch_dir") or "")
+        if dalfox_scratch:
+            argv = bind_scanner_runtime_paths("dalfox", argv, scratch_dir=dalfox_scratch)
         http = int(reservation.get("http_requests") or 0)
         deep_domxss = bool(options.get("deep_domxss"))
         dalfox_workers = 10 if deep_domxss else 3
@@ -1301,16 +1315,89 @@ def bind_scanner_runtime_paths(
 ) -> list[str]:
     """Bind worker-owned ephemeral paths after the fixed argv is constructed."""
     bound = list(argv)
-    if name != "sqlmap":
+    scanner = str(name or "").strip().lower()
+    if scanner not in SCANNER_WIRE_LOG_FILES:
         return bound
     if not scratch_dir or not os.path.isabs(scratch_dir):
-        raise AgentToolError("sqlmap requires an absolute worker-owned scratch directory")
-    try:
-        output_index = bound.index("--output-dir") + 1
-    except (ValueError, IndexError) as exc:
-        raise AgentToolError("sqlmap output directory contract is missing") from exc
-    bound[output_index] = scratch_dir
+        raise AgentToolError(f"{scanner} requires an absolute worker-owned scratch directory")
+    bindings: tuple[tuple[str, str | None], ...] = (
+        (("--output-dir", None), ("-t", SCANNER_WIRE_LOG_FILES["sqlmap"]))
+        if scanner == "sqlmap"
+        else (("--har-file-path", SCANNER_WIRE_LOG_FILES["dalfox"]),)
+    )
+    for flag, filename in bindings:
+        try:
+            index = bound.index(flag) + 1
+        except ValueError as exc:
+            raise AgentToolError(f"{scanner} {flag} contract is missing") from exc
+        if index >= len(bound):
+            raise AgentToolError(f"{scanner} {flag} contract is missing")
+        bound[index] = (
+            os.path.join(scratch_dir, filename) if filename else scratch_dir
+        )
     return bound
+
+
+# Exact wire logs the worker binds into each job's private scratch directory. sqlmap's -t
+# traffic file and Dalfox's HAR record every HTTP transaction the tool sends: measured
+# against a counting origin, sqlmap logged 471 of 471 requests and Dalfox 1,225 of 1,225.
+# Their counts therefore settle the wire reservation exactly (a refund of the unused hold,
+# or the recorded overrun) instead of retaining the full conservative hold. Katana's JSONL
+# is a discovery feed, not a wire log, and stays conservative on purpose.
+SCANNER_WIRE_LOG_FILES: dict[str, str] = {"sqlmap": "traffic.log", "dalfox": "requests.har"}
+_MAX_WIRE_LOG_BYTES = 256 * 1024 * 1024
+_SQLMAP_TRAFFIC_MARKER = re.compile(r"^HTTP request \[#(\d{1,9})\]", re.MULTILINE)
+
+
+def sqlmap_traffic_request_count(text: str) -> int | None:
+    """Exact request count from a sqlmap ``-t`` traffic log, or None when it proves nothing."""
+    markers = [int(value) for value in _SQLMAP_TRAFFIC_MARKER.findall(str(text or ""))]
+    if not markers:
+        return None
+    # sqlmap numbers its requests sequentially. A gap means blocks were lost, so the
+    # highest number is the larger, safe count.
+    return max(len(markers), max(markers))
+
+
+def har_request_count(text: str) -> int | None:
+    """Exact request count from a HAR document, or None when it is not a HAR."""
+    try:
+        entries = json.loads(str(text or ""))["log"]["entries"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return len(entries)
+
+
+def scanner_file_request_counter(name: str, scratch_dir: str | None) -> dict[str, Any] | None:
+    """Read the tool's own wire log from the job scratch directory before it is removed.
+
+    Returns ``{"actual": n, "source": ...}`` only when the log exists and parses; every
+    other case returns None so the caller keeps the conservative reservation.
+    """
+    scanner = str(name or "").strip().lower()
+    filename = SCANNER_WIRE_LOG_FILES.get(scanner)
+    if not filename or not scratch_dir:
+        return None
+    path = os.path.join(str(scratch_dir), filename)
+    try:
+        if os.path.getsize(path) > _MAX_WIRE_LOG_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    actual = (
+        sqlmap_traffic_request_count(text) if scanner == "sqlmap"
+        else har_request_count(text)
+    )
+    if actual is None:
+        return None
+    return {
+        "actual": actual,
+        "source": "sqlmap_traffic_log" if scanner == "sqlmap" else "dalfox_har",
+    }
 
 
 def scanner_request_reservation(name: str, options: dict[str, Any] | None = None) -> int:
@@ -1449,16 +1536,32 @@ def _explicit_request_counters(value: Any) -> list[int]:
     return counters
 
 
-def scanner_request_settlement(name: str, stdout: str) -> dict[str, Any]:
+def scanner_request_settlement(
+    name: str, stdout: str, *, file_counter: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Derive honest post-execution wire-request accounting from scanner output.
 
     An explicit scanner counter is exact and may refund a conservative reservation.  A successful
     ``httpx`` fingerprint is one request because redirects are not followed by its fixed template.
-    Other result records are only a lower bound: a crawler/template engine can issue many requests
-    that produce no record, so those observations must never be treated as exact or refunded.
+    A tool's own complete wire log (``file_counter`` from ``scanner_file_request_counter``) is
+    exact as well.  Other result records are only a lower bound: a crawler/template engine can
+    issue many requests that produce no record, so those observations must never be treated as
+    exact or refunded.
     """
     scanner = str(name or "").strip().lower()
     text = str(stdout or "")
+    if file_counter is not None:
+        try:
+            logged = max(0, int(file_counter.get("actual")))
+        except (AttributeError, TypeError, ValueError):
+            logged = None
+        if logged is not None:
+            return {
+                "mode": "exact",
+                "actual": logged,
+                "observed_minimum": logged,
+                "source": str(file_counter.get("source") or "tool_wire_log"),
+            }
     decoded: list[Any] = []
     try:
         whole = json.loads(text)

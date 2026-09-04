@@ -192,6 +192,11 @@ Severities are `critical`, `high`, `medium`, `low`, and `info`. Triage states ar
   ownership fields, or modify findings with verification history.
 - Finding lists may omit heavy fields. Respect `details_included` and `omitted_detail_fields`.
 - Do not reinterpret inconclusive retests as fixed or verified.
+- Unauthenticated `data_exposure` proofs recognise only a narrow, entropy-screened set of
+  self-evident secret formats. JWTs, bearer tokens, SSNs, card numbers, and Google API keys are
+  excluded because public endpoints may legitimately issue them or documentation samples match.
+  A public value outside that set is an observation, not a verified exposure; widening the set
+  is a proof-contract change, never a per-target tuning.
 
 Evidence retention cleanup is destructive and interactive-only. It starts with a target-scoped
 dry-run preview, binds an immutable snapshot, uses a one-use dangerous approval for that preview,
