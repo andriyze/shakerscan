@@ -1,0 +1,100 @@
+name: Build candidate on main
+
+# Build a certifiable image set for every main commit, so cutting a release is a certify-only step
+# instead of an hour-long rebuild. This runs the shared image build (`_build-images.yml`) against
+# the pushed SHA and publishes candidate-<sha>-<run-id> manifests plus the uncertified receipt,
+# exactly what a release candidate produces today. It publishes no version tag, no `latest`, no Git
+# tag, and no GitHub Release; the release candidate remains the only path that certifies and the
+# promotion workflows remain the only paths that publish a version.
+#
+# Docs-only pushes are skipped: they cannot change any image. A release candidate whose SHA has no
+# pre-built set still builds on demand, so skipping here can never block a release.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/rulesets/**"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Exact 40-character main SHA to build (defaults to the current main tip)"
+        required: false
+
+# One build per commit. Never cancel a running build: a release may target any recent SHA, so an
+# in-flight build of an older commit must be allowed to finish.
+concurrency:
+  group: shakerscan-build-on-main-${{ github.event.inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Resolve build metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      candidate_sha: ${{ steps.meta.outputs.candidate_sha }}
+      created: ${{ steps.meta.outputs.created }}
+      workflow_sha: ${{ steps.meta.outputs.workflow_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build metadata
+        id: meta
+        env:
+          # A dispatch override is the only external input; validate it to 40 hex before it is ever
+          # used as a git ref. On a push there is no override and the event SHA is used.
+          INPUT_SHA: ${{ github.event.inputs.sha }}
+          EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        shell: bash
+        run: |
+          candidate_sha="${INPUT_SHA:-$EVENT_SHA}"
+          if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Refusing to build a non-40-hex SHA: $candidate_sha" >&2
+            exit 1
+          fi
+          # The SHA must be an ancestor of main; a dispatch cannot aim the build at an arbitrary
+          # unmerged commit.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$candidate_sha" origin/main || {
+            echo "SHA $candidate_sha is not reachable from origin/main" >&2
+            exit 1
+          }
+          version="$(git show "$candidate_sha:VERSION" | tr -d '[:space:]')"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "VERSION at $candidate_sha is not a release version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build images
+    needs: meta
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/_build-images.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      candidate_sha: ${{ needs.meta.outputs.candidate_sha }}
+      created: ${{ needs.meta.outputs.created }}
+      workflow_sha: ${{ needs.meta.outputs.workflow_sha }}
+    secrets: inherit
