@@ -22,6 +22,7 @@ printf '%s\n' \
   "API_IMAGE=shakerscan/shakerscan-api@sha256:$(printf '2%.0s' {1..64})" \
   "UI_IMAGE=shakerscan/shakerscan-ui@sha256:$(printf '3%.0s' {1..64})" \
   "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@sha256:$(printf '4%.0s' {1..64})" \
+  "MODEL_INTAKE_IMAGE=shakerscan/shakerscan-model-intake@sha256:$(printf '5%.0s' {1..64})" \
   "RUNTIME_MANIFEST_SHA256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$ROOT_DIR/install/MANIFEST.sha256")" \
   > "$SMOKE_ROOT/assets/v$version/release-image-lock.env"
 export SHAKERSCAN_RELEASE_ASSET_ROOT="file://$SMOKE_ROOT/assets"

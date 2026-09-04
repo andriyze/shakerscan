@@ -301,7 +301,7 @@ export SCANNER_IMAGE_TAG
 if [ "\${SHAKERSCAN_DISABLE_IMAGE_LOCK:-0}" != "1" ] && [ -f "$INSTALL_DIR/release-image-lock.env" ]; then
     while IFS='=' read -r key value; do
         case "\$key" in
-            SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE)
+            SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|MODEL_INTAKE_IMAGE)
                 case "\$value" in
                     *@sha256:????????????????????????????????????????????????????????????????) export "\$key=\$value" ;;
                     *) printf 'Invalid release image lock for %s\n' "\$key" >&2; exit 1 ;;
@@ -477,7 +477,8 @@ for binding in \
     "SCANNER_IMAGE=shakerscan/shakerscan-scanner" \
     "API_IMAGE=shakerscan/shakerscan-api" \
     "UI_IMAGE=shakerscan/shakerscan-ui" \
-    "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer"; do
+    "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer" \
+    "MODEL_INTAKE_IMAGE=shakerscan/shakerscan-model-intake"; do
     key="${binding%%=*}"
     repository="${binding#*=}"
     value="$(sed -n "s/^${key}=//p" "$INSTALL_STAGE/release-image-lock.env")"
@@ -487,7 +488,7 @@ for binding in \
 done
 while IFS='=' read -r lock_key lock_value; do
     case "$lock_key" in
-        SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|RUNTIME_MANIFEST_SHA256|''|'#'*) ;;
+        SCANNER_IMAGE|API_IMAGE|UI_IMAGE|SIGNER_IMAGE|MODEL_INTAKE_IMAGE|RUNTIME_MANIFEST_SHA256|''|'#'*) ;;
         *) fail "release image lock contains an unsupported key: $lock_key" ;;
     esac
 done < "$INSTALL_STAGE/release-image-lock.env"

@@ -25,6 +25,7 @@ env:
   API_IMAGE: shakerscan/shakerscan-api
   UI_IMAGE: shakerscan/shakerscan-ui
   SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+  MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
 
 jobs:
   promote:
@@ -99,6 +100,7 @@ jobs:
           verify_provenance "$API_IMAGE" api
           verify_provenance "$UI_IMAGE" ui
           verify_provenance "$SIGNER_IMAGE" signer
+          verify_provenance "$MODEL_INTAKE_IMAGE" model_intake
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
@@ -134,6 +136,7 @@ jobs:
           promote "$API_IMAGE" api
           promote "$UI_IMAGE" ui
           promote "$SIGNER_IMAGE" signer
+          promote "$MODEL_INTAKE_IMAGE" model_intake
 
       - name: Create the annotated release tag
         env:
@@ -172,9 +175,10 @@ jobs:
             "API_IMAGE=shakerscan/shakerscan-api@" + .images.api,
             "UI_IMAGE=shakerscan/shakerscan-ui@" + .images.ui,
             "SIGNER_IMAGE=shakerscan/shakerscan-model-intake-signer@" + .images.signer,
+            "MODEL_INTAKE_IMAGE=shakerscan/shakerscan-model-intake@" + .images.model_intake,
             "RUNTIME_MANIFEST_SHA256=" + .runtime_manifest_sha256
           ' release-candidate-receipt.json > release-image-lock.env
-          test "$(wc -l < release-image-lock.env | tr -d ' ')" = 5
+          test "$(wc -l < release-image-lock.env | tr -d ' ')" = 6
           cp "docs/releases/${VERSION}.md" release-notes.md
           cat >> release-notes.md <<EOF
 

@@ -195,12 +195,12 @@ def build_receipt(
         raise PreservationError("unsupported preservation matrix schema")
     if not SOURCE_SHA.fullmatch(source_sha):
         raise PreservationError("source SHA must be a full lowercase commit identity")
-    required_images = {"scanner", "api", "ui", "signer"}
+    required_images = {"scanner", "api", "ui", "signer", "model_intake"}
     if set(images) != required_images or not all(
         SHA256.fullmatch(str(value)) for value in images.values()
     ):
         raise PreservationError(
-            "exact scanner, api, ui, and signer sha256 image identities are required"
+            "exact scanner, api, ui, signer, and model_intake sha256 image identities are required"
         )
 
     cases = _testcases(junit_path)

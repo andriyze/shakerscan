@@ -61,14 +61,14 @@ def test_release_images_publish_sboms_and_verified_final_digest_provenance():
     workflow = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
     promotion = (ROOT / ".github" / "workflows" / "release.yml").read_text()
 
-    assert workflow.count("provenance: mode=max") == 4
-    assert workflow.count("sbom: true") == 4
+    assert workflow.count("provenance: mode=max") == 5
+    assert workflow.count("sbom: true") == 5
     attest_uses = re.findall(r"uses: actions/attest@([0-9a-f]{40})", workflow)
-    assert len(attest_uses) == 4
+    assert len(attest_uses) == 5
     assert len(set(attest_uses)) == 1
-    assert workflow.count("push-to-registry: true") == 4
-    assert workflow.count("create-storage-record: false") == 4
-    assert workflow.count("gh attestation verify") == 4
+    assert workflow.count("push-to-registry: true") == 5
+    assert workflow.count("create-storage-record: false") == 5
+    assert workflow.count("gh attestation verify") == 5
     assert "github-actions-sigstore" in workflow
     assert "final-multiarch-image-digests" in workflow
     assert "attestations: write" in workflow
@@ -87,15 +87,18 @@ def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
     assert "needs: [meta, merge]\n" in workflow[workflow.index("  certify:"):]
     assert "  vulnerability-scan:\n" in workflow
     assert '== "success $CANDIDATE_SHA"' in promotion
-    for image in ("scanner", "api", "ui", "signer"):
+    for image in ("scanner", "api", "ui", "signer", "model-intake"):
         assert f"- name: {image}" in workflow
     assert "severity: HIGH,CRITICAL" in workflow
     assert "ignore-unfixed: true" in workflow
     assert "skip-dirs: ${{ matrix.target.skip_dirs }}" in workflow
     assert "skip-files: ${{ matrix.target.skip_files }}" in workflow
+    # The toolchain scope exclusion follows the toolchain into the Model Intake image; the
+    # scanner and API images are scanned in full (api still skips only its Docker client).
     assert "skip_dirs: /opt/model-intake-tools" in workflow
     assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner" in workflow
-    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" in workflow
+    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" not in workflow
+    assert workflow.index("- name: model-intake") < workflow.index("skip_dirs: /opt/model-intake-tools")
     assert "exit-code: 1" in workflow
     assert "scanners: vuln" in workflow
     assert "TRIVY_PLATFORM: ${{ matrix.platform.value }}" in workflow
@@ -154,13 +157,16 @@ def test_release_component_builds_have_independent_retry_domains():
     signer_steps = "\n".join(step.get("name", "") for step in jobs["build-signer"]["steps"])
     assert "Build and push scanner by digest" in runtime_steps
     assert "Build and push API control plane by digest" in runtime_steps
+    assert "Build and push Model Intake by digest" in runtime_steps
     assert "Build and push UI by digest" not in runtime_steps
     assert "Build and push signer by digest" not in runtime_steps
     assert "Build and push UI by digest" in ui_steps
     assert "Build and push signer by digest" in signer_steps
 
+    # The API and Model Intake images both derive from the scanner digest built in the same job, so
+    # they share the runtime retry domain; UI and signer stay independent.
     expected_cache_scopes = {
-        "build-runtime": ("scanner", "api"),
+        "build-runtime": ("scanner", "api", "model-intake"),
         "build-ui": ("ui",),
         "build-signer": ("signer",),
     }

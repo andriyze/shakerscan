@@ -14,8 +14,8 @@ Use `./scanner.sh start --image-tag latest` only when you intentionally want the
 hosted installer still downloads runtime docs/scripts from its configured raw source, so the
 generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by default.
 
-| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image |
-| --- | --- | --- | --- | --- | --- |
+| Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
+| --- | --- | --- | --- | --- | --- | --- |
 | 2.0.1 | `8aaef980bed5055685d822a6090ffd12f2b3907f` | `shakerscan/shakerscan-scanner:2.0.1` (`sha256:10a58062ca136c9ab7e3ad2c8fe9f6a67fda939f994f1a2474371962011c74fe`) | `shakerscan/shakerscan-api:2.0.1` (`sha256:0c332fea30c1f679874aaa0ac4cd7b4ea2ac9605d08ba408e67a0295e250ca18`) | `shakerscan/shakerscan-ui:2.0.1` (`sha256:c24730c30fc4360b023625bc5917cac9fd99f5dbffaacd32ae7c268432ad36ee`) | `shakerscan/shakerscan-model-intake-signer:2.0.1` (`sha256:ededba53b317ef216f21818aa7aabb19b7ba07300a0e15999efa0dfe3cde5dbd`) |
 | 2.0.0 | `9d207661e88372e00ab482d347ac53e6c1c9980f` | `shakerscan/shakerscan-scanner:2.0.0` (`sha256:f278d4b1e83836cd43d1c1ef90314d8a96a9f3c3e9a47a5a84551d7faaad6341`) | `shakerscan/shakerscan-api:2.0.0` (`sha256:2dda54dd8858fc536778679bd09efcae3d5b04c4459a8f0a64c09ba1d31f9894`) | `shakerscan/shakerscan-ui:2.0.0` (`sha256:d7d49c71e1b4985de77ae502e2f540391ab9e9e3bdfb0ba59e7c727c866bc085`) | `shakerscan/shakerscan-model-intake-signer:2.0.0` (`sha256:6f316f3fbbb75ea6b1dc7cff830388f44164f2e7cfc1586ba3b1689298daf4cd`) |
 | 0.8.18 | `9f87f7dbf814fce37a5cda95ff7954e21aaa1dd2` | `shakerscan/shakerscan-scanner:0.8.18` (`sha256:1bfdd22e87bf90cead6a2c38cd98abd94c5a8eadeea9cee351ea9a484bd1d1fd`) | `shakerscan/shakerscan-api:0.8.18` (`sha256:9349c5c0b4dc59c4c43de0583770ed03a996df6601adf49b175d40747a7f4a0a`) | `shakerscan/shakerscan-ui:0.8.18` (`sha256:7811dd9ff647c546fe695cc139171694e90b2bc26a725ec6b0534fe94c8ce7bb`) | `shakerscan/shakerscan-model-intake-signer:0.8.18` (`sha256:5cdeb9d25bc0e8a423b0cf8eb2669fc5558e4e551605a987252b9cbf11d522ab`) |
