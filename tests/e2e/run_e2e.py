@@ -413,11 +413,6 @@ _ADAPTIVE_XSS_DEBT = (
     "adaptive real-target headless DOM-XSS verification does not settle to "
     "deterministic proof under the packaged smoke stack (2.0.x debt)"
 )
-_INSTALLED_CLI_DEBT = (
-    "the installed CLI wrapper cannot complete hunt start/call in the packaged "
-    "smoke stack; the same start/call authority is proven server-side by "
-    "H-16/H-17 through the API (2.0.x debt)"
-)
 _MODEL_INTAKE_PREVIEW_DEBT = (
     "the Model Intake durable trust-anchor operator lifecycle is a preview surface "
     "outside the shipping scope of this release (declared exclusion)"
@@ -1467,12 +1462,10 @@ def run_hunt() -> H.Scorecard:
         )
         # A misspelled server dimension must fail locally and preserve a stable
         # non-zero exit before the valid wrapper acceptance below.
-        _release_debt_check(
-            sc,
+        sc.check(
             "H-10 installed CLI rejects contract drift with stable exit code",
             cli_start.returncode == 2
             and "budget dimension" in cli_start.stderr.lower(),
-            _INSTALLED_CLI_DEBT,
             f"exit={cli_start.returncode}",
         )
         valid_cli_start = subprocess.run(
@@ -1508,14 +1501,12 @@ def run_hunt() -> H.Scorecard:
             check=False,
         )
         cli_action = json.loads(cli_call.stdout or "{}")
-        _release_debt_check(
-            sc,
+        sc.check(
             "H-11 installed CLI start and call produce valid V2 authority",
             valid_cli_start.returncode == cli_call.returncode == 0
             and bool(cli_hunt_id)
             and canonical_action_status(cli_action.get("response")) == "success"
             and bool(action_receipt_id(cli_action.get("response"))),
-            _INSTALLED_CLI_DEBT,
             f"start_exit={valid_cli_start.returncode} call_exit={cli_call.returncode}",
         )
         if cli_hunt_id:
@@ -1523,15 +1514,7 @@ def run_hunt() -> H.Scorecard:
                 "summary": "Installed CLI acceptance completed.", "next_actions": [],
             })
     except Exception as exc:
-        # In a declared-debt release the packaged-wrapper failure is tracked debt,
-        # not a hard gate failure; the same authority is proven by H-16/H-17.
-        if RELEASE_DECLARED_DEBT:
-            sc.xfail(
-                "H-11 installed CLI start and call produce valid V2 authority",
-                False, _INSTALLED_CLI_DEBT, f"exception: {exc}",
-            )
-        else:
-            sc.error("H-10 through H-11 installed CLI acceptance", exc)
+        sc.error("H-10 through H-11 installed CLI acceptance", exc)
 
     # MCP adapter: invoke its real client implementation against this API, then
     # compare the same canonical policy/manifest/action lifecycle.

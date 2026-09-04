@@ -137,6 +137,7 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         done
     fi
     SHAKERSCAN_API="http://127.0.0.1:$API_PORT" \
+        SHAKERSCAN_API_PORT="$API_PORT" \
         SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan" \
         SHAKERSCAN_E2E_CLI_HOME="$SMOKE_HOME" \
         SHAKERSCAN_E2E_HONEY_HOST="$fixture_host" \

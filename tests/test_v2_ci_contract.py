@@ -109,6 +109,13 @@ def test_candidate_validate_reuses_the_main_suite_report_instead_of_rerunning():
     assert "INSTALLED_STACK_SMOKE_E2E" in release
 
 
+def test_installed_stack_smoke_forwards_its_random_api_port_to_the_cli():
+    smoke = (ROOT / "scripts" / "installed_stack_smoke.sh").read_text(encoding="utf-8")
+    invocation = smoke[smoke.index('SHAKERSCAN_API="http://127.0.0.1:$API_PORT"'):]
+    assert 'SHAKERSCAN_API_PORT="$API_PORT"' in invocation[:500]
+    assert 'SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan"' in invocation[:500]
+
+
 def test_full_release_e2e_accepts_only_exact_main_candidates():
     text = _text("e2e.yml")
     # The candidate must be reachable from the protected default branch; the historical `v2`
