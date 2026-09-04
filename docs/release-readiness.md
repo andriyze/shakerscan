@@ -11,6 +11,12 @@ This is the live release checklist. Source, migrations, generated inventories, i
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are
 useful regression evidence, but do not qualify the frozen 2.0.0 candidate.
 
+## 2.2.0 decision record
+
+| Control | Decision | Owner | Date | Release consequence |
+|---|---|---|---|---|
+| MI-6 durable trust-anchor lifecycle | Ship as release-gated, not as a preview exclusion. | Release owner | 2026-09-04 | Caller-supplied anchors remain rejected; expiry, wrong-key, exact active-key, and deactivation checks are hard installed-stack gates and cannot be converted to declared-debt XFAILs. |
+
 ## Supported product boundary
 
 ShakerScan 2.0.0 is a trusted-operator, self-hosted security scanner.

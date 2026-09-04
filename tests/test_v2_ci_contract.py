@@ -116,6 +116,15 @@ def test_installed_stack_smoke_forwards_its_random_api_port_to_the_cli():
     assert 'SHAKERSCAN_E2E_CLI="$BIN_DIR/shakerscan"' in invocation[:500]
 
 
+def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
+    e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    lifecycle = e2e[e2e.index("# MI-6A/B/C:"):e2e.index("# MI-7:")]
+    assert "sc.xfail" not in lifecycle
+    assert 'sc.error("MI-6 durable trust-anchor lifecycle", e)' in lifecycle
+    assert "MI-6 durable trust-anchor lifecycle | Ship as release-gated" in readiness
+
+
 def test_full_release_e2e_accepts_only_exact_main_candidates():
     text = _text("e2e.yml")
     # The candidate must be reachable from the protected default branch; the historical `v2`

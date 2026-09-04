@@ -315,15 +315,7 @@ def run_model_intake() -> H.Scorecard:
             f"status={after_revoke.get('signature_verification_status')} trusted={after_revoke.get('signature_trusted_root')}",
         )
     except Exception as e:
-        # Model Intake is a preview surface outside this release's shipping scope;
-        # its durable operator lifecycle is recorded as a declared exclusion rather
-        # than a hard gate. The trust-anchor SELECTION security boundary (a caller
-        # cannot supply its own anchor) is proven above and stays a hard check.
-        if RELEASE_DECLARED_DEBT:
-            sc.xfail("MI-6 durable trust-anchor lifecycle", False,
-                     _MODEL_INTAKE_PREVIEW_DEBT, f"exception: {e}")
-        else:
-            sc.error("MI-6 durable trust-anchor lifecycle", e)
+        sc.error("MI-6 durable trust-anchor lifecycle", e)
     finally:
         try:
             cleanup_headers = H.model_intake_operator_headers()
@@ -413,12 +405,6 @@ _ADAPTIVE_XSS_DEBT = (
     "adaptive real-target headless DOM-XSS verification does not settle to "
     "deterministic proof under the packaged smoke stack (2.0.x debt)"
 )
-_MODEL_INTAKE_PREVIEW_DEBT = (
-    "the Model Intake durable trust-anchor operator lifecycle is a preview surface "
-    "outside the shipping scope of this release (declared exclusion)"
-)
-
-
 import time as _time
 
 # Unique per run so the endpoint_url uniqueness constraint never collides with a
