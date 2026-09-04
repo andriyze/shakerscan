@@ -1,4 +1,6 @@
-semgrep==1.172.0
+semgrep==1.174.0
 # Keep Semgrep's transitive TLS/signing runtime above the audited floor used by
 # the rest of ShakerScan instead of inheriting a stale resolver choice.
 cryptography==50.0.0
+# Security floor for Semgrep MCP transport advisories fixed in MCP 1.28.1+.
+mcp==1.29.0
