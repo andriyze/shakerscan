@@ -15,7 +15,8 @@ from typing import Any, Mapping, Sequence
 import urllib.parse
 
 
-CREDENTIAL_SECRET_SCHEMA = "credential-secret/v2"
+CREDENTIAL_SECRET_SCHEMA_V2 = "credential-secret/v2"
+CREDENTIAL_SECRET_SCHEMA = "credential-secret/v3"
 HTTP_CREDENTIAL_KINDS = frozenset({
     "authorization_header",
     "bearer_token",
@@ -55,6 +56,7 @@ IMMEDIATE_HTTP_HEADER_KINDS = frozenset({
     "basic_auth", "custom_headers",
 })
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,200}$")
+_BROWSER_STORAGE_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 _FORBIDDEN_HEADERS = frozenset({
     "host", "content-length", "connection", "transfer-encoding",
     "proxy-authorization", "proxy-connection", "keep-alive", "te", "trailer", "upgrade",
@@ -175,6 +177,7 @@ def build_credential_secret(
     scopes: Any = None,
     custom_headers: Any = None,
     parameter_name: Any = None,
+    browser_storage_key: Any = None,
 ) -> str:
     """Validate and serialize one plaintext envelope for immediate encryption."""
     kind = normalize_credential_kind(auth_kind)
@@ -228,6 +231,19 @@ def build_credential_secret(
         raise CredentialContractError(
             "parameter_name is valid only for query_parameter"
         )
+    storage_key = _text(
+        browser_storage_key,
+        name="browser_storage_key",
+        required=False,
+        maximum=200,
+    )
+    if storage_key is not None and (
+        kind != "bearer_token"
+        or not _BROWSER_STORAGE_KEY_RE.fullmatch(storage_key)
+    ):
+        raise CredentialContractError(
+            "browser_storage_key is valid only for bearer_token and must be a safe localStorage key"
+        )
     endpoint = _endpoint(
         endpoint_url,
         name="endpoint_url",
@@ -257,6 +273,7 @@ def build_credential_secret(
         "scopes": resolved_scopes,
         "custom_headers": headers,
         "parameter_name": resolved_parameter,
+        "browser_storage_key": storage_key,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -272,7 +289,9 @@ def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, A
         value = json.loads(raw)
     except json.JSONDecodeError:
         value = None
-    if not isinstance(value, Mapping) or value.get("schema_version") != CREDENTIAL_SECRET_SCHEMA:
+    if not isinstance(value, Mapping) or value.get("schema_version") not in {
+        CREDENTIAL_SECRET_SCHEMA_V2, CREDENTIAL_SECRET_SCHEMA,
+    }:
         if kind not in {"authorization_header", "cookie"}:
             raise CredentialContractError("stored credential envelope is invalid")
         encoded = build_credential_secret(kind, secret=raw)
@@ -293,6 +312,10 @@ def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, A
         ),
         parameter_name=(
             value.get("parameter_name") if kind == "query_parameter" else None
+        ),
+        browser_storage_key=(
+            value.get("browser_storage_key")
+            if value.get("schema_version") == CREDENTIAL_SECRET_SCHEMA else None
         ),
     )
     return json.loads(encoded)
@@ -343,6 +366,7 @@ def public_credential_configuration(material: Mapping[str, Any]) -> dict[str, An
         "scope_count": len(material.get("scopes") or ()),
         "custom_header_names": sorted(dict(material.get("custom_headers") or {})),
         "parameter_name": material.get("parameter_name"),
+        "browser_storage_key": material.get("browser_storage_key"),
         "interactive_exchange_required": kind in {
             "form_login", "oauth_client_credentials", "oauth_password",
         },

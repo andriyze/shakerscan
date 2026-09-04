@@ -273,6 +273,7 @@ from scan.execution_backend import (
 from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
+from scanner_tools.browser_profile import seed_browser_profile
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -19076,6 +19077,7 @@ async def _execute_agent_scanner_process(
     process_started = False
     execution_uncertain = False
     process_enforcement: dict[str, Any] = {}
+    browser_profile_receipt: dict[str, Any] = {}
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
@@ -19125,7 +19127,13 @@ async def _execute_agent_scanner_process(
                 max_connections=connection_ceiling,
             ).start()
         runtime_paths: dict[str, Any] = {}
-        if name in {"ffuf", "sqlmap"}:
+        browser_storage = (
+            dict(job_data.get("browser_storage") or {})
+            if isinstance(job_data.get("browser_storage"), Mapping) else {}
+        )
+        if name in {"ffuf", "sqlmap"} or (
+            name == "katana_headless" and browser_storage
+        ):
             scratch_dir = tempfile.mkdtemp(
                 prefix=f"shakerscan-{name}-{job_id[:8]}-"
             )
@@ -19142,6 +19150,38 @@ async def _execute_agent_scanner_process(
             })
         if name == "sqlmap":
             runtime_paths["sqlmap_output_dir"] = str(scratch_dir)
+        if name == "katana_headless" and browser_storage:
+            if pinned_proxy is None or not scratch_dir:
+                raise agent_tools.AgentToolError(
+                    "authenticated headless crawl requires the pinned browser transport"
+                )
+            browser_profile_dir = str(Path(scratch_dir) / "chrome-profile")
+            seed_timeout = min(
+                20,
+                max(1, int(reserved_budget.get("tool_wall_seconds") or 0) - 1),
+            )
+            try:
+                browser_profile_receipt = await asyncio.wait_for(
+                    seed_browser_profile(
+                        user_data_dir=browser_profile_dir,
+                        target_origin=urllib.parse.urlunsplit((
+                            parsed_execution.scheme,
+                            parsed_execution.netloc,
+                            "", "", "",
+                        )),
+                        seed=browser_storage,
+                        chromium_path=str(agent_tools._SYSTEM_CHROME_PATH),
+                        proxy_url=pinned_proxy.proxy_url,
+                    ),
+                    timeout=seed_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # browser API errors stay private and fail before traffic
+                raise agent_tools.AgentToolError(
+                    "authenticated browser profile could not be seeded"
+                ) from exc
+            runtime_paths["chrome_data_dir"] = browser_profile_dir
         process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,
@@ -19160,7 +19200,22 @@ async def _execute_agent_scanner_process(
         argv = list(process_plan.argv)
         process_enforcement = process_plan.enforcement_receipt()
         requested_timeout = int(job_data.get("timeout_ms") or process_plan.timeout_ms)
-        timeout_ms = max(1_000, min(process_plan.timeout_ms, requested_timeout))
+        elapsed_before_process_ms = max(
+            0, int((time.monotonic() - monotonic_started) * 1_000),
+        )
+        remaining_wall_ms = (
+            int(reserved_budget.get("tool_wall_seconds") or 0) * 1_000
+            - elapsed_before_process_ms
+        )
+        if remaining_wall_ms < 1_000:
+            raise agent_tools.AgentToolError(
+                "scanner setup exhausted its reserved wall-clock budget"
+            )
+        timeout_ms = min(
+            process_plan.timeout_ms,
+            requested_timeout,
+            remaining_wall_ms,
+        )
         process_environment = {
             key: value
             for key, value in os.environ.items()
@@ -19356,6 +19411,7 @@ async def _execute_agent_scanner_process(
         "settlement": settlement,
         "process_enforcement": process_enforcement,
         "network_telemetry": network_telemetry,
+        "browser_profile": browser_profile_receipt,
         "execution_uncertain": execution_uncertain,
         "network_binding": _agent_scanner_network_binding(name),
     }

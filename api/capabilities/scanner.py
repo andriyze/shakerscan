@@ -241,6 +241,19 @@ class ScannerExecutionAdapter:
                     else "within_ceiling"
                 ),
             }
+        browser_profile = process_result.get("browser_profile")
+        if isinstance(browser_profile, Mapping) and browser_profile:
+            redacted_execution["browser_profile"] = {
+                "schema_version": str(browser_profile.get("schema_version") or ""),
+                "kind": str(browser_profile.get("kind") or ""),
+                "seeded_items": max(
+                    0, int(browser_profile.get("seeded_items") or 0),
+                ),
+                "target_requests": max(
+                    0, int(browser_profile.get("target_requests") or 0),
+                ),
+                "secret_values_visible": False,
+            }
         return CapabilityAdapterResult(
             status=status,
             observations=observations,

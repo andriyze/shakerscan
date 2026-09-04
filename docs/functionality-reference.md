@@ -148,6 +148,14 @@ V2 has exactly one deterministic engine: `scan`. Three independent inputs shape 
   `thorough` (180 minutes), or opt-in `deep` (360 minutes).
 - **Opaque references** select exact-target credential profiles and request-collection selections.
 
+Cookie profiles admitted for `web.browser_crawl` seed the primary cookie jar in a fresh,
+owner-only Chromium profile. Bearer profiles may additionally declare a nonsecret
+`browser_storage_key`; when present, the worker seeds that localStorage key at the exact target
+origin. Bootstrap navigation is fulfilled locally, the token never enters process arguments or
+public receipts, and the ephemeral profile is deleted after Katana exits. Other bearer profiles
+continue to authenticate HTTP-aware capabilities without guessing an application-specific browser
+storage convention.
+
 The typed budget covers duration, HTTP requests, state-changing requests, endpoints, hosts, browser
 actions, TCP attempts, tool wall time, and workers. A custom value may only lower the selected
 profile. `max_state_changing_requests=0` is an explicit deny ceiling. Every action reserves its
@@ -1295,7 +1303,10 @@ profiles receive bounded replay/probe capabilities.
 `POST /credential-profiles/{profile_id}/rotate`. These exact-target Web, API, network, and device
 profiles use immutable encrypted versions, metadata-only responses, capability bounds, expiry, and
 primary/secondary/service/SSH slots. Scan and Hunt queue only opaque IDs; workers revalidate the
-target-bound approval and decrypt the admitted version immediately before execution.
+target-bound approval and decrypt the admitted version immediately before execution. A bearer
+profile may expose a nonsecret `browser_storage_key` for authenticated SPA crawling; cookie values
+and bearer tokens remain worker-private, are placed only in an ephemeral browser profile, and are
+never returned or passed on the scanner command line.
 
 **Legacy target credentials and principals**: `GET|POST /targets/{id}/credential-profiles` ·
 `PATCH|DELETE /targets/{id}/credential-profiles/{profile_id}` ·

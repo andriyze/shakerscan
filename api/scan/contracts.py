@@ -147,6 +147,9 @@ SCAN_AUTHENTICATION_KEYS = frozenset({
     "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
     "oauth_username", "oauth_password", "user2_cookies", "user2_header",
     "user2_login_url", "user2_login_username", "user2_login_password",
+    # Worker-private projection used only to create an ephemeral, target-bound
+    # headless-browser profile. Public Scan payloads may never provide it.
+    "auth_browser_storage",
     # Legacy managed references survived into a worker hydration path that decrypts without the
     # canonical approval, profile-version, target-kind, capability-allowlist and placement checks.
     # credential_profile_ids is the validated replacement, so the legacy key is refused as raw

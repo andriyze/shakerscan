@@ -610,6 +610,7 @@ download "$REPO_RAW_BASE/scanner/redaction.py" "$INSTALL_DIR/scanner/redaction.p
 download "$REPO_RAW_BASE/scanner/risk_scoring.py" "$INSTALL_DIR/scanner/risk_scoring.py"
 download "$REPO_RAW_BASE/scanner/score_bands.py" "$INSTALL_DIR/scanner/score_bands.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/__init__.py" "$INSTALL_DIR/scanner/scanner_tools/__init__.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/browser_profile.py" "$INSTALL_DIR/scanner/scanner_tools/browser_profile.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/build_fingerprint.py" "$INSTALL_DIR/scanner/scanner_tools/build_fingerprint.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/device_postman.py" "$INSTALL_DIR/scanner/scanner_tools/device_postman.py"
 download "$REPO_RAW_BASE/scanner/scanner_tools/request_replay.py" "$INSTALL_DIR/scanner/scanner_tools/request_replay.py"

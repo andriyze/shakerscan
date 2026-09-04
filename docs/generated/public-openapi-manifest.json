@@ -49,9 +49,9 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
-    "CredentialProfileCreate": "5ce497f517c995a974fdd8cd8525f0d020a5268254c957a7c62b587ecadaa82b",
+    "CredentialProfileCreate": "e2efce93a3c40faa60d6273d33db220598fffe48be6a39f52968157c1c1d44a4",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
-    "CredentialProfileRotate": "9a29e2246008a2ac8143b0d245a4869ca6f4b5daaea156fe8265254401d806b5",
+    "CredentialProfileRotate": "f023ee42779be3169d7f816b6172c0831e7a8fdde4a450720996279893b870ba",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
     "DeviceCredentialProfileCreate": "b25505648ad3d2e27de4afb54586d228485d92f256a42418acb2ace596582813",
@@ -174,7 +174,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "0ad75214909e6fda5f7143799d4b4ee112bc1e4d016a2f85f3e6edcd74041356",
+  "contract_sha256": "62bd5ae8b08fe2e8ddbdaaf8ce60a96b4ae7ab1f9a8e4a60c57e5dcf8e188826",
   "openapi": "3.1.0",
   "operation_count": 394,
   "operations": {

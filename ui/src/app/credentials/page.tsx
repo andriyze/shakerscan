@@ -65,6 +65,7 @@ type Draft = {
   username: string
   secondarySecret: string
   headerName: string
+  browserStorageKey: string
   endpointUrl: string
   clientId: string
   scopes: string
@@ -85,6 +86,7 @@ const EMPTY_DRAFT: Draft = {
   username: '',
   secondarySecret: '',
   headerName: 'X-API-Key',
+  browserStorageKey: '',
   endpointUrl: '',
   clientId: '',
   scopes: '',
@@ -143,6 +145,9 @@ function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
   if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {
     errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'
   }
+  if (draft.authKind === 'bearer_token' && draft.browserStorageKey.trim() && !/^[A-Za-z0-9_.:-]{1,200}$/.test(draft.browserStorageKey.trim())) {
+    errors.browserStorageKey = 'Use 1–200 letters, numbers, dots, colons, underscores, or hyphens.'
+  }
   if (needsEndpoint(draft.authKind) && !draft.endpointUrl.trim()) errors.endpointUrl = 'Enter the login or token endpoint.'
   if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'
   if (draft.authKind === 'custom_headers') {
@@ -177,6 +182,9 @@ function secretPayload(draft: Draft): CredentialSecretPayload {
   if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret
   if (kind === 'api_key_header') payload.header_name = draft.headerName
   if (kind === 'query_parameter') payload.parameter_name = draft.headerName
+  if (kind === 'bearer_token' && draft.browserStorageKey.trim()) {
+    payload.browser_storage_key = draft.browserStorageKey.trim()
+  }
   if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl
   if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {
     payload.client_id = draft.clientId
@@ -347,6 +355,7 @@ export default function CredentialsPage() {
       principalLabel: profile.principal_label || '',
       principalSlot: profile.principal_slot,
       headerName: profile.configuration.parameter_name || profile.configuration.header_name || 'X-API-Key',
+      browserStorageKey: profile.configuration.browser_storage_key || '',
       capabilities: profile.allowed_capabilities.join(', '),
     })
     setDraftErrors({})
@@ -564,6 +573,7 @@ export default function CredentialsPage() {
           {!rotating && <Field label="Principal label"><Input value={draft.principalLabel} onChange={(event) => updateDraft({ principalLabel: event.target.value })} placeholder="Optional human-readable identity" /></Field>}
           {showsUsername(draft.authKind) && <Field label="Username" error={draftErrors.username} required={isSsh(draft.authKind)} hint={isIdentityPair(draft.authKind) ? 'Optional if you supply a secret below.' : undefined}><Input autoComplete="off" value={draft.username} onChange={(event) => updateDraft({ username: event.target.value })} /></Field>}
           {(draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && <Field label={draft.authKind === 'query_parameter' ? 'Parameter name' : 'Header name'} error={draftErrors.headerName} required><Input value={draft.headerName} onChange={(event) => updateDraft({ headerName: event.target.value })} /></Field>}
+          {draft.authKind === 'bearer_token' && <Field label="Browser localStorage key" error={draftErrors.browserStorageKey} hint="Optional. Set this only when the application reads its bearer token from localStorage."><Input value={draft.browserStorageKey} onChange={(event) => updateDraft({ browserStorageKey: event.target.value })} placeholder="token" /></Field>}
           {needsEndpoint(draft.authKind) && <Field label="Login / token endpoint" error={draftErrors.endpointUrl} required><Input value={draft.endpointUrl} onChange={(event) => updateDraft({ endpointUrl: event.target.value })} placeholder="/login or https://target/token" /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label={draft.authKind === 'oauth_client_credentials' ? 'Client ID' : 'Client ID (required for Scan)'} error={draftErrors.clientId} required={draft.authKind === 'oauth_client_credentials'}><Input autoComplete="off" value={draft.clientId} onChange={(event) => updateDraft({ clientId: event.target.value })} /></Field>}
           {(draft.authKind === 'oauth_client_credentials' || draft.authKind === 'oauth_password') && <Field label="OAuth scopes"><Input value={draft.scopes} onChange={(event) => updateDraft({ scopes: event.target.value })} placeholder="openid profile" /></Field>}

@@ -573,6 +573,43 @@ def test_katana_preserves_only_spa_fragment_route_shape_and_field_names():
     assert "private-browser-value" not in json.dumps(output)
 
 
+def test_headless_katana_uses_only_a_worker_owned_private_profile(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o700)
+    profile.chmod(0o700)
+
+    plan = at.build_enforced_scanner_plan(
+        "katana_headless",
+        "https://app.test/",
+        {},
+        reserved_budget={"http_requests": 601, "tool_wall_seconds": 30},
+        pinned_address="192.0.2.10",
+        pinned_proxy_url="socks5://127.0.0.1:1080",
+        runtime_paths={"chrome_data_dir": str(profile)},
+    )
+
+    assert plan.argv[plan.argv.index("-chrome-data-dir") + 1] == str(profile)
+    assert "-no-incognito" in plan.argv
+    assert plan.budget_proof["inputs"]["browser_profile_seeded"] is True
+
+
+def test_headless_katana_rejects_a_shared_private_profile(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir(mode=0o755)
+    profile.chmod(0o755)
+
+    with pytest.raises(at.AgentToolError, match="worker-owned"):
+        at.build_enforced_scanner_plan(
+            "katana_headless",
+            "https://app.test/",
+            {},
+            reserved_budget={"http_requests": 601, "tool_wall_seconds": 30},
+            pinned_address="192.0.2.10",
+            pinned_proxy_url="socks5://127.0.0.1:1080",
+            runtime_paths={"chrome_data_dir": str(profile)},
+        )
+
+
 def test_external_scanner_output_is_typed_and_query_values_are_redacted():
     secret = "AbCdEf0123456789AbCdEf0123456789"
     output = at.parse_scanner_output("nuclei", json.dumps({

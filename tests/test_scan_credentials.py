@@ -161,6 +161,71 @@ def test_scan_worker_binding_projects_primary_and_secondary_headers():
     }
 
 
+@pytest.mark.parametrize(
+    ("kind", "headers", "configuration", "expected"),
+    [
+        (
+            "cookie",
+            {"Cookie": "session=primary-secret"},
+            {},
+            {
+                "schema_version": "scan-browser-storage/v1",
+                "kind": "cookie_header",
+                "value": "session=primary-secret",
+            },
+        ),
+        (
+            "bearer_token",
+            {"Authorization": "Bearer primary-secret"},
+            {"browser_storage_key": "auth.token"},
+            {
+                "schema_version": "scan-browser-storage/v1",
+                "kind": "local_storage",
+                "key": "auth.token",
+                "value": "primary-secret",
+            },
+        ),
+    ],
+)
+def test_scan_worker_binding_projects_browser_auth_privately(
+    kind, headers, configuration, expected,
+):
+    resolved = SimpleNamespace(
+        profile=SimpleNamespace(
+            auth_kind=kind,
+            allowed_capabilities=("web.browser_crawl",),
+            configuration=configuration,
+        ),
+        http_headers=lambda: SecretHTTPHeaders(headers),
+    )
+
+    options = bind_resolved_scan_credential({}, resolved, scan_lane="primary")
+
+    assert options["auth_browser_storage"] == expected
+
+
+def test_browser_storage_is_not_projected_without_explicit_capability_or_key():
+    resolved = SimpleNamespace(
+        profile=SimpleNamespace(
+            auth_kind="bearer_token",
+            allowed_capabilities=("http.request",),
+            configuration={"browser_storage_key": "auth.token"},
+        ),
+        http_headers=lambda: SecretHTTPHeaders({
+            "Authorization": "Bearer primary-secret",
+        }),
+    )
+    no_capability = bind_resolved_scan_credential(
+        {}, resolved, scan_lane="primary",
+    )
+    resolved.profile.allowed_capabilities = ("web.browser_crawl",)
+    resolved.profile.configuration = {}
+    no_key = bind_resolved_scan_credential({}, resolved, scan_lane="primary")
+
+    assert "auth_browser_storage" not in no_capability
+    assert "auth_browser_storage" not in no_key
+
+
 def test_scan_worker_binding_preserves_custom_headers_and_form_login():
     header = SimpleNamespace(
         profile=SimpleNamespace(auth_kind="custom_headers"),

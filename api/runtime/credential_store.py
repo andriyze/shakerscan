@@ -33,6 +33,7 @@ PUBLIC_CONFIGURATION_KEYS = frozenset({
     "scope_count",
     "custom_header_names",
     "parameter_name",
+    "browser_storage_key",
     "interactive_exchange_required",
     "secret_values_visible",
 })
