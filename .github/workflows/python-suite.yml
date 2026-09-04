@@ -46,7 +46,12 @@ jobs:
           while IFS= read -r path; do
             [[ -z "$path" ]] && continue
             case "$path" in
-              docs/*|*.md|install/STABLE_VERSION|.github/rulesets/*|LICENSE|.gitignore) ;;
+              # The ledger, the stable-channel pointer, and the release notes carry contracts the
+              # suite asserts (published digests for install/STABLE_VERSION, the docs status
+              # matrix), so a change to any of them runs the suite. 2.0.1 merged the channel
+              # bump with a pending ledger row because these were skipped as metadata.
+              RELEASES.md|install/STABLE_VERSION|docs/releases/*) run=true ;;
+              docs/*|*.md|.github/rulesets/*|LICENSE|.gitignore) ;;
               *) run=true ;;
             esac
           done <<< "$changed"

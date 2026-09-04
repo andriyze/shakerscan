@@ -29,7 +29,10 @@ def test_candidate_build_cannot_publish_release_or_stable_aliases():
     assert "e2e_run_id:" not in text
     assert "codeql_run_id:" in text
     assert "parity_run_id:" in text
-    assert 'verify_run "$CODEQL_RUN_ID" "CodeQL"' in text
+    # The name is unique on purpose: a stale default-setup record is also called "CodeQL", which
+    # makes `gh --workflow CodeQL` ambiguous and made the 2.0.1 re-dispatch chain hang.
+    assert 'verify_run "$CODEQL_RUN_ID" "CodeQL analysis"' in text
+    assert (ROOT / ".github" / "workflows" / "codeql.yml").read_text().startswith("name: CodeQL analysis\n")
     assert 'if [[ -n "$PARITY_RUN_ID" ]]; then' in text
     assert 'verify_run "$PARITY_RUN_ID" "V2 Scan parity (real fleet)"' in text
     assert '"not_run_optional_boundary"' not in text  # recorded by the certifier, not forged here

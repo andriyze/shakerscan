@@ -9,10 +9,31 @@ SMOKE_HOME="$SMOKE_ROOT/home"
 RUNTIME="$SMOKE_HOME/.shakerscan"
 BIN_DIR="$SMOKE_HOME/.local/bin"
 PROJECT="shakerscan-public-smoke-$$"
-API_PORT=8080
-UI_PORT=3000
-POSTGRES_PORT=5432
-REDIS_PORT=6379
+
+# The smoke runs a complete second stack, so it must never fight the operator's own stack for
+# the default ports (the 2.0.1 promotion failed on 127.0.0.1:6379 with the dev stack running).
+# Each port is the first free one at or above a high default; the installer and its compose
+# files take them through the same variables an operator would use. Override with
+# SHAKERSCAN_SMOKE_{API,UI,POSTGRES,REDIS}_PORT to pin one.
+free_port() {
+    local port="$1"
+    while ! python3 -c 'import socket, sys
+s = socket.socket()
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.close()' "$port" 2>/dev/null; do
+        port=$((port + 1))
+        if [ "$port" -gt 65000 ]; then
+            echo "public smoke: no free port found at or above $1" >&2
+            exit 1
+        fi
+    done
+    echo "$port"
+}
+API_PORT="${SHAKERSCAN_SMOKE_API_PORT:-$(free_port 18080)}"
+UI_PORT="${SHAKERSCAN_SMOKE_UI_PORT:-$(free_port 13000)}"
+POSTGRES_PORT="${SHAKERSCAN_SMOKE_POSTGRES_PORT:-$(free_port 15432)}"
+REDIS_PORT="${SHAKERSCAN_SMOKE_REDIS_PORT:-$(free_port 16379)}"
+echo "public smoke: api=$API_PORT ui=$UI_PORT postgres=$POSTGRES_PORT redis=$REDIS_PORT"
 
 check_equal() {
     local label="$1" actual="$2" expected="$3"

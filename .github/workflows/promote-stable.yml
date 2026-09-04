@@ -108,21 +108,33 @@ jobs:
 
       - name: Prepare the stable-channel pull request branch
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SMOKE_URL: ${{ inputs.smoke_receipt_url }}
           SMOKE_SHA256: ${{ inputs.smoke_receipt_sha256 }}
         shell: bash
         run: |
-          if [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" == "$VERSION" ]]; then
-            echo "install/STABLE_VERSION already resolves ${VERSION}; nothing to bump."
-            exit 0
-          fi
           branch="release/stable-${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch" main
-          printf '%s\n' "$VERSION" > install/STABLE_VERSION
-          git add install/STABLE_VERSION
+          # The ledger row is what the upgrade smoke and the runtime-hardening test read for
+          # install/STABLE_VERSION, so it moves in the SAME commit as the channel pointer. It is
+          # recorded from the release's own image lock (verified above) and the release's source
+          # commit, never typed by hand; a row that already holds different digests fails closed.
+          release_sha="$(gh release view "v${VERSION}" --json targetCommitish --jq .targetCommitish)"
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+          python3 scripts/record_release_ledger.py \
+            --version "$VERSION" --commit "$release_sha" \
+            --lock release-image-lock.env --ledger RELEASES.md
+          if [[ "$(tr -d '[:space:]' < install/STABLE_VERSION)" != "$VERSION" ]]; then
+            printf '%s\n' "$VERSION" > install/STABLE_VERSION
+          fi
+          if git diff --quiet -- RELEASES.md install/STABLE_VERSION; then
+            echo "install/STABLE_VERSION already resolves ${VERSION} and the ledger row is recorded; nothing to bump."
+            exit 0
+          fi
+          git add RELEASES.md install/STABLE_VERSION
           git commit -m "release: promote ${VERSION} stable channel" \
             -m "Public smoke receipt: ${SMOKE_URL}" \
             -m "Receipt sha256: ${SMOKE_SHA256}" \
