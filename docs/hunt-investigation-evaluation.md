@@ -1,5 +1,7 @@
 # Hunt investigation evaluation
 
+**Status**: Evaluation protocol; not a security-efficacy claim.
+
 The H18 scripted integration test verifies plumbing. It is not evidence that an
 independent planner discovers vulnerabilities or selects methodologies correctly.
 Use the following protocol before claiming recall or productivity improvements.
