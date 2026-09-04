@@ -1,0 +1,33 @@
+name: Verify RC native tools
+on:
+  push:
+    branches: [fix/2.2.0-rc-failures]
+    paths: [.github/workflows/verify-rc-native-tools.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - name: Build patched native scanner stage
+        run: |
+          docker buildx build --load --target model-intake-go-tools \
+            -f scanner/Dockerfile.model-intake -t shakerscan-model-intake-go-tools:verify .
+      - name: Prove embedded dependency floors
+        run: |
+          docker run --rm --entrypoint sh shakerscan-model-intake-go-tools:verify -ec '
+            go version /out/trivy | grep -F go1.27.0
+            go version /out/osv-scanner | grep -F go1.27.0
+            go version -m /out/trivy | grep -F "golang.org/x/crypto\tv0.55.0"
+            go version -m /out/trivy | grep -F "github.com/go-git/go-git/v5\tv5.19.2"
+            go version -m /out/trivy | grep -F "google.golang.org/grpc\tv1.83.1"
+            go version -m /out/trivy | grep -F "oras.land/oras-go/v2\tv2.6.2"
+            go version -m /out/osv-scanner | grep -F "golang.org/x/crypto\tv0.55.0"
+            go version -m /out/osv-scanner | grep -F "golang.org/x/mod\tv0.40.0"
+            go version -m /out/osv-scanner | grep -F "google.golang.org/grpc\tv1.83.1"
+            /out/trivy --version
+            /out/osv-scanner --version
+          '
