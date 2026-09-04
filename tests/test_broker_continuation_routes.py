@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from types import SimpleNamespace
 import sys
 
 import pytest
 
-sys.modules.setdefault("asyncpg", SimpleNamespace(Pool=object))
+try:
+    import asyncpg  # noqa: F401 - prefer the real driver in the locked CI environment
+except ModuleNotFoundError:
+    sys.modules.setdefault("asyncpg", SimpleNamespace(Pool=object))
 from api.fleet_routes import router as routes
 from api.scan.continuation import root_scan_plan_revision
 from api.scan.continuation_rounds import compile_next_continuation
