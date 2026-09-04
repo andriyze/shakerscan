@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +218,7 @@ from scan.budget_allocator import (
 )
 from scan.continuation import (
     ContinuationBudgetCeiling,
+    MAX_SCAN_CONTINUATION_ROUNDS,
     reconciled_continuation_ceiling,
     ScanContinuationAllocation,
     ScanContinuationError,
@@ -224,6 +226,7 @@ from scan.continuation import (
     amended_scan_plan_revision,
     absent_receipt_summary,
     build_discovery_continuation_manifests,
+    continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     load_discovery_shard_receipts,
     merge_scan_action_continuation,
@@ -11604,10 +11607,28 @@ async def _materialize_local_scan_continuation(
     parent_results: Mapping[str, CapabilityResultReference],
     dispatcher: DatabaseNeutralScanActionDispatcher,
     execution_plan: Any,
-) -> tuple[ScanActionPlan, ScanPlanRevision]:
+    revision_number: int = 1,
+    include_finalizer: bool = True,
+    finalize_only: bool = False,
+) -> tuple[ScanActionPlan, ScanPlanRevision] | None:
+    if not 1 <= revision_number <= MAX_SCAN_CONTINUATION_ROUNDS + 1:
+        raise ScanContinuationError("continuation revision is outside its bound")
+    if finalize_only and not include_finalizer:
+        raise ScanContinuationError("a finalizer-only revision must include the finalizer")
+    root_action_count = len(allocation.parent_action_ids)
+    root_actions = parent_plan.actions[:root_action_count]
+    root_results = {
+        action_id: parent_results[action_id]
+        for action_id in allocation.parent_action_ids
+        if action_id in parent_results
+    }
+    if set(root_results) != set(allocation.parent_action_ids):
+        raise ScanContinuationError(
+            "continuation is missing a terminal root action receipt"
+        )
     observations = {
         action.action_id: await dispatcher._observations(action.action_id)
-        for action in parent_plan.actions
+        for action in root_actions
     }
     request_manifests = await _load_scan_continuation_request_manifests(
         scan_id=dispatcher.scan_id,
@@ -11619,7 +11640,7 @@ async def _materialize_local_scan_continuation(
         target_url=dispatcher.target_url,
         target=dispatcher.target,
         options=dispatcher.options,
-        action_results=parent_results,
+        action_results=root_results,
         observations=observations,
         request_manifests=request_manifests,
     )
@@ -11689,8 +11710,17 @@ async def _materialize_local_scan_continuation(
         ),
         action_scope="endpoint",
         action_budgets=zero_cost_existing_inputs,
+        # Every work revision receives a unique action namespace. The ninth
+        # revision is terminal-only and reuses round eight only while compiling
+        # the finalizer reservation; no round-eight work is appended twice.
+        continuation_round=min(revision_number, MAX_SCAN_CONTINUATION_ROUNDS),
+        manifest_offsets=continuation_manifest_offsets(parent_plan),
+        # The first continuation satisfies explicit family floors. Later rounds
+        # are opportunistic breadth and must stop cleanly when the residual can
+        # no longer fund a fast-tier batch.
+        require_family_minimums=revision_number == 1,
     )
-    continuation_plan = allocate_scan_action_plan(
+    allocated_plan = allocate_scan_action_plan(
         continuation_raw,
         # Admit against what the settled root actions actually left, not the
         # worst-case residual frozen at submission (see reconciled_continuation_ceiling).
@@ -11698,12 +11728,74 @@ async def _materialize_local_scan_continuation(
             reconciled_continuation_ceiling(allocation, parent_results),
         ),
     ).plan
+
+    # Keep the continuation plan independently valid while selecting only work
+    # that was actually admitted. Optional actions whose dependencies were
+    # skipped are omitted rather than appended as terminal noise. One graph slot
+    # is always retained for the finalizer, including during work-only rounds.
+    selected: list[ScanAction] = []
+    selected_ids: set[str] = set()
+    append_slots = max(0, 511 - len(parent_plan.actions))
+    appended_work = 0
+    for action in allocated_plan.actions:
+        is_input = action.action_id.startswith((
+            "inputs.auth_", "inputs.collection_",
+        ))
+        if is_input:
+            selected.append(action)
+            selected_ids.add(action.action_id)
+            continue
+        if action.action_id == "finalize.report":
+            continue
+        if finalize_only or action.admission_status != "planned":
+            continue
+        if any(dependency not in selected_ids for dependency in action.dependencies):
+            continue
+        if appended_work >= append_slots:
+            continue
+        selected.append(action)
+        selected_ids.add(action.action_id)
+        appended_work += 1
+
+    if not finalize_only and appended_work == 0:
+        return None
+    if include_finalizer:
+        finalizer = next(
+            action for action in allocated_plan.actions
+            if action.action_id == "finalize.report"
+        )
+        selected.append(replace(
+            finalizer,
+            dependencies=tuple(action.action_id for action in selected),
+            action_digest=None,
+        ))
+    continuation_plan = ScanActionPlan(
+        scan_id=allocated_plan.scan_id,
+        execution_plan_digest=allocated_plan.execution_plan_digest,
+        target_binding_digest=allocated_plan.target_binding_digest,
+        actions=tuple(
+            replace(action, ordinal=index, action_digest=None)
+            for index, action in enumerate(selected)
+        ),
+    )
     amended = merge_scan_action_continuation(
         parent_plan=parent_plan,
         continuation_plan=continuation_plan,
         allocation=allocation,
         parent_results=parent_results,
+        include_finalizer=include_finalizer,
     )
+    manifest_reference_values: list[Mapping[str, Any]] = [
+        endpoints.reference().canonical_dict(),
+        candidates.reference().canonical_dict(),
+        *(manifest.reference().canonical_dict() for manifest in request_manifests),
+    ]
+    if request_candidates is not None:
+        manifest_reference_values.append(
+            request_candidates.reference().canonical_dict()
+        )
+    if isinstance(template_ref, Mapping):
+        manifest_reference_values.append(dict(template_ref))
     revision = amended_scan_plan_revision(
         parent_plan=parent_plan,
         continuation_plan=continuation_plan,
@@ -11711,8 +11803,9 @@ async def _materialize_local_scan_continuation(
         allocation=allocation,
         discovery_results=parent_results,
         work_manifest_references=unique_work_manifest_reference_dicts(
-            action.capability_args for action in continuation_plan.actions
+            manifest_reference_values
         ),
+        revision=revision_number,
     )
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -11881,7 +11974,7 @@ async def _execute_reserved_deterministic_scan(
             scan_id=scan_id,
             job_id=job_id,
             progress_start=5,
-            progress_end=95 if initial_has_finalizer else 45,
+            progress_end=95 if initial_has_finalizer else 40,
             backend=backend,
         ),
     ).run(plan)
@@ -11901,50 +11994,114 @@ async def _execute_reserved_deterministic_scan(
             raise ScanCapabilityContractError(
                 "active Scan has no upfront continuation allocation"
             )
+        all_results = dict(orchestration.action_results)
+        next_revision = (
+            int(plan_revision.revision) + 1 if plan_revision is not None else 1
+        )
+
+        async def run_amended_plan(
+            amended_plan: ScanActionPlan,
+            amended_revision: ScanPlanRevision,
+            *,
+            progress_start: int,
+            progress_end: int,
+        ) -> Any:
+            nonlocal backend
+            backend = PostgresScanExecutionBackend(
+                pool=db_pool,
+                plan=amended_plan,
+                worker_id=worker_id,
+                backend_name="local",
+                aggregate_owner_id=(
+                    str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
+                    or None
+                ),
+            )
+            dispatcher.plan = amended_plan
+            dispatcher.plan_revision = amended_revision
+            dispatcher.backend = backend
+            amended_executor = ReceiptScanActionExecutor(
+                scan_id=scan_id,
+                target_id=execution.target_binding.target_id,
+                worker_id=worker_id,
+                dispatcher=dispatcher,
+                scope_receipt_id=execution.target_binding.scope_receipt_id,
+                approval_receipt_id=admission.plan.policy.approval_receipt_id,
+            )
+            amended_result = await ScanOrchestrator(
+                backend=backend,
+                executor=amended_executor,
+                event_callback=_local_scan_action_activity_callback(
+                    plan=amended_plan,
+                    scan_id=scan_id,
+                    job_id=job_id,
+                    progress_start=progress_start,
+                    progress_end=progress_end,
+                    backend=backend,
+                ),
+            ).run(amended_plan)
+            return amended_result
+
         try:
-            plan, plan_revision = await _materialize_local_scan_continuation(
+            # Append one digest-bound work revision at a time. Recompilation
+            # starts each manifest lane at its first unplanned index and admits
+            # only what the cumulatively reconciled residual can still fund.
+            while next_revision <= MAX_SCAN_CONTINUATION_ROUNDS:
+                materialized = await _materialize_local_scan_continuation(
+                    parent_plan=plan,
+                    allocation=continuation_allocation,
+                    parent_results=all_results,
+                    dispatcher=dispatcher,
+                    execution_plan=execution.execution_plan,
+                    revision_number=next_revision,
+                    include_finalizer=False,
+                )
+                if materialized is None:
+                    break
+                plan, plan_revision = materialized
+                round_start = 40 + ((next_revision - 1) * 50 // MAX_SCAN_CONTINUATION_ROUNDS)
+                round_end = 40 + (next_revision * 50 // MAX_SCAN_CONTINUATION_ROUNDS)
+                orchestration = await run_amended_plan(
+                    plan,
+                    plan_revision,
+                    progress_start=round_start,
+                    progress_end=round_end,
+                )
+                all_results.update(orchestration.action_results)
+                if any(
+                    result.status.value == "cancelled"
+                    for result in orchestration.action_results.values()
+                ):
+                    raise ValueError("Cancelled by user")
+                next_revision += 1
+
+            # Finalization is its own immutable revision. This preserves a
+            # terminal report even when all eight work rounds were consumed and
+            # prevents an early finalizer from making later amendments invalid.
+            finalized = await _materialize_local_scan_continuation(
                 parent_plan=plan,
                 allocation=continuation_allocation,
-                parent_results=orchestration.action_results,
+                parent_results=all_results,
                 dispatcher=dispatcher,
                 execution_plan=execution.execution_plan,
+                revision_number=next_revision,
+                include_finalizer=True,
+                finalize_only=True,
+            )
+            if finalized is None:
+                raise ScanContinuationError(
+                    "terminal Scan continuation produced no finalizer"
+                )
+            plan, plan_revision = finalized
+            orchestration = await run_amended_plan(
+                plan,
+                plan_revision,
+                progress_start=90,
+                progress_end=95,
             )
         except ScanContinuationError as exc:
             record_operational_event(get_redis(), "continuation_rejected")
             raise ScanCapabilityContractError(str(exc)) from exc
-        backend = PostgresScanExecutionBackend(
-            pool=db_pool,
-            plan=plan,
-            worker_id=worker_id,
-            backend_name="local",
-            aggregate_owner_id=(
-                str(normalized.get("_v2_worker_authority", {}).get("parent_scan_id") or "")
-                or None
-            ),
-        )
-        dispatcher.plan = plan
-        dispatcher.plan_revision = plan_revision
-        dispatcher.backend = backend
-        executor = ReceiptScanActionExecutor(
-            scan_id=scan_id,
-            target_id=execution.target_binding.target_id,
-            worker_id=worker_id,
-            dispatcher=dispatcher,
-            scope_receipt_id=execution.target_binding.scope_receipt_id,
-            approval_receipt_id=admission.plan.policy.approval_receipt_id,
-        )
-        orchestration = await ScanOrchestrator(
-            backend=backend,
-            executor=executor,
-            event_callback=_local_scan_action_activity_callback(
-                plan=plan,
-                scan_id=scan_id,
-                job_id=job_id,
-                progress_start=45,
-                progress_end=95,
-                backend=backend,
-            ),
-        ).run(plan)
     final_result = orchestration.action_results.get("finalize.report")
     if final_result is not None and final_result.status.value == "cancelled":
         raise ValueError("Cancelled by user")

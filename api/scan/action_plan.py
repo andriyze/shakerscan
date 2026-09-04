@@ -733,6 +733,9 @@ class ScanActionPlanCompiler:
         family_scope: Sequence[str] | None = None,
         defer_manifest_actions: bool = False,
         include_finalizer: bool = True,
+        continuation_round: int = 0,
+        manifest_offsets: Mapping[str, int] | None = None,
+        require_family_minimums: bool = True,
         available_placement_capabilities: Iterable[str] | None = None,
         placement_backends: Sequence[str] = ("local", "broker"),
         action_budgets: Mapping[str, Mapping[str, int]] | None = None,
@@ -744,6 +747,24 @@ class ScanActionPlanCompiler:
             raise ScanActionPlanError("defer_manifest_actions must be a boolean")
         if not isinstance(include_finalizer, bool):
             raise ScanActionPlanError("include_finalizer must be a boolean")
+        if (
+            isinstance(continuation_round, bool)
+            or not isinstance(continuation_round, int)
+            or not 0 <= continuation_round <= 8
+        ):
+            raise ScanActionPlanError("continuation_round must be between zero and eight")
+        if not isinstance(require_family_minimums, bool):
+            raise ScanActionPlanError("require_family_minimums must be a boolean")
+        offsets: dict[str, int] = {}
+        for raw_name, raw_offset in dict(manifest_offsets or {}).items():
+            name = _token(raw_name, name="manifest offset action")
+            if (
+                isinstance(raw_offset, bool)
+                or not isinstance(raw_offset, int)
+                or raw_offset < 0
+            ):
+                raise ScanActionPlanError("manifest offsets must be non-negative integers")
+            offsets[name] = raw_offset
         if defer_manifest_actions and scope != "full":
             raise ScanActionPlanError(
                 "manifest action deferral is only valid for a full admission phase"
@@ -919,12 +940,22 @@ class ScanActionPlanCompiler:
             required: bool = False,
             supporting: bool = False,
         ) -> None:
+            def round_id(value: str) -> str:
+                if (
+                    continuation_round < 1
+                    or value == "finalize.report"
+                    or value.startswith(("inputs.auth_", "inputs.collection_"))
+                ):
+                    return value
+                suffix = f".r{continuation_round:02d}"
+                return value if value.endswith(suffix) else f"{value}{suffix}"
+
             blueprints.append(_ActionBlueprint(
-                action_id=action_id,
+                action_id=round_id(action_id),
                 stage=stage,
                 capability_name=capability_name,
                 capability_args=capability_args,
-                dependencies=tuple(dependencies),
+                dependencies=tuple(round_id(item) for item in dependencies),
                 required=required,
                 supporting=supporting,
             ))
@@ -1266,6 +1297,7 @@ class ScanActionPlanCompiler:
             minimum_count: int = 0,
         ) -> None:
             """Compile every exact manifest item affordable by the Scan ceiling."""
+            required = required and require_family_minimums
             if not manifest_ref:
                 add(
                     base_action_id,
@@ -1367,6 +1399,7 @@ class ScanActionPlanCompiler:
             reserve_dependency_slots: int = 0,
         ) -> None:
             """Compile bounded ranked slices instead of one process per candidate."""
+            required = required and require_family_minimums
             limits = (
                 dict(ledger_limits) if ledger_limits is not None
                 else execution_plan.budget.ledger_limits()
@@ -1397,8 +1430,13 @@ class ScanActionPlanCompiler:
                 },
             )
             entry_count = int(manifest_ref.get("entry_count") or 0) if manifest_ref else 0
+            manifest_offset = min(entry_count, offsets.get(base_action_id, 0))
+            remaining_entries = max(0, entry_count - manifest_offset)
             if entry_count:
-                total_batches = max(1, (entry_count + batch_size - 1) // batch_size)
+                total_batches = (
+                    (remaining_entries + batch_size - 1) // batch_size
+                    if remaining_entries else 0
+                )
             else:
                 # The candidate manifest is not materialized at admission: its
                 # entries arrive through the discovery continuation. Assuming a
@@ -1408,6 +1446,8 @@ class ScanActionPlanCompiler:
                 # "required batch action verify.xss exceeds plan graph capacity".
                 # Reserve the published minimum instead of guessing one.
                 total_batches = max(1, minimum_batches)
+            if total_batches < 1:
+                return
             affordable = total_batches
             for name, amount in batch_budget.items():
                 if amount > 0:
@@ -1447,7 +1487,7 @@ class ScanActionPlanCompiler:
                     f"required batch action {base_action_id} exceeds plan graph capacity"
                 )
             for batch_index in range(count):
-                start = batch_index * batch_size
+                start = manifest_offset + batch_index * batch_size
                 slice_count = (
                     min(batch_size, max(0, entry_count - start))
                     if entry_count else 1
@@ -1459,6 +1499,10 @@ class ScanActionPlanCompiler:
                     {
                         **dict(capability_args),
                         "slice": {"start": start, "count": slice_count},
+                        **(
+                            {"continuation_work_key": base_action_id}
+                            if continuation_round > 0 else {}
+                        ),
                         # The manifest's full size, carried so completeness can be measured against
                         # the work that EXISTS rather than the work that was scheduled. Budget
                         # affordability, the batch ceiling and graph capacity can all cut `count`
@@ -1482,6 +1526,7 @@ class ScanActionPlanCompiler:
             scope in {"full", "endpoint"}
             and bola
             and {"primary", "secondary"} <= set(lane_refs)
+            and continuation_round <= 1
         )
         if scope in {"full", "endpoint"} and passive_nuclei and not defer_manifest_actions:
             add_manifest_batches(

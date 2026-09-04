@@ -466,10 +466,20 @@ def amended_scan_plan_revision(
     work_manifest_references: tuple[Mapping[str, Any], ...],
     revision: int = 1,
 ) -> ScanPlanRevision:
+    root_count = len(allocation.parent_action_ids)
+    try:
+        root_prefix = ScanActionPlan(
+            scan_id=parent_plan.scan_id,
+            execution_plan_digest=parent_plan.execution_plan_digest,
+            target_binding_digest=parent_plan.target_binding_digest,
+            actions=tuple(parent_plan.actions[:root_count]),
+        )
+    except ScanActionPlanError as exc:
+        raise ScanContinuationError(str(exc)) from exc
     if (
-        allocation.parent_plan_digest != parent_plan.plan_digest
+        root_prefix.plan_digest != allocation.parent_plan_digest
         or amended_plan.scan_id != parent_plan.scan_id
-        or set(discovery_results) != set(allocation.parent_action_ids)
+        or not set(allocation.parent_action_ids) <= set(discovery_results)
         or tuple(amended_plan.actions[:len(parent_plan.actions)])
         != parent_plan.actions
     ):
@@ -510,6 +520,7 @@ def reconciled_continuation_ceiling(
     never held stays as the submission froze it.
     """
     ceiling = {name: int(amount) for name, amount in allocation.budget_ceiling.items()}
+    root_ids = set(allocation.parent_action_ids)
     for action_id in allocation.parent_action_ids:
         result = (parent_results or {}).get(action_id)
         if result is None:
@@ -518,7 +529,30 @@ def reconciled_continuation_ceiling(
         consumed = dict(result.budget_consumed or {})
         for name in ceiling:
             ceiling[name] += int(reserved.get(name, 0)) - int(consumed.get(name, 0))
+    # The frozen ceiling is the post-root residual. Later rounds therefore
+    # subtract only their settled actual use; their reservations were never
+    # part of the root hold and unused portions remain available naturally.
+    for action_id, result in (parent_results or {}).items():
+        if action_id in root_ids or action_id == "finalize.report":
+            continue
+        for name, amount in dict(result.budget_consumed or {}).items():
+            if name in ceiling:
+                ceiling[name] -= int(amount)
     return {name: max(0, amount) for name, amount in ceiling.items()}
+
+
+def continuation_manifest_offsets(plan: ScanActionPlan) -> dict[str, int]:
+    """Return the first unplanned manifest index for every ranked work lane."""
+    offsets: dict[str, int] = {}
+    for action in plan.actions:
+        key = str(action.capability_args.get("continuation_work_key") or "").strip()
+        raw_slice = action.capability_args.get("slice")
+        if not key or not isinstance(raw_slice, Mapping):
+            continue
+        start = int(raw_slice.get("start") or 0)
+        count = int(raw_slice.get("count") or 0)
+        offsets[key] = max(offsets.get(key, 0), start + count)
+    return offsets
 
 
 def merge_scan_action_continuation(
@@ -527,18 +561,29 @@ def merge_scan_action_continuation(
     continuation_plan: ScanActionPlan,
     allocation: ScanContinuationAllocation,
     parent_results: Mapping[str, CapabilityResultReference] | None = None,
+    include_finalizer: bool = True,
 ) -> ScanActionPlan:
     """Append a digest-bound continuation without changing executed actions.
 
     With ``parent_results`` the continuation is bounded by the reconciled ceiling
     (see ``reconciled_continuation_ceiling``); without them, by the frozen one.
     """
+    root_count = len(allocation.parent_action_ids)
+    try:
+        root_prefix = ScanActionPlan(
+            scan_id=parent_plan.scan_id,
+            execution_plan_digest=parent_plan.execution_plan_digest,
+            target_binding_digest=parent_plan.target_binding_digest,
+            actions=tuple(parent_plan.actions[:root_count]),
+        )
+    except ScanActionPlanError as exc:
+        raise ScanContinuationError(str(exc)) from exc
     if (
         parent_plan.scan_id != allocation.scan_id
-        or parent_plan.plan_digest != allocation.parent_plan_digest
+        or root_prefix.plan_digest != allocation.parent_plan_digest
         or parent_plan.execution_plan_digest != allocation.execution_plan_digest
         or parent_plan.target_binding_digest != allocation.target_binding_digest
-        or tuple(action.action_id for action in parent_plan.actions)
+        or tuple(action.action_id for action in root_prefix.actions)
         != allocation.parent_action_ids
     ):
         raise ScanContinuationError(
@@ -556,9 +601,10 @@ def merge_scan_action_continuation(
         action for action in continuation_plan.actions
         if action.action_id == "finalize.report"
     ]
-    if len(finalizers) != 1:
+    expected_finalizers = 1 if include_finalizer else 0
+    if len(finalizers) != expected_finalizers:
         raise ScanContinuationError(
-            "continuation plan must contain exactly one finalizer"
+            "continuation plan has the wrong finalizer count"
         )
 
     parent_by_id = {
@@ -601,7 +647,8 @@ def merge_scan_action_continuation(
 
     ceiling = reconciled_continuation_ceiling(allocation, parent_results)
     consumed = {name: 0 for name in ceiling}
-    for action in (*appended, finalizers[0]):
+    budgeted_actions = (*appended, *finalizers)
+    for action in budgeted_actions:
         for name, amount in action.requested_budget.items():
             if name not in consumed:
                 raise ScanContinuationError(
@@ -623,13 +670,14 @@ def merge_scan_action_continuation(
         actions.append(replace(
             action, ordinal=len(actions), action_digest=None,
         ))
-    finalizer = replace(
-        finalizers[0],
-        ordinal=len(actions),
-        dependencies=tuple(action.action_id for action in actions),
-        action_digest=None,
-    )
-    actions.append(finalizer)
+    if include_finalizer:
+        finalizer = replace(
+            finalizers[0],
+            ordinal=len(actions),
+            dependencies=tuple(action.action_id for action in actions),
+            action_digest=None,
+        )
+        actions.append(finalizer)
     if len(actions) > _MAX_ACTIONS:
         raise ScanContinuationError("continued Scan plan exceeds its action bound")
     try:
@@ -1037,6 +1085,8 @@ def build_discovery_continuation_manifests(
 
 __all__ = [
     "ContinuationBudgetCeiling",
+    "MAX_SCAN_CONTINUATION_ROUNDS",
+    "MAX_SCAN_PLAN_REVISION",
     "SCAN_CONTINUATION_ALLOCATION_SCHEMA",
     "SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1",
     "ScanContinuationAllocation",
@@ -1044,6 +1094,7 @@ __all__ = [
     "ScanPlanRevision",
     "amended_scan_plan_revision",
     "build_discovery_continuation_manifests",
+    "continuation_manifest_offsets",
     "merge_scan_action_continuation",
     "root_scan_plan_revision",
     "scan_discovery_result_digest",
