@@ -93,12 +93,13 @@ def test_release_scans_every_final_manifest_and_requires_explicit_waivers():
     assert "ignore-unfixed: true" in workflow
     assert "skip-dirs: ${{ matrix.target.skip_dirs }}" in workflow
     assert "skip-files: ${{ matrix.target.skip_files }}" in workflow
-    # The toolchain scope exclusion follows the toolchain into the Model Intake image; the
-    # scanner and API images are scanned in full (api still skips only its Docker client).
-    assert "skip_dirs: /opt/model-intake-tools" in workflow
-    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner" in workflow
-    assert "skip_files: /opt/tools/trivy,/opt/tools/osv-scanner,/usr/local/bin/docker" not in workflow
-    assert workflow.index("- name: model-intake") < workflow.index("skip_dirs: /opt/model-intake-tools")
+    model_intake = workflow.split("- name: model-intake", 1)[1].split("- name: ui", 1)[0]
+    assert 'skip_dirs: ""' in model_intake
+    assert 'skip_files: ""' in model_intake
+    assert "/opt/model-intake-tools" not in workflow
+    assert "/opt/tools/trivy,/opt/tools/osv-scanner" not in workflow
+    assert '--skip-dirs "${{ matrix.target.skip_dirs }}"' in workflow
+    assert '--skip-files "${{ matrix.target.skip_files }}"' in workflow
     assert "exit-code: 1" in workflow
     assert "scanners: vuln" in workflow
     assert "TRIVY_PLATFORM: ${{ matrix.platform.value }}" in workflow

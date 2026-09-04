@@ -879,13 +879,11 @@ jobs:
             digest: ${{ needs.merge.outputs.api_digest }}
             skip_dirs: ""
             skip_files: /usr/local/bin/docker
-          # The Model Intake toolchain moved out of the scanner and API images into this one. Its
-          # isolated tool environments keep the same scope exclusion they had before the split.
           - name: model-intake
             image: shakerscan/shakerscan-model-intake
             digest: ${{ needs.merge.outputs.model_intake_digest }}
-            skip_dirs: /opt/model-intake-tools
-            skip_files: /opt/tools/trivy,/opt/tools/osv-scanner
+            skip_dirs: ""
+            skip_files: ""
           - name: ui
             image: shakerscan/shakerscan-ui
             digest: ${{ needs.merge.outputs.ui_digest }}
@@ -907,6 +905,8 @@ jobs:
           python3 scripts/validate_vulnerability_waivers.py \
             --file security/image-vulnerability-waivers.json \
             --image "${{ matrix.target.name }}" \
+            --skip-dirs "${{ matrix.target.skip_dirs }}" \
+            --skip-files "${{ matrix.target.skip_files }}" \
             --output .trivyignore
 
       - name: Reject high or critical image vulnerabilities
