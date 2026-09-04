@@ -286,7 +286,10 @@ def test_api_image_bakes_the_same_release_identity_environment_as_the_runtime():
     assert "--build-arg SCANNER_VERSION=${{ needs.meta.outputs.version }}" in validate_build
     assert "--build-arg SCANNER_SOURCE_REVISION=${{ needs.meta.outputs.candidate_sha }}" in validate_build
     validate_check = _step_named(candidate, "Verify locked API control-plane image")["run"]
-    assert "shakerscan-api:release-candidate | awk -F= '$1 == \"SCANNER_VERSION\" {print $2}'" in validate_check
+    assert "for image in shakerscan-scanner:release-candidate shakerscan-api:release-candidate; do" in validate_check
+    assert "awk -F= '$1 == \"SCANNER_VERSION\" {print $2}'" in validate_check
+    assert '-e SCANNER_EXPECTED_REVISION="${{ needs.meta.outputs.candidate_sha }}"' in validate_check
+    assert '--entrypoint python3 "$image" /app/release_identity.py --verify' in validate_check
 
     publisher = (ROOT / "scripts" / "publish-images.sh").read_text()
     api_build = publisher[publisher.index("ShakerScan API Control Plane"):publisher.index("-f scanner/Dockerfile.api")]

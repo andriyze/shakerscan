@@ -338,9 +338,15 @@ jobs:
             done
           '
           test "$(docker image inspect --format '{{.Config.User}}' shakerscan-api:release-candidate)" = "10002:10002"
-          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-scanner:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
-          test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shakerscan-api:release-candidate | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
-          test "$(docker run --rm --entrypoint sh shakerscan-api:release-candidate -c 'python3 -c '\''import json; print(json.load(open("/opt/shakerscan/release-manifest.json"))["version"])'\'')" = "${{ needs.meta.outputs.version }}"
+          # Both locked images bake the candidate identity and their release manifests verify
+          # against it; the maintained tool replaces ad-hoc quoting of an inline Python snippet.
+          for image in shakerscan-scanner:release-candidate shakerscan-api:release-candidate; do
+            test "$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | awk -F= '$1 == "SCANNER_VERSION" {print $2}')" = "${{ needs.meta.outputs.version }}"
+            docker run --rm \
+              -e SCANNER_EXPECTED_VERSION="${{ needs.meta.outputs.version }}" \
+              -e SCANNER_EXPECTED_REVISION="${{ needs.meta.outputs.candidate_sha }}" \
+              --entrypoint python3 "$image" /app/release_identity.py --verify
+          done
 
       - name: Enforce candidate-image external wire ceilings
         env:
