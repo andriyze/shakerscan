@@ -5,6 +5,10 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-readiness.md` plus `RELEASES.md` at the repository root.
 
+## 2.1 line
+
+- [`2.1.0.md`](2.1.0.md) — candidate; not yet published or promoted.
+
 ## Published 2.0 line
 
 - [`2.0.1.md`](2.0.1.md) — published 2026-09-03 and promoted to the stable installer channel.
