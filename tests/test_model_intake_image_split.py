@@ -1,11 +1,11 @@
 """The Model Intake toolchain lives in its own image, not in the scanner or API images.
 
 The scanner and API images ship to every worker; the Model Intake artifact toolchain (semgrep,
-modelscan, trivy, osv-scanner, their databases, and the pip-audit virtual environment that vendors
-msgpack/setuptools) is ~2GB and only the Model Intake worker and sandbox need it. This split builds
+modelscan, trivy, osv-scanner, their databases, and the pip-audit virtual environment) is ~2GB and
+only the Model Intake worker and sandbox need it. This split builds
 it as an overlay on the exact scanner runtime -- the same base the API image uses -- so the Model
 Intake services run the identical code and tool paths, while the scanner and API images shrink and
-go free of the waived build-tool findings.
+the release carries no build-tool vulnerability waivers.
 """
 
 from __future__ import annotations
@@ -58,15 +58,23 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert MI.count("apt-get purge -y --auto-remove") == 1
 
 
-def test_the_waivers_move_to_the_model_intake_image_and_leave_scanner_and_api_clean():
+def test_the_release_images_have_no_vulnerability_waivers():
     waivers = json.loads((ROOT / "security" / "image-vulnerability-waivers.json").read_text())["waivers"]
-    by_image: dict[str, set[str]] = {}
-    for w in waivers:
-        by_image.setdefault(w["image"], set()).add(w["vulnerability_id"])
-    assert by_image.get("model-intake") == {"CVE-2025-47273", "GHSA-6v7p-g79w-8964"}
-    assert "scanner" not in by_image and "api" not in by_image
+    assert waivers == []
     validator = (ROOT / "scripts" / "validate_vulnerability_waivers.py").read_text()
     assert '"model-intake"' in validator
+
+
+def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():
+    lock = (ROOT / "scanner" / "model_intake_tools" / "pip-audit.lock").read_text()
+
+    # GHSA-6v7p-g79w-8964 affects msgpack <=1.2.0; 1.2.1 is the patched release.
+    assert "msgpack==1.2.1" in lock
+    assert "msgpack==1.2.0" not in lock
+    # setuptools is seeded by some distro venv implementations but is not in the
+    # hash-locked runtime graph. Remove it and prove it is absent during the build.
+    assert 'pip-audit/bin/pip" uninstall -y setuptools' in MI
+    assert 'find_spec("setuptools") is None' in MI
 
 
 def _service(compose_path, name):

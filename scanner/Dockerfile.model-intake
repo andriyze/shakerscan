@@ -4,8 +4,8 @@
 # their databases) lives only here, not in the scanner or API images. It is an overlay on the
 # exact scanner runtime -- the same base the API image builds from -- so the Model Intake worker
 # and sandbox run the identical code and tool paths they did when the toolchain shipped inside the
-# scanner image. Only this image carries the ~2GB toolchain and its vendored build-tool SBOM; the
-# scanner and API images stay smaller and free of the waived msgpack/setuptools findings.
+# scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
+# removed after installation so it cannot require a runtime vulnerability waiver.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 FROM ${SCANNER_RUNTIME_IMAGE}
 
@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Model-intake evidence adapters live in separate, hash-locked virtual
 # environments. Their dependency graphs cannot alter the API/worker runtime.
+# Debian's venv seed may install setuptools even though the hash-locked pip-audit
+# graph does not depend on it. Remove that build tool after installation and
+# prove it is absent so it cannot require a runtime vulnerability waiver.
 COPY scanner/model_intake_tools /opt/model-intake-locks
 COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
@@ -33,6 +36,9 @@ RUN set -eu; \
         ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
       fi; \
     done; \
+    "/opt/model-intake-tools/pip-audit/bin/pip" uninstall -y setuptools; \
+    /opt/model-intake-tools/pip-audit/bin/python -c \
+      'import importlib.util; assert importlib.util.find_spec("setuptools") is None'; \
     install -m 0755 /opt/model-intake-locks/pip_audit_offline.py /opt/tools/pip-audit-offline; \
     mkdir -p /opt/pip-audit-cache; \
     /opt/tools/pip-audit-offline --build-cache \
