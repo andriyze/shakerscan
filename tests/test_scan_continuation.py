@@ -9,6 +9,7 @@ from api.runtime.models import TargetBinding
 from api.scan.action_plan import ScanActionPlanCompiler
 from api.scan.budget_allocator import allocate_scan_action_plan
 from api.scan.continuation import (
+    MAX_SCAN_PLAN_REVISION,
     reconciled_continuation_ceiling,
     ContinuationBudgetCeiling,
     SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1,
@@ -255,6 +256,35 @@ def test_plan_revision_chain_is_reproducible_and_binds_discovery_receipts():
     assert first.revision_digest != changed.revision_digest
     assert first.continuation_plan_digest == continuation.plan_digest
     assert ScanPlanRevision.from_dict(first.canonical_dict()) == first
+
+
+def test_plan_revision_chain_accepts_bounded_later_revisions():
+    parent, continuation, allocation = _plans()
+    amended = merge_scan_action_continuation(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        allocation=allocation,
+    )
+    results = {
+        action.action_id: _result(
+            action, status=CapabilityResultStatus.SUCCESS, namespace="later-revision",
+        )
+        for action in parent.actions
+    }
+    revision = amended_scan_plan_revision(
+        parent_plan=parent,
+        continuation_plan=continuation,
+        amended_plan=amended,
+        allocation=allocation,
+        discovery_results=results,
+        work_manifest_references=unique_work_manifest_reference_dicts(
+            action.capability_args for action in continuation.actions
+        ),
+        revision=MAX_SCAN_PLAN_REVISION,
+    )
+    assert revision.revision == MAX_SCAN_PLAN_REVISION
+    with pytest.raises(ScanContinuationError, match="between zero"):
+        replace(revision, revision=MAX_SCAN_PLAN_REVISION + 1, revision_digest=None)
 
 
 def test_continuation_request_verifier_binds_parent_collection_replay():

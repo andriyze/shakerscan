@@ -35,6 +35,8 @@ SCAN_CONTINUATION_ALLOCATION_SCHEMA_V1 = "scan-continuation-allocation/v1"
 SCAN_CONTINUATION_ALLOCATION_SCHEMA = "scan-continuation-allocation/v2"
 SCAN_PLAN_REVISION_SCHEMA = "scan-plan-revision/v1"
 SCAN_DISCOVERY_RESULT_SET_SCHEMA = "scan-discovery-result-set/v1"
+MAX_SCAN_CONTINUATION_ROUNDS = 8
+MAX_SCAN_PLAN_REVISION = MAX_SCAN_CONTINUATION_ROUNDS + 1
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ACTIONS = 512
 _LEGACY_CONTINUATION_CAPABILITIES = (
@@ -278,7 +280,7 @@ class ScanContinuationAllocation:
 
 @dataclass(frozen=True)
 class ScanPlanRevision:
-    """Content-free identity of the root plan or its sole amendment."""
+    """Content-free identity of one plan in the bounded append-only chain."""
 
     scan_id: str
     revision: int
@@ -298,8 +300,14 @@ class ScanPlanRevision:
             scan_id = str(uuid.UUID(str(self.scan_id)))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ScanContinuationError("revision scan_id must be a UUID") from exc
-        if isinstance(self.revision, bool) or self.revision not in {0, 1}:
-            raise ScanContinuationError("Scan plan revision must be zero or one")
+        if (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or not 0 <= self.revision <= MAX_SCAN_PLAN_REVISION
+        ):
+            raise ScanContinuationError(
+                f"Scan plan revision must be between zero and {MAX_SCAN_PLAN_REVISION}"
+            )
         references: list[Mapping[str, Any]] = []
         for raw in self.work_manifest_references:
             try:
@@ -379,7 +387,7 @@ class ScanPlanRevision:
             "revision": self.revision,
             "plan_digest": self.plan_digest,
         }
-        if self.revision == 1:
+        if self.revision > 0:
             material.update({
                 "parent_plan_digest": self.parent_plan_digest,
                 "continuation_allocation_digest": (
@@ -456,6 +464,7 @@ def amended_scan_plan_revision(
     allocation: ScanContinuationAllocation,
     discovery_results: Mapping[str, CapabilityResultReference],
     work_manifest_references: tuple[Mapping[str, Any], ...],
+    revision: int = 1,
 ) -> ScanPlanRevision:
     if (
         allocation.parent_plan_digest != parent_plan.plan_digest
@@ -469,7 +478,7 @@ def amended_scan_plan_revision(
         )
     return ScanPlanRevision(
         scan_id=amended_plan.scan_id,
-        revision=1,
+        revision=revision,
         plan_digest=str(amended_plan.plan_digest),
         parent_plan_digest=str(parent_plan.plan_digest),
         continuation_allocation_digest=allocation.allocation_digest,

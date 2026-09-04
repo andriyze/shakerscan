@@ -253,7 +253,7 @@ CREATE INDEX idx_scan_capability_actions_reservation
 
 CREATE TABLE scan_action_plan_revisions (
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL CHECK (revision IN (0,1)),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9),
     plan_digest CHAR(64) NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
     parent_plan_digest CHAR(64) CHECK (
         parent_plan_digest IS NULL OR parent_plan_digest ~ '^[0-9a-f]{64}$'
@@ -281,7 +281,7 @@ CREATE TABLE scan_action_plan_revisions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scan_id, revision),
     UNIQUE (scan_id, plan_digest),
-    CONSTRAINT scan_action_plan_revisions_immutable_shape_check CHECK (
+    CONSTRAINT scan_action_plan_revisions_multi_round_shape_check CHECK (
         (
             revision=0
             AND parent_plan_digest IS NULL
@@ -292,7 +292,7 @@ CREATE TABLE scan_action_plan_revisions (
         )
         OR
         (
-            revision=1
+            revision BETWEEN 1 AND 9
             AND parent_plan_digest IS NOT NULL
             AND continuation_allocation_digest IS NOT NULL
             AND discovery_result_digest IS NOT NULL

@@ -13,6 +13,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .action_plan import ScanActionPlan, ScanActionPlanError
 from .continuation import (
+    MAX_SCAN_PLAN_REVISION,
     ScanContinuationAllocation,
     ScanContinuationError,
     ScanPlanRevision,
@@ -29,6 +30,7 @@ ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME = "v2_scan_plan_revision_chain_v1"
 ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME = (
     "v2_scan_plan_revision_immutability_v1"
 )
+ACTION_PLAN_MULTI_ROUND_MIGRATION_NAME = "v2_scan_plan_multi_round_v1"
 SCAN_ACTION_SCHEMA_SQL = r"""
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_json JSONB;
 ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_action_plan_digest TEXT;
@@ -176,7 +178,7 @@ BEGIN
 END $$;
 CREATE TABLE IF NOT EXISTS scan_action_plan_revisions (
     scan_id UUID NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL CHECK (revision IN (0,1)),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9),
     plan_digest CHAR(64) NOT NULL CHECK (plan_digest ~ '^[0-9a-f]{64}$'),
     parent_plan_digest CHAR(64) CHECK (
         parent_plan_digest IS NULL OR parent_plan_digest ~ '^[0-9a-f]{64}$'
@@ -218,11 +220,26 @@ ALTER TABLE scan_action_plan_revisions
 UPDATE scan_action_plan_revisions
 SET continuation_allocation_digest=NULL
 WHERE revision=0 AND continuation_allocation_digest IS NOT NULL;
+ALTER TABLE scan_action_plan_revisions
+    DROP CONSTRAINT IF EXISTS scan_action_plan_revisions_revision_bound_check;
+ALTER TABLE scan_action_plan_revisions
+    DROP CONSTRAINT IF EXISTS scan_action_plan_revisions_revision_check;
+ALTER TABLE scan_action_plan_revisions
+    DROP CONSTRAINT IF EXISTS scan_action_plan_revisions_immutable_shape_check;
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-         WHERE conname='scan_action_plan_revisions_immutable_shape_check'
+         WHERE conname='scan_action_plan_revisions_multi_round_bound_check'
+         AND conrelid='scan_action_plan_revisions'::regclass
+    ) THEN
+        ALTER TABLE scan_action_plan_revisions
+        ADD CONSTRAINT scan_action_plan_revisions_multi_round_bound_check
+        CHECK (revision BETWEEN 0 AND 9);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname='scan_action_plan_revisions_multi_round_shape_check'
            AND conrelid='scan_action_plan_revisions'::regclass
     ) THEN
         -- Pre-chain V2 databases can contain immutable revision-1 history
@@ -230,7 +247,7 @@ BEGIN
         -- reconstructed without inventing evidence, so retain the history and
         -- enforce the complete shape on every row written after this upgrade.
         ALTER TABLE scan_action_plan_revisions
-        ADD CONSTRAINT scan_action_plan_revisions_immutable_shape_check
+        ADD CONSTRAINT scan_action_plan_revisions_multi_round_shape_check
         CHECK (
             (
                 revision=0
@@ -242,7 +259,7 @@ BEGIN
             )
             OR
             (
-                revision=1
+                revision BETWEEN 1 AND 9
                 AND parent_plan_digest IS NOT NULL
                 AND continuation_allocation_digest IS NOT NULL
                 AND discovery_result_digest IS NOT NULL
@@ -272,6 +289,9 @@ VALUES ('v2_scan_plan_revision_chain_v1')
 ON CONFLICT (name) DO NOTHING;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_scan_plan_revision_immutability_v1')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_scan_plan_multi_round_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 
@@ -327,11 +347,10 @@ UPDATE scans
 SET scan_action_plan_json=$5::jsonb,
     scan_action_plan_digest=$4,
     scan_action_plan_schema=$6,
-    scan_continuation_applied_at=NOW()
+    scan_continuation_applied_at=COALESCE(scan_continuation_applied_at, NOW())
 WHERE id=$1
   AND scan_action_plan_digest=$2
   AND scan_continuation_allocation_digest=$3
-  AND scan_continuation_applied_at IS NULL
   AND status NOT IN ('cancelled','cancelling')
 RETURNING id, scan_action_plan_digest
 """
@@ -375,7 +394,7 @@ INSERT INTO scan_action_plan_revisions (
     continuation_allocation_digest, revision_schema,
     discovery_result_digest, work_manifest_refs_json,
     continuation_plan_digest, revision_digest, plan_json
-) VALUES ($1,1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb)
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb)
 ON CONFLICT (scan_id, revision) DO UPDATE SET
     revision_schema=EXCLUDED.revision_schema,
     discovery_result_digest=EXCLUDED.discovery_result_digest,
@@ -609,7 +628,7 @@ class PostgresScanActionStore:
         allocation: ScanContinuationAllocation,
         revision: ScanPlanRevision,
     ) -> tuple[Mapping[str, Any], ...]:
-        """Atomically apply the sole append-only continuation revision."""
+        """Atomically append one bounded continuation revision."""
         async with conn.transaction():
             return await self._amend_plan_rows(
                 conn,
@@ -632,13 +651,16 @@ class PostgresScanActionStore:
         if (
             parent_plan.scan_id != amended_plan.scan_id
             or allocation.scan_id != amended_plan.scan_id
-            or allocation.parent_plan_digest != parent_plan.plan_digest
+            or tuple(
+                action.action_id
+                for action in parent_plan.actions[:len(allocation.parent_action_ids)]
+            ) != allocation.parent_action_ids
             or amended_plan.execution_plan_digest != allocation.execution_plan_digest
             or amended_plan.target_binding_digest != allocation.target_binding_digest
             or tuple(amended_plan.actions[:len(parent_plan.actions)])
             != parent_plan.actions
             or revision.scan_id != amended_plan.scan_id
-            or revision.revision != 1
+            or not 1 <= revision.revision <= MAX_SCAN_PLAN_REVISION
             or revision.plan_digest != amended_plan.plan_digest
             or revision.parent_plan_digest != parent_plan.plan_digest
             or revision.continuation_allocation_digest
@@ -717,6 +739,7 @@ class PostgresScanActionStore:
         revision_row = await conn.fetchrow(
             _PERSIST_AMENDED_REVISION_SQL,
             uuid.UUID(amended_plan.scan_id),
+            revision.revision,
             amended_plan.plan_digest,
             parent_plan.plan_digest,
             allocation.allocation_digest,

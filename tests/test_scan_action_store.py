@@ -18,6 +18,7 @@ from api.scan.action_store import (
     ACTION_LEASE_MIGRATION_NAME,
     ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME,
     ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME,
+    ACTION_PLAN_MULTI_ROUND_MIGRATION_NAME,
     MIGRATION_NAME,
     PostgresScanActionStore,
     SCAN_ACTION_SCHEMA_SQL,
@@ -127,13 +128,13 @@ class FakeConn:
                 }
             else:
                 (
-                    scan_id, plan_digest, parent_digest, allocation_digest,
+                    scan_id, revision_number, plan_digest, parent_digest, allocation_digest,
                     schema, discovery_digest, raw_refs, continuation_digest,
                     revision_digest, raw_plan,
                 ) = args
                 incoming = {
                     "scan_id": scan_id,
-                    "revision": 1,
+                    "revision": revision_number,
                     "plan_digest": plan_digest,
                     "parent_plan_digest": parent_digest,
                     "continuation_allocation_digest": allocation_digest,
@@ -193,7 +194,6 @@ class FakeConn:
                 or self.plan_row["scan_action_plan_digest"] != parent_digest
                 or self.plan_row.get("scan_continuation_allocation_digest")
                 != allocation_digest
-                or self.plan_row.get("scan_continuation_applied_at") is not None
             ):
                 return None
             self.plan_row.update({
@@ -309,6 +309,7 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     assert ACTION_BUDGET_IDENTITY_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_PLAN_REVISION_CHAIN_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert ACTION_PLAN_REVISION_IMMUTABILITY_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
+    assert ACTION_PLAN_MULTI_ROUND_MIGRATION_NAME in SCAN_ACTION_SCHEMA_SQL
     assert "REFERENCES scans(id) ON DELETE CASCADE" in SCAN_ACTION_SCHEMA_SQL
     assert ") REFERENCES budget_reservations (" in SCAN_ACTION_SCHEMA_SQL
     assert "idx_scan_capability_actions_reservation" in SCAN_ACTION_SCHEMA_SQL
@@ -332,6 +333,9 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
     revision_repair_sql = Path(
         "db/repairs/2026-08-24_v2_scan_plan_revision_chain.sql"
     ).read_text(encoding="utf-8")
+    multi_round_repair_sql = Path(
+        "db/repairs/2026-09-04_v2_scan_multi_round_continuations.sql"
+    ).read_text(encoding="utf-8")
     for source in (init_sql, repair_sql):
         assert "scan_action_plan_json" in source
         assert "CREATE TABLE" in source and "scan_capability_actions" in source
@@ -353,18 +357,21 @@ def test_action_store_schema_matches_fresh_install_and_upgrade_repair():
         assert "reservation_owner_id" in source
         assert "id, owner_kind, owner_id, action_id, action_digest" in source
         assert "r.action_digest=a.action_digest" in source
-    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql):
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, revision_repair_sql, multi_round_repair_sql):
         assert "revision_digest" in source
         assert "discovery_result_digest" in source
         assert "work_manifest_refs_json" in source
-        assert "scan_action_plan_revisions_immutable_shape_check" in source
+    for source in (init_sql, SCAN_ACTION_SCHEMA_SQL, multi_round_repair_sql):
+        assert "scan_action_plan_revisions_multi_round_shape_check" in source
+        assert "revision BETWEEN 1 AND 9" in source
     # Existing V2 databases contain pre-content-addressed revision-1 rows whose
     # missing discovery evidence cannot be truthfully reconstructed. Upgrade
     # migrations must grandfather those immutable historical rows while still
     # enforcing the complete shape on every new row.
-    assert "scan_action_plan_revisions_immutable_shape_check" in SCAN_ACTION_SCHEMA_SQL
+    assert "DROP CONSTRAINT IF EXISTS scan_action_plan_revisions_immutable_shape_check" in SCAN_ACTION_SCHEMA_SQL
     assert ") NOT VALID;" in SCAN_ACTION_SCHEMA_SQL
     assert ") NOT VALID;" in revision_repair_sql
+    assert ") NOT VALID;" in multi_round_repair_sql
 
 
 def test_action_store_rolls_back_failed_continuation_and_resumes_only_incomplete_actions():
