@@ -71,27 +71,84 @@ def test_v2_contracts_workflow_is_manual_stack_acceptance_only():
     assert image_checkout["with"]["fetch-depth"] == 0
 
 
-def test_pr_smoke_runs_fast_areas_and_browser_once_and_skips_unrelated_changes():
+def test_pr_smoke_runs_every_area_and_browser_once_and_skips_unrelated_changes():
+    """The pull request runs the gates that used to kill candidates an hour after merge.
+
+    Between 2.0.0 and 2.2.0, 56 of 60 release candidates failed, and the checks that failed them
+    (the final-image vulnerability gate, the installed-stack DAST and Model Intake E2E) ran only in
+    certification. The PR check now runs every E2E area on the PR-built stack, against the same
+    Juice Shop target certification uses, with only the declared-debt rows tolerated.
+    """
     smoke = _text("e2e-pr.yml")
     assert 'echo "ui=true" >> "$GITHUB_OUTPUT"' in smoke
     assert 'echo "backend=true" >> "$GITHUB_OUTPUT"' in smoke
     assert "steps.changes.outputs.stack == 'true'" in smoke
-    areas_step = smoke[smoke.index("Run the fast deterministic E2E areas"):]
+    areas_step = smoke[smoke.index("Run every E2E area on the built stack"):]
     assert "if: steps.changes.outputs.backend == 'true'" in areas_step[:200]
-    assert "python3 tests/e2e/run_e2e.py --area platform" in smoke
-    assert "python3 tests/e2e/run_e2e.py --area ai_gate" in smoke
-    assert "python3 tests/e2e/run_e2e.py --area hunt" in smoke
-    # The slow areas run once, on the final images, in certification.
-    assert "--area all" not in smoke
-    assert "--area dast" not in smoke
-    assert "--area model_intake" not in smoke
-    assert "--profile e2e" not in smoke
+    assert "python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json" in smoke
+    assert "docker compose --profile e2e up -d" in smoke
+    assert "SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000" in smoke
+    assert "SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000" in smoke
+    assert "SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN" in smoke
     assert "SHAKERSCAN_RELEASE_DECLARED_DEBT" in smoke
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run build" in smoke
     assert "npm --prefix ui run test:browser" in smoke
     assert "scripts/run_complete_python_suite.py" not in smoke
     assert "node-version: 26" in smoke
+
+
+def _steps(workflow_name: str, job_name: str) -> list[dict]:
+    import yaml
+
+    document = yaml.safe_load(_text(workflow_name))
+    return [step for step in document["jobs"][job_name]["steps"] if isinstance(step, dict)]
+
+
+def test_pr_smoke_applies_the_candidate_vulnerability_gate_to_the_built_images():
+    """The PR image gate and the certification image gate are one policy, pinned in lockstep.
+
+    Certification scans the five final manifests with Trivy; the PR scans the five images it
+    just built with the same action, severity, fixed-only rule, exit code, waiver file, and
+    per-image skip list. Any drift between the two makes this test fail, so the PR gate cannot
+    quietly become weaker than the release gate again.
+    """
+    certify = next(
+        step for step in _steps("release-candidate.yml", "vulnerability-scan")
+        if step.get("name") == "Reject high or critical image vulnerabilities"
+    )
+    matrix = {
+        target["name"]: target
+        for target in __import__("yaml").safe_load(_text("release-candidate.yml"))
+        ["jobs"]["vulnerability-scan"]["strategy"]["matrix"]["target"]
+    }
+    assert set(matrix) == {"scanner", "api", "model-intake", "ui", "signer"}
+    policy_keys = ("format", "severity", "scanners", "ignore-unfixed", "exit-code")
+    certify_policy = {key: certify["with"][key] for key in policy_keys}
+
+    smoke_steps = _steps("e2e-pr.yml", "smoke")
+    scans = [
+        step for step in smoke_steps
+        if str(step.get("uses", "")).startswith("aquasecurity/trivy-action@")
+    ]
+    assert len(scans) == len(matrix)
+    for step in scans:
+        assert step["uses"] == certify["uses"]
+        assert step["if"] == "steps.changes.outputs.stack == 'true'"
+        assert {key: step["with"][key] for key in policy_keys} == certify_policy
+        image = step["with"]["trivyignores"].removeprefix(".trivyignore-")
+        assert image in matrix, image
+        assert step["with"]["skip-files"] == matrix[image]["skip_files"]
+        assert step["with"]["skip-dirs"] == matrix[image]["skip_dirs"]
+        assert step["with"]["output"] == f"trivy-{image}.json"
+    resolve = next(step for step in smoke_steps if step.get("id") == "images")
+    for image in matrix:
+        assert f'--image "$image"' in resolve["run"]
+    assert "for image in scanner api model-intake ui signer; do" in resolve["run"]
+    assert "security/image-vulnerability-waivers.json" in resolve["run"]
+    assert 'skip_files="/usr/local/bin/docker"' in resolve["run"]
+    upload = next(step for step in smoke_steps if step.get("name") == "Upload E2E scorecard and browser results")
+    assert "trivy-*.json" in upload["with"]["path"]
 
 
 def test_candidate_validate_reuses_the_main_suite_report_instead_of_rerunning():
