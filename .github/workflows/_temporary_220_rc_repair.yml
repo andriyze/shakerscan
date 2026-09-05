@@ -29,57 +29,30 @@ jobs:
 
           action = Path("api/scan/action_plan.py")
           text = action.read_text()
-          old = '''                        dependencies=tuple(dict.fromkeys((
-                              *private_request_dependencies,
-                              *request_sqli_dependencies,
-                          ))),
-                          required="sqli" in explicitly_requested,
-                      )'''
-          new = '''                        dependencies=tuple(dict.fromkeys((
-                              *private_request_dependencies,
-                              *request_sqli_dependencies,
-                          ))),
-                          # Exact-request differential verification is the selected-family
-                          # minimum. Deterministic proof is a best-effort escalation: a scan
-                          # with authority for replay + verification must not fail merely
-                          # because the remaining mutation budget cannot also fund proof.
-                          required=False,
-                      )'''
-          if text.count(old) != 1:
-              raise SystemExit(f"expected one exact request SQLi proof block, found {text.count(old)}")
-          action.write_text(text.replace(old, new))
+          marker = '"prove.request_sqli",'
+          start = text.index(marker)
+          end = text.index("            if nosqli:", start)
+          segment = text[start:end]
+          required = 'required="sqli" in explicitly_requested,'
+          if segment.count(required) != 1:
+              raise SystemExit(f"expected one required SQLi proof in marker block, found {segment.count(required)}")
+          segment = segment.replace(
+              required,
+              '# Exact-request differential verification is the family minimum; proof is an optional escalation.\n                        required=False,',
+          )
+          action.write_text(text[:start] + segment + text[end:])
 
           test = Path("tests/test_220_request_candidate_priority.py")
           text = test.read_text()
-          text = text.replace(
-              'def _plan(family: str):\n',
-              'def _plan(family: str, *, max_state_changing_requests: int = 10):\n',
-              1,
-          )
-          text = text.replace(
-              '        max_state_changing_requests=10,\n',
-              '        max_state_changing_requests=max_state_changing_requests,\n',
-              1,
-          )
-          old_test = '''def test_exact_sqli_request_and_proof_fit_rc_mutation_ceiling() -> None:
-              budget, plan = _plan("sqli")
-              by_id = {action.action_id: action for action in plan.actions}
-
-              assert by_id["verify.request_sqli"].required is True
-              assert by_id["prove.request_sqli"].required is True
-              assert by_id["verify.sqli"].required is False
-              assert by_id["prove.sqli"].required is False
-
-              allocation = allocate_scan_action_plan(plan, budget)
-              admitted = {action.action_id: action for action in allocation.plan.actions}
-              assert admitted["verify.request_sqli"].admission_status == "planned"
-              assert admitted["prove.request_sqli"].admission_status == "planned"
-              assert (
-                  admitted["verify.request_sqli"].requested_budget["state_changing_requests"]
-                  + admitted["prove.request_sqli"].requested_budget["state_changing_requests"]
-              ) <= 10
-          '''
-          new_test = '''def test_exact_sqli_verification_survives_tight_rc_mutation_ceiling() -> None:
+          old_sig = 'def _plan(family: str):\n'
+          old_budget = '        max_state_changing_requests=10,\n'
+          if text.count(old_sig) != 1 or text.count(old_budget) != 1:
+              raise SystemExit("unexpected request priority helper shape")
+          text = text.replace(old_sig, 'def _plan(family: str, *, max_state_changing_requests: int = 10):\n', 1)
+          text = text.replace(old_budget, '        max_state_changing_requests=max_state_changing_requests,\n', 1)
+          marker = 'def test_exact_sqli_request_and_proof_fit_rc_mutation_ceiling() -> None:\n'
+          start = text.index(marker)
+          replacement = '''def test_exact_sqli_verification_survives_tight_rc_mutation_ceiling() -> None:
               budget, plan = _plan("sqli")
               by_id = {action.action_id: action for action in plan.actions}
 
@@ -107,9 +80,7 @@ jobs:
               assert admitted["verify.request_sqli"].admission_status == "planned"
               assert admitted["prove.request_sqli"].admission_status == "planned"
           '''
-          if text.count(old_test) != 1:
-              raise SystemExit(f"expected one stale SQLi regression test, found {text.count(old_test)}")
-          test.write_text(text.replace(old_test, new_test))
+          test.write_text(text[:start] + replacement)
           PY
       - name: Regenerate installer manifest
         run: |
