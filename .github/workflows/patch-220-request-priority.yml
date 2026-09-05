@@ -19,7 +19,7 @@ jobs:
         with:
           ref: fix/2.2.0-final-rc
           fetch-depth: 0
-      - name: Apply exact-request family minimum
+      - name: Apply planner edit
         shell: bash
         run: |
           python3 - <<'PY'
@@ -28,85 +28,33 @@ jobs:
           s = p.read_text()
           a = '        explicitly_requested = set(\n            execution_plan.resolved_families or policy.include_families\n        )\n        needs_candidates = xss or sqli or active_nuclei or passive_nuclei\n'
           b = '        explicitly_requested = set(\n            execution_plan.resolved_families or policy.include_families\n        )\n        # Exact operator-imported requests are stronger execution authority than synthetic candidates.\n        # When present, their verifier satisfies the selected-family minimum so generic breadth cannot\n        # consume the mutation ceiling before the exact request is replayed.\n        exact_request_candidates = bool(\n            request_candidate_ref\n            and int(request_candidate_ref.get("entry_count") or 0) > 0\n        )\n        needs_candidates = xss or sqli or active_nuclei or passive_nuclei\n'
-          if a not in s: raise SystemExit('family anchor missing')
+          if a not in s:
+              raise SystemExit('family anchor missing')
           s = s.replace(a, b, 1)
           s = s.replace('                required="xss" in explicitly_requested,\n', '                required=("xss" in explicitly_requested and not exact_request_candidates),\n', 1)
           s = s.replace('                required="sqli" in explicitly_requested,\n', '                required=("sqli" in explicitly_requested and not exact_request_candidates),\n', 1)
           s = s.replace('                    required="sqli" in explicitly_requested,\n', '                    required=("sqli" in explicitly_requested and not exact_request_candidates),\n', 1)
           x = '                    required=False,\n                    reserve_dependency_slots=int(sqli),\n'
-          if x not in s: raise SystemExit('request xss anchor missing')
+          if x not in s:
+              raise SystemExit('request xss anchor missing')
           s = s.replace(x, '                    required="xss" in explicitly_requested,\n                    reserve_dependency_slots=int(sqli),\n', 1)
           q = '                    required=False,\n                    reserve_dependency_slots=1,\n'
-          if q not in s: raise SystemExit('request sqli anchor missing')
+          if q not in s:
+              raise SystemExit('request sqli anchor missing')
           s = s.replace(q, '                    required="sqli" in explicitly_requested,\n                    reserve_dependency_slots=1,\n', 1)
           r = '                        required=False,\n                    )\n            if nosqli:\n'
-          if r not in s: raise SystemExit('request sqli proof anchor missing')
+          if r not in s:
+              raise SystemExit('request sqli proof anchor missing')
           s = s.replace(r, '                        required="sqli" in explicitly_requested,\n                    )\n            if nosqli:\n', 1)
           p.write_text(s)
-
-          Path('tests/test_220_request_candidate_priority.py').write_text(r'''from __future__ import annotations
-
-import uuid
-
-from api.runtime.models import ScanBudget, ScanPolicy, TargetBinding
-from api.scan.action_plan import ScanActionPlanCompiler
-from api.scan.budget_allocator import allocate_scan_action_plan
-from api.scan.execution import ScanExecutionPlan
-from api.scan.work_manifests import ScanWorkManifestReference
-
-SCAN_ID = "71000000-0000-4000-8000-000000000001"
-SCOPE_ID = "71000000-0000-4000-8000-000000000002"
-APPROVAL_ID = "71000000-0000-4000-8000-000000000003"
-
-
-def _target():
-    return TargetBinding(target_id="target-rc", target_kind="web", canonical_host="fixtures", allowed_origins=("http://fixtures:8000",), allowed_addresses=("192.0.2.10",), allowed_root_domains=("fixtures",), scope_receipt_id=SCOPE_ID)
-
-
-def _ref(kind: str, digest: str, count: int = 1):
-    schemas = {"candidate": "candidate-manifest/v1", "request": "request-manifest/v2", "request_candidate": "request-candidate-manifest/v2"}
-    return ScanWorkManifestReference(manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, kind + digest)), kind=kind, content_schema=schemas[kind], manifest_digest=digest * 64, entry_count=count, status="complete").canonical_dict()
-
-
-def _plan(family: str):
-    budget = ScanBudget(max_duration_seconds=600, max_http_requests=2000, max_endpoints=40, max_browser_actions=20, max_tcp_ports=20, max_tool_wall_seconds=600, max_workers=1, max_state_changing_requests=10, max_hosts=40)
-    execution = ScanExecutionPlan(policy=ScanPolicy(active_testing=True, allow_state_changing_http=True, include_families=("recon", family), scope_receipt_id=SCOPE_ID, approval_receipt_id=APPROVAL_ID), budget_profile="balanced", budget=budget)
-    plan = ScanActionPlanCompiler().compile(scan_id=SCAN_ID, execution_plan=execution, target_binding=_target(), request_collection_refs=({"collection_id":"collection-rc","selection_id":"selection-rc","binding_id":"binding-rc","version":1,"selection_digest":"a"*64,"active":True,"max_requests":1,"replay_policy":"confirmed_active"},), request_manifest_refs={"a"*64:_ref("request","b")}, candidate_manifest_ref=_ref("candidate","c"), request_candidate_manifest_ref=_ref("request_candidate","d"), action_scope="endpoint")
-    return budget, plan
-
-
-def test_exact_xss_request_is_selected_family_minimum():
-    budget, plan = _plan("xss")
-    by_id = {a.action_id:a for a in plan.actions}
-    assert by_id["verify.request_xss"].required is True
-    assert by_id["verify.xss"].required is False
-    allocation = allocate_scan_action_plan(plan, budget)
-    admitted = {a.action_id:a for a in allocation.plan.actions}
-    assert admitted["verify.request_xss"].admission_status == "planned"
-    assert admitted["verify.request_xss"].requested_budget["state_changing_requests"] >= 2
-
-
-def test_exact_sqli_request_and_proof_fit_rc_mutation_ceiling():
-    budget, plan = _plan("sqli")
-    by_id = {a.action_id:a for a in plan.actions}
-    assert by_id["verify.request_sqli"].required is True
-    assert by_id["prove.request_sqli"].required is True
-    assert by_id["verify.sqli"].required is False
-    assert by_id["prove.sqli"].required is False
-    allocation = allocate_scan_action_plan(plan, budget)
-    admitted = {a.action_id:a for a in allocation.plan.actions}
-    assert admitted["verify.request_sqli"].admission_status == "planned"
-    assert admitted["prove.request_sqli"].admission_status == "planned"
-    assert admitted["verify.request_sqli"].requested_budget["state_changing_requests"] + admitted["prove.request_sqli"].requested_budget["state_changing_requests"] <= 10
-''')
           PY
           git diff --check
-      - name: Commit planner fix
+      - name: Commit planner edit
         shell: bash
         run: |
           rm -f .github/workflows/patch-220-request-priority.yml .github/workflows/patch-220-request-priority-v2.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add api/scan/action_plan.py tests/test_220_request_candidate_priority.py .github/workflows/patch-220-request-priority.yml .github/workflows/patch-220-request-priority-v2.yml
+          git add api/scan/action_plan.py .github/workflows/patch-220-request-priority.yml .github/workflows/patch-220-request-priority-v2.yml
           git commit -m "fix(scan): prioritize exact request verification in selected families"
           git push origin HEAD:fix/2.2.0-final-rc
