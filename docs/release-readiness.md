@@ -7,7 +7,8 @@ UI unit suite, the source gates (module-size ratchet, capability inventory, inst
 and hunt contracts, image inventory, import closure), both offline installer smokes, a local build
 of the slim non-root API image with socket access proven through the in-container group, and a
 local build of the Model Intake image with `pip` and `setuptools` stripped from its tool
-environments. Live retest on the rebuilt local fleet (2026-09-04, honey, balanced, active): the single-worker
+environments (and, since 2026-09-05, pip's vendored SBOM pruned to match and the image scanning
+its own toolchain at build time with the release gate's policy). Live retest on the rebuilt local fleet (2026-09-04, honey, balanced, active): the single-worker
 Scan ran three appended continuation revisions before the finalizer (plan revision 4), spent 1,891 of
 3,600 tool-wall seconds and 8,678 requests, and stopped because the template manifest was exhausted,
 not the budget; the pre-fix thorough Scan of the same target had spent 26% of its wall after one
