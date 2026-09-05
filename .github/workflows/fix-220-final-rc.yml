@@ -1,113 +1,29 @@
-name: Build 2.2.0 final RC fixes
+name: Export frozen RC regression workspace
 on:
   push:
     branches: [fix/2.2.0-final-rc-work]
     paths: [.github/workflows/fix-220-final-rc.yml]
 permissions:
-  contents: write
+  contents: read
 jobs:
-  patch:
+  export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: fix/2.2.0-final-rc-work
-          fetch-depth: 0
-      - name: Patch Model Intake stage boundary and DAST accounting
-        shell: bash
+          ref: b538195c05373fcf1d70c4b63c5574f98dfc5f34
+          persist-credentials: false
+      - name: Export exact committed source without credentials
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          dockerfile = Path('scanner/Dockerfile.model-intake')
-          text = dockerfile.read_text()
-          old = 'FROM ${SCANNER_RUNTIME_IMAGE}\n\n# The scanner base strips its C toolchain and pip/venv machinery.'
-          new = 'FROM ${SCANNER_RUNTIME_IMAGE} AS model-intake-python-tools\n\n# Build the Python toolchain in a disposable stage. BuildKit SBOM attestations retain\n# packages that existed in a final-image layer even when a later RUN removes them, so\n# pip/setuptools wheels and their vendored msgpack must never enter the final image.\n# The scanner base strips its C toolchain and pip/venv machinery.'
-          if old not in text:
-              raise SystemExit('model-intake builder anchor missing')
-          text = text.replace(old, new, 1)
-          if '\nFROM ${SCANNER_RUNTIME_IMAGE}\n\n# Copy only the scrubbed Model Intake runtime' not in text:
-              text += r'''
-
-# Start the release image from a fresh scanner runtime. Only scrubbed runtime artifacts
-# cross this stage boundary; transient apt Python wheels, compilers, pip caches, and
-# setuptools from the builder cannot appear in the final-image SBOM or filesystem.
-FROM ${SCANNER_RUNTIME_IMAGE}
-COPY --from=model-intake-python-tools /opt/model-intake-locks /opt/model-intake-locks
-COPY --from=model-intake-python-tools /opt/model-intake-tools /opt/model-intake-tools
-COPY --from=model-intake-python-tools /opt/pip-audit-cache /opt/pip-audit-cache
-COPY --from=model-intake-python-tools /opt/trivy-cache /opt/trivy-cache
-COPY --from=model-intake-python-tools /opt/osv-cache /opt/osv-cache
-COPY --from=model-intake-python-tools /opt/tools/trivy /opt/tools/trivy
-COPY --from=model-intake-python-tools /opt/tools/osv-scanner /opt/tools/osv-scanner
-COPY --from=model-intake-python-tools /opt/tools/pip-audit-offline /opt/tools/pip-audit-offline
-RUN set -eu; \
-    ln -sf /opt/model-intake-tools/modelscan/bin/modelscan /opt/tools/modelscan; \
-    ln -sf /opt/model-intake-tools/fickling/bin/fickling /opt/tools/fickling; \
-    ln -sf /opt/model-intake-tools/semgrep/bin/semgrep /opt/tools/semgrep; \
-    ln -sf /opt/model-intake-tools/safetensors/bin/safetensors /opt/tools/safetensors; \
-    test ! -e /usr/share/python-wheels/setuptools-70.3.0-py3-none-any.whl; \
-    ! find /opt/model-intake-tools -type d -name 'setuptools-70.3.0.dist-info' -print -quit | grep -q .; \
-    ! find /opt/model-intake-tools -path '*/pip/_vendor/msgpack' -print -quit | grep -q .; \
-    /opt/tools/modelscan --version; \
-    /opt/tools/fickling --version; \
-    /opt/tools/semgrep --version; \
-    /opt/tools/trivy --version; \
-    /opt/tools/osv-scanner --version; \
-    /opt/tools/pip-audit-offline --version
-ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
-RUN PYTHONPATH=/app/scanner_tools \
-    /opt/model-intake-tools/safetensors/bin/python \
-    /app/scanner_tools/model_intake_safetensors_selftest.py
-RUN python3 /app/scanner_tools/model_intake_adapter_self_test.py \
-      --output /opt/model-intake-tools/self-test.json && \
-    echo "MODEL INTAKE FINAL RUNTIME VERIFIED OK"
-'''
-          dockerfile.write_text(text)
-
-          finalizer = Path('api/scan/finalizer.py')
-          ftext = finalizer.read_text()
-          needle = '''            if item.get("kind") != "candidate_attempt":\n                continue\n'''
-          replacement = '''            # Batch request-body verifiers persist both a candidate_attempt row and\n            # the typed request_body_verification proof. Older durable attempts and\n            # single-request verifier receipts can contain only the proof row; count\n            # either contract as one real attempt, keyed by candidate/attempt ID, so\n            # coverage cannot report zero work after actual control+mutation traffic.\n            if item.get("kind") not in {"candidate_attempt", "request_body_verification"}:\n                continue\n'''
-          if needle in ftext:
-              ftext = ftext.replace(needle, replacement, 1)
-              finalizer.write_text(ftext)
-
-          test = Path('tests/test_220_release_regressions.py')
-          test.write_text(r'''from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_model_intake_final_image_has_clean_stage_boundary():
-    text = (ROOT / "scanner" / "Dockerfile.model-intake").read_text()
-    assert "FROM ${SCANNER_RUNTIME_IMAGE} AS model-intake-python-tools" in text
-    marker = "# Start the release image from a fresh scanner runtime."
-    assert marker in text
-    final = text.split(marker, 1)[1]
-    assert "FROM ${SCANNER_RUNTIME_IMAGE}" in final
-    assert "apt-get install" not in final
-    assert "python3-pip-whl" not in final
-    assert "python3-setuptools-whl" not in final
-    assert "COPY --from=model-intake-python-tools /opt/model-intake-tools" in final
-    assert "pip/_vendor/msgpack" in final
-
-
-def test_request_verification_is_a_real_family_attempt_contract():
-    text = (ROOT / "api" / "scan" / "finalizer.py").read_text()
-    assert 'item.get("kind") not in {"candidate_attempt", "request_body_verification"}' in text
-''')
-          PY
-          python3 scripts/generate_install_manifest.py
-          python3 -m pytest -q tests/test_220_release_regressions.py tests/test_scan_finalizer.py tests/test_request_mutation_verifier.py tests/test_scan_action_adapter.py tests/test_scan_action_compiler.py tests/test_install_manifest.py
-          git diff --check
-      - name: Commit fixes
-        shell: bash
-        run: |
-          rm .github/workflows/fix-220-final-rc.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add scanner/Dockerfile.model-intake api/scan/finalizer.py tests/test_220_release_regressions.py install/MANIFEST.sha256 .github/workflows/fix-220-final-rc.yml
-          git commit -m 'fix(release): harden model intake image and request verification accounting'
-          git push origin HEAD:fix/2.2.0-final-rc-work
+          test "$(git rev-parse HEAD)" = b538195c05373fcf1d70c4b63c5574f98dfc5f34
+          mkdir /tmp/rc-workspace
+          git archive --format=tar.gz HEAD > /tmp/rc-workspace/source.tar.gz
+          git ls-tree -r HEAD > /tmp/rc-workspace/tree.txt
+          sha256sum /tmp/rc-workspace/source.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rc-workspace-b538195c
+          path: /tmp/rc-workspace
+          retention-days: 1
+          if-no-files-found: error
