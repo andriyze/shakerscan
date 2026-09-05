@@ -42,6 +42,8 @@ def _ref(kind: str, digest: str, count: int = 1) -> dict:
 
 
 def _plan(family: str):
+    # Mirror the deliberately tight RC D2/D3 mutation ceiling. The selected family
+    # must spend this authority on the exact imported request before generic breadth.
     budget = ScanBudget(
         max_duration_seconds=600,
         max_http_requests=2000,
