@@ -1125,7 +1125,12 @@ jobs:
     # created, whether the images were built here or reused from build-on-main.
     if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Certification runs the thorough Juice Shop benchmark, whose wall ceiling is the thorough
+    # profile's max_tool_wall_seconds (180 min in 2.2.0), plus the installed-stack E2E, both
+    # upgrade rehearsals, the fault receipts, and scoring. The limit must cover the ceiling plus
+    # that overhead; tests/test_release_workflow_contract.py derives the floor from the budget
+    # contract so a future ladder change cannot leave the release a timeout to walk into.
+    timeout-minutes: 300
     permissions:
       contents: read
       packages: read

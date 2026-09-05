@@ -129,3 +129,32 @@ def test_clean_candidate_build_retries_only_pinned_base_downloads():
     assert "scripts/retry-command.sh docker build" not in workflow
     assert "scripts/retry-command.sh scripts/selftest-model-intake-guest.sh" not in workflow
     assert workflow.count("scripts/retry-command.sh timeout 300 docker pull") == 2
+
+
+def test_certify_timeout_covers_the_thorough_scan_ceiling_plus_certification_overhead():
+    """The certify job runs the thorough Juice Shop benchmark on the final images.
+
+    2.2.0 raised the thorough wall ceiling to 180 minutes while certify kept a 120-minute limit,
+    so a benchmark scan that did not exhaust its work early would have timed the release out
+    instead of failing on quality. The floor is derived from the budget contract, not typed by
+    hand, so the next ladder change trips this test rather than the next release.
+    """
+    import math
+
+    import yaml
+
+    from api.scan.contracts import BUDGET_PROFILES
+
+    document = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+    )
+    certify_limit = int(document["jobs"]["certify"]["timeout-minutes"])
+    thorough_wall_minutes = math.ceil(BUDGET_PROFILES["thorough"].max_tool_wall_seconds / 60)
+    # E2E areas, two upgrade rehearsals, fault receipts, benchmark scoring, and image pulls.
+    certification_overhead_minutes = 60
+    assert certify_limit >= thorough_wall_minutes + certification_overhead_minutes, (
+        f"certify timeout {certify_limit} min cannot cover the thorough ceiling "
+        f"{thorough_wall_minutes} min plus {certification_overhead_minutes} min of certification"
+    )
+    # GitHub-hosted runners cap a job at 360 minutes; stay inside it.
+    assert certify_limit <= 360
