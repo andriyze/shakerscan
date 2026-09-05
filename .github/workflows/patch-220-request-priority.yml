@@ -1,0 +1,86 @@
+name: Patch 2.2.0 request priority
+
+on:
+  push:
+    branches:
+      - "fix/2.2.0-final-rc"
+    paths:
+      - ".github/workflows/patch-220-request-priority.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: fix/2.2.0-final-rc
+          fetch-depth: 0
+      - name: Apply planner fix and regression
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('api/scan/action_plan.py')
+          text = path.read_text()
+
+          anchor = '''        explicitly_requested = set(\n            execution_plan.resolved_families or policy.include_families\n        )\n        needs_candidates = xss or sqli or active_nuclei or passive_nuclei\n'''
+          replacement = '''        explicitly_requested = set(\n            execution_plan.resolved_families or policy.include_families\n        )\n        # An operator-imported exact request is stronger execution authority than a\n        # synthetic candidate inferred from crawl/spec data. When a materialized\n        # request-candidate manifest exists, let that exact work satisfy the selected\n        # family's required minimum; otherwise the generic required verifier/prover\n        # can consume the mutation ceiling before the exact replay is admitted.\n        exact_request_candidates = bool(\n            request_candidate_ref\n            and int(request_candidate_ref.get("entry_count") or 0) > 0\n        )\n        needs_candidates = xss or sqli or active_nuclei or passive_nuclei\n'''
+          if anchor not in text:
+              raise SystemExit('explicitly_requested anchor not found')
+          text = text.replace(anchor, replacement, 1)
+
+          text = text.replace(
+              '                required="xss" in explicitly_requested,\n',
+              '                required=("xss" in explicitly_requested and not exact_request_candidates),\n',
+              1,
+          )
+          text = text.replace(
+              '                required="sqli" in explicitly_requested,\n',
+              '                required=("sqli" in explicitly_requested and not exact_request_candidates),\n',
+              1,
+          )
+          # The next selected-family SQLi required flag belongs to prove.sqli.
+          text = text.replace(
+              '                    required="sqli" in explicitly_requested,\n',
+              '                    required=("sqli" in explicitly_requested and not exact_request_candidates),\n',
+              1,
+          )
+
+          old_xss = '''                    required=False,\n                    reserve_dependency_slots=int(sqli),\n'''
+          new_xss = '''                    required="xss" in explicitly_requested,\n                    reserve_dependency_slots=int(sqli),\n'''
+          if old_xss not in text:
+              raise SystemExit('request XSS required anchor not found')
+          text = text.replace(old_xss, new_xss, 1)
+
+          old_sqli = '''                    required=False,\n                    reserve_dependency_slots=1,\n'''
+          new_sqli = '''                    required="sqli" in explicitly_requested,\n                    reserve_dependency_slots=1,\n'''
+          if old_sqli not in text:
+              raise SystemExit('request SQLi required anchor not found')
+          text = text.replace(old_sqli, new_sqli, 1)
+
+          # Exact SQLi proof has a measured 8-mutation floor. D2's ten-request\n          # authority intentionally funds verifier(2)+proof(8); make that proof the\n          # selected-family proof minimum instead of generic prove.sqli.\n          old_prove = '''                        required=False,\n                    )\n            if nosqli:\n'''
+          new_prove = '''                        required="sqli" in explicitly_requested,\n                    )\n            if nosqli:\n'''
+          if old_prove not in text:
+              raise SystemExit('request SQLi proof required anchor not found')
+          text = text.replace(old_prove, new_prove, 1)
+          path.write_text(text)
+
+          test = Path('tests/test_220_request_candidate_priority.py')
+          test.write_text('''from __future__ import annotations\n\nimport uuid\n\nfrom api.runtime.models import ScanBudget, ScanPolicy, TargetBinding\nfrom api.scan.action_plan import ScanActionPlanCompiler\nfrom api.scan.budget_allocator import allocate_scan_action_plan\nfrom api.scan.execution import ScanExecutionPlan\nfrom api.scan.work_manifests import ScanWorkManifestReference\n\nSCAN_ID = "71000000-0000-4000-8000-000000000001"\nSCOPE_ID = "71000000-0000-4000-8000-000000000002"\nAPPROVAL_ID = "71000000-0000-4000-8000-000000000003"\n\ndef _target():\n    return TargetBinding(\n        target_id="target-rc", target_kind="web", canonical_host="fixtures",\n        allowed_origins=("http://fixtures:8000",), allowed_addresses=("192.0.2.10",),\n        allowed_root_domains=("fixtures",), scope_receipt_id=SCOPE_ID,\n    )\n\ndef _ref(kind: str, digest: str, count: int = 1):\n    schemas = {\n        "candidate": "candidate-manifest/v1",\n        "request": "request-manifest/v2",\n        "request_candidate": "request-candidate-manifest/v2",\n    }\n    return ScanWorkManifestReference(\n        manifest_id=str(uuid.uuid5(uuid.NAMESPACE_URL, kind + digest)),\n        kind=kind, content_schema=schemas[kind], manifest_digest=digest * 64,\n        entry_count=count, status="complete",\n    ).canonical_dict()\n\ndef _plan(family: str):\n    budget = ScanBudget(\n        max_duration_seconds=600, max_http_requests=2000, max_endpoints=40,\n        max_browser_actions=20, max_tcp_ports=20, max_tool_wall_seconds=600,\n        max_workers=1, max_state_changing_requests=10, max_hosts=40,\n    )\n    execution = ScanExecutionPlan(\n        policy=ScanPolicy(\n            active_testing=True, allow_state_changing_http=True,\n            include_families=("recon", family), scope_receipt_id=SCOPE_ID,\n            approval_receipt_id=APPROVAL_ID,\n        ),\n        budget_profile="balanced", budget=budget,\n    )\n    request_digest = "a"\n    collection = ({\n        "collection_id": "collection-rc", "selection_id": "selection-rc",\n        "binding_id": "binding-rc", "version": 1,\n        "selection_digest": request_digest * 64, "active": True,\n        "max_requests": 1, "replay_policy": "confirmed_active",\n    },)\n    plan = ScanActionPlanCompiler().compile(\n        scan_id=SCAN_ID, execution_plan=execution, target_binding=_target(),\n        request_collection_refs=collection,\n        request_manifest_refs={request_digest * 64: _ref("request", "b")},\n        candidate_manifest_ref=_ref("candidate", "c"),\n        request_candidate_manifest_ref=_ref("request_candidate", "d"),\n        action_scope="endpoint", ledger_limits=budget.ledger_limits(),\n    )\n    return budget, plan\n\ndef test_exact_xss_request_satisfies_selected_family_minimum_before_generic_breadth():\n    budget, plan = _plan("xss")\n    by_id = {a.action_id: a for a in plan.actions}\n    assert by_id["verify.request_xss"].required is True\n    assert by_id["verify.xss"].required is False\n    allocated = allocate_scan_action_plan(plan, budget, require_finalizer=True)\n    admitted = {a.action_id: a for a in allocated.plan.actions}\n    assert admitted["verify.request_xss"].admission_status == "planned"\n    assert admitted["verify.request_xss"].requested_budget["state_changing_requests"] >= 2\n\ndef test_exact_sqli_request_and_proof_own_the_ten_mutation_minimum():\n    budget, plan = _plan("sqli")\n    by_id = {a.action_id: a for a in plan.actions}\n    assert by_id["verify.request_sqli"].required is True\n    assert by_id["prove.request_sqli"].required is True\n    assert by_id["verify.sqli"].required is False\n    assert by_id["prove.sqli"].required is False\n    allocated = allocate_scan_action_plan(plan, budget, require_finalizer=True)\n    admitted = {a.action_id: a for a in allocated.plan.actions}\n    assert admitted["verify.request_sqli"].admission_status == "planned"\n    assert admitted["prove.request_sqli"].admission_status == "planned"\n    assert (\n        admitted["verify.request_sqli"].requested_budget["state_changing_requests"]\n        + admitted["prove.request_sqli"].requested_budget["state_changing_requests"]\n    ) <= 10\n''')
+          PY
+          python3 -m pytest -q tests/test_220_request_candidate_priority.py tests/test_scan_action_compiler.py tests/test_scan_action_adapter.py tests/test_request_mutation_verifier.py
+          git diff --check
+      - name: Commit planner fix
+        shell: bash
+        run: |
+          rm .github/workflows/patch-220-request-priority.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/scan/action_plan.py tests/test_220_request_candidate_priority.py .github/workflows/patch-220-request-priority.yml
+          git commit -m "fix(scan): prioritize exact request verification in selected families"
+          git push origin HEAD:fix/2.2.0-final-rc
