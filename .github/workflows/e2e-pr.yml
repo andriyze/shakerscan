@@ -1,11 +1,15 @@
 name: E2E smoke
 
-# Pre-merge integration coverage, run ONCE per change: the fast deterministic E2E areas
-# (platform, AI Gate on the fixture endpoint, keyless Hunt) and the production-stack browser
-# acceptance, so a broken page or contract fails on the pull request instead of an hour into
-# a candidate build. The complete E2E (DAST against Juice Shop, Model Intake), the recall
-# benchmark, and the fault receipts run once, on the final images, in release-candidate
-# certification. It is a required check and always reports.
+# Pre-merge integration coverage, run ONCE per change, on the stack built from the pull
+# request: every E2E area (platform, AI Gate, Hunt, DAST against Juice Shop, Model Intake),
+# the production-stack browser acceptance, and the same high/critical image vulnerability
+# gate certification applies to the final images. Between 2.0.0 and 2.2.0 fifty-six of sixty
+# release candidates failed, and the gates that killed them (final-image Trivy, the
+# installed-stack DAST and Model Intake E2E, the upgrade rehearsal) ran only in certification,
+# an hour after merge. This check runs the first two of those before merge so a candidate
+# confirms rather than discovers. Certification still repeats them on the final multi-arch
+# manifests with attestation; the recall benchmark, the fault receipts, and the upgrade
+# rehearsal remain certification-only. It is a required check and always reports.
 
 on:
   pull_request:
@@ -20,7 +24,7 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       POSTGRES_PASSWORD: ci-postgres-credential-0000000000000001
       REDIS_PASSWORD: ci-redis-credential-000000000000000001
@@ -79,25 +83,35 @@ jobs:
           # The API image builds FROM shakerscan-worker:local, which compose will not
           # build for it -- see tests/test_ci_builds_before_composing.py.
           ./scanner.sh build
-          docker compose up -d
+          # The e2e profile adds the pinned Juice Shop fixture the DAST and Hunt areas scan,
+          # reachable from the workers by its compose service name.
+          docker compose --profile e2e up -d
           for i in $(seq 1 90); do
             curl -sf http://localhost:8080/health && break
             sleep 5
           done
           curl -sf http://localhost:8080/health
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:3001/ >/dev/null && break
+            sleep 5
+          done
+          curl -sf http://127.0.0.1:3001/ >/dev/null
 
-      - name: Run the fast deterministic E2E areas
+      - name: Run every E2E area on the built stack
         if: steps.changes.outputs.backend == 'true'
         env:
           # The PR gate mirrors the candidate certification, which is an authorized declared-debt
           # release: checks the release owner has recorded as debt run as loud, counted XFAIL rows
           # (an XPASS is printed when one unexpectedly passes). Every undeclared check stays hard.
+          # A candidate dispatched without waive_e2e_debt fails on exactly the rows printed here.
           SHAKERSCAN_RELEASE_DECLARED_DEBT: "1"
+          # The same targets certification's installed-stack smoke uses.
+          SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000
+          SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000
+          SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ${{ env.MODEL_INTAKE_OPERATOR_TOKEN }}
         run: |
           mkdir -p artifacts
-          python3 tests/e2e/run_e2e.py --area platform --scorecard artifacts/e2e-scorecard.json
-          python3 tests/e2e/run_e2e.py --area ai_gate
-          python3 tests/e2e/run_e2e.py --area hunt
+          python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json
           python3 - <<'PY'
           import json
           card = json.load(open("artifacts/e2e-scorecard.json"))
@@ -110,6 +124,117 @@ jobs:
               print(f"::warning title=declared E2E debt::{area}: {name} -- {reason}")
           print(f"declared-debt rows: {len(debt)}; gate: {card.get('gate')}")
           PY
+
+      - name: Resolve the built images and the active vulnerability waivers
+        id: images
+        if: steps.changes.outputs.stack == 'true'
+        shell: bash
+        run: |
+          resolve() {
+            docker compose images "$1" --format json | python3 -c '
+          import json, sys
+          rows = json.load(sys.stdin)
+          if not rows:
+              raise SystemExit("no image for service " + sys.argv[1])
+          print(rows[0]["Repository"] + ":" + rows[0]["Tag"])
+          ' "$1"
+          }
+          {
+            echo "scanner=$(resolve worker)"
+            echo "api=$(resolve api)"
+            echo "model_intake=$(resolve model-intake-worker)"
+            echo "ui=$(resolve ui)"
+            echo "signer=$(resolve model-intake-signer)"
+          } >> "$GITHUB_OUTPUT"
+          # The same waiver policy and per-image skip list the candidate vulnerability-scan
+          # job applies; tests/test_v2_ci_contract.py pins the two in lockstep.
+          for image in scanner api model-intake ui signer; do
+            skip_files=""
+            if [ "$image" = "api" ]; then
+              skip_files="/usr/local/bin/docker"
+            fi
+            python3 scripts/validate_vulnerability_waivers.py \
+              --file security/image-vulnerability-waivers.json \
+              --image "$image" \
+              --skip-dirs "" \
+              --skip-files "$skip_files" \
+              --output ".trivyignore-$image"
+          done
+
+      - name: Reject high or critical vulnerabilities in the built scanner image
+        if: steps.changes.outputs.stack == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.images.outputs.scanner }}
+          format: json
+          output: trivy-scanner.json
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore-scanner
+          skip-dirs: ""
+          skip-files: ""
+
+      - name: Reject high or critical vulnerabilities in the built API image
+        if: steps.changes.outputs.stack == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.images.outputs.api }}
+          format: json
+          output: trivy-api.json
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore-api
+          skip-dirs: ""
+          skip-files: /usr/local/bin/docker
+
+      - name: Reject high or critical vulnerabilities in the built Model Intake image
+        if: steps.changes.outputs.stack == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.images.outputs.model_intake }}
+          format: json
+          output: trivy-model-intake.json
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore-model-intake
+          skip-dirs: ""
+          skip-files: ""
+
+      - name: Reject high or critical vulnerabilities in the built UI image
+        if: steps.changes.outputs.stack == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.images.outputs.ui }}
+          format: json
+          output: trivy-ui.json
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore-ui
+          skip-dirs: ""
+          skip-files: ""
+
+      - name: Reject high or critical vulnerabilities in the built signer image
+        if: steps.changes.outputs.stack == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.images.outputs.signer }}
+          format: json
+          output: trivy-signer.json
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore-signer
+          skip-dirs: ""
+          skip-files: ""
 
       - name: Set up supported Node runtime
         if: steps.changes.outputs.stack == 'true'
@@ -139,13 +264,14 @@ jobs:
           path: |
             artifacts/e2e-scorecard.json
             ui/test-results/browser-results.json
+            trivy-*.json
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Dump stack logs on failure
         if: failure() && steps.changes.outputs.stack == 'true'
-        run: docker compose logs --tail=300 api worker ui || true
+        run: docker compose --profile e2e logs --tail=300 api worker model-intake-worker ui juice-shop || true
 
       - name: Stop E2E stack
         if: always() && steps.changes.outputs.stack == 'true'
-        run: docker compose down -v
+        run: docker compose --profile e2e down -v

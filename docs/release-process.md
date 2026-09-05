@@ -16,13 +16,17 @@ report on every pull request:
 | --- | --- | --- |
 | `commit-policy` | `commit-policy.yml` | A `release:` commit carries only metadata (`VERSION`, notes, ledger, `install/STABLE_VERSION`). |
 | `python-suite` | `python-suite.yml` | The complete partitioned Python suite plus every static gate (generated inventories and contracts, installer manifest, import closure, module size, documentation policy, surface dispositions, target transport) from the locked dependency set. |
-| `smoke` | `e2e-pr.yml` | The fast deterministic E2E areas (platform, AI Gate, Hunt) and the real-stack browser acceptance on the built stack. |
+| `smoke` | `e2e-pr.yml` | Every E2E area (platform, AI Gate, Hunt, DAST against Juice Shop, Model Intake) and the real-stack browser acceptance on the stack built from the pull request, plus the same high/critical vulnerability gate certification applies, run against the five PR-built images. |
 
 Each check runs once per change. The candidate reuses the `python-suite` report for its exact SHA
-instead of rerunning the suite inside the image, and the slow E2E areas (DAST against Juice Shop,
-Model Intake), the recall benchmark, the fault receipts, and the upgrade rehearsal run only in
-candidate certification, on the final images. `v2-contracts.yml` is a manual stack acceptance and
-runs nothing on pull requests.
+instead of rerunning the suite inside the image. Certification repeats the E2E areas and the
+vulnerability gate on the final multi-architecture manifests with attestation, and adds what only
+final images can prove: the recall benchmark, the fault receipts, and the upgrade rehearsal. The
+pull-request check exists so those repeats confirm rather than discover: between 2.0.0 and 2.2.0,
+fifty-six of sixty candidates failed on gates no pull request had run. The PR check tolerates only
+the rows the release owner recorded as declared debt (printed as warnings); a candidate dispatched
+without `waive_e2e_debt` fails on exactly those rows. `v2-contracts.yml` is a manual stack
+acceptance and runs nothing on pull requests.
 
 A committed ruleset is a promise until it is imported. Apply and verify it with:
 

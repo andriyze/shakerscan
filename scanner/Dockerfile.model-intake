@@ -88,6 +88,12 @@ RUN set -eu; \
     vendor="/opt/model-intake-tools/pip-audit/lib/python3.12/site-packages/pip/_vendor"; \
     rm -rf "$vendor/msgpack" "$vendor/pkg_resources"; \
     sed -i '/^msgpack==/d; /^setuptools==/d' "$vendor/vendor.txt"; \
+    # pip 25+ also ships a CycloneDX SBOM of its vendor tree, and a scanner reads that as the
+    # installed set: the first 2.2.0 candidates failed the image gate on the two deleted
+    # packages because only vendor.txt had been edited. Prune the SBOM to what remains
+    # (deleting it would hide pip's other vendored packages from every scanner).
+    python3 /opt/model-intake-locks/prune_pip_vendor_sbom.py "$vendor/bom.cdx.json" msgpack setuptools; \
+    ! grep -Eq '"name": *"(msgpack|setuptools)"' "$vendor/bom.cdx.json"; \
     "/opt/model-intake-tools/pip-audit/bin/python" -c \
       'import importlib.util as u; assert u.find_spec("setuptools") is None; assert u.find_spec("pip._vendor.msgpack") is None; assert u.find_spec("pip._vendor.pkg_resources") is None'; \
     ! grep -Eq "^(msgpack|setuptools)==" "$vendor/vendor.txt"; \
@@ -132,6 +138,28 @@ RUN set -eu; \
     osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
     printf '{"UpdatedAt":"%s","Ecosystem":"PyPI","DatabaseSHA256":"%s"}\n' "$osv_updated" "$osv_db_sha" > /opt/osv-cache/metadata.json
 ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
+
+# The image ships a vulnerability scanner and its database, so it proves its own toolchain
+# clean at build time with exactly the release gate's policy: release-candidate.yml's
+# vulnerability-scan job (HIGH/CRITICAL, fixed advisories only, the same waiver file and the
+# model-intake skip list). tests/test_model_intake_image_split.py pins the two together. A
+# finding fails the build here, where it costs minutes, instead of certification an hour after
+# merge; 2.1.0 and 2.2.0 both learned of this image's findings only from a failed candidate.
+COPY security/image-vulnerability-waivers.json /tmp/image-gate/security/
+COPY scripts/validate_vulnerability_waivers.py scripts/release_image_inventory.py /tmp/image-gate/scripts/
+COPY install/release-images.json /tmp/image-gate/install/
+RUN set -eu; \
+    python3 /tmp/image-gate/scripts/validate_vulnerability_waivers.py \
+      --file /tmp/image-gate/security/image-vulnerability-waivers.json --image model-intake \
+      --skip-dirs "" --skip-files "" --output /tmp/image-gate/.trivyignore; \
+    mkdir -p /tmp/image-gate/native; \
+    cp /opt/tools/trivy /opt/tools/osv-scanner /tmp/image-gate/native/; \
+    for root in /opt/model-intake-tools /tmp/image-gate/native; do \
+      /opt/tools/trivy rootfs --cache-dir /opt/trivy-cache --skip-db-update --skip-java-db-update \
+        --offline-scan --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+        --ignorefile /tmp/image-gate/.trivyignore --format table "$root"; \
+    done; \
+    rm -rf /tmp/image-gate
 
 # The official Rust parser boundary is a release-image gate, not an optional
 # test dependency or a monkeypatched unit-test seam.

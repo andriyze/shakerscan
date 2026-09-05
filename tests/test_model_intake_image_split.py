@@ -136,3 +136,38 @@ def test_fleet_overlays_carry_no_model_intake_service():
         services = set((overlay.get("services") or {}).keys())
         assert not {s for s in services if "model-intake" in s}, (name, sorted(services))
         assert "model_intake_sandbox.py" not in (ROOT / name).read_text(encoding="utf-8")
+
+
+def test_model_intake_image_prunes_pip_sbom_and_scans_itself_with_the_release_policy():
+    """The image that ships a vulnerability scanner proves its own toolchain clean at build time.
+
+    Candidates 7d85939f and ba415089 failed the image gate on msgpack 1.1.2 and setuptools
+    70.3.0 after the vendored code had been removed: pip's CycloneDX SBOM still listed them and
+    Trivy reports from it. The Dockerfile now prunes the SBOM and then runs the release gate's
+    exact policy (severity, fixed-only rule, exit code, waiver file, skip list) over the toolchain
+    and its own native scanners, so a finding fails the build instead of certification.
+    """
+    import yaml
+
+    dockerfile = (ROOT / "scanner" / "Dockerfile.model-intake").read_text()
+    assert 'prune_pip_vendor_sbom.py "$vendor/bom.cdx.json" msgpack setuptools' in dockerfile
+    assert (ROOT / "scanner" / "model_intake_tools" / "prune_pip_vendor_sbom.py").is_file()
+    assert "! grep -Eq '\"name\": *\"(msgpack|setuptools)\"' \"$vendor/bom.cdx.json\"" in dockerfile
+    self_scan = dockerfile[dockerfile.index("COPY security/image-vulnerability-waivers.json"):]
+    assert "/opt/tools/trivy rootfs --cache-dir /opt/trivy-cache --skip-db-update" in self_scan
+    assert "for root in /opt/model-intake-tools /tmp/image-gate/native; do" in self_scan
+    assert "--image model-intake" in self_scan and '--skip-dirs "" --skip-files ""' in self_scan
+
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "release-candidate.yml").read_text())
+    job = workflow["jobs"]["vulnerability-scan"]
+    gate = next(step for step in job["steps"] if step.get("name") == "Reject high or critical image vulnerabilities")["with"]
+    target = next(item for item in job["strategy"]["matrix"]["target"] if item["name"] == "model-intake")
+    assert f"--severity {gate['severity']}" in self_scan
+    assert ("--ignore-unfixed" in self_scan) is bool(gate["ignore-unfixed"])
+    assert f"--exit-code {gate['exit-code']}" in self_scan
+    assert f"--scanners {gate['scanners']}" in self_scan
+    assert target["skip_dirs"] == "" and target["skip_files"] == ""
+    assert "security/image-vulnerability-waivers.json" in self_scan
+    # The self-scan runs after the offline database is baked and before the runtime gates.
+    assert self_scan.index("trivy rootfs") < self_scan.index("model_intake_safetensors_selftest.py")
+    assert dockerfile.index("--download-db-only") < dockerfile.index("trivy rootfs")
