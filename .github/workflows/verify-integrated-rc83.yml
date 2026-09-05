@@ -1,0 +1,112 @@
+name: Validate integrated RC83 corrections
+on:
+  push:
+    branches: [fix/2.2.0-final-rc-work]
+    paths: [.github/workflows/verify-integrated-rc83.yml]
+permissions:
+  contents: write
+concurrency:
+  group: verify-integrated-rc83
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Apply the exact locally reviewed patch to the frozen PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/rc83-integrated.*.b64 /tmp/
+          git checkout --detach b538195c05373fcf1d70c4b63c5574f98dfc5f34
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          encoded = ''.join(Path(f'/tmp/rc83-integrated.{n}.b64').read_text().strip() for n in range(3))
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '359673ba305cbc0b6926801ee3f9d1adda9df0569f494287b86d54ae23023fe1'
+          Path('/tmp/integrated.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/integrated.patch
+          git apply --index /tmp/integrated.patch
+          test "$(git write-tree)" = 269c11c1c2b8803325de241d32bf6b3b43bf1b09
+          git diff --cached --check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install the actual locked candidate dependencies and browser
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+          python -m playwright install --with-deps chromium
+      - name: Run the complete partitioned Python suite including real browser controls
+        run: |
+          mkdir -p artifacts
+          python scripts/run_complete_python_suite.py --artifacts-dir artifacts
+      - name: Validate generated files and source release contracts together
+        run: |
+          python scripts/generate_capability_inventory.py --check
+          python scripts/generate_scan_contract.py --check
+          python scripts/generate_hunt_contract.py --check
+          python scripts/generate_public_api_contract.py --check
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_installed_import_closure.py
+          python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
+          python scripts/check_surface_dispositions.py
+          python scripts/check_scan_target_transport.py
+          git diff --exit-code
+      - name: Prove DOM execution against the exact benchmark application
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name rc83-juice -p 127.0.0.1:3001:3000 bkimminich/juice-shop@sha256:e68144772ebaaca0ec117b38d44903af92416793230288ef7c5437fc4f26850a
+          trap 'docker rm -f rc83-juice >/dev/null' EXIT
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:3001/ >/dev/null && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:3001/ >/dev/null
+          python - <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from api.capabilities.xss_verification import HuntXSSBrowserAdapter
+          from api.hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+          from api.hunt.deterministic_findings import verified_xss_observations
+          from api.runtime.capability_registry import CAPABILITY_REGISTRY
+          from api.runtime.models import TargetBinding
+          async def run():
+              origin = 'http://127.0.0.1:3001'
+              target = TargetBinding(target_id='rc83-benchmark', target_kind='web', canonical_host='127.0.0.1', allowed_origins=(origin,), allowed_addresses=('127.0.0.1',))
+              spec = CAPABILITY_REGISTRY.require('xss.verify')
+              adapter = HuntXSSBrowserAdapter(target=target, execution_url=origin + '/#/search?q=shakerscan', requested_budget=spec.budget_cost)
+              result = await CapabilityExecutor().execute(CapabilityExecutionContext(spec, target, spec.budget_cost, True), adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False)
+              proof = verified_xss_observations(result.observations, target_url=origin)
+              summary = {'status': result.status, 'errors': result.errors, 'consumed': dict(result.actual_budget), 'proof': proof, 'observations': result.observations}
+              Path('artifacts/real-juice-browser-proof.json').write_text(json.dumps(summary, indent=2) + '\n')
+              print(json.dumps({'status': result.status, 'errors': result.errors, 'consumed': dict(result.actual_budget), 'verified_count': len(proof)}))
+              assert result.status in {'success', 'partial'} and proof, 'real application did not produce execution proof'
+              assert proof[0]['proof_contract'] == 'xss_browser_execution/v1'
+              assert proof[0]['sanitized_screenshot_sha256']
+          asyncio.run(run())
+          PY
+      - name: Preserve only the verified product tree on a scratch result branch
+        run: |
+          test "$(git write-tree)" = 269c11c1c2b8803325de241d32bf6b3b43bf1b09
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(release): validate integrated budget, browser proof and vendor inventory corrections'
+          git push origin HEAD:refs/heads/fix/rc83-integrated-validated
+          echo "Verified tree: $(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scratch commit: $(git rev-parse HEAD). PR83 and main have not been changed by this job." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: integrated-rc83-validation
+          path: artifacts
+          retention-days: 14
+          if-no-files-found: warn
