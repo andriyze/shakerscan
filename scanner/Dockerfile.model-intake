@@ -4,8 +4,8 @@
 # their databases) lives only here, not in the scanner or API images. It is an overlay on the
 # exact scanner runtime -- the same base the API image builds from -- so the Model Intake worker
 # and sandbox run the identical code and tool paths they did when the toolchain shipped inside the
-# scanner image. Only this image carries the ~2GB toolchain; build-only packaging machinery is
-# removed after installation so it cannot require a runtime vulnerability waiver.
+# scanner image. Build-only Python packaging machinery is isolated in a disposable stage so it
+# cannot appear in the final release image or its BuildKit SBOM attestation.
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 ARG MODEL_INTAKE_GO_BUILDER=golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
 FROM ${MODEL_INTAKE_GO_BUILDER} AS model-intake-go-tools
@@ -27,7 +27,6 @@ RUN set -eux; \
     CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-X=github.com/google/osv-scanner/v2/internal/version.OSVVersion=${OSV_SCANNER_VERSION} -X=github.com/google/osv-scanner/v2/cmd/osv-scanner/internal/cmd.commit=${OSV_SCANNER_COMMIT}" -o /out/osv-scanner ./cmd/osv-scanner
 
 # Verify inside the builder: PR CI and release builds execute the same checks.
-# Match metadata fields, not a shell-quoted backslash-t (which is not a tab).
 RUN set -eu; \
     for tool in trivy osv-scanner; do \
       go version "/out/$tool" | grep -F 'go1.26.6'; \
@@ -44,16 +43,11 @@ RUN set -eu; \
     /out/trivy --version | grep -Fx "Version: ${TRIVY_VERSION}"; \
     /out/osv-scanner --version 2>&1 | grep -Fx "osv-scanner version: ${OSV_SCANNER_VERSION}"
 
-FROM ${SCANNER_RUNTIME_IMAGE}
-
-# The scanner base strips its C toolchain and pip/venv machinery. The Model Intake adapters compile
-# from source into hash-locked virtual environments, so restore the build dependencies for this
-# overlay and purge them again once the toolchain is built.
-# Model-intake evidence adapters live in separate, hash-locked virtual
-# environments. Their dependency graphs cannot alter the API/worker runtime.
-# The installer (pip, which vendors msgpack) and any seeded setuptools are removed
-# from every environment after installation and proven absent, so no build tool can
-# require a runtime vulnerability waiver.
+# Build the Python Model Intake toolchain away from the final image. BuildKit SBOMs can retain
+# packages introduced by earlier layers even when later RUN instructions uninstall them. In RC103
+# that made transient setuptools 70.3.0 and pip-vendored msgpack 1.1.2 release blockers. Only the
+# scrubbed runtime directories cross the stage boundary below.
+FROM ${SCANNER_RUNTIME_IMAGE} AS model-intake-python-tools
 COPY scanner/model_intake_tools /opt/model-intake-locks
 COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.lock
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
@@ -70,14 +64,6 @@ RUN set -eu; \
         ln -s "/opt/model-intake-tools/${tool}/bin/${tool}" "/opt/tools/${tool}"; \
       fi; \
     done; \
-    # Strip the installer from every tool environment once its hash-locked graph is in
-    # place. pip vendors msgpack 1.1.2 and setuptools 70.3.0 (its vendor.txt is what the
-    # release image scan reads), and those two were the only findings the release ever
-    # waived. No adapter needs pip at runtime, so the four tool environments lose it
-    # entirely. pip-audit's pip-api needs pip itself, so that environment keeps pip but
-    # loses the two vendored packages: the offline wrapper runs with --disable-pip, pip's
-    # HTTP cache (the only msgpack user) never runs, and the cache build two steps below
-    # proves the stripped pip still serves pip-api.
     for tool in modelscan fickling semgrep safetensors; do \
       "/opt/model-intake-tools/${tool}/bin/python" -m pip uninstall -y pip setuptools >/dev/null 2>&1 || \
         "/opt/model-intake-tools/${tool}/bin/python" -m pip uninstall -y pip; \
@@ -104,7 +90,6 @@ RUN set -eu; \
     apt-get purge -y --auto-remove make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3.12-venv python3-pip-whl python3-setuptools-whl; \
     rm -rf /var/lib/apt/lists/*
 
-# Native scanners are rebuilt from tagged upstream source using a patched Go toolchain.
 COPY --from=model-intake-go-tools /out/trivy /opt/tools/trivy
 COPY --from=model-intake-go-tools /out/osv-scanner /opt/tools/osv-scanner
 ARG TRIVY_DOWNLOAD_ATTEMPTS=4
@@ -132,14 +117,9 @@ RUN set -eu; \
     osv_db_sha="$(sha256sum /opt/osv-cache/osv-scalibr/PyPI/all.zip | cut -d' ' -f1)"; osv_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
     printf '{"UpdatedAt":"%s","Ecosystem":"PyPI","DatabaseSHA256":"%s"}\n' "$osv_updated" "$osv_db_sha" > /opt/osv-cache/metadata.json
 ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
-
-# The official Rust parser boundary is a release-image gate, not an optional
-# test dependency or a monkeypatched unit-test seam.
 RUN PYTHONPATH=/app/scanner_tools \
     /opt/model-intake-tools/safetensors/bin/python \
     /app/scanner_tools/model_intake_safetensors_selftest.py
-
-# Verify the Model Intake toolchain and run the adapter self-test that gates the release image.
 RUN set -e && \
     /opt/tools/modelscan --version && \
     /opt/tools/fickling --version && \
@@ -149,4 +129,37 @@ RUN set -e && \
     /opt/tools/pip-audit-offline --version && \
     python3 /app/scanner_tools/model_intake_adapter_self_test.py \
       --output /opt/model-intake-tools/self-test.json && \
-    echo "MODEL INTAKE TOOLCHAIN VERIFIED OK"
+    echo "MODEL INTAKE BUILDER TOOLCHAIN VERIFIED OK"
+
+# The final release image starts from a fresh scanner runtime. Only scrubbed runtime artifacts
+# cross the boundary, so transient build wheels and compilers are absent from both the filesystem
+# and the final-image SBOM/provenance inspected by release vulnerability gates.
+FROM ${SCANNER_RUNTIME_IMAGE}
+COPY --from=model-intake-python-tools /opt/model-intake-locks /opt/model-intake-locks
+COPY --from=model-intake-python-tools /opt/model-intake-tools /opt/model-intake-tools
+COPY --from=model-intake-python-tools /opt/pip-audit-cache /opt/pip-audit-cache
+COPY --from=model-intake-python-tools /opt/trivy-cache /opt/trivy-cache
+COPY --from=model-intake-python-tools /opt/osv-cache /opt/osv-cache
+COPY --from=model-intake-python-tools /opt/tools/trivy /opt/tools/trivy
+COPY --from=model-intake-python-tools /opt/tools/osv-scanner /opt/tools/osv-scanner
+COPY --from=model-intake-python-tools /opt/tools/pip-audit-offline /opt/tools/pip-audit-offline
+RUN set -eu; \
+    ln -sf /opt/model-intake-tools/modelscan/bin/modelscan /opt/tools/modelscan; \
+    ln -sf /opt/model-intake-tools/fickling/bin/fickling /opt/tools/fickling; \
+    ln -sf /opt/model-intake-tools/semgrep/bin/semgrep /opt/tools/semgrep; \
+    ln -sf /opt/model-intake-tools/safetensors/bin/safetensors /opt/tools/safetensors; \
+    ! find /opt/model-intake-tools -type d \( -name 'setuptools' -o -name 'setuptools-70.3.0.dist-info' \) -print -quit | grep -q .; \
+    ! find /opt/model-intake-tools -path '*/pip/_vendor/msgpack' -print -quit | grep -q .; \
+    /opt/tools/modelscan --version; \
+    /opt/tools/fickling --version; \
+    /opt/tools/semgrep --version; \
+    /opt/tools/trivy --version; \
+    /opt/tools/osv-scanner --version; \
+    /opt/tools/pip-audit-offline --version
+ENV OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/opt/osv-cache
+RUN PYTHONPATH=/app/scanner_tools \
+    /opt/model-intake-tools/safetensors/bin/python \
+    /app/scanner_tools/model_intake_safetensors_selftest.py
+RUN python3 /app/scanner_tools/model_intake_adapter_self_test.py \
+      --output /opt/model-intake-tools/self-test.json && \
+    echo "MODEL INTAKE FINAL RUNTIME VERIFIED OK"

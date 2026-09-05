@@ -971,6 +971,13 @@ class ScanActionPlanCompiler:
         explicitly_requested = set(
             execution_plan.resolved_families or policy.include_families
         )
+        # Exact operator-imported requests are stronger execution authority than synthetic candidates.
+        # When present, their verifier satisfies the selected-family minimum so generic breadth cannot
+        # consume the mutation ceiling before the exact request is replayed.
+        exact_request_candidates = bool(
+            request_candidate_ref
+            and int(request_candidate_ref.get("entry_count") or 0) > 0
+        )
         needs_candidates = xss or sqli or active_nuclei or passive_nuclei
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
@@ -1657,7 +1664,7 @@ class ScanActionPlanCompiler:
                 },
                 manifest_ref=candidate_ref,
                 dependencies=active_dependencies,
-                required="xss" in explicitly_requested,
+                required=("xss" in explicitly_requested and not exact_request_candidates),
                 minimum_batches=(
                     2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
                 ),
@@ -1707,7 +1714,7 @@ class ScanActionPlanCompiler:
                 },
                 manifest_ref=candidate_ref,
                 dependencies=active_dependencies,
-                required="sqli" in explicitly_requested,
+                required=("sqli" in explicitly_requested and not exact_request_candidates),
                 minimum_batches=(
                     2 if execution_plan.budget_profile in {"thorough", "deep"} else 1
                 ),
@@ -1728,7 +1735,7 @@ class ScanActionPlanCompiler:
                     },
                     manifest_ref=candidate_ref,
                     dependencies=sqli_verify_dependencies,
-                    required="sqli" in explicitly_requested,
+                    required=("sqli" in explicitly_requested and not exact_request_candidates),
                     minimum_batches=1,
                     reserve_dependency_slots=int(authz_will_run),
                 )
@@ -1806,7 +1813,7 @@ class ScanActionPlanCompiler:
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
-                    required=False,
+                    required="xss" in explicitly_requested,
                     reserve_dependency_slots=int(sqli),
                 )
             if sqli:
@@ -1820,7 +1827,7 @@ class ScanActionPlanCompiler:
                     dependencies=tuple(dict.fromkeys((
                         *primary_dependency, *private_request_dependencies,
                     ))),
-                    required=False,
+                    required="sqli" in explicitly_requested,
                     reserve_dependency_slots=1,
                 )
                 request_sqli_dependencies = tuple(
@@ -1838,6 +1845,7 @@ class ScanActionPlanCompiler:
                             *private_request_dependencies,
                             *request_sqli_dependencies,
                         ))),
+                        # Exact-request differential verification is the family minimum; proof is an optional escalation.
                         required=False,
                     )
             if nosqli:
