@@ -1,0 +1,31 @@
+name: Export exact RC103 tool evidence
+on:
+  push:
+    branches: [fix/2.2.0-final-rc-work]
+    paths: [.github/workflows/export-rc103-tool-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Extract only the scanner binary and embedded dependency inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=shakerscan/shakerscan-model-intake@sha256:e0e50ffad554529bd3caafe20c968c42c3b1e1ee4fbb0da88ebd41284271715f
+          docker pull "$image"
+          container="$(docker create --entrypoint /bin/true "$image")"
+          trap 'docker rm -f "$container" >/dev/null' EXIT
+          mkdir -p /tmp/rc103-tools
+          docker cp "$container:/opt/tools/dalfox" /tmp/rc103-tools/dalfox
+          docker cp "$container:/opt/model-intake-tools/pip-audit/lib/python3.12/site-packages/pip/_vendor/bom.cdx.json" /tmp/rc103-tools/pip-vendor-bom.cdx.json
+          printf '%s\n' "$image" > /tmp/rc103-tools/source-image.txt
+          sha256sum /tmp/rc103-tools/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rc103-tools-and-inventory
+          path: /tmp/rc103-tools
+          retention-days: 1
+          if-no-files-found: error
