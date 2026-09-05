@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/rc83-integrated.*.b64 /tmp/
+          cp .github/rc83-integrated.*.b64 .github/rc83-contract-followup.patch /tmp/
           git checkout --detach b538195c05373fcf1d70c4b63c5574f98dfc5f34
           python3 - <<'PY'
           from pathlib import Path
@@ -28,11 +28,14 @@ jobs:
           encoded = ''.join(Path(f'/tmp/rc83-integrated.{n}.b64').read_text().strip() for n in range(3))
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == '359673ba305cbc0b6926801ee3f9d1adda9df0569f494287b86d54ae23023fe1'
+          assert hashlib.sha256(Path('/tmp/rc83-contract-followup.patch').read_bytes()).hexdigest() == '7091668245403fd774942248dd8033ebb1077d95d310ada8fb358d326f9051db'
           Path('/tmp/integrated.patch').write_bytes(patch)
           PY
           git apply --check /tmp/integrated.patch
           git apply --index /tmp/integrated.patch
-          test "$(git write-tree)" = 269c11c1c2b8803325de241d32bf6b3b43bf1b09
+          git apply --check /tmp/rc83-contract-followup.patch
+          git apply --index /tmp/rc83-contract-followup.patch
+          test "$(git write-tree)" = 2e191419f2466436c947d680ba14416b405a2470
           git diff --cached --check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
@@ -96,7 +99,7 @@ jobs:
           PY
       - name: Preserve only the verified product tree on a scratch result branch
         run: |
-          test "$(git write-tree)" = 269c11c1c2b8803325de241d32bf6b3b43bf1b09
+          test "$(git write-tree)" = 2e191419f2466436c947d680ba14416b405a2470
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix(release): validate integrated budget, browser proof and vendor inventory corrections'
