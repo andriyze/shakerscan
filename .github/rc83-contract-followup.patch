@@ -1,0 +1,35 @@
+diff --git a/tests/test_e2e_runner_contract.py b/tests/test_e2e_runner_contract.py
+index accbbea..0bfb513 100644
+--- a/tests/test_e2e_runner_contract.py
++++ b/tests/test_e2e_runner_contract.py
+@@ -80,6 +80,15 @@ def _dast_scan_policies() -> list[dict]:
+ 
+     source = inspect.getsource(run_e2e.run_dast)
+     tree = ast.parse(source.lstrip())
++    # The full area and pre-merge lane deliberately share the SAME assertions.
++    # Include their literals only after proving the full area still calls them.
++    assert any(
++        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
++        and node.func.id == "run_dast_request_regressions"
++        for node in ast.walk(tree)
++    ), "full DAST acceptance no longer executes the shared request regressions"
++    shared = inspect.getsource(run_e2e.run_dast_request_regressions)
++    tree.body.extend(ast.parse(shared.lstrip()).body)
+     policies: list[dict] = []
+     for node in ast.walk(tree):
+         if not isinstance(node, ast.Dict):
+diff --git a/tests/test_scan_capability_execution.py b/tests/test_scan_capability_execution.py
+index 1df8615..fcf540c 100644
+--- a/tests/test_scan_capability_execution.py
++++ b/tests/test_scan_capability_execution.py
+@@ -498,7 +498,9 @@ def test_scan_xss_reserves_browser_budget_only_for_headless_proof():
+     )
+ 
+     assert "browser_actions" not in reflected.estimated_budget
+-    assert headless.estimated_budget["browser_actions"] == 1
++    # Navigation and the deterministic proof check are independently accounted.
++    assert headless.estimated_budget["browser_actions"] == 2
++    assert headless.estimated_budget["browser_actions"] == specification.budget_cost["browser_actions"]
+ 
+ 
+ def test_scan_session_capability_requires_approval_but_not_active_testing():
