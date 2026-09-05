@@ -41,7 +41,7 @@ def _ref(kind: str, digest: str, count: int = 1) -> dict:
     ).canonical_dict()
 
 
-def _plan(family: str):
+def _plan(family: str, *, max_state_changing_requests: int = 10):
     # Mirror the deliberately tight RC D2/D3 mutation ceiling. The selected family
     # must spend this authority on the exact imported request before generic breadth.
     budget = ScanBudget(
@@ -52,7 +52,7 @@ def _plan(family: str):
         max_tcp_ports=20,
         max_tool_wall_seconds=600,
         max_workers=1,
-        max_state_changing_requests=10,
+        max_state_changing_requests=max_state_changing_requests,
         max_hosts=40,
     )
     execution = ScanExecutionPlan(
@@ -101,20 +101,30 @@ def test_exact_xss_request_is_selected_family_minimum() -> None:
     assert admitted["verify.request_xss"].requested_budget["state_changing_requests"] >= 2
 
 
-def test_exact_sqli_request_and_proof_fit_rc_mutation_ceiling() -> None:
+def test_exact_sqli_verification_survives_tight_rc_mutation_ceiling() -> None:
     budget, plan = _plan("sqli")
     by_id = {action.action_id: action for action in plan.actions}
 
     assert by_id["verify.request_sqli"].required is True
-    assert by_id["prove.request_sqli"].required is True
+    assert by_id["prove.request_sqli"].required is False
     assert by_id["verify.sqli"].required is False
     assert by_id["prove.sqli"].required is False
 
     allocation = allocate_scan_action_plan(plan, budget)
     admitted = {action.action_id: action for action in allocation.plan.actions}
     assert admitted["verify.request_sqli"].admission_status == "planned"
+    assert admitted["prove.request_sqli"].admission_status == "skipped"
+    assert admitted["prove.request_sqli"].reason_code == "insufficient_plan_budget"
+
+
+def test_exact_sqli_proof_runs_when_mutation_authority_is_available() -> None:
+    budget, plan = _plan("sqli", max_state_changing_requests=20)
+    by_id = {action.action_id: action for action in plan.actions}
+
+    assert by_id["verify.request_sqli"].required is True
+    assert by_id["prove.request_sqli"].required is False
+
+    allocation = allocate_scan_action_plan(plan, budget)
+    admitted = {action.action_id: action for action in allocation.plan.actions}
+    assert admitted["verify.request_sqli"].admission_status == "planned"
     assert admitted["prove.request_sqli"].admission_status == "planned"
-    assert (
-        admitted["verify.request_sqli"].requested_budget["state_changing_requests"]
-        + admitted["prove.request_sqli"].requested_budget["state_changing_requests"]
-    ) <= 10

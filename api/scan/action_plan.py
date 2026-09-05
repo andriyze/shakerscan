@@ -1845,7 +1845,8 @@ class ScanActionPlanCompiler:
                             *private_request_dependencies,
                             *request_sqli_dependencies,
                         ))),
-                        required="sqli" in explicitly_requested,
+                        # Exact-request differential verification is the family minimum; proof is an optional escalation.
+                        required=False,
                     )
             if nosqli:
                 add_manifest_batches(
