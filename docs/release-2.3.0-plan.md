@@ -152,6 +152,32 @@ the same deterministic proof moat, so it depends on R1 (a single failing capabil
 the run) being solid first. 2.3.0 does one cheap Hunt thing only: **measure** Scan vs Scan+Hunt on
 Juice Shop with the existing keyless flow to establish the audit's baseline table. Measurement only,
 no new Hunt build this release.
+
+**5. Give Hunt structured target memory.** A durable target-knowledge model, not raw HTTP records
+fed to the agent every turn. It holds: endpoints, parameters, principals, observed objects/IDs,
+authentication state, technologies, interesting responses, hypotheses tried, failed hypotheses,
+verified attack relationships, and previous Hunt findings. The agent gets compact structured memory
+plus retrieval, never thousands of raw transactions. ShakerScan already persists evidence and Hunt
+records (`GET /hunts/{id}/query`); this makes that a first-class, queryable target graph the loop
+in point 4 reads and updates each turn.
+
+**6. Move advanced vulnerability discovery into Hunt.** Gradually stop expanding giant deterministic
+logic for BOLA/IDOR, business logic, multi-step auth flaws, GraphQL abuse, stored XSS, workflow
+bypass, and chained vulnerabilities. Deterministic Scan still detects the obvious cases; Hunt handles
+the adaptive investigation, verifying through the same deterministic proof moat. The worked loop:
+
+```text
+Scan discovers /api/orders/{id}
+   -> Hunt notices object IDs + two principals
+   -> replay with principal B
+   -> compare ownership
+   -> enumerate bounded adjacent objects
+   -> deterministic proof engine verifies BOLA
+```
+
+This is why R4 (the authenticated BOLA/NoSQL pair) is the *stretch* end of 2.3.0, not its core: those
+classes are where Scan's deterministic reach ends and Hunt's adaptive reasoning begins. 2.3.0 lands
+only the deterministic-reachable share; the adaptive remainder is Hunt's in 2.4.0.
 ## Exit criteria for 2.3.0
 
 - Juice Shop thorough authenticated recall ≥ 0.67 (6 of 9), `sqli-search` still verified, zero new
