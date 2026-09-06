@@ -69,6 +69,24 @@ green before R2 re-lands.
 cost classes first within a slice — correct once slices mix cost classes, but it is not what fixed
 the regression.
 
+**R1 LANDED (2026-09-06, log-diagnosed then measured; commit d85c29e3).** Two robustness fixes in
+`_external_batch`, both unit-proven and measured on the funded authed benchmark: (a) the whole
+per-candidate body is wrapped so a candidate that raises anywhere is a failed attempt, not a dead
+action; (b) a body candidate's HTTP reservation is bound to its state-changing reservation, because
+every body request is a mutation and `capabilities/scanner.py` requires `state_changing_requests >=
+http_requests` (the real crash `body scanner requires a conservative state-changing reservation`,
+read from the worker log). Result: **zero adapter crashes**, `verify.sqli` is `partial` not
+`failed`, `prove.sqli` runs `success`, `sqli-search` verifies, recall holds 0.44 with a synthesized
+body candidate present. R1's gate is green.
+
+**Remaining blocker for sqli-login, precisely located.** With crashes gone, the login body
+candidate still does not verify because the **proof stage is starved**: `sqli_proof` attempted 1 of
+13 candidates (verified `products/search`) and left 12 unattempted, so the login body candidate
+never reached sqlmap proof. This is the DAST-3 proof-slice allocation the crash was masking:
+`api/scan/action_plan.py` `add_manifest_batches` / `api/scan/budget_allocator.py` must fund more
+than one proof candidate, or rank the login body into the funded proof slice. R2 stays reverted
+until that lands sqli-login (its gate: recall >= 5/9).
+
 ### R2 — Re-land the auth-credential body synthesizer (target 5/9: sqli-login)
 
 Under state-changing authority, synthesize a `POST <path>` endpoint with a JSON
