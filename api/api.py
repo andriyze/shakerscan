@@ -11374,7 +11374,7 @@ async def _submit_scan(
             options_payload["credential_action_name"] = credential_action_name
             if any(
                 str(item.get("auth_kind") or "") in {
-                    "form_login", "oauth_client_credentials", "oauth_password",
+                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
                 }
                 for item in credential_refs
             ):

@@ -314,7 +314,7 @@ class PostgresAuthSessionStore:
         if slot not in {"primary", "secondary", "service"}:
             raise AuthSessionStoreError("authentication session principal is invalid")
         kind = str(auth_kind or "").strip().lower()
-        if kind not in {"form_login", "oauth_client_credentials", "oauth_password"}:
+        if kind not in {"form_login", "oauth_client_credentials", "oauth_password", "json_login"}:
             raise AuthSessionStoreError("authentication session kind is invalid")
         capabilities = _capabilities(compatible_capabilities)
         if "http.request" not in capabilities:

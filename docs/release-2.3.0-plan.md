@@ -223,6 +223,42 @@ on the same target, before the next one starts.
 | A3 | **The reasoning loop.** Observe, hypothesize, select, execute, inspect, update, verify, repeat; verifying only through the deterministic proof moat. | On A0's target, Scan + Hunt finds at least one class Scan alone does not, verified, zero false positives. |
 | A4 | **Advanced discovery moves into Hunt.** BOLA/BFLA first (the worked loop below), then login probing, NoSQL operator injection, GraphQL, stored XSS, chains. | `bfla-users` or a BOLA class verified by Hunt through the moat; the Scan gap list can shrink by that class. |
 
+### A0 result (measured 2026-09-06, Juice Shop, current build)
+
+| Answer-key class | Scan alone | Hunt today | Why |
+|---|---|---|---|
+| sqli-search | **verified** (critical) | inherits Scan | deterministic SQLi proof |
+| exposed-metrics / -ftp-listing / -confidential | **verified** (high) | inherits Scan | exposure probe cluster |
+| sqli-login | miss | miss | Scan: one 480-request body slot per verify slice; Hunt: no login-injection loop |
+| xss-dom-search | miss | miss | needs DOM/hash-route discovery |
+| xss-reflected | miss | miss | percent-encoded reflection only |
+| bfla-users | miss | **miss (blocked)** | Hunt's `authz.verify` needs an interactive session; see below |
+| nosqli-reviews | miss | miss | needs authenticated operator-injection |
+
+**Scan alone reaches 4/9. Hunt adds zero verified classes over Scan on this target today**, and the
+reason is specific and code-confirmed, not a tuning gap:
+
+1. **The auth/session primitives do not converge (this is what A1 must fix).** The Hunt's only
+   deterministic cross-principal proof, `authz.verify`, requires two interactive sessions from
+   `auth.session.establish`. That capability supports exactly `form_login` (parses an HTML `<form>`),
+   `oauth_client_credentials`, and `oauth_password` (`api/capabilities/auth.py` `SESSION_AUTH_KINDS`).
+   Juice Shop — like most modern APIs — authenticates with a JSON login (`POST /rest/user/login`
+   with `{email,password}`) that returns a JWT in the response body. A `bearer_token` profile is
+   rejected outright (`credential is not an interactive HTTP profile`), and `form_login` finds no
+   HTML form. So the Hunt cannot establish the sessions its BOLA/BFLA proof needs, on the exact class
+   of target (JSON + JWT) that is the common case. The Scan authenticates the same target fine with a
+   bearer profile. **That divergence is the concrete A1 target.**
+2. **The endpoint knowledge base is unstructured and noisy (this is what A2 must fix).** The Hunt's
+   prior-knowledge inventory for this target is ~3,000 endpoints, of which ~2,000 are
+   content-discovery phantoms (`/api/Cards/admin`, `/api/Addresss/basket`, all with an identical
+   generic `id,limit,offset,page,token` param shape). A reasoning loop handed this raw cannot tell a
+   real route from wordlist noise. This is exactly the motivation for A2's structured target memory.
+
+**Consequence for A1.** A0 reprioritises A1's first convergence. The originally-named candidates
+(`sqlmap.verify`, `js.analyze`) are real duplication, but the *blocking* divergence is the
+auth/session primitive: a target the Scan can authenticate must also be able to drive the Hunt's
+`authz.verify`. A1's first converged primitive is therefore the credential/session layer.
+
 The rationale for each, as the operator stated it:
 
 **3. One shared capability layer.** Scan and Hunt use the *same* primitives; Hunt chooses

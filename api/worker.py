@@ -12468,7 +12468,7 @@ async def _bind_scan_replay_primary_credential(
         except CredentialResolutionError as exc:
             if (
                 resolved.profile.auth_kind not in {
-                    "form_login", "oauth_client_credentials", "oauth_password",
+                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
                 }
                 or not trusted_primary_headers
             ):

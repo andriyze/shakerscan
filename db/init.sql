@@ -407,7 +407,7 @@ CREATE TABLE credential_profiles (
     name TEXT NOT NULL,
     auth_kind TEXT NOT NULL CHECK (auth_kind IN (
         'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-        'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
+        'form_login','oauth_client_credentials','oauth_password','json_login','custom_headers','query_parameter',
         'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
     )),
     principal_label TEXT,
@@ -480,7 +480,7 @@ CREATE TABLE auth_sessions (
     ),
     principal_label TEXT,
     auth_kind TEXT NOT NULL CHECK (
-        auth_kind IN ('form_login','oauth_client_credentials','oauth_password')
+        auth_kind IN ('form_login','oauth_client_credentials','oauth_password','json_login')
     ),
     compatible_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
         jsonb_typeof(compatible_capabilities) = 'array'
