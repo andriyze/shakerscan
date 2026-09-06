@@ -38,31 +38,36 @@ certification, after merge. 2.3.0 moves that measurement onto the pull request (
 
 ## Workstreams, in dependency order
 
-### R1 — Fix verifier budget allocation so an expensive candidate never starves a cheaper one
+### R1 — A single failing candidate must not crash the whole verifier batch (the real bug)
 
-**Corrected diagnosis (2026-09-06, after two measured regressions).** Adding one login-body
-candidate took the SQLi family from verifying `sqli-search` to zero verified, recall 0.44 → 0.33,
-**twice** — once without any scheduler change and once with a within-slice cost-ordering fix
-(committed as the sub-component below). The second measurement proved the lever is not batch
-*execution order*: `sqli.verify_batch` is **sliced across multiple actions** (`verify.sqli.r01`,
-`verify.sqli.001.r01`, ...), each with its own budget. The expensive body candidate gets a funded
-slice that displaces the cheap `sqli-search` query candidate's slice, and the family reports
-`action_incomplete`. The fix therefore lives in **slice allocation** — `api/scan/action_plan.py`
-`add_manifest_batches` and `api/scan/budget_allocator.py` — not in the batch loop.
+**True diagnosis (2026-09-06, from the worker log — after two wrong diagnoses from the coverage
+rollup).** The regression was never budget starvation or cross-slice allocation. `GET
+/scans/{id}/actions` and the worker log show the base action **crashed**: `verify.sqli.r01` and
+`verify.xss.r01` `failed` with "The capability adapter failed" and the worker logged
+`[scan] action verify.sqli.r01 adapter raised ValueError`, while the sliced `.001.r01` actions
+succeeded. `_external_batch` resolves and executes each candidate with **no per-candidate guard**, so
+one candidate that raises (a `ScanWorkManifestError`, which subclasses `ValueError`, from
+`execution_request_for_manifest_candidate`) propagates out and the orchestrator fails the entire
+action — every candidate in that slice, `sqli-search` included, loses its verdict. Adding the
+synthesized login endpoint shifted the manifest so a candidate in the base slice no longer resolved;
+without the guard, that one candidate took the family to 0 verified.
 
-**Sub-component done (safe, tested, insufficient alone):** `order_batch_rows_by_cost_class` in
-`api/scan/external_process.py`, wired into `_external_batch`, attempts cheaper cost classes before
-expensive body candidates *within* a slice. Correct and necessary once slices mix cost classes, but
-it does not move recall alone because the displacement is cross-slice.
+Two earlier "diagnoses" in this document's history — a wall-overrun and a cross-slice budget
+displacement — were both read from the family-coverage rollup and were both wrong. The lesson is now
+a binding rule in AGENTS.md: read the action error and worker log before theorising.
 
-**Change still to build:** the allocator must guarantee every cheaper (query/path) candidate a
-funded slice before an expensive (body) candidate consumes one, so adding a body candidate can
-never remove a query verdict. This needs per-attempt cost/verdict **instrumentation** first
-(the current coverage telemetry only exposes family-level counts, which is why reasoning from it
-regressed twice); build that, then make the allocator change test-driven against it.
+**Change:** wrap per-candidate processing in `_external_batch` so a candidate that fails to resolve
+or execute is recorded as a failed attempt and the batch continues to the next candidate. A batch
+never fails wholesale because one candidate raised.
 
-**Gate:** on the funded benchmark, `sqli-search` still verifies with a body candidate present, and
-recall does not drop below 0.44. This gate must be green before R2 re-lands.
+**Gate:** unit test — a batch whose one candidate's resolver raises still completes and checkpoints
+the others, and the action is `partial`, never `failed`. Live: with the synthesized login body
+candidate present, `sqli-search` still verifies and recall does not drop below 0.44. This must be
+green before R2 re-lands.
+
+**Kept sub-component (secondary, tested):** `order_batch_rows_by_cost_class` still attempts cheaper
+cost classes first within a slice — correct once slices mix cost classes, but it is not what fixed
+the regression.
 
 ### R2 — Re-land the auth-credential body synthesizer (target 5/9: sqli-login)
 
@@ -109,19 +114,44 @@ seeded victim data so its BOLA/SQLi numbers mean something.
 **Gate:** a crAPI benchmark run produces a non-degraded scorecard with authenticated responses
 accepted and the BOLA families actually attempted.
 
-## Frozen for 2.3.0 (maintenance-only, adopted from the audit)
+## Frozen for 2.3.0 (maintenance-only)
 
-Keep working, do not expand: connected-device functionality, ASM functionality, scoring frameworks,
-release-process abstractions, policy abstractions, generic UI surfaces, Model Intake breadth. The
-release pipeline is sound after 2.2.0; it needs no more machinery.
+**1. Freeze DAST feature expansion (operator direction, 2026-09-06).** Keep the current Scan
+stable. Only fix recall, auth, discovery, proof, and regressions. Do **not** add a new scanner
+family unless it *directly* improves benchmark recall. Scan stays the deterministic baseline for
+CI/CD and quick coverage; the architecture already separates deterministic Scan from AI-driven
+Hunt, and that separation is kept.
 
-## Hunt is the 2.4.0 objective, not 2.3.0
+Also frozen, keep working but do not expand: connected-device functionality, ASM functionality,
+scoring frameworks, release-process abstractions, policy abstractions, generic UI surfaces, Model
+Intake breadth. The release pipeline is sound after 2.2.0; it needs no more machinery.
 
-The audit's "make Hunt materially outperform Scan" bet is strategically right, but Hunt verifies
-through the same deterministic proof moat and would hit the same starvation R1 fixes. 2.3.0 does one
-cheap Hunt thing: **measure** Scan vs Scan+Hunt on Juice Shop with the existing keyless flow to
-establish the audit's baseline table. Measurement only, no new Hunt build this release.
+**2. Scan is primarily a discovery + baseline engine.** The recall work in R1–R6 serves this: Scan
+should reliably produce endpoints, methods, parameter and body schemas, JS-discovered routes,
+OpenAPI/GraphQL surfaces, technologies, authenticated browser traffic, two-principal context, the
+obvious deterministic findings, and the HTTP transaction archive. The 2.0.1 OpenAPI ingestion and
+authenticated-browser fixes are exactly this direction; R2 (auth-credential body) and R3 (SPA
+route extraction) continue it. Deep, open-ended exploitation is Hunt's job, not Scan's.
 
+## Architecture direction for 2.4.0 (operator direction, 2026-09-06)
+
+Recorded now so 2.3.0's frozen scope is understood as deliberate, not neglect. These are 2.4.0,
+built only after 2.3.0 meets its recall bar.
+
+**3. One shared capability layer.** Scan and Hunt use the *same* primitives; Hunt chooses
+capabilities and ShakerScan executes and enforces policy. This is convergence on the capability
+registry that already exists (AGENTS.md invariant 5: one canonical registry entry per executable
+capability), not a new subsystem. The target primitive set: `http.request`, `browser.navigate`,
+`browser.execute`, `credential.use`, `response.diff`, `nuclei.run`, `sqlmap.verify`, `xss.verify`,
+`graphql.inspect`, `js.analyze`, `oob.allocate`, `evidence.save`. No Hunt-specific scanners; the
+2.3.0 recall work (R2 body verifier, R3 JS route analysis) lands as capabilities both engines share.
+
+**4. Hunt becomes a real reasoning loop.** A persistent loop: observe → hypothesize → select
+capability → execute → inspect evidence → update hypothesis → verify → repeat. It verifies through
+the same deterministic proof moat, so it depends on R1 (a single failing capability must not crash
+the run) being solid first. 2.3.0 does one cheap Hunt thing only: **measure** Scan vs Scan+Hunt on
+Juice Shop with the existing keyless flow to establish the audit's baseline table. Measurement only,
+no new Hunt build this release.
 ## Exit criteria for 2.3.0
 
 - Juice Shop thorough authenticated recall ≥ 0.67 (6 of 9), `sqli-search` still verified, zero new
