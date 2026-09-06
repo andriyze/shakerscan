@@ -312,6 +312,18 @@ Do not claim physical acceptance without the content-free multi-node fault/recla
 - Preserve user changes and avoid destructive Git commands.
 - Generate public contracts from the app instead of hand-copying them.
 - Add behavioral tests that fail without the fix; source-string assertions alone are insufficient.
+- Diagnose a scan failure from the primary signal, not a summary. `GET /scans/{id}/actions` gives
+  per-action status and error, `GET /scans/{id}/logs` and the worker container logs
+  (`docker compose logs worker`) carry the actual failure, and `GET /scans/{id}/http-transactions`
+  the traffic. A family-coverage rollup (`/result` coverage counts) is a CONSEQUENCE, never a cause:
+  a family showing `action_incomplete` / 0 verified is most often a crashed action
+  (`[scan] action <id> adapter raised <Error>` in the worker log), not a budget race. Read the
+  action error and the worker log BEFORE theorising about budgets, allocation, or ordering, and
+  before changing any scheduler or allocator code. Reasoning from the rollup alone has produced
+  repeated wrong diagnoses and live recall regressions.
+- One candidate must never fail a whole batch action. A per-candidate exception is recorded as a
+  failed attempt and the batch continues; a batch that fails every candidate because one raised is
+  a robustness bug, not a coverage outcome.
 - Do not weaken a gate to make it pass. Fix code or deliberately update characterized contracts.
 
 `scripts/check_module_size.py` is blocking in CI. Extract cohesive modules rather than raising

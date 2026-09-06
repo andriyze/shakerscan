@@ -2719,182 +2719,222 @@ class DatabaseNeutralScanActionDispatcher:
                 continue
             if self.cancelled():
                 break
-            body_request: dict[str, Any] = {}
-            if manifest_kind is ScanWorkManifestKind.CANDIDATE:
-                # A body candidate is not describable by a URL, so resolve the whole request and
-                # keep the body shape for the tool. A query candidate resolves to a bare URL
-                # exactly as before.
-                resolved = execution_request_for_manifest_candidate(
-                    endpoints, manifest, manifest_index,
+            try:
+                body_request: dict[str, Any] = {}
+                if manifest_kind is ScanWorkManifestKind.CANDIDATE:
+                    # A body candidate is not describable by a URL, so resolve the whole request and
+                    # keep the body shape for the tool. A query candidate resolves to a bare URL
+                    # exactly as before.
+                    resolved = execution_request_for_manifest_candidate(
+                        endpoints, manifest, manifest_index,
+                    )
+                    execution_target = str(resolved["url"])
+                    if resolved.get("body_field_names"):
+                        body_request = {
+                            "method": str(resolved["method"]),
+                            "content_type": resolved.get("content_type"),
+                            "body_field_names": list(resolved["body_field_names"]),
+                            "injection_field": str(resolved["field_name"]),
+                        }
+                else:
+                    execution_target = execution_url_for_manifest_endpoint(
+                        manifest, manifest_index,
+                    )
+                remaining_attempts = max(1, len(rows) - offset)
+                remaining_budget = {
+                    name: max(0, int(limit) - int(consumed.get(name, 0)))
+                    for name, limit in action.requested_budget.items()
+                }
+                # Never divide the reservation below what one attempt needs to
+                # reach a verdict. An even split gave each of thirteen candidates
+                # twelve seconds of sqlmap, so every attempt returned unproven and
+                # the family spent its whole budget proving nothing. The manifest is
+                # ranked, so funding the top of it and reporting the remainder as
+                # unattempted is strictly more useful than diluting all of it.
+                floor = batch_attempt_floor(
+                    action.capability_name, body_candidate=bool(body_request),
                 )
-                execution_target = str(resolved["url"])
-                if resolved.get("body_field_names"):
-                    body_request = {
-                        "method": str(resolved["method"]),
-                        "content_type": resolved.get("content_type"),
-                        "body_field_names": list(resolved["body_field_names"]),
-                        "injection_field": str(resolved["field_name"]),
-                    }
-            else:
-                execution_target = execution_url_for_manifest_endpoint(
-                    manifest, manifest_index,
+                # Check the floor against what is actually left before building the
+                # slice: a dimension that has run out is absent from the slice
+                # entirely, so testing only the dimensions present would let an
+                # unfundable attempt through and fail it downstream instead.
+                if any(
+                    remaining_budget.get(name, 0) < amount
+                    for name, amount in floor.items()
+                ):
+                    # Candidate cost classes can be mixed. An expensive body entry
+                    # must not suppress a later fundable query entry in the same
+                    # immutable slice.
+                    continue
+                sub_budget = {
+                    name: max(1, floor.get(name, 1), amount // remaining_attempts)
+                    for name, amount in remaining_budget.items() if amount > 0
+                }
+                if body_request:
+                    # Every request a body attempt sends is a mutation, so the body scanner
+                    # requires state_changing_requests >= http_requests (capabilities/scanner.py).
+                    # The slice scales http_requests up with the abundant HTTP budget while the
+                    # state-changing budget stays near its floor, which left http > state_changing
+                    # and raised "body scanner requires a conservative state-changing reservation"
+                    # -- crashing the whole verify.sqli/verify.xss action. Bind the two: a body
+                    # attempt's HTTP reservation equals its state-changing reservation.
+                    state_changing = int(sub_budget.get("state_changing_requests", 0))
+                    if state_changing > 0:
+                        sub_budget["http_requests"] = min(
+                            int(sub_budget.get("http_requests", 0)), state_changing,
+                        )
+                if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
+                    break
+                parsed = urllib.parse.urlsplit(execution_target)
+                registered_target = urllib.parse.urlunsplit(
+                    (parsed.scheme, parsed.netloc, "", "", "")
                 )
-            remaining_attempts = max(1, len(rows) - offset)
-            remaining_budget = {
-                name: max(0, int(limit) - int(consumed.get(name, 0)))
-                for name, limit in action.requested_budget.items()
-            }
-            # Never divide the reservation below what one attempt needs to
-            # reach a verdict. An even split gave each of thirteen candidates
-            # twelve seconds of sqlmap, so every attempt returned unproven and
-            # the family spent its whole budget proving nothing. The manifest is
-            # ranked, so funding the top of it and reporting the remainder as
-            # unattempted is strictly more useful than diluting all of it.
-            floor = batch_attempt_floor(
-                action.capability_name, body_candidate=bool(body_request),
-            )
-            # Check the floor against what is actually left before building the
-            # slice: a dimension that has run out is absent from the slice
-            # entirely, so testing only the dimensions present would let an
-            # unfundable attempt through and fail it downstream instead.
-            if any(
-                remaining_budget.get(name, 0) < amount
-                for name, amount in floor.items()
-            ):
-                # Candidate cost classes can be mixed. An expensive body entry
-                # must not suppress a later fundable query entry in the same
-                # immutable slice.
-                continue
-            sub_budget = {
-                name: max(1, floor.get(name, 1), amount // remaining_attempts)
-                for name, amount in remaining_budget.items() if amount > 0
-            }
-            if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
-                break
-            parsed = urllib.parse.urlsplit(execution_target)
-            registered_target = urllib.parse.urlunsplit(
-                (parsed.scheme, parsed.netloc, "", "", "")
-            )
-            socket_factory = FrozenTargetSocketFactory(
-                hostname=str(parsed.hostname or self.target.canonical_host),
-                port=parsed.port or (443 if parsed.scheme == "https" else 80),
-                frozen_addresses=self.target.allowed_addresses,
-            )
-            scanner_options = {"_batch_attempt": True, **body_request}
-            args = dict(primary.capability_args())
-            args.update(body_request)
-            if tool == "nuclei":
-                scanner_options.update(template_options)
-                args.update(template_options)
-            elif tool == "dalfox":
-                scanner_options["severity"] = "high"
-                args["severity"] = "high"
-            legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
-            prepared = fit_prepared_scan_capability(
-                prepare_scan_external_capability(
+                socket_factory = FrozenTargetSocketFactory(
+                    hostname=str(parsed.hostname or self.target.canonical_host),
+                    port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                    frozen_addresses=self.target.allowed_addresses,
+                )
+                scanner_options = {"_batch_attempt": True, **body_request}
+                args = dict(primary.capability_args())
+                args.update(body_request)
+                if tool == "nuclei":
+                    scanner_options.update(template_options)
+                    args.update(template_options)
+                elif tool == "dalfox":
+                    scanner_options["severity"] = "high"
+                    args["severity"] = "high"
+                legacy_spec = CAPABILITY_REGISTRY.require(legacy_capability)
+                prepared = fit_prepared_scan_capability(
+                    prepare_scan_external_capability(
+                        specification=legacy_spec,
+                        target=self.target,
+                        args=args,
+                        policy=self.policy,
+                    ),
+                    ledger_limits=sub_budget,
+                )
+                adapter = ScannerExecutionAdapter(
                     specification=legacy_spec,
-                    target=self.target,
-                    args=args,
-                    policy=self.policy,
-                ),
-                ledger_limits=sub_budget,
-            )
-            adapter = ScannerExecutionAdapter(
-                specification=legacy_spec,
-                process_payload={
-                    "job_id": f"{self.job_id}:{action.action_id}:{attempt_id[:16]}",
-                    "tool_name": tool,
-                    "execution_target": execution_target,
-                    "registered_target": registered_target,
-                    "scanner_options": scanner_options,
-                    "trusted_headers": primary.headers(),
-                    "timeout_ms": int(sub_budget["tool_wall_seconds"]) * 1_000,
-                    "pinned_address": socket_factory.primary_address,
-                    "authorized_addresses": list(self.target.allowed_addresses),
-                    "address_policy": socket_factory.policy_receipt,
-                    "oob_interactsh_server": None,
-                    "oob_interactsh_token": None,
-                },
-                process_runner=self.process_runner,
-                requested_budget=sub_budget,
-                redacted_execution=prepared.redacted_execution,
-            )
-            result = await CapabilityExecutor().execute(
-                CapabilityExecutionContext(
-                    specification=legacy_spec,
-                    target=self.target,
+                    process_payload={
+                        "job_id": f"{self.job_id}:{action.action_id}:{attempt_id[:16]}",
+                        "tool_name": tool,
+                        "execution_target": execution_target,
+                        "registered_target": registered_target,
+                        "scanner_options": scanner_options,
+                        "trusted_headers": primary.headers(),
+                        "timeout_ms": int(sub_budget["tool_wall_seconds"]) * 1_000,
+                        "pinned_address": socket_factory.primary_address,
+                        "authorized_addresses": list(self.target.allowed_addresses),
+                        "address_policy": socket_factory.policy_receipt,
+                        "oob_interactsh_server": None,
+                        "oob_interactsh_token": None,
+                    },
+                    process_runner=self.process_runner,
                     requested_budget=sub_budget,
-                    adapter_managed_cancellation=True,
-                ),
-                adapter,
-                heartbeat=heartbeat,
-                cancelled=self.cancelled,
-            )
-            attempt_observations = tuple({
-                # The tool parsers read the tool's own output, which names the vulnerable parameter
-                # but not the endpoint. Without the locus a finding has no route, so it cannot be
-                # matched to an expectation, routed to a verifier (an unresolved route abstains by
-                # design), or acted on by an operator. The adapter resolved the request, so it
-                # supplies what the parser cannot -- and never overwrites a locus the parser set.
-                "url": execution_target,
-                "method": body_request.get("method", "GET"),
-                **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
-            } for item in result.observations)
-            proof_state = next((
-                str(item.get("proof_state"))
-                for item in attempt_observations if item.get("proof_state")
-            ), "unproven")
-            response_hashes = sorted({
-                str(value)
-                for item in attempt_observations
-                for key, value in item.items()
-                if "sha256" in str(key).lower() and str(value)
-            })[:20]
-            attempt_observations = (
-                {
-                    "kind": "candidate_attempt",
+                    redacted_execution=prepared.redacted_execution,
+                )
+                result = await CapabilityExecutor().execute(
+                    CapabilityExecutionContext(
+                        specification=legacy_spec,
+                        target=self.target,
+                        requested_budget=sub_budget,
+                        adapter_managed_cancellation=True,
+                    ),
+                    adapter,
+                    heartbeat=heartbeat,
+                    cancelled=self.cancelled,
+                )
+                attempt_observations = tuple({
+                    # The tool parsers read the tool's own output, which names the vulnerable parameter
+                    # but not the endpoint. Without the locus a finding has no route, so it cannot be
+                    # matched to an expectation, routed to a verifier (an unresolved route abstains by
+                    # design), or acted on by an operator. The adapter resolved the request, so it
+                    # supplies what the parser cannot -- and never overwrites a locus the parser set.
+                    "url": execution_target,
+                    "method": body_request.get("method", "GET"),
+                    **dict(item), "attempt_id": attempt_id, "candidate_id": candidate_id,
+                } for item in result.observations)
+                proof_state = next((
+                    str(item.get("proof_state"))
+                    for item in attempt_observations if item.get("proof_state")
+                ), "unproven")
+                response_hashes = sorted({
+                    str(value)
+                    for item in attempt_observations
+                    for key, value in item.items()
+                    if "sha256" in str(key).lower() and str(value)
+                })[:20]
+                attempt_observations = (
+                    {
+                        "kind": "candidate_attempt",
+                        "attempt_id": attempt_id,
+                        "candidate_id": candidate_id,
+                        "family": family,
+                        "status": result.status,
+                        "proof_state": proof_state,
+                        "response_hashes": response_hashes,
+                        "budget_consumed": dict(result.actual_budget),
+                    },
+                    *attempt_observations,
+                )
+                attempt = {
                     "attempt_id": attempt_id,
                     "candidate_id": candidate_id,
-                    "family": family,
                     "status": result.status,
-                    "proof_state": proof_state,
-                    "response_hashes": response_hashes,
+                    "timed_out": bool(result.timed_out),
                     "budget_consumed": dict(result.actual_budget),
-                },
-                *attempt_observations,
-            )
-            attempt = {
-                "attempt_id": attempt_id,
-                "candidate_id": candidate_id,
-                "status": result.status,
-                "timed_out": bool(result.timed_out),
-                "budget_consumed": dict(result.actual_budget),
-                "observations": attempt_observations,
-                "errors": tuple(result.errors),
-                "proof_state": proof_state,
-            }
-            if result.status != "cancelled":
-                await checkpoint_attempt(action.action_id, attempt)
-            attempted += 1
-            observations.extend(attempt_observations)
-            errors.extend(str(item) for item in result.errors)
-            for name, amount in result.actual_budget.items():
-                consumed[name] = min(
-                    int(action.requested_budget.get(name, 0)),
-                    consumed.get(name, 0) + int(amount),
-                )
-            # Any attempt that did not succeed counts. A timed-out external tool is
-            # normalized to "partial" upstream, and "partial" was absent from this set --
-            # so a batch in which every single attempt timed out, with every candidate
-            # started, aggregated to unattempted=0, terminal_failure=False and reported
-            # `success` with `timed_out=False`. That is how a family showed complete
-            # coverage while proving nothing at all.
-            if result.status not in {"success", "succeeded", "completed"}:
+                    "observations": attempt_observations,
+                    "errors": tuple(result.errors),
+                    "proof_state": proof_state,
+                }
+                if result.status != "cancelled":
+                    await checkpoint_attempt(action.action_id, attempt)
+                attempted += 1
+                observations.extend(attempt_observations)
+                errors.extend(str(item) for item in result.errors)
+                for name, amount in result.actual_budget.items():
+                    consumed[name] = min(
+                        int(action.requested_budget.get(name, 0)),
+                        consumed.get(name, 0) + int(amount),
+                    )
+                # Any attempt that did not succeed counts. A timed-out external tool is
+                # normalized to "partial" upstream, and "partial" was absent from this set --
+                # so a batch in which every single attempt timed out, with every candidate
+                # started, aggregated to unattempted=0, terminal_failure=False and reported
+                # `success` with `timed_out=False`. That is how a family showed complete
+                # coverage while proving nothing at all.
+                if result.status not in {"success", "succeeded", "completed"}:
+                    terminal_failure = True
+                if result.status in {"timed_out", "partial"} or getattr(result, "timed_out", False):
+                    attempt_timed_out = True
+                if result.status == "cancelled":
+                    break
+            except (ScanWorkManifestError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                # One candidate that raises anywhere in its setup or execution must never fail the
+                # whole batch action. execution_request_for_manifest_candidate and the external
+                # capability preparation raise ValueError/ScanWorkManifestError on a candidate the
+                # manifest shift left unresolvable; without this the orchestrator failed the entire
+                # verify.sqli / verify.xss action, so every other candidate -- sqli-search included
+                # -- lost its verdict and the family read as gapped. Record this candidate as a
+                # failed attempt (checkpointed, counted) and continue to the next one.
+                failed_attempt = {
+                    "attempt_id": attempt_id,
+                    "candidate_id": candidate_id,
+                    "status": "failed",
+                    "timed_out": False,
+                    "budget_consumed": {},
+                    "observations": (),
+                    "errors": (f"candidate_failed:{type(exc).__name__}",),
+                    "proof_state": "not_proven",
+                }
+                try:
+                    await checkpoint_attempt(action.action_id, failed_attempt)
+                except Exception:
+                    pass
+                attempted += 1
                 terminal_failure = True
-            if result.status in {"timed_out", "partial"} or getattr(result, "timed_out", False):
-                attempt_timed_out = True
-            if result.status == "cancelled":
-                break
+                errors.append(f"candidate_failed:{type(exc).__name__}")
+                continue
         unattempted = max(0, len(rows) - attempted)
         partial = unattempted > 0 or terminal_failure
         # Say why, ahead of any per-attempt tool errors, so the durable reason is
