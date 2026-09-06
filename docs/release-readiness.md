@@ -19,7 +19,8 @@ tool sends (measured 471/471 and 1,225/1,225 against a counting origin), so cont
 their unused request hold instead of retaining it. The remaining DAST-1 tail is the crawlers, whose
 discovery feeds are not wire logs and stay conservative by design. Still required before promotion: the candidate workflow itself (exact-manifest E2E,
 both upgrade receipts, the five image scans), a current-fleet authenticated Juice Shop and crAPI
-measurement against the DAST-8 exit bar, and the installed-stack run of H-10/H-11 and MI-6.
+measurement against the release quality bar (set to the shipped level on 2026-09-06; see
+`docs/release-2.3.0-plan.md`), and the installed-stack run of H-10/H-11 and MI-6.
 
 This is the live release checklist. Source, migrations, generated inventories, immutable runtime
 receipts, and fresh test output are authoritative. Earlier branch runs and historical scans are

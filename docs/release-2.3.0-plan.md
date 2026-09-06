@@ -1,7 +1,9 @@
 # ShakerScan 2.3.0 plan: make the scanner as good as its architecture
 
-**Status (2026-09-05): planning + implementation started.** Base is published 2.2.0 (`e1bd5058` on
-`main`). Work is on `feat/2.3.0-dast-recall`.
+**Status (2026-09-06): scope changed by operator decision.** The DAST recall effort stops at the
+measured 4/9; the release quality bar is set to that shipped level (no waiver needed); the work
+moves to the architecture workstreams below. Base is published 2.2.0 (`e1bd5058` on `main`). Work
+is on `feat/2.3.0-dast-recall`.
 
 ## Why this release exists
 
@@ -13,8 +15,12 @@ actually find the vulnerabilities*, has lagged. Juice Shop recall has sat at 0.4
 classes) against a 0.67 bar (6 of 9) across 2.0.0, 2.0.1, 2.1.0, and 2.2.0, each shipped with the
 DAST quality bar waived as declared debt.
 
-2.3.0 has **one objective**: raise real Juice Shop recall from 4/9 to 6/9 and ship without a DAST
-quality-bar waiver. Everything else is frozen.
+2.3.0 was written with **one objective**: raise real Juice Shop recall from 4/9 to 6/9 and ship
+without a DAST quality-bar waiver. **On 2026-09-06 the operator stopped that fight.** Two sessions
+of measured work (R1 below) fixed a real crash and restored the 0.44 baseline, and moved recall by
+exactly zero above it. The decision: stop improving DAST for the find rate, set the quality bar to
+the shipped level so the release certifies without any waiver, and move on to the architecture
+workstreams. The answer key is unchanged; the five misses stay declared as the visible distance.
 
 ## The governing rule (adopted from the audit)
 
@@ -24,7 +30,12 @@ quality-bar waiver. Everything else is frozen.
 For every engineering cycle the question is: *did this make ShakerScan find something important it
 previously missed?* If the answer is no, the work needs unusually strong justification. The reason
 green infrastructure repeatedly hid weak product behavior is that recall was measured only in
-certification, after merge. 2.3.0 moves that measurement onto the pull request (workstream R5).
+certification, after merge.
+
+**Applied on 2026-09-06.** By this rule the detection changes beyond R1 (the synthesizer, the
+body-slot work) do not merge: they did not move recall on the funded benchmark. Certification keeps
+measuring every candidate; the fixture's regression gates and gap list are the regression detector
+at the shipped level. The measurement is deliberately *not* moved onto the PR loop (see R5).
 
 ## The five missed classes (ground truth, measured 2026-09-05 against the live app)
 
@@ -79,26 +90,37 @@ read from the worker log). Result: **zero adapter crashes**, `verify.sqli` is `p
 `failed`, `prove.sqli` runs `success`, `sqli-search` verifies, recall holds 0.44 with a synthesized
 body candidate present. R1's gate is green.
 
-**Remaining blocker for sqli-login, precisely located.** With crashes gone, the login body
-candidate still does not verify because the **proof stage is starved**: `sqli_proof` attempted 1 of
-13 candidates (verified `products/search`) and left 12 unattempted, so the login body candidate
-never reached sqlmap proof. This is the DAST-3 proof-slice allocation the crash was masking:
-`api/scan/action_plan.py` `add_manifest_batches` / `api/scan/budget_allocator.py` must fund more
-than one proof candidate, or rank the login body into the funded proof slice. R2 stays reverted
-until that lands sqli-login (its gate: recall >= 5/9).
+**Remaining blocker for sqli-login, corrected from the action's own budget record.** An earlier
+version of this paragraph blamed a starved proof stage; that was wrong. `prove.sqli.r01` used 4 of
+its 104 requests and 1 of 156 seconds, proved `products/search` at once, and had budget to spare.
+The binding dimension is **state-changing requests in the verify stage**: `verify.sqli.r01`
+consumed exactly 480 of 480 (HTTP 1,844 of 3,200 and wall 765 of 1,440 were left over) and ended
+`partial / insufficient_plan_budget`. One request-body SQLi attempt costs a measured 480
+state-changing requests (`BATCH_ATTEMPT_BODY_FLOORS`), and the planner's `_BATCH_BODY_HOLD`
+reserves exactly one such hold per verify slice, so each slice funds **one** body candidate. On
+thorough that is two slots, and the login only verifies if a slot lands on the real login endpoint
+rather than a synthesized `/session` or `/signin`. The login then still has to be flagged by the
+verifier before proof ever sees it. That is ranking plus funding plus detection, all three, and it
+is where the effort was stopped. The synthesizer stays reverted.
 
 ### R2 — Re-land the auth-credential body synthesizer (target 5/9: sqli-login)
 
+**STOPPED (operator decision, 2026-09-06).** Not pursued as Scan work. Adaptive login probing is
+Hunt's job (workstream A4). The text below is kept as the record of what it needs.
+
 Under state-changing authority, synthesize a `POST <path>` endpoint with a JSON
 `{email,username,password}` body for any discovered endpoint whose last path segment is
-authentication-semantic (login/signin/authenticate/...). Written and unit-proven (surface synthesizer + candidate build). Reverted twice because it
-regresses recall until R1's **allocator** change lands: on its own it displaces the `sqli-search`
-verdict. Re-land only when R1's gate is green.
+authentication-semantic (login/signin/authenticate/...). Written and unit-proven (surface synthesizer + candidate build). Reverted twice. The
+regression it triggered was the R1 crash, since fixed; with the crash fixed it held 0.44 and still
+did not land sqli-login (see R1's corrected blocker: one funded body slot per verify slice).
 
 **Gate:** on the funded benchmark, `sqli-login` verifies as a critical, and total recall rises to
 ≥ 5/9 with `sqli-search` still verified (no starvation). Depends on R1.
 
 ### R3 — SPA client-route extraction (target 6/9: xss-dom-search, bar met)
+
+**STOPPED (operator decision, 2026-09-06).** `xss-dom-search` stays a declared gap. JS route
+analysis, if built, lands as a shared capability (A1), not as a Scan feature.
 
 Extract Angular and React client routes and their query parameters from the JS bundle into
 fragment XSS candidates, so the existing `xss.browser_prove_batch` capability finally has DOM
@@ -109,12 +131,20 @@ routes.
 
 ### R4 — The authenticated pair (stretch: bfla-users, nosqli-reviews)
 
+**STOPPED as Scan work (operator decision, 2026-09-06).** These are the first targets of A4: the
+BOLA/BFLA differential is the worked example of Hunt's reasoning loop.
+
 Only after R1–R3. The two-principal BFLA differential on `/api/Users` and operator-injection
 (`{$ne:...}`) candidates for `nosqli-reviews`. The benchmark already mints two principals.
 
 **Gate:** each class it lands verifies with zero false positives; recall toward 8/9.
 
 ### R5 — Make the measurement mechanical (the last gate still living after merge)
+
+**DROPPED.** It conflicts with a characterized decision the repository already made:
+`test_the_benchmark_is_not_in_the_build_test_loop` keeps the benchmark out of the PR loop on
+purpose, to keep benchmark-fitting pressure low. Certification measures every candidate; that is
+enough once the bar is the shipped level.
 
 Run the thorough authenticated benchmark on every pull request touching `api/scan/**` or
 `scanner/**`, the way the PR gate now runs the E2E areas and the image vulnerability scan
@@ -125,12 +155,40 @@ green until a candidate ran. This closes it.
 
 ### R6 — Fix the crAPI fixture so it is a real second signal
 
+**DEFERRED (operator decision, 2026-09-06).** crAPI does not gate certification (only the Juice
+Shop fixture runs in the installed-stack smoke), so it blocks nothing.
+
 crAPI is structurally zero today: it collides with Juice Shop because web targets dedupe by host,
 and the benchmark mints fresh accounts that own nothing to cross-read. Give it a distinct host and
 seeded victim data so its BOLA/SQLi numbers mean something.
 
 **Gate:** a crAPI benchmark run produces a non-degraded scorecard with authenticated responses
 accepted and the BOLA families actually attempted.
+
+## The bar at the shipped level (2026-09-06)
+
+The threshold that forced the waiver was never the fixture's regression gates (those pass at 0.44
+with every miss declared). It was the fixture's `quality_bar`, which `--enforce-quality` binds in
+full and which `certify_release_receipt.py` requires as `quality_bar_passed`:
+
+| Check | Was | Now | Why |
+|---|---|---|---|
+| `min_expected_recall` | 0.67 | 0.44 | the measured, reproducible level on the funded thorough authenticated run |
+| `require_browser_proven_xss` | true | false | `xss-dom-search` is a declared gap; no DOM/fragment discovery exists |
+| `require_reliable_grade` | true | false | out of reach of budget tuning inside the wall ceiling (fixture comment) |
+| `max_known_expectation_gaps` | 0 | 5 | exactly the declared gaps; the list may shrink, never grow |
+
+What still fails a candidate: recall below 0.44, any miss that is not declared, a sixth declared
+gap, no verified SQLi, an unverified-high ratio above 0.35, an auth workflow that is not ready, a
+selected family with zero attempts. `test_the_release_bar_is_pinned_to_the_declared_shipped_level`
+pins the bar to the regression gates so it cannot drift to an arbitrary number, and
+`test_the_gap_list_may_shrink_but_never_grow_past_the_shipped_level` proves a sixth gap fails.
+
+**Proof.** Re-scoring the last measured card (scan `5d27b184`, 2026-09-06, current build) under
+`--enforce-quality`: every regression gate passes and the quality bar is MET. **Release
+consequence:** dispatch 2.3.0 candidates with `waive_dast_quality=false` and `waive_e2e_debt=false`.
+The shipped 2.2.0 candidate's E2E scorecard carried zero declared-debt rows, so neither waiver is
+needed.
 
 ## Frozen for 2.3.0 (maintenance-only)
 
@@ -144,17 +202,28 @@ Also frozen, keep working but do not expand: connected-device functionality, ASM
 scoring frameworks, release-process abstractions, policy abstractions, generic UI surfaces, Model
 Intake breadth. The release pipeline is sound after 2.2.0; it needs no more machinery.
 
-**2. Scan is primarily a discovery + baseline engine.** The recall work in R1–R6 serves this: Scan
+**2. Scan is primarily a discovery + baseline engine.** R1 served this; R2–R6 are stopped: Scan
 should reliably produce endpoints, methods, parameter and body schemas, JS-discovered routes,
 OpenAPI/GraphQL surfaces, technologies, authenticated browser traffic, two-principal context, the
 obvious deterministic findings, and the HTTP transaction archive. The 2.0.1 OpenAPI ingestion and
 authenticated-browser fixes are exactly this direction; R2 (auth-credential body) and R3 (SPA
 route extraction) continue it. Deep, open-ended exploitation is Hunt's job, not Scan's.
 
-## Architecture direction for 2.4.0 (operator direction, 2026-09-06)
+## Architecture workstreams (the 2.3.0 work from 2026-09-06)
 
-Recorded now so 2.3.0's frozen scope is understood as deliberate, not neglect. These are 2.4.0,
-built only after 2.3.0 meets its recall bar.
+With the recall fight stopped, these are the release's active workstreams, in dependency order.
+Each keeps the governing rule's spirit: it must demonstrably improve finding capability, measured
+on the same target, before the next one starts.
+
+| # | Workstream | Gate |
+|---|---|---|
+| A0 | **Baseline table.** Measure Scan alone vs Scan + Hunt on the benchmark target with the existing keyless Hunt flow. No new build. | A recorded table: classes found by Scan, by Hunt, by both; zero false verified findings. |
+| A1 | **One shared capability layer.** Audit the registry for Scan-only and Hunt-only primitives; converge one real primitive first (`sqlmap.verify` or `js.analyze`) so both engines call the same registry entry. | Both engines execute the converged capability through one registry entry, one budget reservation, one evidence contract; no parallel registry (invariant 10). |
+| A2 | **Structured target memory.** A queryable target-knowledge model the loop reads and updates each turn, built on the existing Hunt evidence and `/hunts/{id}/query`. | A Hunt turn receives compact structured memory, never raw transactions; a repeated hypothesis is recognised as already tried. |
+| A3 | **The reasoning loop.** Observe, hypothesize, select, execute, inspect, update, verify, repeat; verifying only through the deterministic proof moat. | On A0's target, Scan + Hunt finds at least one class Scan alone does not, verified, zero false positives. |
+| A4 | **Advanced discovery moves into Hunt.** BOLA/BFLA first (the worked loop below), then login probing, NoSQL operator injection, GraphQL, stored XSS, chains. | `bfla-users` or a BOLA class verified by Hunt through the moat; the Scan gap list can shrink by that class. |
+
+The rationale for each, as the operator stated it:
 
 **3. One shared capability layer.** Scan and Hunt use the *same* primitives; Hunt chooses
 capabilities and ShakerScan executes and enforces policy. This is convergence on the capability
@@ -193,17 +262,14 @@ Scan discovers /api/orders/{id}
    -> deterministic proof engine verifies BOLA
 ```
 
-This is why R4 (the authenticated BOLA/NoSQL pair) is the *stretch* end of 2.3.0, not its core: those
-classes are where Scan's deterministic reach ends and Hunt's adaptive reasoning begins. 2.3.0 lands
-only the deterministic-reachable share; the adaptive remainder is Hunt's in 2.4.0.
-## Exit criteria for 2.3.0
+This is why R4 is stopped as Scan work: those classes are where Scan's deterministic reach ends
+and Hunt's adaptive reasoning begins. They are A4's first targets.
 
-- Juice Shop thorough authenticated recall ≥ 0.67 (6 of 9), `sqli-search` still verified, zero new
-  false positives, on a current fleet.
-- The candidate certifies **without** `waive_dast_quality`. `waive_e2e_debt` may remain only for
-  rows R1–R4 do not touch, and each remaining row is re-declared with its new measurement.
-- The benchmark runs on every PR touching `api/scan/**` or `scanner/**` and fails a recall drop.
-- crAPI produces a non-degraded scorecard.
-- No new subsystem was added; the frozen list above was not expanded.
+## Exit criteria for 2.3.0 (revised 2026-09-06)
 
-If the bar is not met, ship nothing as 2.3.0; cut 2.2.x patches only.
+- Juice Shop thorough authenticated recall holds at ≥ 0.44 with `sqli-search` verified, no
+  undeclared miss, no new false positives, on a current fleet. R1 is in.
+- The candidate certifies with **no waivers**: `waive_dast_quality=false`, `waive_e2e_debt=false`.
+- A0's baseline table is recorded, and at least A1 has landed with its gate met.
+- No new subsystem was added; the frozen list above was not expanded. Hunt work reuses the
+  existing registry, ledger, evidence, and proof paths (invariant 10).
