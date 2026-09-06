@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 PROCESS_PLAN_SCHEMA = "enforced-process-plan/v1"
@@ -97,6 +97,38 @@ def batch_attempt_floor(capability_name: str, *, body_candidate: bool = False) -
         if floor:
             return dict(floor)
     return dict(BATCH_ATTEMPT_FLOORS.get(name) or {})
+
+
+def batch_row_cost_class(row: Mapping[str, Any] | Any) -> int:
+    """Rank a ranked-manifest candidate by verdict cost: 0 cheap (query/path), 1 expensive (body).
+
+    A body candidate reaches a verdict at the measured body floor (sqlmap on a JSON login: ~420s /
+    480 requests) versus ~30s / 160 requests for a query or path candidate. When one batch mixes
+    the two, funding the expensive one first can consume the wall that several cheap verdicts
+    needed: adding one login-body candidate to Juice Shop's SQLi family took it from verifying the
+    products search injection to zero verified (recall 0.44 -> 0.33), because the body candidate
+    outranked the query candidate by score and displaced it. Cost is orthogonal to score, so the
+    batch orders by cost class first and preserves score order within a class; an expensive
+    candidate then runs only on the budget cheaper verdicts did not need, and can never remove one.
+    """
+    mapping = row if isinstance(row, Mapping) else {}
+    method = str(mapping.get("method") or "GET").upper()
+    location = str(mapping.get("parameter_location") or mapping.get("location") or "")
+    has_body = bool(mapping.get("body_field_names")) or location == "body"
+    return 1 if (method != "GET" and has_body) else 0
+
+
+def order_batch_rows_by_cost_class(rows: Sequence[Any]) -> list[Any]:
+    """Reorder ``(index, candidate)`` batch rows cheapest cost class first, score order preserved.
+
+    A stable sort on the cost class alone keeps the manifest's score ranking inside each class, so
+    the change is exactly: never let an expensive body candidate be attempted before a cheaper
+    candidate it would otherwise starve. Resume is unaffected because attempt ids are content
+    addressed by candidate, not by position.
+    """
+    return sorted(rows, key=lambda entry: batch_row_cost_class(
+        entry[1] if isinstance(entry, tuple) and len(entry) == 2 else entry
+    ))
 
 
 def batch_attempt_capacity(

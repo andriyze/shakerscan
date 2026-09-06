@@ -38,30 +38,39 @@ certification, after merge. 2.3.0 moves that measurement onto the pull request (
 
 ## Workstreams, in dependency order
 
-### R1 — Fix the verifier batch scheduler (prerequisite for everything)
+### R1 — Fix verifier budget allocation so an expensive candidate never starves a cheaper one
 
-**Defect:** when one expensive proof (a body sqlmap run, ~420 s) overruns the family's wall, the
-whole batch action ends `action_incomplete` and **none** of its attempts record a completion —
-including cheaper candidates that would have verified. Measured 2026-09-05: adding one login body
-candidate took the SQLi family from verifying `sqli-search` to `action_incomplete` (planned 13,
-attempted 10, completed 0), dropping recall 0.44 → 0.33.
+**Corrected diagnosis (2026-09-06, after two measured regressions).** Adding one login-body
+candidate took the SQLi family from verifying `sqli-search` to zero verified, recall 0.44 → 0.33,
+**twice** — once without any scheduler change and once with a within-slice cost-ordering fix
+(committed as the sub-component below). The second measurement proved the lever is not batch
+*execution order*: `sqli.verify_batch` is **sliced across multiple actions** (`verify.sqli.r01`,
+`verify.sqli.001.r01`, ...), each with its own budget. The expensive body candidate gets a funded
+slice that displaces the cheap `sqli-search` query candidate's slice, and the family reports
+`action_incomplete`. The fix therefore lives in **slice allocation** — `api/scan/action_plan.py`
+`add_manifest_batches` and `api/scan/budget_allocator.py` — not in the batch loop.
 
-**Change:** a batch must complete what it can afford within its wall and report the rest as
-`unattempted`, checkpointing each finished attempt before starting the next, so a later overrun
-never discards an earlier completion.
+**Sub-component done (safe, tested, insufficient alone):** `order_batch_rows_by_cost_class` in
+`api/scan/external_process.py`, wired into `_external_batch`, attempts cheaper cost classes before
+expensive body candidates *within* a slice. Correct and necessary once slices mix cost classes, but
+it does not move recall alone because the displacement is cross-slice.
 
-**Gate:** on the funded thorough authenticated Juice Shop benchmark, `sqli-search` still verifies
-and recall does not drop below 0.44. Unit test: a batch whose Nth attempt would overrun the wall
-still persists attempts 1..N-1 as completed and marks the rest unattempted, never `action_incomplete`
-for the whole action.
+**Change still to build:** the allocator must guarantee every cheaper (query/path) candidate a
+funded slice before an expensive (body) candidate consumes one, so adding a body candidate can
+never remove a query verdict. This needs per-attempt cost/verdict **instrumentation** first
+(the current coverage telemetry only exposes family-level counts, which is why reasoning from it
+regressed twice); build that, then make the allocator change test-driven against it.
+
+**Gate:** on the funded benchmark, `sqli-search` still verifies with a body candidate present, and
+recall does not drop below 0.44. This gate must be green before R2 re-lands.
 
 ### R2 — Re-land the auth-credential body synthesizer (target 5/9: sqli-login)
 
 Under state-changing authority, synthesize a `POST <path>` endpoint with a JSON
 `{email,username,password}` body for any discovered endpoint whose last path segment is
-authentication-semantic (login/signin/authenticate/...). Written and unit-proven in this session
-(reverted only because R1 was not yet done). A universal technique keyed on endpoint semantics, not
-any one app's routes.
+authentication-semantic (login/signin/authenticate/...). Written and unit-proven (surface synthesizer + candidate build). Reverted twice because it
+regresses recall until R1's **allocator** change lands: on its own it displaces the `sqli-search`
+verdict. Re-land only when R1's gate is green.
 
 **Gate:** on the funded benchmark, `sqli-login` verifies as a critical, and total recall rises to
 ≥ 5/9 with `sqli-search` still verified (no starvation). Depends on R1.

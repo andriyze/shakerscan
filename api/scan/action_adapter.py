@@ -163,7 +163,11 @@ except (ImportError, ModuleNotFoundError):
 
 from .action_plan import ScanAction, ScanActionPlan
 from .capability_result import CapabilityResultReason
-from .external_process import BATCH_ATTEMPT_FLOORS, batch_attempt_floor
+from .external_process import (
+    BATCH_ATTEMPT_FLOORS,
+    batch_attempt_floor,
+    order_batch_rows_by_cost_class,
+)
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -2624,7 +2628,13 @@ class DatabaseNeutralScanActionDispatcher:
         ):
             raise ScanActionAdapterError("batch action slice is invalid")
         stop = min(len(manifest.entries), start + count)
-        rows = tuple(enumerate(manifest.entries[start:stop], start=start))
+        # Fund cheaper candidate classes before expensive body candidates within the slice, so an
+        # expensive attempt runs only on the budget cheaper verdicts did not need and can never
+        # displace one (R1: see order_batch_rows_by_cost_class). Score order is preserved inside a
+        # class; the slice membership is unchanged, only the attempt order within it.
+        rows = tuple(order_batch_rows_by_cost_class(
+            enumerate(manifest.entries[start:stop], start=start)
+        ))
         if not rows:
             return self._skip(action, "not_applicable")
         template_options: dict[str, Any] = {}
