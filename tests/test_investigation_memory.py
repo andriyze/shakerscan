@@ -164,3 +164,14 @@ def test_a_refusal_is_recorded_as_faithfully_as_a_success(memory):
         status=403, auth_context="bearer",
     ))
     assert recorded["succeeded"] is False and recorded["status"] == 403
+
+
+def test_the_verdict_is_machine_readable_because_the_prose_is_not(memory):
+    """The two verdict strings differ only by a leading "no", so prose matching flips the answer."""
+    empty = memory.route_conclusion("GET", "/untouched")
+    assert empty["weakness_demonstrated"] is False and empty["examined"] is False
+    memory.record_experiment(_experiment(outcome=REFUTED))
+    refuted = memory.route_conclusion("GET", "/authz/vuln/orders/{id}")
+    assert refuted["weakness_demonstrated"] is False and refuted["examined"] is True
+    memory.record_experiment(_experiment(hypothesis="another", outcome=SUPPORTED))
+    assert memory.route_conclusion("GET", "/authz/vuln/orders/{id}")["weakness_demonstrated"] is True

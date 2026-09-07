@@ -25,11 +25,13 @@ the durable memory, so a resumed session spends its budget on what is still open
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from .investigation_memory import (
     INCONCLUSIVE,
+    REFUTED,
+    SUPPORTED,
     UNKNOWN,
     Experiment,
     InvestigationMemory,
@@ -86,7 +88,7 @@ class ProposedExperiment:
     subject_principal: str
     evidence_needed: tuple[str, ...]
     conditions: Mapping[str, Any] = field(default_factory=dict)
-    risk: str = "read-only cross-principal replay"
+    risk: str = "read-only cross-principal replay (GET only)"
 
     def as_experiment(self, outcome: str) -> Experiment:
         return Experiment(
@@ -111,12 +113,27 @@ def investigate(
     *,
     available_principals: Sequence[str],
     memory: InvestigationMemory,
+    retry_settled: bool = False,
 ) -> dict[str, Any]:
     """Propose what is worth testing about this request, and what each test would need.
 
     Returns proposals plus the reason any were withheld, so a pentester can see that the absence
     of a suggestion is a stated limitation rather than silence.
     """
+    # A cross-principal replay of a mutating verb is not a read-only test: it needs separate
+    # mutation authorization and faithful body preservation, neither of which this workflow has.
+    # Proposing one and labelling it read-only would be misleading even though nothing here
+    # executes, and `reproduction` would emit the mutating request verbatim.
+    if request.method.upper() != "GET":
+        return {
+            "proposals": [],
+            "not_proposed": [
+                f"{request.method.upper()} is not supported by this workflow. A cross-principal "
+                "replay of a mutating request requires separate mutation authorization and exact "
+                "request-body preservation; capture the corresponding GET, or drive the mutation "
+                "through an explicitly authorized path."
+            ],
+        }
     if not request.addresses_an_object:
         return {
             "proposals": [],
@@ -161,14 +178,62 @@ def investigate(
             conditions={"auth_context": request.auth_context},
         )
         prior = memory.already_tried(proposal.as_experiment(INCONCLUSIVE))
-        if prior is not None:
+        if prior is not None and prior.get("settled") and not retry_settled:
             withheld.append(
                 f"already tested as {other}: {prior.get('outcome')} "
                 f"({prior.get('hypothesis')})"
             )
             continue
+        if prior is not None and not prior.get("settled"):
+            # Inconclusive is an open question, not a closed one: re-propose it, and say why it
+            # is coming back so the pentester can fix the prerequisite instead of repeating it
+            # blindly.
+            proposal = replace(proposal, why=(
+                f"{proposal.why} A previous attempt was inconclusive after "
+                f"{prior.get('attempt_count')} try/tries; retry once the missing evidence "
+                "(baseline listing, or a live session for both principals) is available."
+            ))
         proposals.append(proposal)
     return {"proposals": proposals, "not_proposed": withheld}
+
+
+def outcome_from_result(
+    proposal: "ProposedExperiment", result: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Derive this proposal's outcome from the proof evidence, not from an aggregate flag.
+
+    A collection-wide differential reports that *something* under the collection was readable
+    across principals. Recording that as the proposal's result would attribute another object's
+    finding to the object the pentester selected. So a supported outcome requires a finding whose
+    evidence names this proposal's object; anything else is refuted or inconclusive.
+    """
+    findings = [f for f in (result.get("findings") or []) if isinstance(f, Mapping)]
+    for finding in findings:
+        evidence = finding.get("evidence") or {}
+        if str(evidence.get("proof_type") or "") != "cross_principal_replay":
+            continue
+        if str(evidence.get("requested_object_id") or "") != str(proposal.identifier):
+            continue
+        return SUPPORTED, (
+            f"evidence names object {proposal.identifier}: owner "
+            f"{evidence.get('owner_status')} / actor {evidence.get('attacker_status')}, "
+            "absent from the actor's own listing"
+        )
+    if findings:
+        others = sorted({
+            str((f.get("evidence") or {}).get("requested_object_id") or "?") for f in findings
+        })
+        return INCONCLUSIVE, (
+            f"the run produced findings for {', '.join(others)}, none of which is "
+            f"{proposal.identifier}; this proposal is unproven and another object's finding "
+            "cannot stand in for it"
+        )
+    if result.get("replays_completed"):
+        return REFUTED, (
+            "the replay completed and produced no cross-principal evidence for "
+            f"object {proposal.identifier}"
+        )
+    return INCONCLUSIVE, "no replay completed, so nothing was established"
 
 
 def explain(
@@ -203,6 +268,17 @@ def explain(
         reading = (
             "Both principals see the same response, but the object also appears in the second "
             "principal's own listing, so this is shared access rather than a boundary crossing."
+        )
+    elif owner_status == attacker_status:
+        # Identical answers with no proof settle nothing. Reading this as enforcement would turn
+        # "we failed to demonstrate a crossing" into "the boundary held", which the evidence does
+        # not support.
+        certainty = UNKNOWN
+        reading = (
+            "Both principals were answered identically, but the crossing was not established. "
+            "This is inconclusive, not evidence of enforcement. Missing: confirmation that the "
+            "object is absent from the actor's own listing, and that the body returned to the "
+            "actor is the owner's object rather than their own."
         )
     else:
         certainty = "observed"

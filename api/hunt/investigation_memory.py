@@ -200,15 +200,32 @@ class InvestigationMemory:
         return attributes
 
     def record_experiment(self, experiment: Experiment) -> dict[str, Any]:
-        """Record a test and its outcome, scoped to exactly what it tried."""
+        """Append an attempt for this experiment, scoped to exactly what it tried.
+
+        Identity and history are different things. Re-running an experiment used to overwrite its
+        record, so an inconclusive first attempt vanished the moment it was retried and the reason
+        for the retry was lost with it. Attempts accumulate: the same identity can legitimately be
+        run again after a failed prerequisite, a refreshed session, changed application state, or
+        because the pentester asked for it, and the history is what makes that judgeable.
+        """
         subject = object_key(experiment.collection, experiment.identifier)
         route = route_key(experiment.method, experiment.route_template)
         self._store.upsert_node(self._target_id, NODE_ROUTE, route, {})
         self._store.upsert_node(self._target_id, NODE_OBJECT, subject, {
             "collection": experiment.collection, "identifier": experiment.identifier,
         })
+        prior = self._experiment_record(experiment.key)
+        attempts = list(prior.get("attempts") or [])
+        attempts.append({
+            "outcome": experiment.outcome, "at": experiment.at, "detail": experiment.detail,
+        })
         self._store.upsert_node(self._target_id, NODE_EXPERIMENT, f"experiment:{experiment.key}", {
             "experiment_key": experiment.key,
+            "attempts": attempts,
+            "attempt_count": len(attempts),
+            # Settled once any attempt reached a definite outcome; an inconclusive run leaves the
+            # experiment open and retryable rather than closing it.
+            "settled": any(a["outcome"] in {SUPPORTED, REFUTED} for a in attempts),
             "hypothesis": experiment.hypothesis,
             "actor_principal": experiment.actor_principal,
             "subject_principal": experiment.subject_principal,
@@ -264,11 +281,20 @@ class InvestigationMemory:
         experiments = [r for r in self._experiments() if r.get("route") == route]
         outcomes = {name: 0 for name in sorted(OUTCOMES)}
         for item in experiments:
-            outcomes[item.get("outcome", INCONCLUSIVE)] = outcomes.get(item.get("outcome"), 0) + 1
+            # An experiment counts once, by the strongest outcome any of its attempts reached.
+            reached = {a.get("outcome") for a in (item.get("attempts") or [])}
+            latest = (SUPPORTED if SUPPORTED in reached
+                      else REFUTED if REFUTED in reached else INCONCLUSIVE)
+            outcomes[latest] = outcomes.get(latest, 0) + 1
+        demonstrated = bool(outcomes.get(SUPPORTED))
         return {
             "route": route,
             "experiments": len(experiments),
             "outcomes": outcomes,
+            # Read this, not the prose. The two verdict strings differ only by a leading "no",
+            # so a consumer matching on substrings gets the answer exactly backwards.
+            "weakness_demonstrated": demonstrated,
+            "examined": bool(experiments),
             "tested_pairs": sorted({
                 f"{item.get('actor_principal')}->{item.get('subject_principal')}"
                 for item in experiments
@@ -295,8 +321,8 @@ class InvestigationMemory:
                 principals.append(node.get("node_key"))
         experiments = self._experiments()
         open_questions = [
-            f"{item.get('hypothesis')} — {item.get('outcome')}"
-            for item in experiments if item.get("outcome") == INCONCLUSIVE
+            f"{item.get('hypothesis')} — inconclusive after {item.get('attempt_count')} attempt(s)"
+            for item in experiments if not item.get("settled")
         ]
         return {
             "objects": sorted(objects),
@@ -307,7 +333,7 @@ class InvestigationMemory:
             ),
             "settled": [
                 f"{item.get('hypothesis')} — {item.get('outcome')}"
-                for item in experiments if item.get("outcome") in {SUPPORTED, REFUTED}
+                for item in experiments if item.get("settled")
             ],
             "open_questions": open_questions,
         }

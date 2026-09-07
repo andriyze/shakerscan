@@ -156,7 +156,14 @@ AUTHZ_ORDERS = {
     "2001": {"id": "2001", "owner": "user-b", "email": "brian.okafor@example.test",
              "address": "9 Beech Road, Leeds", "amount": "99.99",
              "note": "user-b private order"},
+    # Sealed: owned by user-a and enforced even in the vulnerable mode. It exists so evidence
+    # attribution can be tested -- selecting this object must not be confirmed by a finding that
+    # actually came from a different object in the same collection.
+    "1009": {"id": "1009", "owner": "user-a", "email": "alice.harper@example.test",
+             "address": "12 Alder Lane, Bristol", "amount": "5.00",
+             "note": "user-a sealed order"},
 }
+AUTHZ_SEALED_ORDERS = {"1009"}
 # Deliberately ownerless: readable by everyone by design. A differential that calls this a
 # finding is producing a false positive.
 AUTHZ_NOTICES = {
@@ -230,7 +237,7 @@ def _authz_route(handler: http.server.BaseHTTPRequestHandler, path: str) -> bool
     if order is None:
         handler._send(404, {"error": "not_found"})
         return True
-    if mode == "safe" and order["owner"] != caller:
+    if (mode == "safe" or parts[2] in AUTHZ_SEALED_ORDERS) and order["owner"] != caller:
         # The patched twin: ownership is enforced at the object route.
         handler._send(403, {"error": "forbidden"})
         return True

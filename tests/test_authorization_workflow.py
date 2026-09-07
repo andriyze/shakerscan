@@ -29,10 +29,12 @@ from hunt.authorization_workflow import (  # noqa: E402
     CapturedRequest,
     explain,
     investigate,
+    outcome_from_result,
     reproduction,
     resume,
 )
 from hunt.investigation_memory import (  # noqa: E402
+    INCONCLUSIVE,
     INFERRED,
     REFUTED,
     SUPPORTED,
@@ -135,7 +137,7 @@ def test_the_approved_experiment_finds_the_weakness_and_is_recorded(base_url, me
 
     memory.record_experiment(proposal.as_experiment(SUPPORTED))
     conclusion = memory.route_conclusion(proposal.method, proposal.route_template)
-    assert "weakness demonstrated" in conclusion["verdict"]
+    assert conclusion["weakness_demonstrated"] is True
 
 
 def test_the_same_loop_on_the_patched_twin_finds_nothing(base_url, memory):
@@ -224,3 +226,89 @@ def test_reproduction_is_the_minimal_evidence_backed_sequence(memory):
     assert steps[0]["request"].endswith("/authz/vuln/orders")       # baseline first
     assert steps[-1]["request"].endswith("/authz/vuln/orders/1001")  # then the crossing
     assert all(step["establishes"] for step in steps)
+
+
+# -- review fixes: mutating verbs, honest explanations, retries, evidence attribution ---------
+
+def test_a_mutating_request_is_declined_rather_than_labelled_read_only(memory):
+    """A cross-principal DELETE is not a read-only test and must not be proposed as one."""
+    for method in ("DELETE", "POST", "PATCH", "PUT"):
+        result = investigate(
+            CapturedRequest(method=method, path="/authz/vuln/orders/1001", principal="user-a"),
+            available_principals=PRINCIPALS, memory=memory,
+        )
+        assert result["proposals"] == []
+        assert "not supported by this workflow" in result["not_proposed"][0]
+        assert "mutation authorization" in result["not_proposed"][0]
+
+
+def test_identical_answers_without_proof_are_inconclusive_not_enforcement():
+    """Failing to demonstrate a crossing is not evidence that the boundary held."""
+    told = explain(owner_status=200, attacker_status=200, owner_fields=["email"],
+                   attacker_fields=["email"],
+                   object_absent_from_attacker_listing=True, proven=False)
+    assert told["certainty"] == UNKNOWN
+    assert "not evidence of enforcement" in told["reading"]
+    assert "Missing:" in told["reading"]
+
+
+def test_an_inconclusive_experiment_stays_open_and_is_re_proposed(memory):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    memory.record_experiment(proposal.as_experiment(INCONCLUSIVE))
+    again = investigate(captured(), available_principals=PRINCIPALS, memory=memory)
+    assert len(again["proposals"]) == 1
+    assert "previous attempt was inconclusive" in again["proposals"][0].why
+
+
+def test_every_attempt_is_retained_not_overwritten(memory):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    memory.record_experiment(proposal.as_experiment(INCONCLUSIVE))
+    memory.record_experiment(proposal.as_experiment(SUPPORTED))
+    record = memory.already_tried(proposal.as_experiment(INCONCLUSIVE))
+    assert record["attempt_count"] == 2
+    assert [a["outcome"] for a in record["attempts"]] == [INCONCLUSIVE, SUPPORTED]
+    assert record["settled"] is True
+
+
+def test_a_settled_experiment_can_still_be_retried_on_request(memory):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    memory.record_experiment(proposal.as_experiment(SUPPORTED))
+    assert investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"] == []
+    forced = investigate(captured(), available_principals=PRINCIPALS, memory=memory,
+                         retry_settled=True)
+    assert len(forced["proposals"]) == 1
+
+
+def test_a_sealed_object_is_not_confirmed_by_another_objects_finding(base_url, memory):
+    """Evidence attribution: the collection is vulnerable, but the SELECTED object is not.
+
+    Running the collection differential reports a crossing for 1001. Recording that as the
+    outcome for 1009 would attribute another object's finding to the object the pentester chose.
+    """
+    request = CapturedRequest(method="GET", path="/authz/vuln/orders/1009", principal="user-a")
+    proposal = investigate(request, available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    assert proposal.identifier == "1009"
+
+    result = execute(base_url, proposal, "vuln")
+    outcome, why = outcome_from_result(proposal, result)
+    assert outcome != SUPPORTED
+    assert "1009" in why
+
+    memory.record_experiment(proposal.as_experiment(outcome))
+    conclusion = memory.route_conclusion(proposal.method, proposal.route_template)
+    assert conclusion["weakness_demonstrated"] is False
+
+
+def test_the_selected_object_is_confirmed_by_its_own_evidence(base_url, memory):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    outcome, why = outcome_from_result(proposal, execute(base_url, proposal, "vuln"))
+    assert outcome == SUPPORTED
+    assert "evidence names object 1001" in why
+
+
+def test_the_patched_twin_is_refuted_by_evidence_not_by_an_absent_flag(base_url, memory):
+    proposal = investigate(captured("safe"), available_principals=PRINCIPALS,
+                           memory=memory)["proposals"][0]
+    outcome, why = outcome_from_result(proposal, execute(base_url, proposal, "safe"))
+    assert outcome == REFUTED
+    assert "no cross-principal evidence" in why
