@@ -45,6 +45,7 @@ from asm_inventory import (  # noqa: E402
     _probe_path_status,
     _soft404_matches,
 )
+from runtime.endpoint_reality import classify_endpoint_reality  # noqa: E402
 
 DEFAULT_SAMPLE = Path(__file__).resolve().parents[1] / "tests/fixtures/hunt/endpoint_reality_sample.json"
 
@@ -66,6 +67,11 @@ async def evaluate(base_url: str, entries: list[dict], timeout: int = 5) -> list
     for entry, server_path, probed in zip(entries, server_paths, probes):
         sigs = signatures.get(_path_prefix(server_path)) or []
         matched = any(_soft404_matches(probed, sig) for sig in sigs)
+        # The three-valued classifier, which may abstain.
+        judged = classify_endpoint_reality(
+            probe_status=probed[0], probe_size=probed[1], signatures=sigs,
+            probed_method="GET", declared_method=entry.get("method"), path=entry.get("path"),
+        )
         results.append({
             **entry,
             "probe_status": probed[0],
@@ -73,6 +79,8 @@ async def evaluate(base_url: str, entries: list[dict], timeout: int = 5) -> list
             "signatures": [list(s) for s in sigs],
             # The shipping filter's verdict: a match means "drop as phantom".
             "verdict": "phantom" if matched else "kept",
+            "classified": judged.outcome,
+            "reason": judged.reason,
         })
     return results
 
@@ -89,6 +97,21 @@ def report(results: list[dict]) -> dict:
             harmful.append(row)
     real = buckets.get("real", {})
     phantom = buckets.get("phantom", {})
+
+    # The three-valued classifier, scored on the same sample. A wrong decision is the harm;
+    # an abstention is an honest "cannot tell" and is counted separately, never as a success.
+    classified: dict[str, dict[str, int]] = {}
+    wrong: list[dict] = []
+    for row in results:
+        bucket = classified.setdefault(row["label"], {})
+        bucket[row["classified"]] = bucket.get(row["classified"], 0) + 1
+        truth, said = row["label"], row["classified"]
+        if said == "unknown":
+            continue
+        if (truth in {"real", "client_route"} and said == "phantom") or (
+            truth == "phantom" and said == "real"
+        ):
+            wrong.append(row)
     return {
         "by_label": buckets,
         "phantoms_identified": phantom.get("phantom", 0),
@@ -96,6 +119,8 @@ def report(results: list[dict]) -> dict:
         "real_wrongly_demoted": real.get("phantom", 0),
         "real_total": sum(real.values()),
         "harmful_misclassifications": harmful,
+        "classifier_by_label": classified,
+        "classifier_wrong_decisions": wrong,
     }
 
 
@@ -125,6 +150,15 @@ def main() -> int:
     for row in summary["harmful_misclassifications"]:
         print(f"  HARM: {row['label']} judged phantom -> {row['method']} {row['path']}")
     print("\nby label:", json.dumps(summary["by_label"]))
+
+    print("\n--- three-valued classifier (runtime.endpoint_reality) ---")
+    print(f"{'label':<14}{'says':<10}{'reason':<28}path")
+    for row in sorted(results, key=lambda r: (r["label"], r["path"])):
+        print(f"{row['label']:<14}{row['classified']:<10}{row['reason']:<28}{row['path']}")
+    print(f"\nwrong decisions: {len(summary['classifier_wrong_decisions'])}")
+    for row in summary["classifier_wrong_decisions"]:
+        print(f"  WRONG: {row['label']} judged {row['classified']} -> {row['method']} {row['path']}")
+    print("by label:", json.dumps(summary["classifier_by_label"]))
     return 0
 
 
