@@ -211,6 +211,11 @@ route extraction) continue it. Deep, open-ended exploitation is Hunt's job, not 
 
 ## Architecture workstreams (the 2.3.0 work from 2026-09-06)
 
+**Canonical direction: `docs/hunt-architecture.md`** (operator vision, 2026-09-07) — Hunt as an
+AI-augmented penetration-testing workspace: human judgment + AI reasoning + deterministic execution
+and proof. The workstreams A0–A4 below are that document's Phases 1–6; the mapping and the current
+measured state live there. Read it first; this section is the execution detail.
+
 With the recall fight stopped, these are the release's active workstreams, in dependency order.
 Each keeps the governing rule's spirit: it must demonstrably improve finding capability, measured
 on the same target, before the next one starts.

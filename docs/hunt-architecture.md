@@ -1,84 +1,234 @@
-# Hunt architecture — findings and the convergence backlog
+# Hunt architecture — AI-augmented penetration testing
 
-This document collects what the A0 baseline measurement (2026-09-06) revealed about the Hunt
-runtime, and the architectural fixes it implies. It is the working reference for the 2.3.0
-architecture workstreams (A0–A4 in `release-2.3.0-plan.md`). Findings are stated as they were
-measured on the live stack, not as design intent.
+This is the canonical product direction for Hunt (operator direction, 2026-09-07), followed by the
+current measured state and how the 2.3.0 workstreams map onto it. It supersedes the earlier A0
+findings-only version of this file; those findings are preserved below under "Current state."
 
-## The one-line finding
+## Goal
 
-On Juice Shop, the deterministic Scan reaches 4/9 answer-key classes and the Hunt adds **zero**
-verified classes over it today. The Hunt's headline capability — the two-principal BOLA/BFLA
-differential — cannot run on the target at all, for two structural reasons below. Neither is a
-tuning gap; both are convergence gaps the plan already names.
+Design Hunt as an AI-powered penetration-testing workspace that makes a skilled human pentester
+materially more effective. The objective is **not** a fully autonomous scanner that replaces the
+pentester. It is:
 
-## Finding 1 — the auth/session primitive does not converge (A1)
+> **Human judgment + AI reasoning + deterministic execution and proof.**
 
-**Symptom.** A credentialed two-principal Hunt on Juice Shop cannot establish the sessions its
-`authz.verify` proof requires. `auth.session.establish` returns
-`contract:credential is not an interactive HTTP profile` for a bearer-token profile.
+- The human owns scope, objectives, risk decisions, and final judgment.
+- The AI is a fast research partner: observe, hypothesize, investigate, correlate, propose the next
+  best action.
+- ShakerScan provides the controlled execution environment, target memory, tools, evidence, and
+  verification.
 
-**Root cause.** `authz.verify` (the only deterministic cross-principal proof) requires two
-interactive sessions from `auth.session.establish`. That capability's `SESSION_AUTH_KINDS`
-(`api/capabilities/auth.py`) is exactly `{form_login, oauth_client_credentials, oauth_password}`:
+## Core product model — three layers
 
-- `form_login` GETs the login page and parses an HTML `<form>`.
-- the OAuth kinds POST a form-encoded grant.
+```text
+┌──────────────────────────────────────────────────────┐
+│                 HUMAN PENTESTER                       │
+│ objectives • intuition • authorization • judgment     │
+│ attack ideas • prioritization • final conclusions     │
+└───────────────────────┬───────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│                  AI HUNT BRAIN                        │
+│ observe → hypothesize → investigate → correlate       │
+│ challenge assumptions → propose next actions          │
+│ maintain target model → explain reasoning/results     │
+└───────────────────────┬───────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│             SHAKERSCAN EXECUTION PLANE                │
+│ HTTP • Browser • Auth • Nuclei • SQLMap • JS          │
+│ GraphQL • OOB • Diff • Replay • Evidence • Proof       │
+│ scope • budgets • approvals • logging • safety         │
+└──────────────────────────────────────────────────────┘
+```
 
-Juice Shop — and the large class of modern JSON APIs — authenticates with a JSON body
-(`POST /rest/user/login {email,password}`) that returns a JWT in the **response body**
-(`{"authentication":{"token": "..."}}`). No supported kind performs a JSON login, and the existing
-body-token extractor in `_session_headers` reads only the OAuth-standard `access_token`, not a
-nested `authentication.token`. The Scan authenticates the same target fine with a bearer profile, so
-the two engines' credential paths have diverged.
+The division is strict, and it maps directly onto invariants ShakerScan already enforces:
 
-**Why it matters.** `authz.verify`'s proof engine
-(`verify_target_bound_object_authorization`) already runs the differential from two **identity
-header dicts**, not from session objects — the session wrapper only supplies those headers. So the
-proof engine is ready; only the way a principal's identity is obtained is missing for JSON+JWT
-targets.
+- The human decides **what matters**.
+- The AI decides **what may be worth trying next** (candidates/notes only — AGENTS.md invariant 7).
+- ShakerScan decides **whether an action is allowed** and executes it safely (target binding,
+  policy, budgets, approvals — invariants 4/5/6).
+- Evidence/proof decides **whether a vulnerability is real** (deterministic proof contract, the
+  hard boundary in section "Deterministic proof").
 
-**Fix (A1, in progress).** Add a `json_login` session auth kind: POST a JSON credential body to the
-login endpoint and retain the returned JWT as the session's `Authorization: Bearer` header. This
-reuses the existing proof engine unchanged (one registry entry, one evidence contract — AGENTS.md
-invariant 5/10) and unblocks BOLA/BFLA on JSON+JWT APIs, which is the common modern case, not a
-Juice-Shop special case.
+## Hunt is a research session, not a scan
 
-## Finding 2 — the endpoint knowledge base is unstructured and phantom-dominated (A2)
+Not `start → run predetermined tests → report`, but a persistent investigation loop whose state
+survives any single AI context window:
 
-**Symptom.** The Hunt's prior-knowledge endpoint inventory for the target is ~3,000 rows. About
-two-thirds are content-discovery phantoms: `/api/Cards/admin`, `/api/Addresss/basket`,
-`/api/Cards/2fa`, all carrying the identical generic param shape `id,limit,offset,page,token`.
+```text
+observe → build target model → generate hypotheses → rank → choose evidence needed
+   → execute bounded action → analyze → update target model → prove / reject / defer → repeat
+```
 
-**Root cause.** Discovery writes every probed path into the same endpoint inventory the Hunt reads
-back, with no confidence or provenance separation between an observed real route and a wordlist
-guess that returned a soft-200. A reasoning loop handed this raw cannot tell a real route from noise
-and will spend its budget on phantoms.
+The AI must never rediscover the whole application from scratch each turn. A Hunt runs for minutes
+or hours; its state is durable.
 
-**Fix (A2, planned).** Structured target memory: a queryable target-knowledge model with
-provenance and confidence, built on the existing evidence store and `/hunts/{id}/query`, so a Hunt
-turn receives a compact, ranked, real-route view rather than the raw discovery dump.
+## Human and AI roles
 
-## Operational gotchas (save re-learning these)
+**Human controls:** engagement scope, allowed targets, active-testing and state-changing
+permission, credentials/personas, high-risk techniques, the Hunt objective, areas of interest,
+business context, manual observations, and final severity/impact judgment. The human can inject a
+hypothesis at any time.
 
-- A credentialed Hunt needs its approval receipt minted at `risk_tier:"credential"` and with **no**
-  `action_name`. An action-bound receipt (e.g. the benchmark's `scan.submit`) is rejected with
-  "Approval receipt is bound to a different action"; an `active`-tier receipt is rejected with
-  "Approval receipt risk tier does not cover the requested action".
-- `http.request` (Hunt) accepts `as_principal: primary|secondary|service` and injects the managed
-  credential without a `session_ref`. `authz.verify` and `auth.session.establish` are separate and
-  session-based — that asymmetry is Finding 1.
-- Juice Shop `/rest/user/whoami` returns `{"user":{}}` even with a valid bearer sent directly, so it
-  is a bad authentication oracle. Judge injection by a real authenticated endpoint, not whoami.
-- Reuse the benchmark's authority helpers for setup:
-  `scripts.benchmark_targets._canonical_benchmark_authority`, `mint_token`,
-  `_create_benchmark_bearer_profile`. The Juice Shop lab target is registered as
-  `749f7228-87ab-4ebb-bab3-66ec487a7a79` (`http://host.docker.internal:3001`).
+**AI specializes in what humans are slow at:** reading thousands of endpoints; correlating traffic;
+reading large JS bundles and API schemas; spotting unusual parameters; comparing principals;
+recognizing repeated object relationships; generating and adapting attack hypotheses; tracking
+failed experiments; noticing unexplored areas; chaining weak observations; summarizing evidence.
+The AI must also argue **against** its own hypotheses (record contradictory evidence, deprioritize,
+propose alternatives) so Hunt does not become an expensive payload generator.
 
-## Status
+## Persistent target knowledge graph
 
-| Finding | Workstream | State |
+Model relationships, not a bag of URLs. Persisted entities: application (hosts, services,
+technologies, API specs, JS bundles, GraphQL schemas, auth mechanisms); endpoints (method, route,
+params, body schema, discovery source, auth requirement, observed responses); principals (id, role,
+tenant, observed ownership, session state); objects (type, ids, owner principal, relationships,
+referencing endpoints); observations (interesting responses, errors, reflections, authz
+differences, leaked metadata, controls); hypotheses (statement, supporting/contradictory evidence,
+confidence, required next evidence, status); findings (suspected/verified/rejected/needs-review).
+The graph persists across Hunts. The AI gets compact structured memory plus retrieval, never
+thousands of raw transactions.
+
+## Hypothesis engine
+
+Hunt thinks in hypotheses, not scanner families. The taxonomy classifies the result **afterward**.
+
+```text
+Observation: GET /api/orders/4121 returned owner_id=84; a second principal is available.
+Hypothesis:  authorization may depend only on the order id.
+Evidence:    response.diff(GET /api/orders/4121, principal=A, principal=B)
+```
+
+## Capability architecture
+
+The AI receives small, strongly typed capabilities, never arbitrary shell or planner-supplied argv
+(invariant 3). Each capability declares input schema, risk, permissions, target restrictions,
+request/time budget, expected evidence, and output schema. Target families: HTTP (request/replay/
+mutate/compare/sequence), browser (navigate/interact/observe_network/execute_candidate/
+capture_state), auth (principal.select/compare, session.refresh, auth.observe), discovery
+(surface.query, openapi/graphql/javascript.inspect, traffic.search), verification (sqlmap.verify,
+xss.browser_verify, nuclei.run_selected, oob.allocate/check), evidence (record/query,
+finding.propose/verify_request). Scan and Hunt call the **same** registry entries (invariant 5/10).
+
+## Human–AI collaboration modes
+
+Modes differ by **authority, not engine**:
+
+- **Copilot** — AI only recommends; the human executes/approves. For sensitive engagements.
+- **Assisted** — AI auto-runs low-risk actions; higher-risk actions request approval. The intended
+  default. This is the existing approval-receipt + policy model applied per action.
+- **Autonomous** — AI runs everything the engagement policy permits; the human observes and can
+  interrupt. For labs, staging, long-running research.
+
+## The AI learns from the pentester (session-scoped, never global)
+
+The human teaches Hunt during an engagement ("403 vs 404 here is an authz side channel"; "ignore
+missing-CSP findings, focus on exploitable flaws"). This becomes **target/session guidance**, never
+a permanent global detector rule. This is a hard constraint: it must not contaminate the universal
+engine with application-specific heuristics (see the universal-engine rule).
+
+## Skills become expert playbooks
+
+Skills teach the AI how an expert reasons about a problem (e.g. `skill.web.authorization`: map
+object relationships and principals, distinguish collection/object endpoints, inspect ownership
+identifiers, replay with alternate principals, test nested resources, check read/write asymmetry,
+look for indirect references). The AI decides which ideas apply. Skills never contain
+target-specific routes or benchmark answers.
+
+## Deterministic proof — a hard invariant
+
+> **AI reasoning is not proof.** (AGENTS.md invariant 7.)
+
+AI reasoning creates a *candidate*. Verification requires deterministic evidence: a boolean/time
+differential, a controlled-mutation database error, sqlmap proof for injection; a genuine
+cross-principal comparison for BOLA (not merely HTTP 200). This is one of ShakerScan's strongest
+advantages and must not be weakened. It is also why the A3/A4 BOLA work is a careful build — see
+"Current state."
+
+## Scan and Hunt relationship
+
+Keep Scan; simplify its role to a fast deterministic baseline (crawl, API/schema and JS discovery,
+technology detection, known-exposure checks, basic injection, baseline proof). Its output is
+*initial target knowledge + obvious verified findings*, which Hunt consumes for adaptive
+investigation. A pentester can also start Hunt without a full Scan first.
+
+## Pentester-focused outputs
+
+Not thousands of findings. Verified vulnerabilities (counted by severity), strong leads (unresolved
+hypotheses worth manual review), interesting observations, and explicit coverage gaps (with the
+reason, e.g. "payment workflow untested: no payment test account supplied"). Every verified issue
+carries a minimal reproduction: principal/context, request, response, proof, impact, retest action.
+
+## Benchmark the AI against humans
+
+The primary success criterion is **Human + Hunt materially outperforms either alone**, measured on
+controlled pentest benchmarks across four arms (Scan only / AI Hunt only / Human only / Human + AI)
+on: verified and severe vulnerabilities, unique findings, false positives, time to first important
+finding, requests sent, investigation time, attack chains, and the share of AI leads useful to the
+pentester. This is a new evaluation axis beyond DAST recall, and it is what justifies added Hunt
+complexity.
+
+## What not to build
+
+- A giant deterministic expert system (thousands of `if route contains "order"…` rules). Let the AI
+  reason from observed facts.
+- An unrestricted shell agent. Keep typed capabilities and server-side enforcement.
+- A chatbot bolted onto a scanner. The AI needs real structured memory, evidence, tools, and the
+  ability to drive investigation.
+- A replacement for the pentester. The product is one strong pentester with the leverage of several
+  researchers.
+
+---
+
+## Current state (measured 2026-09-06/07)
+
+What exists today, honestly, and where it sits against the vision.
+
+- **Deterministic proof boundary: already enforced.** Hunt creates only unverified candidates;
+  verification runs through the deterministic proof moat (`validate_object_authorization`, the
+  sqli/xss proof contracts). This is the vision's strongest invariant and it is real now.
+- **Scan-as-baseline: real.** Scan produces the target knowledge (endpoints, principals, objects)
+  and the obvious verified findings. On Juice Shop it reaches 4/9 answer-key classes (verified SQLi
+  + the sensitive-exposure cluster).
+- **A0 baseline measured.** Hunt currently adds **zero** verified classes over Scan on Juice Shop,
+  for two structural reasons the vision's Phase 2/3 address:
+  1. *Auth/session primitives had diverged* — the Hunt's cross-principal proof needed an interactive
+     session the JSON+JWT login could not produce. **Fixed:** the `json_login` session auth kind
+     (commit `a0e0511a`) converges the credential primitive so a JSON+JWT target drives
+     `authz.verify` through the same registry entry Scan uses. Live-verified: both principals
+     establish sessions and the proof runs with them recognized as distinct.
+  2. *Endpoint knowledge is a raw, phantom-dominated URL list* (~3,000 rows, ~two-thirds
+     content-discovery phantoms). This is exactly the unstructured-target problem the knowledge
+     graph (Phase 2) exists to fix. Not yet built.
+- **First verified Hunt finding: not yet.** Getting Hunt to verify a class Scan misses (the A3
+  gate) needs a targeted-id BOLA proof. It is designed and **fail-closed** (the proof validator is
+  unchanged, so a wrong evidence-gather can only fail to verify), with one critical caveat: the
+  target route and the attacker's own baseline route must be the same resource collection, or a
+  public object would falsely verify. Because a new proof path is the most false-positive-sensitive
+  change in the system, it is scoped for a focused build with positive-and-negative validation, not
+  shipped opportunistically.
+
+## Workstream-to-phase mapping
+
+The 2.3.0 architecture workstreams (`release-2.3.0-plan.md`) are this vision's phases:
+
+| Vision phase | Plan workstream | State |
 |---|---|---|
-| Auth/session divergence | A1 | fix in progress: `json_login` session kind |
-| Phantom-dominated inventory | A2 | planned |
-| Hunt adds 0 over Scan | A3 measurement gate | blocked on A1 |
+| Phase 1 — pentester-friendly Hunt (timeline, observations/hypotheses/actions, approve/skip/modify) | (new, UX) | not started |
+| Phase 2 — target knowledge graph | A2 structured target memory | not started; A0 proved the need |
+| Phase 3 — unified capability API (Scan and Hunt share primitives) | A1 shared capability layer | **first primitive converged** (`json_login`); more to audit |
+| Phase 4 — adaptive reasoning loop | A3 reasoning loop | blocked on the targeted-id proof + Phase 2 |
+| Phase 5 — deep workflow reasoning (authz, multi-user, business logic, GraphQL, SPA, chains) | A4 advanced discovery in Hunt | designed for BOLA (targeted-id proof); pending |
+| Phase 6 — human + AI benchmarks | (new, eval) | not started; replaces recall-only as the success axis |
+
+## Recommended direction (one line)
+
+> An AI-augmented penetration-testing environment where humans provide judgment and creativity, AI
+> provides scale and adaptive reasoning, and ShakerScan provides safe execution and trustworthy
+> proof.
+
+DAST remains underneath as baseline discovery and deterministic verification. Hunt becomes the
+product. The competitive advantage is not more payloads than Burp or Nuclei; it is a pentester and
+an AI researcher sharing one target model, evidence, tools, and history — and together finding more
+real vulnerabilities, faster.
