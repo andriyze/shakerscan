@@ -230,6 +230,11 @@ def test_path_prefix_and_soft404_matches():
     assert a._soft404_matches(("200", 13212), ("500", 3060)) is False  # status differs
     assert a._soft404_matches(("200", 631), ("200", 75055)) is False   # size differs
     assert a._soft404_matches(("ERR", -1), ("500", 3060)) is False     # inconclusive
+    # An unmeasurable body size is inconclusive, not a match. Size is the only
+    # discriminator once the status matches, and this module keeps an endpoint whenever
+    # the probe cannot decide -- dropping a real endpoint is the harmful error.
+    assert a._soft404_matches(("401", -1), ("401", 83)) is False       # probe size unknown
+    assert a._soft404_matches(("401", 83), ("401", -1)) is False       # signature size unknown
 
 
 def test_is_unreachable_classification():
