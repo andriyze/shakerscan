@@ -209,6 +209,33 @@ What exists today, honestly, and where it sits against the vision.
   change in the system, it is scoped for a focused build with positive-and-negative validation, not
   shipped opportunistically.
 
+## Phase 2a — what de-noising the endpoint frontier actually requires (measured 2026-09-07)
+
+The Hunt frontier ranks endpoints by `priority_score` alone, and that ranking is measurably wrong:
+the phantom `/api/Cards/admin` scores 65 while the real, heavily-tested `/api/Users` scores 20. An
+evidence-based confidence ranking was built and **measured against the live inventory before
+shipping. It made the frontier worse and was reverted.** Four candidate signals are now empirically
+eliminated:
+
+| Signal | Verdict |
+|---|---|
+| `source` provenance | Useless. Real values are `scan`/`coverage_recon`/`asm`/`recon`, not the column comment's `crawl\|ffuf\|openapi`. Phantoms and real routes share them. |
+| Evidence of interaction (`attempt_count`, `last_verdict`) | Does not separate. Probed phantoms acquire attempts and verdicts because the app answers them; `/api/Cards/search/` ranked top. |
+| HTTP status | App-dependent and inverted here: this target 401/400s the wordlist paths and 200s the real ones. Any status rule would be benchmark-fitting. |
+| `content_hash` | Unusable — never populated (null across all rows). |
+
+**The conclusion is structural: the inventory does not record enough to judge whether a route is
+real.** Reality can only be assessed against what "unknown" looks like *for this target* — the
+differential the ASM layer already implements (learn a not-found signature from per-prefix decoy
+probes, then compare candidates). Today that logic filters at write time and persists no
+per-endpoint verdict, so the frontier cannot rank on it.
+
+**Phase 2a is therefore:** persist the decoy-signature comparison per endpoint (a real-vs-catch-all
+verdict), populate it on the reachability probe, backfill it, and rank the Hunt frontier on it. This
+is learned per target and carries no app facts, so it satisfies the universal-engine rule. It is
+also a precondition for the knowledge graph proper: an entity model built over a surface that is
+two-thirds phantom inherits the noise.
+
 ## Workstream-to-phase mapping
 
 The 2.3.0 architecture workstreams (`release-2.3.0-plan.md`) are this vision's phases:
@@ -216,7 +243,7 @@ The 2.3.0 architecture workstreams (`release-2.3.0-plan.md`) are this vision's p
 | Vision phase | Plan workstream | State |
 |---|---|---|
 | Phase 1 — pentester-friendly Hunt (timeline, observations/hypotheses/actions, approve/skip/modify) | (new, UX) | not started |
-| Phase 2 — target knowledge graph | A2 structured target memory | not started; A0 proved the need |
+| Phase 2 — target knowledge graph | A2 structured target memory | de-noising design settled by measurement (below); relationship layer not started |
 | Phase 3 — unified capability API (Scan and Hunt share primitives) | A1 shared capability layer | **first primitive converged** (`json_login`); more to audit |
 | Phase 4 — adaptive reasoning loop | A3 reasoning loop | blocked on the targeted-id proof + Phase 2 |
 | Phase 5 — deep workflow reasoning (authz, multi-user, business logic, GraphQL, SPA, chains) | A4 advanced discovery in Hunt | designed for BOLA (targeted-id proof); pending |
