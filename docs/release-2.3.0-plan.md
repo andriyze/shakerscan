@@ -277,9 +277,28 @@ capability), not a new subsystem. The target primitive set: `http.request`, `bro
 **4. Hunt becomes a real reasoning loop.** A persistent loop: observe → hypothesize → select
 capability → execute → inspect evidence → update hypothesis → verify → repeat. It verifies through
 the same deterministic proof moat, so it depends on R1 (a single failing capability must not crash
-the run) being solid first. 2.3.0 does one cheap Hunt thing only: **measure** Scan vs Scan+Hunt on
-Juice Shop with the existing keyless flow to establish the audit's baseline table. Measurement only,
-no new Hunt build this release.
+the run) being solid first.
+
+**Superseded 2026-09-07 (operator).** This originally said "measurement only, no new Hunt build this
+release." That is no longer the plan: a complete knowledge graph must not block useful Hunt work,
+and inventory cleanup is not the project. The next milestone is **one complete assisted
+authorization investigation** — a pentester hands Hunt a captured request, Hunt identifies the
+object and principal, proposes a cross-user test, executes it in approved scope, explains the
+response difference, and verifies, rejects or preserves the lead. It is built on the existing
+`authz.verify` capability and the existing Hunt APIs, candidates, evidence and MCP surface, never a
+parallel engine or a new agent framework.
+
+*Acceptance:* a seeded vulnerable application yields a reproducible authorization finding and its
+patched twin does not; public or shared objects, expired sessions and unrelated collections produce
+no proof. Memory persists only what that workflow needs — request → principal → object →
+ownership/access evidence → hypothesis → experiment → outcome — with each inferred relationship
+carrying its supporting evidence and an explicit uncertainty state ("user A received this object"
+is never "only user A may access it"), and with rejected and inconclusive results retained so a
+completed check never marks a whole route safe. Interrupting the planner and resuming with a fresh
+context must continue without rediscovering the object or repeating an experiment. Scored with the
+existing protocol in `hunt-investigation-evaluation.md`, not a new benchmark: new verified findings,
+false promotions on patched controls, useful leads, duplicated experiments, requests consumed and
+pentester time. The deterministic Scan regression gates stay.
 
 **5. Give Hunt structured target memory.** A durable target-knowledge model, not raw HTTP records
 fed to the agent every turn. It holds: endpoints, parameters, principals, observed objects/IDs,

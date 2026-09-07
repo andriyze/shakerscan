@@ -253,10 +253,12 @@ never-probed guess (65) above the heavily-tested real `/api/Users` (20).
 Evaluated the shipping comparison (`_learn_not_found_signatures`, `_probe_path_status`,
 `_soft404_matches`) against the labeled sample. It is **not an existence oracle**:
 
-| Measure | Result |
-|---|---|
-| Phantoms identified | 2 / 7 — only the invented controls, which return 500 |
-| Real endpoints wrongly demoted | 1 / 9 — `POST /rest/user/login` |
+> **These numbers are WITHDRAWN.** They came from scoring the low-level `_soft404_matches`
+> matcher, not the shipping `filter_reachable_worklist`, which already keeps fragment routes and
+> already drops only GET entries so a method-specific route survives. Re-scored against the real
+> entry point, production made **no errors on the sample**: absent routes dropped 2/2, real or
+> client routes dropped 0, and no useful representative lost. There was nothing here for a
+> replacement to improve. Reproduce with `scripts/evaluate_endpoint_reality.py`.
 
 The five realistic wordlist phantoms return `401 / 83 bytes` — and so do the real protected routes
 `/api/Addresss` and `/api/Cards`. When auth middleware answers a real protected route and a
@@ -265,34 +267,44 @@ nonexistent one identically, the comparison cannot distinguish them, and the cor
 demotion comes from probing GET against a POST-only route, so method-specific endpoints are at risk
 from a path-only probe.
 
-### Known defects in the existing filter (found while measuring)
+### Defects found while measuring — both now addressed
 
-Both are in `api/asm_inventory.py` and would be inherited by anything that persists this verdict:
+Both were in `api/asm_inventory.py`:
 
-1. **The filter disables itself on large batches.** Above `max_probe` (default 2,000) unique paths
-   it returns every entry unfiltered. Whether real ingestion batches exceed this is **unverified** —
-   a large inventory alone does not prove it.
-2. **The matcher treats unknown size as a match.** `_soft404_matches` returns `True` when the status
-   matches and either size is unknown, which contradicts the module's own stated bias ("any
-   inconclusive probe keeps the endpoint") three lines above. Persisting this verdict would preserve
-   incorrect classifications.
+1. **The filter disabled itself silently on large batches.** Above `max_probe` (default 2,000)
+   unique paths it returns every entry unfiltered. **Mitigated** (`17f97acb`): the skip is now
+   logged with its counts, so the question is answerable from production. The limit is unchanged,
+   and whether real ingestion batches exceed it remains **unverified**.
+2. **The matcher treated an unmeasurable size as a match**, dropping an endpoint on an undecidable
+   comparison and contradicting the module's own stated bias. **Fixed** (`02fa0c27`): an
+   inconclusive size now keeps the endpoint, with tests that fail without the fix.
 
 Also corrected: an earlier claim that ASM "only filters at write time" was wrong. A sweep already
 persists `last_http_status`, `unreachable_streak` and `last_reachability_at`, and retires rows to
 `gone`. What is missing is the richer *comparison* evidence, not persisted reachability.
 
-### What Phase 2a should therefore be
+### Phase 2a state: implemented / live-validated / pending
 
-Not perfect route classification, and not a `real=true` flag. The target memory needs to be
-**useful and uncertainty-aware**:
+**Implemented and live-validated.** An opt-in grouped frontier, `kind="endpoint_groups"` on the
+existing `/hunts/{id}/query` (`kind="endpoints"` unchanged). Groups carry `route_template`,
+`grouping_evidence`, `sample_count`, `representatives`, `principal_contexts`, `prior_results`,
+`open_questions` and every member `sample_id`, so a grouping is reversible and drill-down through
+`filter.id` loses no lead. Ordering puts groups with prior results first and never lets repeated
+parameter samples occupy the first page. Verified end to end against the running API.
 
-- Persist comparison **evidence and its context** — method, principal/auth context, control
-  (decoy) reference, comparison outcome, timestamp — not a boolean. Missing or ambiguous controls
-  must remain `unknown`.
-- Evaluate any candidate signal on the labeled sample first, scoring both phantom reduction and
-  real endpoints demoted. Top-N precision alone is insufficient.
-- Improve Hunt ordering **without deleting uncertain leads**: a smaller exploration queue, with the
-  pentester able to pin endpoints.
+**Implemented, deliberately conservative.** Status-only sibling-to-route inference was removed as
+unsupported (`20b62611`). Grouping now merges only on identifier-shaped segments or a declared
+specification, and identifier-shaped grouping is labelled tentative. Removing unsupported merges
+can *increase* group counts, so **no measured live de-noising or recall improvement is claimed.**
+
+**Pending.** Persisting comparison evidence with its context (method, principal/auth context,
+control reference, outcome, timestamp) rather than a boolean; evaluating any new signal on the
+labeled sample in both directions before adoption; authenticated evaluation (the evaluator probes
+anonymously only).
+
+**Not the goal.** A smaller endpoint list is supporting evidence of usability, never proof that
+Hunt finds more. Phase 2a is finished when a pentester gets an actionable target view without
+losing leads — not when every URL carries a label.
 
 ## Workstream-to-phase mapping
 
