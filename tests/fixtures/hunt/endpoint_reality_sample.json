@@ -1,0 +1,34 @@
+{
+  "schema_version": "endpoint-reality-sample/v1",
+  "purpose": "Independently labeled endpoint sample for evaluating whether a reality signal (currently the ASM decoy / soft-404 comparison) can separate real routes from discovery phantoms without demoting real endpoints. Labels are ground truth derived from the target application's known route structure, NEVER from the probe result being evaluated (that would be circular).",
+  "target": "OWASP Juice Shop (lab fixture)",
+  "label_values": {
+    "real": "A distinct server-addressable endpoint of the application.",
+    "phantom": "Not a distinct endpoint: a wordlist/synthesized path that the server may still answer.",
+    "client_route": "Resolved in the browser, not server-addressable. Must NOT be judged phantom.",
+    "unknown": "Genuinely ambiguous; a correct classifier may answer unknown."
+  },
+  "notes": "A binary real/phantom verdict is known to be insufficient: an auth middleware can answer a real protected route and a nonexistent one identically, and HTTP permits 404 for an existing forbidden resource. Entries whose correct outcome is 'unknown' are included deliberately so an evaluator is scored on abstention, not only on separation.",
+  "entries": [
+    {"path": "/rest/user/login", "method": "POST", "label": "real", "category": "method_specific", "basis": "Documented auth endpoint; POST is the real verb, GET behaves differently."},
+    {"path": "/rest/user/login", "method": "GET", "label": "unknown", "category": "method_specific", "basis": "Same path, non-canonical verb. A path-only probe cannot judge this; correct answer is unknown."},
+    {"path": "/rest/products/search", "method": "GET", "label": "real", "category": "public", "basis": "Documented search endpoint; the verified SQLi locus."},
+    {"path": "/api/Feedbacks", "method": "GET", "label": "real", "category": "public", "basis": "Sequelize model collection route, publicly readable."},
+    {"path": "/api/Users", "method": "GET", "label": "real", "category": "protected", "basis": "Model collection route; the answer key's BFLA locus."},
+    {"path": "/api/Addresss", "method": "GET", "label": "real", "category": "protected", "basis": "Model collection route, caller-scoped; verified caller-scoped in this session."},
+    {"path": "/api/Cards", "method": "GET", "label": "real", "category": "protected", "basis": "Model collection route requiring auth."},
+    {"path": "/rest/admin/application-version", "method": "GET", "label": "real", "category": "public", "basis": "Documented rest route."},
+    {"path": "/rest/basket/1", "method": "GET", "label": "real", "category": "protected_object", "basis": "Object route; the canonical BOLA locus. Object id may or may not exist."},
+    {"path": "/#/search", "method": "GET", "label": "client_route", "category": "client_side", "basis": "Angular fragment route; server returns the app shell for any fragment."},
+    {"path": "/#/login", "method": "GET", "label": "client_route", "category": "client_side", "basis": "Angular fragment route."},
+    {"path": "/api/Cards/search/", "method": "GET", "label": "phantom", "category": "wordlist_suffix", "basis": "Not a defined sub-route. The model router treats 'search' as an id, so the server answers it. THIS ENTRY DEFEATED THE EVIDENCE-BASED RANKING: it acquires attempts and a verdict."},
+    {"path": "/api/Cards/admin", "method": "GET", "label": "phantom", "category": "wordlist_suffix", "basis": "Wordlist suffix on a real model prefix; not a defined sub-route."},
+    {"path": "/api/Addresss/basket", "method": "GET", "label": "phantom", "category": "wordlist_suffix", "basis": "Wordlist suffix; not a defined sub-route."},
+    {"path": "/api/Addresss/coupon", "method": "GET", "label": "phantom", "category": "wordlist_suffix", "basis": "Wordlist suffix; not a defined sub-route."},
+    {"path": "/api/Cards/2fa", "method": "GET", "label": "phantom", "category": "wordlist_suffix", "basis": "Wordlist suffix; not a defined sub-route."},
+    {"path": "/rest/zz9-shakerscan-unlikely-path-a1b2", "method": "GET", "label": "phantom", "category": "invented", "basis": "Deliberately implausible control path."},
+    {"path": "/api/zz9-shakerscan-unlikely-model-a1b2", "method": "GET", "label": "phantom", "category": "invented", "basis": "Deliberately implausible control under a real prefix."},
+    {"path": "/api/Cards/999999", "method": "GET", "label": "unknown", "category": "protected_object", "basis": "Valid object-route shape with a probably-absent id. A 404/401 here does not distinguish 'route absent' from 'object absent'; correct answer is unknown."},
+    {"path": "/ftp", "method": "GET", "label": "real", "category": "public", "basis": "Documented exposed directory; a verified sensitive-exposure locus."}
+  ]
+}

@@ -209,32 +209,90 @@ What exists today, honestly, and where it sits against the vision.
   change in the system, it is scoped for a focused build with positive-and-negative validation, not
   shipped opportunistically.
 
-## Phase 2a — what de-noising the endpoint frontier actually requires (measured 2026-09-07)
+## Phase 2a — endpoint frontier de-noising: two failed approaches, measured (2026-09-07)
 
-The Hunt frontier ranks endpoints by `priority_score` alone, and that ranking is measurably wrong:
-the phantom `/api/Cards/admin` scores 65 while the real, heavily-tested `/api/Users` scores 20. An
-evidence-based confidence ranking was built and **measured against the live inventory before
-shipping. It made the frontier worse and was reverted.** Four candidate signals are now empirically
-eliminated:
+**Status: not solved.** A ranking attempt failed, data limitations were identified, and the
+decoy-based replacement was then evaluated and also found insufficient. Both results are measured,
+and both experiments are reproducible from the repo. Nothing here is a validated replacement.
 
-| Signal | Verdict |
+### Reproducing these results
+
+```bash
+# labeled sample: tests/fixtures/hunt/endpoint_reality_sample.json
+docker compose exec -T api sh -lc \
+  'cd /workspace && PYTHONPATH=/workspace:/workspace/api:/workspace/scanner \
+   python3 scripts/evaluate_endpoint_reality.py --base-url http://host.docker.internal:3001'
+```
+
+Labels are ground truth from the application's known route structure, never from the probe being
+evaluated. The sample deliberately includes protected routes, a method-specific route, client-side
+fragment routes, and entries whose correct answer is `unknown`, so an evaluator is scored on
+abstention as well as separation.
+
+### Experiment 1 — evidence-based ranking (failed, reverted)
+
+Ranked the frontier by evidence of interaction and reachability. Measured against the live
+inventory it promoted the wordlist phantom `/api/Cards/search/` to the top, so it was reverted.
+What this supports, stated no more strongly than the evidence allows:
+
+| Signal | Defensible conclusion |
 |---|---|
-| `source` provenance | Useless. Real values are `scan`/`coverage_recon`/`asm`/`recon`, not the column comment's `crawl\|ffuf\|openapi`. Phantoms and real routes share them. |
-| Evidence of interaction (`attempt_count`, `last_verdict`) | Does not separate. Probed phantoms acquire attempts and verdicts because the app answers them; `/api/Cards/search/` ranked top. |
-| HTTP status | App-dependent and inverted here: this target 401/400s the wordlist paths and 200s the real ones. Any status rule would be benchmark-fitting. |
-| `content_hash` | Unusable — never populated (null across all rows). |
+| `source` provenance | Too coarse **as currently written**: values are `scan`/`coverage_recon`/`asm`/`recon`, not the column comment's `crawl\|ffuf\|openapi`, so it does not separate. Not proof the concept is useless. |
+| `attempt_count`, `last_verdict` | Interaction does not prove existence: probed phantoms acquire both because the app answers them. |
+| HTTP status | Not usable as a fixed rule: on this target the wordlist paths return 401/400 and real routes 200. Any hardcoded status rule would be app-fitting. |
+| `content_hash` | Unavailable (never populated) — untested, not disproven. |
 
-**The conclusion is structural: the inventory does not record enough to judge whether a route is
-real.** Reality can only be assessed against what "unknown" looks like *for this target* — the
-differential the ASM layer already implements (learn a not-found signature from per-prefix decoy
-probes, then compare candidates). Today that logic filters at write time and persists no
-per-endpoint verdict, so the frontier cannot rank on it.
+One failed ranking does not eliminate every combination of these signals. It does show that no
+ranking over these columns alone worked here.
 
-**Phase 2a is therefore:** persist the decoy-signature comparison per endpoint (a real-vs-catch-all
-verdict), populate it on the reachability probe, backfill it, and rank the Hunt frontier on it. This
-is learned per target and carries no app facts, so it satisfies the universal-engine rule. It is
-also a precondition for the knowledge graph proper: an entity model built over a surface that is
-two-thirds phantom inherits the noise.
+Separately measured: the current `priority_score` ordering genuinely misranks, putting a
+never-probed guess (65) above the heavily-tested real `/api/Users` (20).
+
+### Experiment 2 — the existing decoy / soft-404 comparison (insufficient)
+
+Evaluated the shipping comparison (`_learn_not_found_signatures`, `_probe_path_status`,
+`_soft404_matches`) against the labeled sample. It is **not an existence oracle**:
+
+| Measure | Result |
+|---|---|
+| Phantoms identified | 2 / 7 — only the invented controls, which return 500 |
+| Real endpoints wrongly demoted | 1 / 9 — `POST /rest/user/login` |
+
+The five realistic wordlist phantoms return `401 / 83 bytes` — and so do the real protected routes
+`/api/Addresss` and `/api/Cards`. When auth middleware answers a real protected route and a
+nonexistent one identically, the comparison cannot distinguish them, and the correct outcome is
+**unknown**, not phantom. HTTP also permits 404 for an existing forbidden resource. The real-route
+demotion comes from probing GET against a POST-only route, so method-specific endpoints are at risk
+from a path-only probe.
+
+### Known defects in the existing filter (found while measuring)
+
+Both are in `api/asm_inventory.py` and would be inherited by anything that persists this verdict:
+
+1. **The filter disables itself on large batches.** Above `max_probe` (default 2,000) unique paths
+   it returns every entry unfiltered. Whether real ingestion batches exceed this is **unverified** —
+   a large inventory alone does not prove it.
+2. **The matcher treats unknown size as a match.** `_soft404_matches` returns `True` when the status
+   matches and either size is unknown, which contradicts the module's own stated bias ("any
+   inconclusive probe keeps the endpoint") three lines above. Persisting this verdict would preserve
+   incorrect classifications.
+
+Also corrected: an earlier claim that ASM "only filters at write time" was wrong. A sweep already
+persists `last_http_status`, `unreachable_streak` and `last_reachability_at`, and retires rows to
+`gone`. What is missing is the richer *comparison* evidence, not persisted reachability.
+
+### What Phase 2a should therefore be
+
+Not perfect route classification, and not a `real=true` flag. The target memory needs to be
+**useful and uncertainty-aware**:
+
+- Persist comparison **evidence and its context** — method, principal/auth context, control
+  (decoy) reference, comparison outcome, timestamp — not a boolean. Missing or ambiguous controls
+  must remain `unknown`.
+- Evaluate any candidate signal on the labeled sample first, scoring both phantom reduction and
+  real endpoints demoted. Top-N precision alone is insufficient.
+- Improve Hunt ordering **without deleting uncertain leads**: a smaller exploration queue, with the
+  pentester able to pin endpoints.
 
 ## Workstream-to-phase mapping
 
