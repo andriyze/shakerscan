@@ -1,7 +1,8 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
 import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, type Target, type GroupedDomain } from '@/lib/api'
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
@@ -14,7 +15,7 @@ const SEARCH_DEBOUNCE_MS = 300
 
 type TargetIdentityKind = 'registrable_domain' | 'ip_address' | 'internal_service' | 'host'
 
-export function classifyTargetGroupIdentity(value: string): { kind: TargetIdentityKind; label: string; canDiscoverSubdomains: boolean; internal: boolean } {
+function classifyTargetGroupIdentity(value: string): { kind: TargetIdentityKind; label: string; canDiscoverSubdomains: boolean; internal: boolean } {
   const host = value.trim().toLowerCase().replace(/^\[|\]$/g, '')
   const ipv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)
   const ipv6 = host.includes(':') && /^[0-9a-f:]+$/i.test(host)
@@ -812,7 +813,7 @@ function TargetsContent() {
                   </div>
                 )}
                 {/* Subdomain discovery only applies to registrable domain identities. */}
-                {identity.canDiscoverSubdomains && (
+                {identity.canDiscoverSubdomains && featureEnabled('discovery') && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation()

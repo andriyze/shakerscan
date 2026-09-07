@@ -568,8 +568,12 @@ class ArsenalClient:
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
+        api_token: str | None = None,
     ) -> None:
         self.base_url = base_url
+        if api_token and not base_url.startswith("https://"):
+            raise ValueError("Authenticated remote APIs require HTTPS")
+        self.api_token = api_token
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 60.0))
         self.max_response_bytes = max(1_024, min(int(max_response_bytes), MAX_RESPONSE_BYTES))
         self.opener = urllib.request.build_opener(_NoRedirect())
@@ -580,7 +584,11 @@ class ArsenalClient:
             self.base_url + path,
             data=body,
             method=method,
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                **({"Authorization": "Bearer " + self.api_token} if self.api_token else {}),
+            },
         )
         try:
             with self.opener.open(request, timeout=self.timeout_seconds) as response:

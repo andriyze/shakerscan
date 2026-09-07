@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import {
   AlertCircle, ArrowRight, Braces, Check, ChevronDown, Clock3,
   FileCheck2, FlaskConical, Info, Plus, Route, ShieldCheck, Sparkles, Target, Trash2,

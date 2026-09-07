@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { CheckCircle2, Info, X, XCircle } from 'lucide-react'
 
 export interface ToastLink {

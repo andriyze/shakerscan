@@ -1,4 +1,5 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
@@ -120,7 +121,7 @@ export default function RequestCollectionsPage() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets({ limit: 500 }), getDevices({ limit: 500 })])
+    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
       .then(([web, connected]) => {
         if (cancelled) return
         setTargets(usableWebTargets(web.targets || []))
@@ -392,7 +393,7 @@ export default function RequestCollectionsPage() {
           <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
             <option value="web">Web application</option>
             <option value="api">API</option>
-            <option value="device">Connected device</option>
+            {featureEnabled('devices') && <option value="device">Connected device</option>}
           </Select>
         </Field>
         <Field label="Collection owner">

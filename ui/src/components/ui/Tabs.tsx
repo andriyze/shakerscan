@@ -1,6 +1,6 @@
 'use client'
 
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { cn } from '@/lib/cn'
 
 export interface TabItem {

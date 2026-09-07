@@ -1,4 +1,5 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
@@ -243,7 +244,7 @@ export default function CredentialsPage() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets({ limit: 500 }), getDevices({ limit: 500 })])
+    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
       .then(([web, connected]) => {
         if (cancelled) return
         setTargets(usableWebTargets(web.targets || []))
@@ -472,8 +473,8 @@ export default function CredentialsPage() {
             <Select value={targetKind} onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
               <option value="web">Web</option>
               <option value="api">API</option>
-              <option value="network">Network / SSH</option>
-              <option value="device">Connected device</option>
+              {featureEnabled('network_testing') && <option value="network">Network / SSH</option>}
+              {featureEnabled('devices') && <option value="device">Connected device</option>}
             </Select>
           </Field>
           <Field label="Bound target">

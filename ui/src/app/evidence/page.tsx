@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { getEvidenceInstance, getEvidenceInstances, getFindingEvidence, formatDate, type EvidenceInstance, type EvidenceObject } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import {

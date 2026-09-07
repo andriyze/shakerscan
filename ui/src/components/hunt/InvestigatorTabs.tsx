@@ -1,6 +1,6 @@
 'use client'
 
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/cn'
 
