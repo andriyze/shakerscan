@@ -1,8 +1,9 @@
 {
-  "schema_version": "endpoint-reality-sample/v2",
+  "schema_version": "endpoint-reality-sample/v3",
   "purpose": "Independently labeled endpoint sample for evaluating whether the PRODUCTION reachability filter (and any proposed replacement) can separate real routes from discovery noise without demoting real endpoints. Labels are ground truth derived from the target application's known route structure, NEVER from the probe result being evaluated.",
   "target": "OWASP Juice Shop (lab fixture)",
   "v2_change": "Route template and request sample are now labeled SEPARATELY. v1 collapsed them and called /api/Cards/search a 'phantom endpoint'. It is not a separate endpoint at all: it is the real route GET /api/Cards/{id} carrying the invalid id 'search'. Conflating the two makes de-noising look like a classification problem when much of it is a GROUPING problem -- thousands of junk samples of a handful of real templates.",
+  "v3_change": "Adds explicit route_label=unknown cases; an unknown object id is not a substitute for an unknown route. Score template retention and useful-representative retention separately from sample filtering. Template identity includes method and auth_context. No useful sample for a template means working-request retention is untested, not successful. Unknown labels describe fixture knowledge, not proof that a route can never be resolved.",
   "labels": {
     "route_label": {
       "real": "The route template exists and is served by the application.",
@@ -17,7 +18,7 @@
       "unknown": "Cannot be established as ground truth."
     }
   },
-  "scoring_notes": "A definite verdict on an entry whose ground truth is `unknown` is a WRONG DECISION, not a neutral outcome. An auth-masked response and a 404 are both compatible with 'route exists but is hidden', so HTTP alone cannot decide them. Probing is anonymous unless an entry sets `auth_context`.",
+  "scoring_notes": "The production filter exposes keep/drop, not existence judgments: keeping a row does not prove it real. Dropping a route_label=unknown sample is reported separately; zero unknown cases is NOT TESTED. Dropping an invalid sample is not losing its real template if another sample preserves it; retaining only junk must not conceal loss of all useful representatives. Live evaluation is anonymous only and rejects non-anonymous auth_context labels. These labels never enter production filtering.",
   "entries": [
     {"route_template": "/rest/user/login", "request_sample": "/rest/user/login", "method": "POST", "route_label": "real", "sample_label": "not_parameterised", "category": "method_specific", "basis": "Documented auth endpoint. POST is the real verb; a GET probe reports on GET only."},
     {"route_template": "/rest/products/search", "request_sample": "/rest/products/search", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "public", "basis": "Documented search endpoint; the verified SQLi locus."},
@@ -41,6 +42,9 @@
     {"route_template": "/rest/{unknown}", "request_sample": "/rest/zz9-shakerscan-unlikely-path-a1b2", "method": "GET", "route_label": "absent", "sample_label": "invalid", "category": "invented", "basis": "Deliberately implausible control path with no handler."},
 
     {"route_template": "/#/search", "request_sample": "/#/search", "method": "GET", "route_label": "client_route", "sample_label": "not_parameterised", "category": "client_side", "basis": "Angular fragment route; the server returns the app shell for any fragment."},
-    {"route_template": "/#/login", "request_sample": "/#/login", "method": "GET", "route_label": "client_route", "sample_label": "not_parameterised", "category": "client_side", "basis": "Angular fragment route."}
+    {"route_template": "/#/login", "request_sample": "/#/login", "method": "GET", "route_label": "client_route", "sample_label": "not_parameterised", "category": "client_side", "basis": "Angular fragment route."},
+
+    {"route_template": "/rest/user/login", "request_sample": "/rest/user/login", "method": "GET", "route_label": "unknown", "sample_label": "unknown", "category": "unverified_method", "basis": "This fixture establishes POST login, not a GET handler. Its GET route existence has not been independently established; neither a POST declaration nor an anonymous error resolves that gap."},
+    {"route_template": "/api/Cards/{id}/history", "request_sample": "/api/Cards/1/history", "method": "GET", "route_label": "unknown", "sample_label": "unknown", "category": "unverified_nested_route", "basis": "A nested candidate whose handler and access policy have not been independently established in this fixture. Do not infer existence or absence from an auth-masked response. This is intentionally unverified, not an asserted hidden route."}
   ]
 }
