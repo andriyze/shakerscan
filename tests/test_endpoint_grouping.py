@@ -1,152 +1,150 @@
-"""Grouping must collapse repetition without merging distinct routes or losing samples.
+"""Grouping preserves literal routes, all evidence, and an exploration frontier."""
 
-The measured cases these encode: `/api/Cards` children answered with 2 distinct statuses across
-371 siblings (one `{id}` handler), while `/api` children answered with 5 across 462 (many real
-collections). Agreement is the evidence; disagreement must block the merge.
-"""
+import random
 
-import sys
-from pathlib import Path
+import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
-
-from hunt.endpoint_grouping import (  # noqa: E402
-    HOMOGENEOUS_SIBLINGS,
-    ID_SHAPED,
-    SPEC_DECLARED,
-    UNGROUPED,
-    group_endpoint_rows,
-)
+from api.hunt.endpoint_grouping import ID_SHAPED, SPEC_DECLARED, UNGROUPED, group_endpoint_rows
 
 
-def row(path, *, method="GET", auth="anonymous", status=401, ident=None, verdict=None, shape=""):
+def row(path, *, method="GET", auth="anonymous", status=200, ident=None,
+        verdict=None, shape="", location="query", content_type="", tested="untested"):
     return {
         "id": ident or path, "method": method, "auth_state": auth, "path": path,
         "last_http_status": status, "last_verdict": verdict, "param_shape": shape,
-        "test_status": "untested",
+        "param_location": location, "content_type": content_type, "test_status": tested,
     }
 
 
-def by_template(groups):
-    return {g.template: g for g in groups}
+def by_template(rows, **kwargs):
+    return {g.template: g for g in group_endpoint_rows(rows, **kwargs)}
 
 
-def test_junk_samples_of_one_handler_collapse_into_a_template():
-    rows = [row("/api/Cards")] + [
-        row(f"/api/Cards/{name}") for name in ("search", "admin", "2fa", "coupon", "basket")
-    ]
-    groups = by_template(group_endpoint_rows(rows))
-    assert "/api/Cards/{param}" in groups
-    collapsed = groups["/api/Cards/{param}"]
-    assert collapsed.sample_count == 5
-    assert collapsed.evidence == HOMOGENEOUS_SIBLINGS
-    # The collection itself stays its own route.
-    assert "/api/Cards" in groups
+@pytest.mark.parametrize("status", [200, 401, 403, None])
+def test_equal_statuses_never_merge_distinct_literal_collections(status):
+    paths = ["/api", "/api/Users", "/api/Cards", "/api/Feedbacks", "/api/Orders"]
+    assert set(by_template([row(path, status=status) for path in paths])) == set(paths)
 
 
-def test_distinct_collections_are_never_merged_when_responses_disagree():
-    """/api children answered with many statuses: they are separate handlers, not one {id}."""
-    rows = [row("/api")] + [
-        row("/api/Users", status=401), row("/api/Cards", status=400),
-        row("/api/Feedbacks", status=200), row("/api/Quantitys", status=500),
-        row("/api/Hints", status=404),
-    ]
-    groups = by_template(group_endpoint_rows(rows))
-    for collection in ("/api/Users", "/api/Cards", "/api/Feedbacks"):
-        assert collection in groups, f"{collection} was merged away"
-    assert "/api/{param}" not in groups
+def test_wordlist_siblings_are_not_route_templates_without_evidence():
+    paths = ["/api/cards"] + [f"/api/cards/{name}" for name in ("search", "admin", "export", "coupon")]
+    groups = group_endpoint_rows([row(path, status=401) for path in paths])
+    assert {g.template for g in groups} == set(paths)
+    assert all(g.evidence == UNGROUPED for g in groups)
 
 
-def test_an_id_shaped_segment_groups_without_needing_siblings():
-    rows = [row("/rest/basket"), row("/rest/basket/1"), row("/rest/basket/2")]
-    groups = by_template(group_endpoint_rows(rows))
-    assert groups["/rest/basket/{id}"].evidence == ID_SHAPED
-    assert groups["/rest/basket/{id}"].sample_count == 2
+def test_namespace_survives_even_when_other_siblings_qualify_for_old_merge():
+    paths = ["/api", "/api/v1", "/api/v1/users"] + [f"/api/v{i}" for i in range(2, 8)]
+    assert set(by_template([row(path) for path in paths])) == set(paths)
 
 
-def test_a_specification_template_is_the_strongest_evidence():
-    rows = [row("/api/Orders"), row("/api/Orders/abc")]
-    groups = by_template(group_endpoint_rows(rows, spec_templates=["/api/Orders/{id}"]))
-    assert groups["/api/Orders/{id}"].evidence == SPEC_DECLARED
+def test_identifier_namespace_is_not_swallowed():
+    paths = ["/reports/2024", "/reports/2024/annual", "/reports/2025"]
+    assert "/reports/2024" in by_template([row(path) for path in paths])
 
 
-def test_methods_and_auth_contexts_are_never_merged():
-    rows = [
-        row("/api/Cards/1", method="GET", auth="anonymous"),
-        row("/api/Cards/2", method="POST", auth="anonymous"),
-        row("/api/Cards/3", method="GET", auth="user1"),
-    ]
-    groups = group_endpoint_rows(rows)
-    keys = {(g.method, g.auth_state, g.template) for g in groups}
-    assert keys == {
-        ("GET", "anonymous", "/api/Cards/{id}"),
-        ("POST", "anonymous", "/api/Cards/{id}"),
-        ("GET", "user1", "/api/Cards/{id}"),
-    }
+def test_identifier_grouping_is_explicitly_tentative_and_reversible():
+    group = by_template([row("/items/1", ident="a"), row("/items/2", ident="b")])["/items/{id}"]
+    assert group.evidence == ID_SHAPED
+    assert group.as_row()["grouping_inferred"] is True
+    assert group.sample_ids == ["a", "b"]
+    assert group.sample_count == group.member_count == 2
 
 
-def test_no_sample_is_ever_discarded_so_grouping_is_reversible():
-    rows = [row("/api/Cards")] + [
-        row(f"/api/Cards/{n}", ident=f"id-{n}") for n in ("search", "admin", "2fa", "coupon")
-    ]
-    groups = by_template(group_endpoint_rows(rows))
-    collapsed = groups["/api/Cards/{param}"]
-    assert sorted(collapsed.sample_ids) == ["id-2fa", "id-admin", "id-coupon", "id-search"]
-    assert collapsed.sample_count == len(collapsed.sample_ids)
+def test_eight_hex_character_route_name_is_not_an_identifier():
+    assert "/api/deadbeef" in by_template([row("/api/deadbeef")])
 
 
-def test_identical_requests_collapse_and_are_reported():
-    rows = [row("/rest/products/search", ident="a"), row("/rest/products/search", ident="b")]
-    groups = by_template(group_endpoint_rows(rows))
-    group = groups["/rest/products/search"]
-    assert group.sample_count == 1
-    assert any("identical request" in q for q in group.open_questions)
+def test_specification_literal_wins_over_parameter_template():
+    groups = by_template([row("/items/search"), row("/items/abc")],
+                         spec_templates=["/items/search", "/items/{id}"])
+    assert set(groups) == {"/items/search", "/items/{id}"}
+    assert all(g.evidence == SPEC_DECLARED for g in groups.values())
 
 
-def test_an_unparameterised_path_keeps_its_own_identity():
-    groups = by_template(group_endpoint_rows([row("/rest/products/search")]))
-    assert groups["/rest/products/search"].evidence == UNGROUPED
+def test_slashes_and_client_routes_are_not_silently_normalized():
+    paths = ["/items/1", "/items/1/", "/#/view/1", "/#/view/2", "/items", "/items/"]
+    groups = group_endpoint_rows([row(path) for path in paths])
+    assert len(groups) == len(paths)
+    assert {r["path"] for g in groups for r in g.representatives} == set(paths)
 
 
-def test_a_group_carries_prior_results_and_open_questions():
-    rows = [row("/api/Cards")] + [
-        row(f"/api/Cards/{n}", verdict="findings" if n == "search" else None)
-        for n in ("search", "admin", "2fa", "coupon")
-    ]
-    group = by_template(group_endpoint_rows(rows))["/api/Cards/{param}"]
-    assert group.prior_results.get("findings") == 1
-    assert group.prior_results.get("untested") == 3
-    assert any("sibling responses" in q for q in group.open_questions)
-    assert any("only observed anonymously" in q for q in group.open_questions)
+def test_methods_principals_body_shapes_locations_and_types_stay_distinct():
+    variants = [{}, {"method": "POST"}, {"auth": "user1"}, {"shape": "email"},
+                {"location": "json"}, {"content_type": "application/json"}]
+    groups = group_endpoint_rows([row("/items/1", ident=str(i), **v) for i, v in enumerate(variants)])
+    assert len(groups) == len(variants)
+    assert len({g.as_row()["group_id"] for g in groups}) == len(variants)
 
 
-def test_a_child_with_its_own_children_is_a_namespace_not_an_identifier():
-    rows = [
-        row("/api"), row("/api/v1"), row("/api/v2"), row("/api/v3"), row("/api/v4"),
-        row("/api/v1/users"),
-    ]
-    groups = by_template(group_endpoint_rows(rows))
-    # /api/v1 has a child, so it must not be swallowed as an identifier of /api.
-    assert "/api/v1" in groups
+def test_json_and_form_with_same_field_names_keep_both_results():
+    groups = group_endpoint_rows([
+        row("/login", method="POST", shape="email,password", location="json",
+            content_type="application/json", ident="json", verdict="clean", tested="tested"),
+        row("/login", method="POST", shape="email,password", location="form",
+            content_type="application/x-www-form-urlencoded", ident="form", verdict="findings"),
+    ])
+    assert len(groups) == 2
+    assert {member for g in groups for member in g.sample_ids} == {"json", "form"}
+    assert groups[0].prior_results == {"findings": 1}
 
 
-def test_parameter_clusters_do_not_dominate_the_first_page():
-    """Measured live: ordering by density alone put the junk clusters back on page one."""
-    rows = [row("/api/Cards")] + [
-        row(f"/api/Cards/{n}", ident=f"junk{n}")
-        for n in ("search", "admin", "2fa", "coupon", "basket", "export")
-    ] + [row("/rest/products/search"), row("/ftp")]
+def test_duplicate_ids_and_later_findings_are_never_discarded():
+    groups = group_endpoint_rows([
+        row("/items/1", ident="a", verdict="clean", tested="tested"),
+        row("/items/1", ident="b", verdict="findings", tested="tested"),
+    ])
+    group = groups[0]
+    assert group.sample_ids == ["a", "b"]
+    assert group.prior_results == {"clean": 1, "findings": 1}
+    assert group.sample_count == 1 and group.member_count == 2
+    assert group.representatives[0]["id"] == "b"
+    assert group.as_row()["duplicate_count"] == 1
+
+
+def test_representatives_prefer_leads_but_all_samples_remain_accessible():
+    rows = [row(f"/items/{i}", ident=str(i)) for i in range(10)]
+    rows[-1]["last_verdict"] = "findings"
+    group = group_endpoint_rows(rows)[0]
+    assert len(group.representatives) == 3
+    assert group.representatives[0]["id"] == "9"
+    assert len(group.sample_ids) == len(rows)
+
+
+def test_unexplored_routes_are_not_starved_by_leads_or_clean_history():
+    rows = [row(f"/known{i}", verdict="findings", tested="tested") for i in range(20)]
+    rows += [row(f"/new{i}") for i in range(5)]
+    rows += [row(f"/clean{i}", verdict="clean", tested="tested") for i in range(20)]
     ordered = group_endpoint_rows(rows)
-    # The dense parameter cluster must not be first despite having the most samples.
-    assert ordered[0].evidence != HOMOGENEOUS_SIBLINGS
-    templates = [g.template for g in ordered]
-    assert templates.index("/api/Cards/{param}") > templates.index("/rest/products/search")
+    assert [g.frontier_state for g in ordered[:6]] == ["unresolved_lead", "unexplored"] * 3
+    assert all(g.frontier_state == "settled" for g in ordered[-20:])
 
 
-def test_a_group_with_prior_results_leads_the_frontier():
-    rows = [
-        row("/quiet/route"),
-        row("/interesting/route", verdict="findings"),
-    ]
-    ordered = group_endpoint_rows(rows)
-    assert ordered[0].template == "/interesting/route"
+def test_parameterized_routes_are_not_blanket_deprioritized():
+    rows = [row("/a/1")] + [row(f"/z{i}") for i in range(50)]
+    assert group_endpoint_rows(rows)[0].template == "/a/{id}"
+
+
+def test_clean_only_history_does_not_outrank_unexplored_work():
+    rows = [row("/clean", verdict="clean", tested="tested"), row("/new")]
+    assert [g.template for g in group_endpoint_rows(rows)] == ["/new", "/clean"]
+
+
+def test_repeated_discovery_does_not_change_frontier_rank():
+    base = [row("/a"), row("/z")]
+    repeated = base + [row("/z", ident=str(i)) for i in range(20)]
+    assert [g.template for g in group_endpoint_rows(base)] == [g.template for g in group_endpoint_rows(repeated)]
+
+
+def test_order_ids_representatives_and_results_are_input_order_independent():
+    rows = [row(f"/items/{i}", ident=str(i), verdict="findings" if i % 2 else None) for i in range(10)]
+    rows += [row("/items/1", ident="duplicate", verdict="clean", tested="tested")]
+    expected = [g.as_row() for g in group_endpoint_rows(rows)]
+    random.Random(27).shuffle(rows)
+    assert [g.as_row() for g in group_endpoint_rows(rows)] == expected
+
+
+@pytest.mark.parametrize("limit", [0, -1, 11, True, "3"])
+def test_representative_limit_is_bounded(limit):
+    with pytest.raises(ValueError):
+        group_endpoint_rows([], representatives_per_group=limit)

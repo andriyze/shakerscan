@@ -1,269 +1,194 @@
-"""Group an endpoint inventory into route templates, non-destructively.
+"""Reversible, bounded endpoint groups for the Hunt frontier.
 
-The problem this solves
------------------------
-Discovery records every probed request as its own inventory row, so a Hunt reading the frontier
-sees thousands of entries that are mostly the same handler answering junk parameters.
-``/api/Cards/search``, ``/api/Cards/admin`` and ``/api/Cards/2fa`` are not three endpoints; they are
-``GET /api/Cards/{id}`` carrying three invalid ids. Measured on a real target, 20,345 rows are 2,390
-distinct paths over a far smaller number of actual routes.
+Equal HTTP statuses do not establish a shared handler. Status-only sibling
+inference is disabled: literal routes remain separate. Identifier-shaped path
+segments are only a tentative grouping hint, never evidence of route existence.
+Client routes, trailing slashes and namespaces retain their original identity.
 
-This is a grouping problem, not a classification problem. Nothing here decides whether a route is
-"real": earlier attempts to do that failed, and an auth-gated namespace answers identically for an
-absent route and a protected one. Grouping needs no such oracle.
-
-What makes grouping safe
-------------------------
-Collapsing on shape alone is destructive. ``/api/Users``, ``/api/Cards`` and ``/api/Feedbacks`` are
-siblings under ``/api`` and would merge into ``/api/{param}``, erasing real collections. So a
-trailing segment becomes a parameter only on evidence:
-
-``spec_declared``        a supplied specification declares the template. Strongest.
-``id_shaped_segment``    the segment is an integer, UUID or long hex string -- an identifier by
-                         construction, not a route name.
-``homogeneous_siblings`` many siblings under one existing parent whose OBSERVED responses agree.
-                         Measured: ``/api/Cards`` children answer with 2 distinct statuses across
-                         371 siblings (one handler), while ``/api`` children answer with 5 across
-                         462 (many distinct handlers). Disagreement blocks the merge.
-
-Everything else keeps its own path as its template. Guessing is not evidence.
-
-Non-destructive by construction
--------------------------------
-A group never discards a sample: it carries every member id so any grouping can be drilled into or
-undone, and it records which evidence produced it. Method, authentication context and body shape are
-part of group identity and are never merged -- a POST is not a GET, and an authenticated view is not
-an anonymous one.
+Group identity includes method, authentication context, parameter shape/location
+and content type. Exact duplicates reduce sample_count, but all member IDs and
+results survive. Representatives are metadata-only; use their IDs for drill-down.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
+from itertools import zip_longest
+from typing import Any, Iterable, Mapping
 
-# An identifier by construction rather than a route name someone would author.
-_INTEGER = re.compile(r"^\d+$")
+_INTEGER = re.compile(r"^[0-9]+$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-_LONG_HEX = re.compile(r"^[0-9a-fA-F]{8,}$")
-
+_LONG_HEX = re.compile(r"^[0-9a-fA-F]{24,}$")
 SPEC_DECLARED = "spec_declared"
 ID_SHAPED = "id_shaped_segment"
+UNGROUPED = "distinct_path"
+# Retained for readers of historical output, never emitted by this implementation.
 HOMOGENEOUS_SIBLINGS = "homogeneous_siblings"
 EXACT_DUPLICATES = "identical_requests"
-UNGROUPED = "distinct_path"
-
-# Defaults chosen from measurement, not taste: the merge case showed 2 distinct statuses over
-# hundreds of siblings, the must-not-merge cases showed 5 and 6.
-DEFAULT_MIN_SIBLINGS = 4
-DEFAULT_MAX_DISTINCT_STATUSES = 2
+_LANES = ("unresolved_lead", "unexplored", "follow_up", "settled")
 
 
-def _is_id_shaped(segment: str) -> bool:
-    value = (segment or "").strip()
-    if not value:
-        return False
-    return bool(_INTEGER.match(value) or _UUID.match(value) or _LONG_HEX.match(value))
+def _variant(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return (
+        str(row.get("method") or "GET").upper(),
+        str(row.get("auth_state") or "anonymous"),
+        str(row.get("param_shape") or ""),
+        str(row.get("param_location") or ""),
+        str(row.get("content_type") or ""),
+    )
 
 
-def _parent_of(path: str) -> str:
-    trimmed = (path or "/").rstrip("/")
-    if "/" not in trimmed[1:]:
-        return ""
-    return trimmed.rsplit("/", 1)[0]
+def _lane(row: Mapping[str, Any]) -> str:
+    verdict = str(row.get("last_verdict") or "untested").lower()
+    status = str(row.get("test_status") or "").lower()
+    # Inventory findings are leads, not a second proof/verification predicate.
+    if verdict == "findings":
+        return "unresolved_lead"
+    if status in {"untested", "stale"} or verdict == "untested":
+        return "unexplored"
+    if verdict in {"clean", "exploited", "verified"} and status not in {"partial", "error"}:
+        return "settled"
+    return "follow_up"
+
+
+def _row_order(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (_LANES.index(_lane(row)), str(row.get("path") or "/"),
+            _variant(row), str(row.get("id") or ""))
 
 
 @dataclass
 class EndpointGroup:
-    """One route template plus everything a pentester needs to act on it."""
-
     method: str
     auth_state: str
     template: str
     evidence: str
+    param_shape: str = ""
+    param_location: str = ""
+    content_type: str = ""
     sample_count: int = 0
-    #: Every member, so a grouping can be inspected or undone. Never discarded.
+    member_count: int = 0
     sample_ids: list[str] = field(default_factory=list)
     representatives: list[dict[str, Any]] = field(default_factory=list)
     principal_contexts: list[str] = field(default_factory=list)
     prior_results: dict[str, int] = field(default_factory=dict)
     open_questions: list[str] = field(default_factory=list)
+    frontier_state: str = "settled"
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        return (self.method, self.auth_state, self.template, self.param_shape,
+                self.param_location, self.content_type)
 
     def as_row(self) -> dict[str, Any]:
+        group_id = hashlib.sha256(json.dumps(self.identity).encode()).hexdigest()
         return {
-            "method": self.method,
-            "auth_state": self.auth_state,
-            "route_template": self.template,
-            "grouping_evidence": self.evidence,
-            "sample_count": self.sample_count,
+            "group_id": group_id, "method": self.method, "auth_state": self.auth_state,
+            "route_template": self.template, "grouping_evidence": self.evidence,
+            "grouping_inferred": self.evidence == ID_SHAPED,
+            "param_shape": self.param_shape or None,
+            "param_location": self.param_location or None,
+            "content_type": self.content_type or None,
+            "sample_count": self.sample_count, "member_count": self.member_count,
+            "duplicate_count": self.member_count - self.sample_count,
             "representatives": self.representatives,
-            "principal_contexts": sorted(self.principal_contexts),
-            "prior_results": self.prior_results,
-            "open_questions": self.open_questions,
-            "sample_ids": self.sample_ids,
+            "principal_contexts": self.principal_contexts,
+            "prior_results": self.prior_results, "open_questions": self.open_questions,
+            "sample_ids": self.sample_ids, "frontier_state": self.frontier_state,
         }
 
 
-def _template_for(
-    row: Mapping[str, Any],
-    *,
-    spec_templates: set[str],
-    groupable_parents: set[tuple[str, str]],
-) -> tuple[str, str]:
-    """Return ``(template, evidence)`` for one row, defaulting to no grouping."""
-    path = str(row.get("path") or "/").rstrip("/") or "/"
-    method = str(row.get("method") or "GET").upper()
-    parent = _parent_of(path)
+def _template_for(path: str, spec: set[str], namespaces: set[str]) -> tuple[str, str]:
+    if "#" in path:
+        return path, UNGROUPED
+    # Explicit literal operations take precedence over a parameter declaration.
+    if path in spec:
+        return path, SPEC_DECLARED
+    if path.rstrip("/") in namespaces:
+        return path, UNGROUPED
+    suffix = "/" if path.endswith("/") else ""
+    parent, _, segment = path.rstrip("/").rpartition("/")
     if not parent:
         return path, UNGROUPED
-    segment = path.rsplit("/", 1)[1]
-
-    spec_candidate = f"{parent}/{{id}}"
-    if spec_candidate in spec_templates:
-        return spec_candidate, SPEC_DECLARED
-    if _is_id_shaped(segment):
-        return spec_candidate, ID_SHAPED
-    if (method, parent) in groupable_parents:
-        return f"{parent}/{{param}}", HOMOGENEOUS_SIBLINGS
+    candidate = f"{parent}/{{id}}{suffix}"
+    if candidate in spec:
+        return candidate, SPEC_DECLARED
+    if any(pattern.fullmatch(segment) for pattern in (_INTEGER, _UUID, _LONG_HEX)):
+        return candidate, ID_SHAPED
     return path, UNGROUPED
 
 
-def _groupable_parents(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    min_siblings: int,
-    max_distinct_statuses: int,
-) -> set[tuple[str, str]]:
-    """Parents whose children's observed responses agree well enough to be one handler.
-
-    Disagreement is the signal that they are separate routes, so it blocks the merge. A parent
-    that is not itself in the inventory is not treated as a namespace, and a child that has its
-    own children is a namespace rather than an identifier.
-    """
-    known_paths = {str(r.get("path") or "").rstrip("/") for r in rows}
-    has_children = {_parent_of(str(r.get("path") or "")) for r in rows}
-    by_parent: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
-    for row in rows:
-        path = str(row.get("path") or "").rstrip("/")
-        parent = _parent_of(path)
-        if not parent or parent not in known_paths:
-            continue
-        if path in has_children:  # a namespace, not a leaf identifier
-            continue
-        by_parent[(str(row.get("method") or "GET").upper(), parent)].append(row)
-
-    groupable: set[tuple[str, str]] = set()
-    for key, children in by_parent.items():
-        distinct_paths = {str(c.get("path") or "").rstrip("/") for c in children}
-        if len(distinct_paths) < min_siblings:
-            continue
-        statuses = {
-            int(c["last_http_status"]) for c in children
-            if c.get("last_http_status") not in (None, "")
-        }
-        if not statuses or len(statuses) > max_distinct_statuses:
-            continue
-        groupable.add(key)
-    return groupable
-
-
 def group_endpoint_rows(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    spec_templates: Iterable[str] = (),
-    min_siblings: int = DEFAULT_MIN_SIBLINGS,
-    max_distinct_statuses: int = DEFAULT_MAX_DISTINCT_STATUSES,
+    rows: Iterable[Mapping[str, Any]], *, spec_templates: Iterable[str] = (),
     representatives_per_group: int = 3,
 ) -> list[EndpointGroup]:
-    """Collapse an inventory into route-template groups without discarding any sample."""
-    materialised = [dict(r) for r in rows]
-    spec = {str(t) for t in spec_templates}
-    parents = _groupable_parents(
-        materialised, min_siblings=min_siblings, max_distinct_statuses=max_distinct_statuses,
-    )
+    """Project rows without deleting any member or promoting status similarity to a route.
 
-    # Exact duplicates first: identical request identity is one sample, however many rows carry it.
-    seen_identity: set[tuple[str, str, str, str]] = set()
-    grouped: dict[tuple[str, str, str], EndpointGroup] = {}
-    duplicate_counts: dict[tuple[str, str, str], int] = defaultdict(int)
-
+    Optional declarations apply to this input's method scope; the production
+    query does not currently supply specifications. Keep representative counts
+    bounded independently from member IDs.
+    """
+    if type(representatives_per_group) is not int or not 1 <= representatives_per_group <= 10:
+        raise ValueError("representatives_per_group must be between 1 and 10")
+    materialised = sorted((dict(row) for row in rows), key=_row_order)
+    spec = set(spec_templates)
+    namespaces = {
+        str(row.get("path") or "").rstrip("/").rpartition("/")[0]
+        for row in materialised if "#" not in str(row.get("path") or "")
+    }
+    grouped: dict[tuple[str, ...], EndpointGroup] = {}
+    seen: dict[tuple[str, ...], set[str]] = defaultdict(set)
     for row in materialised:
-        method = str(row.get("method") or "GET").upper()
-        auth = str(row.get("auth_state") or "anonymous")
-        path = str(row.get("path") or "/").rstrip("/") or "/"
-        body = str(row.get("param_shape") or "")
-        template, evidence = _template_for(
-            row, spec_templates=spec, groupable_parents=parents,
-        )
-        key = (method, auth, template)
-        identity = (method, auth, path, body)
-        if identity in seen_identity:
-            duplicate_counts[key] += 1
-            continue
-        seen_identity.add(identity)
-
-        group = grouped.get(key)
-        if group is None:
-            group = EndpointGroup(
-                method=method, auth_state=auth, template=template, evidence=evidence,
-            )
-            grouped[key] = group
-        elif group.evidence != evidence and evidence != UNGROUPED:
-            # Several evidence kinds can justify one template; record the strongest seen.
-            group.evidence = evidence if evidence == SPEC_DECLARED else group.evidence
-
-        group.sample_count += 1
+        method, auth, shape, location, content_type = _variant(row)
+        path = str(row.get("path") or "/")
+        template, evidence = _template_for(path, spec, namespaces)
+        key = (method, auth, template, shape, location, content_type)
+        if key not in grouped:
+            grouped[key] = EndpointGroup(method, auth, template, evidence, shape,
+                                         location, content_type, principal_contexts=[auth])
+        group = grouped[key]
+        group.member_count += 1
         if row.get("id") is not None:
             group.sample_ids.append(str(row["id"]))
-        if auth not in group.principal_contexts:
-            group.principal_contexts.append(auth)
-        verdict = str(row.get("last_verdict") or "") or "untested"
+        verdict = str(row.get("last_verdict") or "untested")
         group.prior_results[verdict] = group.prior_results.get(verdict, 0) + 1
+        if _LANES.index(_lane(row)) < _LANES.index(group.frontier_state):
+            group.frontier_state = _lane(row)
+        # Only the distinct-sample counter and representative list are deduplicated.
+        # IDs and results above must include later duplicate rows too.
+        if path in seen[key]:
+            continue
+        seen[key].add(path)
+        group.sample_count += 1
         if len(group.representatives) < representatives_per_group:
             group.representatives.append({
-                "path": path,
-                "param_shape": body or None,
+                "id": str(row["id"]) if row.get("id") is not None else None,
+                "path": path, "param_shape": shape or None,
+                "param_location": location or None, "content_type": content_type or None,
                 "last_http_status": row.get("last_http_status"),
-                "test_status": row.get("test_status"),
-                "last_verdict": row.get("last_verdict"),
+                "test_status": row.get("test_status"), "last_verdict": row.get("last_verdict"),
             })
-
-    for key, group in grouped.items():
-        if duplicate_counts.get(key):
+    for group in grouped.values():
+        group.sample_ids.sort()
+        group.prior_results = dict(sorted(group.prior_results.items()))
+        if group.member_count > group.sample_count:
             group.open_questions.append(
-                f"{duplicate_counts[key]} identical request(s) collapsed"
+                f"{group.member_count - group.sample_count} identical request(s) collapsed; all IDs retained"
             )
-        if group.evidence == HOMOGENEOUS_SIBLINGS:
-            group.open_questions.append(
-                "grouped from agreeing sibling responses, not a specification; "
-                "drill into sample_ids to confirm"
-            )
-        if not any(v for v in group.prior_results if v != "untested"):
-            group.open_questions.append("no sample of this template has produced a verdict yet")
+        if group.evidence == ID_SHAPED:
+            group.open_questions.append("identifier-shaped grouping is tentative; confirm through sample_ids")
+        if group.frontier_state == "unexplored":
+            group.open_questions.append("contains unexplored samples; prior results do not establish coverage")
         if group.principal_contexts == ["anonymous"]:
-            group.open_questions.append("only observed anonymously")
-
-    return sorted(grouped.values(), key=_frontier_order)
-
-
-def _frontier_order(group: EndpointGroup) -> tuple[Any, ...]:
-    """Order a frontier for someone hunting, not for someone counting duplicates.
-
-    Sorting by sample_count alone was measured against the live inventory and put the junk
-    clusters straight back on the first page -- one row each instead of hundreds, but still the
-    whole page. Density measures where discovery was most repetitive, which is precisely the
-    least interesting thing to test.
-
-    So: anything that has already produced a verdict leads, because prior evidence is the
-    strongest reason to look. Then specific routes ahead of parameter clusters, since a cluster
-    of invalid ids is one thing to try, not hundreds. Density only breaks ties.
-    """
-    has_result = any(verdict != "untested" for verdict in group.prior_results)
-    is_parameter_cluster = group.evidence == HOMOGENEOUS_SIBLINGS
-    return (
-        not has_result,          # groups with prior results first
-        is_parameter_cluster,    # specific routes before junk-parameter clusters
-        -group.sample_count,     # then the denser ones
-        group.template,
-    )
+            group.open_questions.append("only inventoried anonymously; authenticated behavior is unknown")
+    # Round-robin active lanes reserves exploration slots. Neither density nor
+    # parameterization changes rank. Completed/clean-only groups follow active work.
+    lanes: dict[str, list[EndpointGroup]] = {name: [] for name in _LANES}
+    for group in sorted(grouped.values(), key=lambda item: item.identity):
+        lanes[group.frontier_state].append(group)
+    active = [group for batch in zip_longest(*(lanes[name] for name in _LANES[:-1]))
+              for group in batch if group is not None]
+    return active + lanes["settled"]

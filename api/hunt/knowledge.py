@@ -85,48 +85,70 @@ def _filter_values(spec: QuerySpec, supplied: Mapping[str, Any]) -> dict[str, An
     return values
 
 
-#: Rows read before grouping. The grouped view is a projection over the whole inventory, so it
-#: cannot be keyset-paged; this bounds the read and the page reports when it was hit.
+#: Bounded projection, not a count of the entire inventory. Filters precede this
+#: limit. Continuation binds the selected rows' digest so changes require restart
+#: instead of making an offset silently skip/repeat groups.
 MAX_GROUPING_ROWS = 20_000
 
 
 async def _endpoint_group_page(
     conn: Any, *, target_id: Any, limit: int, cursor: str | None, scope: str,
+    values: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Collapse the endpoint inventory into route templates for the Hunt frontier.
-
-    Opt-in: ``kind="endpoints"`` is unchanged. This exists because the raw frontier is dominated
-    by repeated samples of a few handlers -- measured, 20,345 rows over 5,634 templates -- so the
-    first page a Hunt reads was mostly one handler answering junk parameters. Grouping is
-    non-destructive: every group carries its member ids, so any grouping can be drilled into.
-    """
-    rows = await conn.fetch(
-        "SELECT id, method, path, auth_state, test_status, last_verdict, param_shape, "
-        "last_http_status, priority_score FROM target_endpoints "
-        f"WHERE target_id=$1 AND COALESCE(test_status,'')<>'gone' LIMIT {MAX_GROUPING_ROWS + 1}",
-        target_id,
-    )
-    truncated = len(rows) > MAX_GROUPING_ROWS
-    groups = group_endpoint_rows([dict(r) for r in rows[:MAX_GROUPING_ROWS]])
+    """Page a deterministic, filtered projection; raw endpoint reads are unchanged."""
+    fingerprint = hashlib.sha256(json.dumps(dict(values), sort_keys=True).encode()).hexdigest()
     offset = 0
-    if cursor:
+    position: dict[str, Any] = {}
+    if cursor is not None:
         position = _decode(cursor)
-        if position.get("v") != 1 or position.get("scope") != scope:
+        offset = position.get("offset")
+        if (type(position.get("v")) is not int or position["v"] != 2
+                or position.get("scope") != scope or position.get("filter") != fingerprint
+                or type(offset) is not int or not 0 <= offset <= MAX_GROUPING_ROWS
+                or not isinstance(position.get("snapshot"), str)):
             raise KnowledgeQueryError("Cursor does not match this knowledge query")
-        offset = int(position.get("offset") or 0)
-        if offset < 0:
-            raise KnowledgeQueryError("Cursor does not match this knowledge query")
+    params: list[Any] = [target_id]
+    where = ["target_id=$1", "COALESCE(test_status,'')<>'gone'"]
+    for key, value in sorted(values.items()):
+        if key == "id":
+            try:
+                value = uuid.UUID(value)
+            except ValueError as exc:
+                raise KnowledgeQueryError("id must be a UUID") from exc
+        params.append(value)
+        placeholder = f"${len(params)}"
+        where.append(f"path ILIKE '%'||{placeholder}||'%'" if key == "path_contains"
+                     else f"{key}={placeholder}")
+    rows = [dict(row) for row in await conn.fetch(
+        "SELECT id, method, path, auth_state, test_status, last_verdict, param_shape, "
+        "param_location, content_type, last_http_status, priority_score FROM target_endpoints "
+        f"WHERE {' AND '.join(where)} ORDER BY id ASC LIMIT {MAX_GROUPING_ROWS + 1}",
+        *params,
+    )]
+    snapshot = hashlib.sha256(json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode()).hexdigest()
+    if cursor is not None and position["snapshot"] != snapshot:
+        raise KnowledgeQueryError("Grouped inventory changed; restart without a cursor")
+    truncated = len(rows) > MAX_GROUPING_ROWS
+    groups = group_endpoint_rows(rows[:MAX_GROUPING_ROWS])
+    if offset > len(groups):
+        raise KnowledgeQueryError("Cursor does not match this knowledge query")
     page = groups[offset:offset + limit]
     has_more = len(groups) > offset + limit
     return {
         "ok": True, "kind": "endpoint_groups", "supported": True,
         "count": len(page), "rows": [g.as_row() for g in page],
         "has_more": has_more,
-        "next_cursor": _encode({"v": 1, "scope": scope, "offset": offset + limit})
+        "next_cursor": _encode({"v": 2, "scope": scope, "filter": fingerprint,
+                                "snapshot": snapshot, "offset": offset + limit})
         if has_more else None,
         "group_count": len(groups),
         "sampled_requests": sum(g.sample_count for g in groups),
+        "inventory_rows_read": min(len(rows), MAX_GROUPING_ROWS),
         "inventory_truncated": truncated,
+        "snapshot_id": snapshot,
+        "grouping_scope": "filtered_inventory",
     }
 
 
@@ -137,14 +159,15 @@ async def query_knowledge_page(
 ) -> dict[str, Any]:
     kind = "receipts" if kind == "tool_receipts" else kind
     if kind == "endpoint_groups":
+        values = _filter_values(QUERIES["endpoints"], filters or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
         if device:
             return {"ok": True, "kind": kind, "supported": False, "count": 0, "rows": [],
                     "has_more": False, "next_cursor": None}
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
-            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
         return await _endpoint_group_page(
             conn, target_id=target_id, limit=limit, cursor=cursor,
-            scope=f"web:{target_id}:endpoint_groups",
+            scope=f"web:{target_id}:endpoint_groups", values=values,
         )
     if kind not in QUERIES:
         raise KnowledgeQueryError("Unsupported knowledge kind")

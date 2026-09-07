@@ -27,7 +27,7 @@ class KnowledgeDB:
                 if spec.table == table:
                     fields.update(spec.columns.split(", "))
             if table == "target_endpoints":
-                fields.update({"last_http_status"})  # read by the grouped endpoint page
+                fields.update({"last_http_status", "param_location"})  # grouped projection
             self.db.execute(f"CREATE TABLE {table} ({', '.join(fields)})")
 
     def insert(self, kind, **values):
@@ -122,15 +122,15 @@ def _endpoint(db, ident, path, *, method="GET", auth="anonymous", status=401):
               last_seen_at=STAMP, last_http_status=status)
 
 
-def test_the_grouped_page_collapses_junk_samples_but_keeps_the_collection():
+def test_the_grouped_page_collapses_identifier_samples_but_keeps_the_collection():
     db = KnowledgeDB()
     _endpoint(db, 1, "/api/Cards")
-    for i, name in enumerate(("search", "admin", "2fa", "coupon", "basket"), start=2):
+    for i, name in enumerate(("1", "2", "3", "4", "5"), start=2):
         _endpoint(db, i, f"/api/Cards/{name}")
     page_result = _grouped(db)
     templates = {row["route_template"]: row for row in page_result["rows"]}
-    assert "/api/Cards/{param}" in templates
-    assert templates["/api/Cards/{param}"]["sample_count"] == 5
+    assert "/api/Cards/{id}" in templates
+    assert templates["/api/Cards/{id}"]["sample_count"] == 5
     assert "/api/Cards" in templates          # the real collection survives
     assert page_result["group_count"] == 2
     assert page_result["sampled_requests"] == 6
@@ -139,11 +139,12 @@ def test_the_grouped_page_collapses_junk_samples_but_keeps_the_collection():
 def test_the_grouped_page_never_discards_a_sample():
     db = KnowledgeDB()
     _endpoint(db, 1, "/api/Cards")
-    for i, name in enumerate(("search", "admin", "2fa", "coupon"), start=2):
+    for i, name in enumerate(("1", "2", "3", "4"), start=2):
         _endpoint(db, i, f"/api/Cards/{name}")
-    row = next(r for r in _grouped(db)["rows"] if r["route_template"] == "/api/Cards/{param}")
+    row = next(r for r in _grouped(db)["rows"] if r["route_template"] == "/api/Cards/{id}")
     assert len(row["sample_ids"]) == 4        # every member retained for drill-down
-    assert row["grouping_evidence"] == "homogeneous_siblings"
+    assert row["grouping_evidence"] == "id_shaped_segment"
+    assert row["grouping_inferred"] is True
     assert row["representatives"]
 
 
@@ -169,3 +170,168 @@ def test_a_device_target_has_no_grouped_endpoint_surface():
     result = asyncio.run(query_knowledge_page(
         db, target_id=TARGET, kind="endpoint_groups", device=True))
     assert result["supported"] is False
+
+
+@pytest.mark.parametrize("filters,expected", [
+    ({"method": "post"}, {2}), ({"auth_state": "user1"}, {3}),
+    ({"test_status": "TESTED"}, {4}), ({"path_contains": "Two"}, {2}),
+    ({"id": str(uuid.UUID(int=3))}, {3}),
+    ({"method": "GET", "auth_state": "user1", "path_contains": "three"}, {3}),
+])
+def test_grouped_filters_are_applied_before_projection(filters, expected):
+    db = KnowledgeDB()
+    _endpoint(db, 1, "/one")
+    _endpoint(db, 2, "/two", method="POST")
+    _endpoint(db, 3, "/three", auth="user1")
+    _endpoint(db, 4, "/four")
+    db.db.execute("UPDATE target_endpoints SET test_status='tested' WHERE path='/four'")
+    result = _grouped(db, filters=filters)
+    ids = {sample for group in result["rows"] for sample in group["sample_ids"]}
+    assert ids == {str(uuid.UUID(int=i)) for i in expected}
+    assert result["grouping_scope"] == "filtered_inventory"
+
+
+@pytest.mark.parametrize("filters", [{"method": True}, {"offset": "1"},
+                                     {"id": "bad"}, {"verified_only": True}])
+def test_grouped_invalid_filters_are_not_ignored(filters):
+    with pytest.raises(KnowledgeQueryError):
+        _grouped(KnowledgeDB(), filters=filters)
+
+
+def test_grouped_filter_sql_remains_parameterized():
+    db = KnowledgeDB()
+    _endpoint(db, 1, "/one")
+    value = "' OR 1=1 --"
+    assert _grouped(db, filters={"path_contains": value})["count"] == 0
+    sql, args = db.calls[-1]
+    assert value not in sql and value in args
+
+
+def test_grouped_pages_and_drill_down_are_target_scoped(inventory):
+    result = _grouped(inventory)
+    ids = {sample for group in result["rows"] for sample in group["sample_ids"]}
+    assert str(uuid.UUID(int=1000)) not in ids
+    for sample in sorted(ids)[:3]:
+        assert page(inventory, filters={"id": sample})["rows"][0]["id"] == sample
+
+
+def test_grouped_read_preserves_body_variants_and_duplicate_evidence():
+    db = KnowledgeDB()
+    for i, location, content_type, verdict in (
+        (1, "json", "application/json", "clean"),
+        (2, "form", "application/x-www-form-urlencoded", "findings"),
+        (3, "json", "application/json", "findings"),
+    ):
+        db.insert("endpoints", id=str(uuid.UUID(int=i)), target_id=str(TARGET),
+                  method="POST", path="/login", auth_state="user1", param_shape="email,password",
+                  param_location=location, content_type=content_type, last_verdict=verdict,
+                  test_status="tested", priority_score=10, last_seen_at=STAMP)
+    result = _grouped(db)
+    assert result["count"] == 2 and result["sampled_requests"] == 2
+    assert result["inventory_rows_read"] == 3
+    assert sorted(sample for group in result["rows"] for sample in group["sample_ids"]) == [
+        str(uuid.UUID(int=i)) for i in range(1, 4)
+    ]
+    json_group = next(g for g in result["rows"] if g["param_location"] == "json")
+    assert json_group["prior_results"] == {"clean": 1, "findings": 1}
+    assert json_group["representatives"][0]["id"] == str(uuid.UUID(int=3))
+
+
+def test_grouped_capped_read_is_ordered_and_filters_precede_the_cap(monkeypatch):
+    from api.hunt import knowledge
+
+    monkeypatch.setattr(knowledge, "MAX_GROUPING_ROWS", 3)
+    db = KnowledgeDB()
+    for i in range(10, 0, -1):
+        _endpoint(db, i, f"/route{i}", auth="user1" if i > 7 else "anonymous")
+    db.db.execute("PRAGMA reverse_unordered_selects=ON")
+    result = _grouped(db)
+    assert result["inventory_truncated"] is True
+    assert {s for g in result["rows"] for s in g["sample_ids"]} == {
+        str(uuid.UUID(int=i)) for i in (1, 2, 3)
+    }
+    filtered = _grouped(db, filters={"auth_state": "user1"})
+    assert filtered["inventory_truncated"] is False
+    assert filtered["inventory_rows_read"] == 3
+    assert all(g["auth_state"] == "user1" for g in filtered["rows"])
+
+
+def test_grouped_page_walk_is_stable_across_storage_order_and_page_sizes():
+    db = KnowledgeDB()
+    for i in range(20, 0, -1):
+        _endpoint(db, i, f"/route{i}")
+    result = _grouped(db, limit=3)
+    ids = [g["group_id"] for g in result["rows"]]
+    db.db.execute("PRAGMA reverse_unordered_selects=ON")
+    while result["has_more"]:
+        result = _grouped(db, limit=4, cursor=result["next_cursor"])
+        ids.extend(g["group_id"] for g in result["rows"])
+    assert len(ids) == len(set(ids)) == 20
+
+
+def test_grouped_cursors_bind_target_filters_and_kind():
+    db = KnowledgeDB()
+    for i in range(1, 4):
+        _endpoint(db, i, f"/route{i}")
+    cursor = _grouped(db, limit=1, filters={"method": "get"})["next_cursor"]
+    # Equivalent normalized filters are accepted, different filters are not.
+    assert _grouped(db, limit=1, cursor=cursor, filters={"method": "GET"})["count"] == 1
+    for kwargs in ({"method": "POST"}, {"auth_state": "user1"}, {}):
+        with pytest.raises(KnowledgeQueryError):
+            _grouped(db, cursor=cursor, filters=kwargs)
+    with pytest.raises(KnowledgeQueryError):
+        asyncio.run(query_knowledge_page(db, target_id=OTHER, kind="endpoint_groups",
+                                        cursor=cursor, filters={"method": "GET"}))
+    with pytest.raises(KnowledgeQueryError):
+        page(db, cursor=cursor)
+
+
+@pytest.mark.parametrize("change", ["insert", "delete", "verdict", "body", "auth"])
+def test_changed_grouped_inventory_requires_restart_instead_of_skipping(change):
+    db = KnowledgeDB()
+    for i in range(1, 5):
+        _endpoint(db, i, f"/route{i}")
+    cursor = _grouped(db, limit=1)["next_cursor"]
+    if change == "insert":
+        _endpoint(db, 5, "/new")
+    elif change == "delete":
+        db.db.execute("DELETE FROM target_endpoints WHERE path='/route1'")
+    else:
+        column, value = {"verdict": ("last_verdict", "findings"),
+                         "body": ("param_shape", "email"), "auth": ("auth_state", "user1")}[change]
+        db.db.execute(f"UPDATE target_endpoints SET {column}=? WHERE path='/route4'", (value,))
+    with pytest.raises(KnowledgeQueryError, match="restart"):
+        _grouped(db, cursor=cursor)
+    assert _grouped(db)["ok"] is True
+
+
+@pytest.mark.parametrize("offset", [True, False, "1", 1.5, -1, None, {}, 20001])
+def test_grouped_cursor_offset_requires_a_bounded_integer(offset):
+    from api.hunt.knowledge import _decode, _encode
+
+    db = KnowledgeDB()
+    _endpoint(db, 1, "/one")
+    _endpoint(db, 2, "/two")
+    position = _decode(_grouped(db, limit=1)["next_cursor"])
+    position["offset"] = offset
+    with pytest.raises(KnowledgeQueryError):
+        _grouped(db, cursor=_encode(position))
+
+
+@pytest.mark.parametrize("cursor", ["", "invalid", "e30", "W10", "a" * 2049])
+def test_grouped_malformed_cursor_is_a_query_error(cursor):
+    with pytest.raises(KnowledgeQueryError):
+        _grouped(KnowledgeDB(), cursor=cursor)
+
+
+@pytest.mark.parametrize("limit", [True, 0, 501, "10"])
+def test_grouped_limits_are_validated(limit):
+    with pytest.raises(KnowledgeQueryError):
+        _grouped(KnowledgeDB(), limit=limit)
+
+
+def test_grouped_empty_inventory_is_explicit_and_has_no_cursor():
+    result = _grouped(KnowledgeDB())
+    assert result["rows"] == [] and result["group_count"] == 0
+    assert not result["has_more"] and result["next_cursor"] is None
+    assert not result["inventory_truncated"]
