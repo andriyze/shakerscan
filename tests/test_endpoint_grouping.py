@@ -128,3 +128,25 @@ def test_a_child_with_its_own_children_is_a_namespace_not_an_identifier():
     groups = by_template(group_endpoint_rows(rows))
     # /api/v1 has a child, so it must not be swallowed as an identifier of /api.
     assert "/api/v1" in groups
+
+
+def test_parameter_clusters_do_not_dominate_the_first_page():
+    """Measured live: ordering by density alone put the junk clusters back on page one."""
+    rows = [row("/api/Cards")] + [
+        row(f"/api/Cards/{n}", ident=f"junk{n}")
+        for n in ("search", "admin", "2fa", "coupon", "basket", "export")
+    ] + [row("/rest/products/search"), row("/ftp")]
+    ordered = group_endpoint_rows(rows)
+    # The dense parameter cluster must not be first despite having the most samples.
+    assert ordered[0].evidence != HOMOGENEOUS_SIBLINGS
+    templates = [g.template for g in ordered]
+    assert templates.index("/api/Cards/{param}") > templates.index("/rest/products/search")
+
+
+def test_a_group_with_prior_results_leads_the_frontier():
+    rows = [
+        row("/quiet/route"),
+        row("/interesting/route", verdict="findings"),
+    ]
+    ordered = group_endpoint_rows(rows)
+    assert ordered[0].template == "/interesting/route"

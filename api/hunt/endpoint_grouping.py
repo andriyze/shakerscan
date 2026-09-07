@@ -244,9 +244,26 @@ def group_endpoint_rows(
         if group.principal_contexts == ["anonymous"]:
             group.open_questions.append("only observed anonymously")
 
-    # Densest groups first: they are where the frontier was most repetitive.
-    return sorted(
-        grouped.values(),
-        key=lambda g: (g.sample_count, g.template),
-        reverse=True,
+    return sorted(grouped.values(), key=_frontier_order)
+
+
+def _frontier_order(group: EndpointGroup) -> tuple[Any, ...]:
+    """Order a frontier for someone hunting, not for someone counting duplicates.
+
+    Sorting by sample_count alone was measured against the live inventory and put the junk
+    clusters straight back on the first page -- one row each instead of hundreds, but still the
+    whole page. Density measures where discovery was most repetitive, which is precisely the
+    least interesting thing to test.
+
+    So: anything that has already produced a verdict leads, because prior evidence is the
+    strongest reason to look. Then specific routes ahead of parameter clusters, since a cluster
+    of invalid ids is one thing to try, not hundreds. Density only breaks ties.
+    """
+    has_result = any(verdict != "untested" for verdict in group.prior_results)
+    is_parameter_cluster = group.evidence == HOMOGENEOUS_SIBLINGS
+    return (
+        not has_result,          # groups with prior results first
+        is_parameter_cluster,    # specific routes before junk-parameter clusters
+        -group.sample_count,     # then the denser ones
+        group.template,
     )
