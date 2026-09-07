@@ -122,6 +122,123 @@ class _Dangerous:
 DANGEROUS_PICKLE = pickle.dumps(_Dangerous())
 
 
+# --- Seeded authorization fixture -------------------------------------------------------
+# A vulnerable route and its patched twin over identical data, so an authorization
+# investigation has an acceptance test: the vulnerable mode must yield a reproducible
+# cross-principal finding and the patched mode must yield none. The negative controls exist
+# because "attacker received 200" is not proof -- a public object, an expired session or an
+# unrelated collection must never produce one.
+#
+# Each collection is caller-SCOPED at its listing route (`/authz/<mode>/orders` returns only
+# the caller's orders). That is what a cross-principal differential needs: the victim's object
+# id is genuinely absent from the attacker's own baseline, so a successful read of it is
+# unambiguous. An id-addressed object with no such listing cannot be judged this way.
+AUTHZ_PRINCIPALS = {
+    "authz-token-a": {"principal": "user-a", "expired": False},
+    "authz-token-b": {"principal": "user-b", "expired": False},
+    "authz-token-expired": {"principal": "user-a", "expired": True},
+}
+
+# Owner-scoped objects. user-a owns 1001/1002; user-b owns 2001.
+# These carry realistic private content on purpose. A cross-principal read is only worth
+# reporting when it discloses something -- the proof engine requires PII-shaped values or
+# sensitive field names before it will call a 200 a violation, which is the right guard. An
+# order object in any real application carries the customer's identity and address, so the
+# fixture models that rather than an empty shell. The public notices below deliberately carry
+# none of it, which is what keeps them a valid negative control.
+AUTHZ_ORDERS = {
+    "1001": {"id": "1001", "owner": "user-a", "email": "alice.harper@example.test",
+             "address": "12 Alder Lane, Bristol", "amount": "41.50",
+             "note": "user-a private order"},
+    "1002": {"id": "1002", "owner": "user-a", "email": "alice.harper@example.test",
+             "address": "12 Alder Lane, Bristol", "amount": "12.00",
+             "note": "user-a second order"},
+    "2001": {"id": "2001", "owner": "user-b", "email": "brian.okafor@example.test",
+             "address": "9 Beech Road, Leeds", "amount": "99.99",
+             "note": "user-b private order"},
+}
+# Deliberately ownerless: readable by everyone by design. A differential that calls this a
+# finding is producing a false positive.
+AUTHZ_NOTICES = {
+    "9001": {"id": "9001", "owner": None, "title": "public maintenance notice"},
+    "9002": {"id": "9002", "owner": None, "title": "public release notice"},
+}
+# A shared object that DOES carry identity-shaped content. Without this, the public control
+# could pass merely because it discloses nothing, leaving the ownership logic untested: this
+# one is indistinguishable from a leaked private record by content alone, and must still not
+# be called a violation, because every principal is entitled to it and it appears in every
+# principal's own listing.
+AUTHZ_DIRECTORY = {
+    "7001": {"id": "7001", "owner": None, "name": "Support desk",
+             "email": "dana.whitfield@example.test", "address": "1 Civic Square, Leeds"},
+    "7002": {"id": "7002", "owner": None, "name": "Facilities",
+             "email": "sam.ellery@example.test", "address": "2 Civic Square, Leeds"},
+}
+
+
+def _authz_caller(handler: http.server.BaseHTTPRequestHandler):
+    """Resolve the bearer to a principal. Returns (principal, error_code)."""
+    raw = str(handler.headers.get("Authorization") or "")
+    token = raw[7:].strip() if raw.lower().startswith("bearer ") else ""
+    record = AUTHZ_PRINCIPALS.get(token)
+    if record is None:
+        return None, 401
+    if record["expired"]:
+        return None, 401
+    return record["principal"], None
+
+
+def _authz_route(handler: http.server.BaseHTTPRequestHandler, path: str) -> bool:
+    """Serve the authorization fixture. Returns True when the path was handled."""
+    if not path.startswith("/authz/"):
+        return False
+    parts = [segment for segment in path.split("/") if segment][1:]
+    if not parts:
+        handler._send(404, {"error": "not_found"})
+        return True
+
+    caller, error = _authz_caller(handler)
+    if error is not None:
+        handler._send(error, {"error": "authentication_required"})
+        return True
+
+    # Public collection: no owner, readable by any authenticated caller. Negative control.
+    if parts[0] == "public":
+        collections = {"notices": AUTHZ_NOTICES, "directory": AUTHZ_DIRECTORY}
+        if len(parts) == 2 and parts[1] in collections:
+            handler._send(200, {parts[1]: list(collections[parts[1]].values())})
+            return True
+        if len(parts) == 3 and parts[1] in collections:
+            item = collections[parts[1]].get(parts[2])
+            handler._send(200 if item else 404, item or {"error": "not_found"})
+            return True
+        handler._send(404, {"error": "not_found"})
+        return True
+
+    mode = parts[0]
+    if mode not in {"vuln", "safe"} or len(parts) < 2 or parts[1] != "orders":
+        handler._send(404, {"error": "not_found"})
+        return True
+
+    # Caller-scoped listing: the attacker's own baseline for this collection.
+    if len(parts) == 2:
+        mine = [o for o in AUTHZ_ORDERS.values() if o["owner"] == caller]
+        handler._send(200, {"orders": mine})
+        return True
+
+    order = AUTHZ_ORDERS.get(parts[2])
+    if order is None:
+        handler._send(404, {"error": "not_found"})
+        return True
+    if mode == "safe" and order["owner"] != caller:
+        # The patched twin: ownership is enforced at the object route.
+        handler._send(403, {"error": "forbidden"})
+        return True
+    # The vulnerable twin: the object is returned to any authenticated caller.
+    handler._send(200, {"order": order})
+    return True
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     def _send(
         self,
@@ -209,6 +326,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             })
             return
         _record_traffic(self, "GET")
+        if _authz_route(self, p):
+            return
         if p == "/":
             self._send(200, """<!doctype html><html><head>
 <script src="/assets/parity-app.js"></script></head><body>
