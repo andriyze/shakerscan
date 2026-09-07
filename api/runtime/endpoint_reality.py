@@ -1,30 +1,38 @@
-"""Three-valued judgement of whether an inventoried endpoint is a real route.
+"""Three-valued judgement of whether an observed response distinguishes a route. EXPERIMENTAL.
 
-Why this is not a boolean
--------------------------
-Discovery writes every probed path into the inventory the Hunt later reads, so wordlist guesses
-sit beside real routes. The obvious fix -- classify each row real/phantom and drop the phantoms --
-cannot be done soundly, and two measured results say so:
+Status
+------
+This is an experimental component. It is NOT wired into the production reachability filter and has
+NOT demonstrated any improvement over it. An earlier version of this docstring claimed it reduced
+"real endpoints demoted 1 -> 0" and "client routes demoted 2 -> 0"; those numbers came from scoring
+the low-level ``_soft404_matches`` matcher, not the shipping ``filter_reachable_worklist``, which
+already keeps fragment routes and already drops only GET entries so a method-specific route
+survives. Measured properly against the labeled sample, production made no errors for this module
+to fix. The comparison was invalid and the claim is withdrawn.
 
-* An evidence-based ranking (attempts, verdicts, reachability) promoted a wordlist phantom to the
-  top of the frontier, because a probed phantom acquires attempts and a verdict whenever the app
-  answers it.
-* The existing decoy comparison identified 2 of 7 phantoms on a labeled sample and wrongly demoted
-  a real route. Its failure is structural: under an auth-gated prefix the app returned exactly
-  ``401 / 83 bytes`` for both the real protected routes and the wordlist guesses.
+What it may still be for
+------------------------
+Production learns its not-found control only at the first path segment. If controls are ever learned
+deeper -- the current candidate experiment -- a real protected route and an absent one under the
+same auth-gated namespace both answer with the same auth status, and a deeper control would start
+demoting real routes. The ``auth_masks_existence`` abstention below exists for that case. Until
+deeper controls are actually evaluated, this module earns nothing.
 
-When authentication middleware short-circuits before routing, "absent" and "protected" are the same
-response, and no comparison of that response can separate them. HTTP also permits answering 404 for
-an existing but forbidden resource. The correct output in those cases is **unknown**, and a
-classifier that says "phantom" there is not conservative, it is wrong.
+Read the outcomes as OBSERVATIONS, not proof of existence
+---------------------------------------------------------
+``REAL`` means only "this response is distinguishable from the control", and ``PHANTOM`` means only
+"this response is indistinguishable from the control, or the server said 404". Neither establishes
+that a route exists or does not: HTTP permits 404 for an existing forbidden resource, and an
+unmatched response can still be an invalid sample of a perfectly real route template. A caller that
+needs existence must not read these as existence.
 
-So this module returns one of ``real`` / ``phantom`` / ``unknown`` with the reason, and it abstains
-whenever the control is missing or the observation cannot discriminate. Callers persist the
-evidence and the outcome; they must not collapse ``unknown`` into either side. Ordering may demote
-an uncertain endpoint, but nothing here licenses deleting it -- an uncertain lead the pentester can
-still see is far cheaper than a real endpoint silently removed.
-
-Every rule is derived from the observation itself, never from route names or per-application facts.
+Route templates versus request samples
+--------------------------------------
+Much of what looks like phantom endpoints is not separate endpoints at all. ``/api/Cards/search`` is
+the real route ``/api/Cards/{id}`` carrying an invalid id. On the measured inventory 2,390 distinct
+paths collapse to roughly 369 templates, so the dominant problem is GROUPING, not classification.
+This module judges one observed request; it says nothing about which template that request belongs
+to, and it should not be used as a de-noising strategy on its own.
 """
 
 from __future__ import annotations
