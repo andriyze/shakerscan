@@ -209,7 +209,11 @@ class HuntQueryRequest(BaseModel):
     kind: Literal[
         "summary", "endpoints", "findings", "principals", "services", "scans",
         "collections", "candidates", "notes", "receipts", "hypotheses",
-        "graph_nodes", "graph_edges"
+        "graph_nodes", "graph_edges",
+        # Opt-in grouped frontier: the same inventory collapsed into route templates, so the
+        # first page is not dominated by repeated samples of one handler. "endpoints" is
+        # unchanged for callers that want raw samples.
+        "endpoint_groups",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)

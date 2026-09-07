@@ -26,6 +26,8 @@ class KnowledgeDB:
             for spec in QUERIES.values():
                 if spec.table == table:
                     fields.update(spec.columns.split(", "))
+            if table == "target_endpoints":
+                fields.update({"last_http_status"})  # read by the grouped endpoint page
             self.db.execute(f"CREATE TABLE {table} ({', '.join(fields)})")
 
     def insert(self, kind, **values):
@@ -103,3 +105,67 @@ def test_unsupported_surface_is_not_a_clean_empty_result(inventory):
 def test_invalid_filters_are_not_silently_ignored(inventory, filters):
     with pytest.raises(KnowledgeQueryError):
         page(inventory, "findings", filters=filters)
+
+
+# --- Grouped endpoint frontier (opt-in) ------------------------------------------------
+# The raw frontier is dominated by repeated samples of a few handlers. The grouped view
+# collapses them into route templates without discarding any sample.
+
+
+def _grouped(db, **kwargs):
+    return asyncio.run(query_knowledge_page(db, target_id=TARGET, kind="endpoint_groups", **kwargs))
+
+
+def _endpoint(db, ident, path, *, method="GET", auth="anonymous", status=401):
+    db.insert("endpoints", id=str(uuid.UUID(int=ident)), target_id=str(TARGET), method=method,
+              path=path, auth_state=auth, test_status="untested", priority_score=10,
+              last_seen_at=STAMP, last_http_status=status)
+
+
+def test_the_grouped_page_collapses_junk_samples_but_keeps_the_collection():
+    db = KnowledgeDB()
+    _endpoint(db, 1, "/api/Cards")
+    for i, name in enumerate(("search", "admin", "2fa", "coupon", "basket"), start=2):
+        _endpoint(db, i, f"/api/Cards/{name}")
+    page_result = _grouped(db)
+    templates = {row["route_template"]: row for row in page_result["rows"]}
+    assert "/api/Cards/{param}" in templates
+    assert templates["/api/Cards/{param}"]["sample_count"] == 5
+    assert "/api/Cards" in templates          # the real collection survives
+    assert page_result["group_count"] == 2
+    assert page_result["sampled_requests"] == 6
+
+
+def test_the_grouped_page_never_discards_a_sample():
+    db = KnowledgeDB()
+    _endpoint(db, 1, "/api/Cards")
+    for i, name in enumerate(("search", "admin", "2fa", "coupon"), start=2):
+        _endpoint(db, i, f"/api/Cards/{name}")
+    row = next(r for r in _grouped(db)["rows"] if r["route_template"] == "/api/Cards/{param}")
+    assert len(row["sample_ids"]) == 4        # every member retained for drill-down
+    assert row["grouping_evidence"] == "homogeneous_siblings"
+    assert row["representatives"]
+
+
+def test_the_grouped_page_pages_without_losing_or_repeating_groups():
+    db = KnowledgeDB()
+    for i in range(1, 31):
+        _endpoint(db, i, f"/svc{i}/thing")
+    first = _grouped(db, limit=10)
+    second = _grouped(db, limit=10, cursor=first["next_cursor"])
+    assert first["count"] == 10 and first["has_more"]
+    seen = [r["route_template"] for r in first["rows"] + second["rows"]]
+    assert len(seen) == len(set(seen)) == 20
+
+
+def test_the_raw_endpoint_view_is_unchanged_by_the_grouped_one(inventory):
+    """Grouping is opt-in: kind="endpoints" still returns individual samples."""
+    assert page(inventory)["kind"] == "endpoints"
+    assert page(inventory)["count"] == 100
+
+
+def test_a_device_target_has_no_grouped_endpoint_surface():
+    db = KnowledgeDB()
+    result = asyncio.run(query_knowledge_page(
+        db, target_id=TARGET, kind="endpoint_groups", device=True))
+    assert result["supported"] is False
