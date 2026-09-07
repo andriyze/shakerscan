@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -665,6 +666,9 @@ _SOFT404_MAX_PREFIXES = 16
 _SOFT404_DECOY_TOKENS = ("zz9-shakerscan-probe-404a7", "zz9-shakerscan-probe-404a7/qx8w2")
 
 
+logger = logging.getLogger(__name__)
+
+
 def _soft404_enabled() -> bool:
     return str(os.environ.get("ASM_SOFT404_DETECT", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
@@ -893,7 +897,17 @@ async def filter_reachable_worklist(
 
     probe_paths = [p for p in by_path if p != "__unparsed__"]
     if len(probe_paths) > max_probe:
-        return entries  # too many to probe within budget; don't block, keep all
+        # Too many to probe within budget: keep everything rather than block ingestion.
+        # This silently disables reality filtering for the whole batch, so every phantom
+        # in it reaches the inventory and later the Hunt frontier. Say so: without this
+        # line there is no way to tell from the outside whether the filter ran, and
+        # "does real ingestion exceed the limit?" is unanswerable after the fact.
+        logger.warning(
+            "asm reachability filter skipped: %d unique paths exceeds max_probe=%d; "
+            "keeping all entries unfiltered for %s",
+            len(probe_paths), max_probe, base_url,
+        )
+        return entries
 
     auth_config = _probe_auth_curl_config(options)
     sem = asyncio.Semaphore(max(1, concurrency))

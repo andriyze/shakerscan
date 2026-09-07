@@ -1519,3 +1519,19 @@ def test_probe_path_status_keeps_auth_off_argv(monkeypatch):
     assert "secret-token-xyz" not in " ".join(captured["cmd"])
     assert "-K" in captured["cmd"] and "-" in captured["cmd"]
     assert b"secret-token-xyz" in (captured["stdin"] or b"")
+
+
+def test_the_reachability_filter_says_so_when_it_disables_itself(caplog):
+    """Above max_probe the filter keeps every entry, which silently lets a whole batch of
+    phantoms into the inventory. It must announce that, or "did ingestion exceed the
+    limit?" cannot be answered after the fact."""
+    import asyncio as _asyncio
+
+    worklist = [f"GET /p{i}" for i in range(6)]
+    with caplog.at_level("WARNING"):
+        kept = _asyncio.run(a.filter_reachable_worklist(
+            "https://example.test", worklist, max_probe=3,
+        ))
+    assert kept == worklist                     # nothing dropped
+    assert "max_probe=3" in caplog.text         # and the skip is visible
+    assert "6 unique paths" in caplog.text
