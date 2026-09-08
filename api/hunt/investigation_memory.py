@@ -278,11 +278,21 @@ class InvestigationMemory:
     def ownership_of(self, collection: str, identifier: str) -> dict[str, Any]:
         """What is known about who owns an object. Absent evidence yields `unknown`."""
         subject = object_key(collection, identifier)
+        claims = []
         for edge in self._store.edges(self._target_id, EDGE_OWNS):
             if edge.get("dst_key") == subject:
                 attributes = dict(edge.get("attributes") or {})
                 attributes["principal"] = str(edge.get("src_key", "")).removeprefix("principal:")
-                return attributes
+                claims.append(attributes)
+        if len({claim["principal"] for claim in claims}) > 1:
+            return {
+                "principal": None,
+                "certainty": UNKNOWN,
+                "basis": "multiple ownership claims require reconciliation; shared access is possible",
+                "claims": sorted(claims, key=lambda claim: claim["principal"]),
+            }
+        if claims:
+            return claims[0]
         return {"principal": None, "certainty": UNKNOWN, "basis": "no ownership evidence recorded"}
 
     def route_conclusion(self, method: str, template: str) -> dict[str, Any]:

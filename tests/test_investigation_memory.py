@@ -116,6 +116,22 @@ def test_a_successful_read_is_recorded_as_access_not_authorization(memory):
     assert memory.ownership_of("orders", "1001")["certainty"] == UNKNOWN
 
 
+@pytest.mark.parametrize("owners", [("user-a", "user-b"), ("user-b", "user-a")])
+def test_multiple_ownership_claims_never_choose_first_row(memory, owners):
+    for owner in owners:
+        memory.claim_ownership(OwnershipClaim(
+            collection="orders", identifier="1001", principal=owner,
+            basis=f"fixture evidence for {owner}", certainty=CONFIRMED,
+        ))
+    ownership = memory.ownership_of("orders", "1001")
+    assert ownership["principal"] is None
+    assert ownership["certainty"] == UNKNOWN
+    assert [claim["principal"] for claim in ownership["claims"]] == ["user-a", "user-b"]
+    assert all(claim["certainty"] == CONFIRMED for claim in ownership["claims"])
+    assert "shared access is possible" in ownership["basis"]
+    assert memory.ownership_of("invoices", "1001")["certainty"] == UNKNOWN
+
+
 def test_ownership_is_unknown_until_something_asserts_it(memory):
     assert memory.ownership_of("orders", "4242") == {
         "principal": None, "certainty": UNKNOWN,
