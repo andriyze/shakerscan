@@ -75,6 +75,27 @@ def test_public_hunt_projection_is_metadata_only_and_legacy_fail_closed():
     assert legacy["capabilities"] == []
 
 
+@pytest.mark.parametrize("value", [None, "secret-not-an-identity", "A" * 32, {}, ["a" * 32]])
+def test_public_experiment_reference_filters_invalid_stored_values(value):
+    row = {"input_summary": {"experiment_key": value}, "result_summary": {}}
+    assert public_hunt_action(row)["experiment_key"] is None
+    assert public_hunt_action_trace(row)["experiment_key"] is None
+    assert "secret-not-an-identity" not in json.dumps(public_hunt_action_trace(row))
+
+
+def test_action_trace_keeps_experiment_association_without_claiming_proof():
+    action_id = uuid.uuid4()
+    row = {
+        "id": action_id, "status": "running",
+        "input_summary": {"experiment_key": "a" * 32}, "result_summary": {},
+    }
+    trace = public_hunt_action_trace(row)
+    assert trace["action_id"] == str(action_id)
+    assert trace["experiment_key"] == "a" * 32
+    assert trace["status"] == "running"
+    assert trace["result"]["ok"] is None
+
+
 def test_public_hunt_action_projection_omits_inputs_and_arbitrary_result_content():
     scan_id = uuid.uuid4()
     finding_id = uuid.uuid4()
@@ -274,7 +295,7 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
                 "id": uuid.uuid4(),
                 "capability_name": "collections.inspect",
                 "status": "completed",
-                "input_summary": {},
+                "input_summary": {"experiment_key": "a" * 32},
                 "result_summary": {},
                 "receipt_id": uuid.uuid4(),
                 "started_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
@@ -286,6 +307,7 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
 
     assert len(result["actions"]) == 1
     assert result["actions"][0]["capability_name"] == "collections.inspect"
+    assert result["actions"][0]["experiment_key"] == "a" * 32
     assert result["outcome_summary"] == {
         "schema_version": "hunt-outcome-summary/v3",
         "capability_calls": 0,
