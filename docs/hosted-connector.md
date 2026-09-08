@@ -41,3 +41,30 @@ the user's coding client may send it to its model provider.
 Hunt requires a later, reviewed hosted execution grant, target-bound admission, shared
 capacity accounting, cancellation and reconnection tests. Merely allowing a remote API
 origin or changing an environment variable does not enable hosted Hunt.
+
+## Remote Hunt integration target (not implemented)
+
+The intended `shakerscan` CLI experience is to select a remote workspace, authenticate
+through its browser pairing flow, and use the existing Hunt tools from Codex, Claude,
+or OpenCode through a local stdio MCP server. These are product requirements, not new
+commands available in this preview. Keep local scanner startup optional: connecting to
+a hosted workspace must not start Docker or install a second execution engine.
+
+The remote gateway owns account access, tenant isolation and commercial admission.
+The public engine continues to own target binding, execution budgets, approvals,
+capability execution, evidence and proof. The coding client supplies the planner;
+disconnecting it does not imply that an autonomous planner continues remotely.
+
+Before advertising any Hunt tool, negotiate both workspace capabilities and the existing
+`/hunts/contract`. A read-only connection must never become an execution grant merely
+because the server later enables Hunt. Require a separately reviewed execution scope.
+Persist the selected origin and run ID, not target credentials or raw evidence. Reconnect
+by reading authoritative run state; never retry an ambiguous start as a new run. If the
+current start contract cannot reconcile that ambiguity, add and test the smallest generic
+idempotency extension upstream before enabling hosted starts.
+
+Release acceptance must exercise expiry, revocation, cancellation, interrupted starts,
+resume without duplicate work, tenant/scope denial and bounded execution with evidence.
+Keep all remote behavior opt-in and regression-test normal standalone Hunt. A connector
+to hosted execution is not a runner into the customer's private network; that requires
+a separate outbound runner design and placement policy.
