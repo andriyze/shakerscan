@@ -547,6 +547,41 @@ def test_mcp_forwards_experiment_reference_outside_capability_input():
     assert "experiment_key" not in client.calls[-1][2]["input"]
 
 
+def test_lost_capability_response_preserves_generated_retry_identity_without_secret_errors():
+    class LostResponse(ManifestHuntClient):
+        lose = True
+
+        def request_json(self, method, path, payload=None):
+            result = super().request_json(method, path, payload)
+            if method == "POST" and self.lose:
+                self.lose = False
+                raise mcp.MCPError(-32002, "upstream-secret", {"password": "must-not-leak"})
+            return result
+
+    client = LostResponse()
+    arguments = {
+        "hunt_id": client.HUNT_ID, "capability_name": "http.request",
+        "experiment_key": "a" * 32, "input": {"method": "GET", "path": "/"},
+    }
+    with pytest.raises(mcp.MCPError) as raised:
+        client.call_tool("shakerscan_hunt_capability", arguments)
+    error = raised.value
+    assert "upstream-secret" not in error.message
+    assert "must-not-leak" not in json.dumps(error.data)
+    assert error.data["outcome"] == "unknown"
+    assert error.data["experiment_key"] == "a" * 32
+    assert error.data["mcp_generated_idempotency_key"] is True
+    assert mcp._error_response(1, error)["error"]["data"]["mcp_idempotency_key"] == (
+        error.data["mcp_idempotency_key"]
+    )
+    assert len(client.action_by_key) == 1
+    replay = client.call_tool("shakerscan_hunt_capability", {
+        **arguments, "idempotency_key": error.data["mcp_idempotency_key"],
+    })
+    assert replay["structuredContent"]["idempotent_replay"] is True
+    assert len(client.action_by_key) == 1
+
+
 @pytest.mark.parametrize(
     ("client", "arguments", "message"),
     [

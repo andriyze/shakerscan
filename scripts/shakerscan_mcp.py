@@ -346,6 +346,7 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
             "idempotency_key": {
                 "type": "string", "minLength": 8, "maxLength": 200,
                 "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+                "description": "Persist a caller key before submission for process-crash recovery. Reuse it with unchanged input after uncertain responses.",
             },
         },
         ("hunt_id", "capability_name"),
@@ -823,7 +824,22 @@ class ArsenalClient:
                     "input": capability_input,
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
-            result = self.request_json(hunt_tool.method, path, payload or None)
+            try:
+                result = self.request_json(hunt_tool.method, path, payload or None)
+            except MCPError as exc:
+                if name != "shakerscan_hunt_capability":
+                    raise
+                # The POST may have been admitted before its response was lost.
+                # Preserve recovery identity, never raw upstream error bodies or inputs.
+                raise MCPError(exc.code, "Hunt capability response was not confirmed", {
+                    "outcome": "unknown",
+                    "hunt_id": hunt_id,
+                    "capability_name": capability_name,
+                    "mcp_idempotency_key": payload["idempotency_key"],
+                    "mcp_generated_idempotency_key": generated_idempotency_key is not None,
+                    **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
+                    "recovery": "Read Hunt action history; if retrying, use the same key and unchanged input. Do not submit a new key.",
+                }) from exc
             if name == "shakerscan_hunt_capability":
                 result = {
                     **result,
