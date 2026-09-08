@@ -826,7 +826,9 @@ class DatabaseNeutralScanActionDispatcher:
                     if action.action_id == "baseline.http" else None
                 ),
                 principal_slot=(
-                    "primary" if primary.authenticated else "anonymous"
+                    "primary"
+                    if action.action_id == "baseline.http" and primary.authenticated
+                    else "anonymous"
                 ),
             ))
             request = (
