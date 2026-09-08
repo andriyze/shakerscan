@@ -106,6 +106,10 @@ after their execution lease expires, only against the currently configured origi
 It retains unknown intent, fences concurrent resume, and preserves cadence while
 recording accepted receipts. Real PostgreSQL fixtures cover these cases; production
 credential provisioning, deployment and live lifecycle acceptance remain pending.
+Active retries also perform receipt lookup before POSTing. Authentication failures,
+unrecognized 404s and unknown outcomes retain pending intent instead of becoming
+denials. Only the configured gateway's explicit missing-record response permits
+another same-key admission attempt; a fresh occurrence is dispatched normally.
 Only validated normal passive schedules are currently translated to public Scan
 requests; unsupported option fields are rejected rather than silently dropped.
 An accepted occurrence stamps the schedule's last-run time atomically with its

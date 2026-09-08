@@ -72,7 +72,7 @@ class ManagedScheduleDispatcher:
                         "GET", self._origin + "/_hosted/schedule-dispatches/" + key,
                         headers={"Authorization": "Bearer " + self._token},
                     ) as response:
-                        if response.status_code != 200:
+                        if response.status_code not in {200, 404}:
                             return DispatchOutcome("retry", "admission_unconfirmed")
                         body = bytearray()
                         async for chunk in response.aiter_bytes():
@@ -80,6 +80,12 @@ class ManagedScheduleDispatcher:
                             if len(body) > 16384:
                                 return DispatchOutcome("retry", "invalid_receipt")
                         data = json.loads(body)
+                        if response.status_code == 404:
+                            # The deployed gateway's specific missing-record response;
+                            # generic proxy/old-version 404s are not evidence of absence.
+                            if data == {"detail": "No local admission receipt"}:
+                                return DispatchOutcome("retry", "receipt_missing")
+                            return DispatchOutcome("retry", "admission_unconfirmed")
                         if not isinstance(data, dict) or data.get("schema_version") != "schedule-admission/v1":
                             return DispatchOutcome("retry", "invalid_receipt")
                         if data.get("state") == "accepted":

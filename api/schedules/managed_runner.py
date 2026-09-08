@@ -64,11 +64,15 @@ async def run_due(pool, *, dispatcher=None, now=None):
             )
             if occurrence is None:
                 continue
-            outcome = await dispatcher.dispatch(
-                str(schedule["id"]),
-                str(occurrence["id"]),
-                occurrence["payload"],
-            )
+            outcome = None
+            if not occurrence["new_occurrence"]:
+                outcome = await dispatcher.lookup(str(schedule["id"]), str(occurrence["id"]))
+            if outcome is None or outcome.code == "receipt_missing":
+                outcome = await dispatcher.dispatch(
+                    str(schedule["id"]),
+                    str(occurrence["id"]),
+                    occurrence["payload"],
+                )
             next_run = None
             if outcome.state != "retry":
                 next_run = schedule_ops.schedule_next_run_at(schedule)

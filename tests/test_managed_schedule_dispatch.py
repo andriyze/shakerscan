@@ -88,3 +88,13 @@ def test_lookup_never_posts_or_treats_missing_receipt_as_denial(status, body, ex
     assert str(seen[0].url) == (
         "https://tenant.test/_hosted/schedule-dispatches/" + occurrence_key(SCHEDULE, OCCURRENCE)
     )
+
+
+def test_only_explicit_gateway_absence_allows_active_retry():
+    dispatcher = ManagedScheduleDispatcher(
+        "https://tenant.test", "fixture-only", transport=httpx.MockTransport(
+            lambda _: httpx.Response(404, json={"detail": "No local admission receipt"})
+        ),
+    )
+    outcome = asyncio.run(dispatcher.lookup(SCHEDULE, OCCURRENCE))
+    assert outcome.state == "retry" and outcome.code == "receipt_missing"

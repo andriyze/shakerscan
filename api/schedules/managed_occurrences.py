@@ -74,6 +74,7 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
             raise ValueError("Pending occurrence requires original gateway reconciliation")
         if row and row["lease_until"] and row["lease_until"] > now:
             return None
+        created = row is None
         if not row:
             if not schedule["next_run_at"] or schedule["next_run_at"] > now:
                 return None
@@ -96,6 +97,7 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
             row["id"],
         )
         result = dict(row)
+        result["new_occurrence"] = created
         if isinstance(result["payload"], str):
             result["payload"] = json.loads(result["payload"])
         return result

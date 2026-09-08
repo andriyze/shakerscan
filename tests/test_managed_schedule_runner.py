@@ -41,7 +41,7 @@ def test_managed_dispatch_uses_persisted_payload_and_receipt(monkeypatch, state,
     persisted = {"target": "https://example.test", "budget_profile": "fast"}
     init = AsyncMock()
     claim = AsyncMock(
-        return_value={"id": occurrence_id, "lease_id": lease_id, "payload": persisted}
+        return_value={"id": occurrence_id, "lease_id": lease_id, "payload": persisted, "new_occurrence": True}
     )
     settle = AsyncMock(return_value=True)
     monkeypatch.setattr(runner.occurrences, "initialize", init)
@@ -142,3 +142,33 @@ def test_real_scheduler_entrypoint_routes_before_local_queue(monkeypatch, manage
         with pytest.raises(LocalPathReached):
             asyncio.run(namespace["run_due_schedules"](None))
     callback.assert_awaited_once_with(None)
+
+
+@pytest.mark.parametrize("state,code", [
+    ("retry", "admission_unconfirmed"), ("retry", "receipt_missing"),
+    ("accepted", "admitted"), ("denied", "admission_denied"),
+])
+def test_existing_occurrence_looks_up_before_any_post(monkeypatch, state, code):
+    now = datetime.now(timezone.utc)
+    schedule_id, occurrence_id, lease_id = uuid4(), uuid4(), uuid4()
+    monkeypatch.setattr(runner.occurrences, "initialize", AsyncMock())
+    monkeypatch.setattr(runner.occurrences, "fetch_dispatchable", AsyncMock(return_value=[{"id": schedule_id}]))
+    payload = {"target": "https://example.test", "policy": {"active_testing": False}}
+    monkeypatch.setattr(runner.occurrences, "claim", AsyncMock(return_value={
+        "id": occurrence_id, "lease_id": lease_id, "payload": payload, "new_occurrence": False,
+    }))
+    settle = AsyncMock()
+    monkeypatch.setattr(runner.occurrences, "settle", settle)
+    monkeypatch.setattr(runner.schedule_ops, "schedule_next_run_at", lambda _: now)
+    outcome = DispatchOutcome(state, code, str(uuid4()) if state == "accepted" else None)
+    dispatcher = types.SimpleNamespace(
+        origin="https://gateway.test", lookup=AsyncMock(return_value=outcome),
+        dispatch=AsyncMock(return_value=DispatchOutcome("retry", "admission_unconfirmed")),
+    )
+    assert asyncio.run(runner.run_due(None, dispatcher=dispatcher, now=now)) is True
+    dispatcher.lookup.assert_awaited_once_with(str(schedule_id), str(occurrence_id))
+    if code == "receipt_missing":
+        dispatcher.dispatch.assert_awaited_once_with(str(schedule_id), str(occurrence_id), payload)
+    else:
+        dispatcher.dispatch.assert_not_awaited()
+    assert settle.await_args.kwargs["state"] == ("retry" if code == "receipt_missing" else state)

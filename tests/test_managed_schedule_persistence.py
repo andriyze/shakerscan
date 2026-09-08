@@ -58,6 +58,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
             )
             assert sum(x is not None for x in claims) == 1
             first = next(x for x in claims if x)
+            assert first["new_occurrence"] is True
             await pool.close()
             pool = await asyncpg.create_pool(
                 dsn, server_settings={"search_path": schema}
@@ -77,6 +78,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 pool, schedule, "https://gateway.test", invalid_edit, now=later
             )
             assert second["id"] == first["id"]
+            assert second["new_occurrence"] is False
             assert second["payload"] == payload
             assert second["gateway_origin"] == "https://gateway.test"
             assert not await store.settle(
