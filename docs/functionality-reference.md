@@ -1510,8 +1510,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 404 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 338 | `api/**/*.py` |
+| Public REST operations | 405 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 339 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1853,6 +1853,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan_endpoint` |
 | `POST` | `/scans/batch` | `submit_batch_endpoint` |
+| `GET` | `/scans/dispatch-receipts/lookup` | `scan_dispatch_receipt` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
 | `GET` | `/scans/{scan_id}/actions` | `get_scan_actions` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |

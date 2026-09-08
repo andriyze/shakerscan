@@ -1,6 +1,7 @@
 """Real PostgreSQL/process-crash fixture; no scanner or external network execution."""
 
 import asyncio
+import hashlib
 import json
 import multiprocessing
 import os
@@ -9,9 +10,12 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from api.public_api_contract import PublicV2IdempotencyMiddleware
+from api.public_retry_receipts import router
 
 try:
     from public_retry_context import bind_scan_acceptance
@@ -100,6 +104,18 @@ def test_processing_reservation_survives_process_death_and_age(mode):
 
             result = await exchange(pool, forbidden_endpoint)
             assert result[0]["status"] == (200 if mode == "success" else 409)
+            app = FastAPI()
+            app.include_router(router)
+            app.state.db_pool = pool
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://fixture") as client:
+                receipt_response = await client.get("/scans/dispatch-receipts/lookup", headers={
+                    "Idempotency-Key": "crash-fixture-key",
+                    "X-ShakerScan-Request-SHA256": hashlib.sha256(b'{"target":"fixture"}').hexdigest(),
+                })
+                assert receipt_response.status_code == 200
+                assert receipt_response.json()["scan_id"] == SCAN_ID
+                assert receipt_response.json()["state"] == "recorded"
             async with pool.acquire() as conn:
                 state = await conn.fetchval("SELECT state FROM public_api_idempotency")
                 assert state == ("completed" if mode == "success" else "processing")

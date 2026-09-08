@@ -174,9 +174,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "3af03ff7285634c64d4652ad40064c41944b13ce856cf30881cecc293f5029c7",
+  "contract_sha256": "84b546efcbfa4a4a4630bc30f6ae3c6c3fa321897ead1c2a6ff62482ad1b730e",
   "openapi": "3.1.0",
-  "operation_count": 394,
+  "operation_count": 395,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -2272,6 +2272,18 @@
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "scan",
+      "tags": []
+    },
+    "GET /scans/dispatch-receipts/lookup": {
+      "deprecated": false,
+      "operation_id": "scan_dispatch_receipt_scans_dispatch_receipts_lookup_get",
+      "parameters_sha256": "8f2ac6b39b76fc01abf08da05905d0eb5aadee4736c5baef3a24139817eb535f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": "scan",
@@ -5442,6 +5454,7 @@
       "DELETE /scans/{scan_id}/http-transactions",
       "GET /scan/contracts",
       "GET /scans",
+      "GET /scans/dispatch-receipts/lookup",
       "GET /scans/{scan_id}",
       "GET /scans/{scan_id}/actions",
       "GET /scans/{scan_id}/ai-redteam-report",

@@ -13499,6 +13499,12 @@ app.include_router(hunt_run_router)
 _configure_http_archive_router(lambda: db_pool)
 app.include_router(_http_archive_router)
 
+try:
+    from public_retry_receipts import router as _public_retry_receipts_router
+except ModuleNotFoundError:
+    from api.public_retry_receipts import router as _public_retry_receipts_router
+app.include_router(_public_retry_receipts_router)
+
 
 # =============================================================================
 # Keyless, turn-based ReAct hunt (Gap A). The default planner_mode:"agent" is KEYLESS — the
