@@ -309,7 +309,16 @@ class PublicV2IdempotencyMiddleware:
 
         # An exception or cancellation may follow a committed/enqueued action.
         # Do not erase its reservation and make a retry execute it again.
-        await self.app(scope, replay_receive, capture_send)
+        try:
+            from public_retry_context import retry_identity
+        except ModuleNotFoundError:
+            from api.public_retry_context import retry_identity
+
+        token = retry_identity.set((method, path, key_digest, request_digest))
+        try:
+            await self.app(scope, replay_receive, capture_send)
+        finally:
+            retry_identity.reset(token)
 
         start = next((
             item for item in response_messages
@@ -359,7 +368,8 @@ class PublicV2IdempotencyMiddleware:
                 await conn.execute(
                     """DELETE FROM public_api_idempotency
                        WHERE method=$1 AND path=$2 AND key_sha256=$3
-                         AND request_sha256=$4 AND state='processing'""",
+                         AND request_sha256=$4 AND state='processing'
+                         AND response_body IS NULL""",
                     method, path, key_digest, request_digest,
                 )
         for message in response_messages:

@@ -1,6 +1,7 @@
 """Real PostgreSQL/process-crash fixture; no scanner or external network execution."""
 
 import asyncio
+import json
 import multiprocessing
 import os
 import re
@@ -11,6 +12,13 @@ from types import SimpleNamespace
 import pytest
 
 from api.public_api_contract import PublicV2IdempotencyMiddleware
+
+try:
+    from public_retry_context import bind_scan_acceptance
+except ModuleNotFoundError:
+    from api.public_retry_context import bind_scan_acceptance
+
+SCAN_ID = "d2fbfe98-b5d7-41f9-83f1-5f1e4b8ba657"
 
 
 async def exchange(pool, endpoint):
@@ -30,7 +38,7 @@ async def exchange(pool, endpoint):
     return sent
 
 
-def accepted_then_process_exit(dsn, schema):
+def accepted_then_process_exit(dsn, schema, mode):
     import asyncpg
 
     async def run():
@@ -38,17 +46,26 @@ def accepted_then_process_exit(dsn, schema):
                                         server_settings={"search_path": schema + ",public"})
 
         async def endpoint(scope, receive, send):
-            async with pool.acquire() as conn:
+            async with pool.acquire() as conn, conn.transaction():
                 # Synthetic durable side effect, not a real Scan submission.
                 await conn.execute("INSERT INTO accepted_fixture DEFAULT VALUES")
-            os._exit(17)
+                await bind_scan_acceptance(conn, SCAN_ID)
+            if mode == "crash":
+                os._exit(17)
+            body = json.dumps({"scan_id": SCAN_ID} if mode == "success"
+                              else {"detail": "rejected after recording"}).encode()
+            await send({"type": "http.response.start", "status": 200 if mode == "success" else 422,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": body})
 
         await exchange(pool, endpoint)
+        await pool.close()
 
     asyncio.run(run())
 
 
-def test_processing_reservation_survives_process_death_and_age():
+@pytest.mark.parametrize("mode", ["crash", "success", "rejection_after_recording"])
+def test_processing_reservation_survives_process_death_and_age(mode):
     dsn = os.environ.get("SHAKERSCAN_TEST_PUBLIC_RETRY_DSN")
     if not dsn:
         pytest.skip("requires an explicitly selected disposable PostgreSQL instance")
@@ -82,9 +99,17 @@ def test_processing_reservation_survives_process_death_and_age():
                 pytest.fail("retry reexecuted an accepted operation after process death")
 
             result = await exchange(pool, forbidden_endpoint)
-            assert result[0]["status"] == 409
+            assert result[0]["status"] == (200 if mode == "success" else 409)
             async with pool.acquire() as conn:
-                assert await conn.fetchval("SELECT state FROM public_api_idempotency") == "processing"
+                state = await conn.fetchval("SELECT state FROM public_api_idempotency")
+                assert state == ("completed" if mode == "success" else "processing")
+                receipt = json.loads(await conn.fetchval(
+                    "SELECT response_body FROM public_api_idempotency"
+                ))
+                assert receipt == ({"scan_id": SCAN_ID} if mode == "success" else {
+                    "schema": "public-dispatch-acceptance/v1", "kind": "scan",
+                    "id": SCAN_ID, "status": "recorded",
+                })
                 assert await conn.fetchval("SELECT COUNT(*) FROM accepted_fixture") == 1
         finally:
             await pool.close()
@@ -100,11 +125,11 @@ def test_processing_reservation_survives_process_death_and_age():
     try:
         asyncio.run(prepare())
         child = multiprocessing.get_context("spawn").Process(
-            target=accepted_then_process_exit, args=(dsn, schema)
+            target=accepted_then_process_exit, args=(dsn, schema, mode)
         )
         child.start()
         child.join(20)
-        assert child.exitcode == 17, "fixture did not exit after durable acceptance"
+        assert child.exitcode == (17 if mode == "crash" else 0)
         asyncio.run(verify_and_cleanup())
     finally:
         if child is not None and child.is_alive():

@@ -11565,6 +11565,12 @@ async def _submit_scan(
                  json.dumps(options_payload.get("resolved_scan_budget") or {}),
                  json.dumps({"status": "pending", "reasons": []}),
                  json.dumps(canonical_job_payload), canonical_job.payload_digest)
+            try:
+                from public_retry_context import bind_scan_acceptance
+            except ModuleNotFoundError:
+                from api.public_retry_context import bind_scan_acceptance
+
+            await bind_scan_acceptance(conn, scan_id)
             action_store = PostgresScanActionStore()
             await action_store.persist_plan(
                 conn, plan=scan_action_plan,
