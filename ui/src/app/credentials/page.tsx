@@ -46,6 +46,7 @@ const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'cookie', label: 'Cookie' },
   { value: 'basic_auth', label: 'Basic authentication' },
   { value: 'form_login', label: 'Form login' },
+  { value: 'json_login', label: 'JSON login' },
   { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
   { value: 'oauth_password', label: 'OAuth password flow' },
   { value: 'custom_headers', label: 'Custom headers' },
@@ -121,7 +122,7 @@ function isSsh(kind: CredentialAuthKind): boolean {
 // Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half
 // of the username/secret pair on its own, so neither field is individually required -- but at
 // least one must be present. A UI test asserts this list matches the backend constant.
-const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password']
+const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password', 'json_login']
 
 function isIdentityPair(kind: CredentialAuthKind): boolean {
   return IDENTITY_PAIR_KINDS.includes(kind)
@@ -133,7 +134,7 @@ function showsUsername(kind: CredentialAuthKind): boolean {
 }
 
 function needsEndpoint(kind: CredentialAuthKind): boolean {
-  return ['form_login', 'oauth_client_credentials', 'oauth_password'].includes(kind)
+  return ['form_login', 'oauth_client_credentials', 'oauth_password', 'json_login'].includes(kind)
 }
 
 function validateDraft(draft: Draft, rotating: boolean): DraftErrors {

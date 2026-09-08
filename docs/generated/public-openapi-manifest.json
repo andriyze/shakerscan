@@ -49,7 +49,7 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
-    "CredentialProfileCreate": "e2efce93a3c40faa60d6273d33db220598fffe48be6a39f52968157c1c1d44a4",
+    "CredentialProfileCreate": "1756c67d248e0fa0e1ff0b0cedfeaed766cdd06777eaca63f07ec64056ed8fc9",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
     "CredentialProfileRotate": "f023ee42779be3169d7f816b6172c0831e7a8fdde4a450720996279893b870ba",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
@@ -86,7 +86,7 @@
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
     "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
-    "HuntQueryRequest": "2b99ee60a346f67b2862ff83cc8faef0a12f719085253c122cb865acff78a461",
+    "HuntQueryRequest": "85eab024e213d3af43c21ff3b0dab41e58a383f29a6ac11716ed19d0a0916d97",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
     "HuntSkillSuggestionRequest": "12f4bced74b87bcfaa23c429aaa6c8851a80d6325a57706dafb2614952e49487",
     "HuntSkillUsageRequest": "9a1b268fd05dfd816f0295f80103c06e6e6b0f52104085cbacba08ccdb88e5af",
@@ -174,7 +174,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "d78dfecac31258e54123a8aefdb44e8856254d86ed7479b3f8358018e39571fd",
+  "contract_sha256": "6078a0927ec3cd9ce0e76921759d6e1ba2360c527c34b8e9335199e94ddcb693",
   "openapi": "3.1.0",
   "operation_count": 394,
   "operations": {
@@ -1084,7 +1084,7 @@
     "GET /credential-profiles/capabilities": {
       "deprecated": false,
       "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get",
-      "parameters_sha256": "cf959deda5469c23f55bdd3ae3aec9183f7be8c9b5534078aed4e209a0eccadb",
+      "parameters_sha256": "2a051116e52041b60e99c32df9643b0076cc55058b02c04a0b585fdbc2367c74",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
