@@ -68,7 +68,9 @@ def score_run(record, findings, oracle, *, investigations=None, review=None):
         if accounting.get("basis") != "exact_settlement":
             complete_accounting = False
             continue
-        charge_basis = accounting.get("charge_basis", "capability_reported_settlement")
+        # A settled ledger entry does not establish that its charge was measured.
+        # Older or incomplete exports must not silently become measured traffic.
+        charge_basis = accounting.get("charge_basis")
         if charge_basis not in {"capability_reported_settlement", "conservative_full_reservation"}:
             complete_accounting = False
             continue

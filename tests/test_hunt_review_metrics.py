@@ -76,3 +76,44 @@ def test_invalid_accounting_is_rejected(amount):
     record["decision_trace"][0]["result"]["budget_accounting"]["actual"]["http_requests"] = amount
     with pytest.raises(ValueError, match="Invalid measured"):
         score_run(record, [], oracle)
+
+
+@pytest.mark.parametrize("charge_basis", ["missing", None, "", "future_accounting_basis"])
+@pytest.mark.parametrize("actual", [{"http_requests": 4}, {}])
+def test_missing_or_unknown_charge_basis_is_not_measured(charge_basis, actual):
+    record, oracle, _, _ = inputs()
+    accounting = record["decision_trace"][0]["result"]["budget_accounting"]
+    accounting["actual"] = actual
+    if charge_basis == "missing":
+        accounting.pop("charge_basis")
+    else:
+        accounting["charge_basis"] = charge_basis
+    result = score_run(record, [], oracle)
+    assert result["measured_action_budget"] == {}
+    assert result["settled_upper_bound_budget"] == {}
+    assert result["complete_exact_accounting"] is False
+
+
+def test_mixed_accounting_keeps_measured_subtotal_without_inventing_missing_basis():
+    record, oracle, _, _ = inputs()
+    measured = record["decision_trace"][0]
+    conservative, unknown = deepcopy(measured), deepcopy(measured)
+    conservative["action_id"], unknown["action_id"] = "a2", "a3"
+    conservative["result"]["budget_accounting"].update(
+        charge_basis="conservative_full_reservation", actual={"http_requests": 24})
+    unknown["result"]["budget_accounting"].pop("charge_basis")
+    unknown["result"]["budget_accounting"]["actual"] = {"http_requests": 1000}
+    record["decision_trace"].extend([conservative, unknown])
+    result = score_run(record, [], oracle)
+    assert result["measured_action_budget"] == {"http_requests": 4}
+    assert result["settled_upper_bound_budget"] == {"http_requests": 24}
+    assert result["complete_exact_accounting"] is False
+
+
+def test_explicit_measured_zero_remains_exact_accounting():
+    record, oracle, _, _ = inputs()
+    record["decision_trace"][0]["result"]["budget_accounting"]["actual"] = {"http_requests": 0}
+    result = score_run(record, [], oracle)
+    assert result["measured_action_budget"] == {"http_requests": 0}
+    assert result["settled_upper_bound_budget"] == {}
+    assert result["complete_exact_accounting"] is True
