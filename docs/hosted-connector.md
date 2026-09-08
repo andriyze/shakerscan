@@ -75,23 +75,29 @@ a separate outbound runner design and placement policy.
 transport for an operator-owned admission gateway. It rejects redirects, bounds
 response size and request time, preserves a caller-supplied occurrence identity
 across retries, and never treats denied/uncertain admission as successful execution.
-This adapter is **not connected to the scheduler yet** and does not enable hosted
-schedules or change standalone scheduling.
+The public scheduler now calls this adapter through `managed_runner.py` when both
+`SHAKERSCAN_SCHEDULE_DISPATCH_ORIGIN` and `SHAKERSCAN_SCHEDULE_DISPATCH_TOKEN` are
+configured by the operator. The token is a tenant scan-admission credential, never
+a Coolify token. Partial configuration fails closed. With neither variable set,
+standalone scheduling is unchanged. This has not been released or enabled in SaaS.
 
-Before wiring it in, persist an occurrence UUID separately from `next_run_at`:
-the current claim helper changes `next_run_at` to lease time, which cannot be used
-as a stable retry identity. Integration must route every managed occurrence through
-admission, preserve unknown outcomes, and never fall back to local enqueue. Active
+Managed mode persists an occurrence UUID separately from `next_run_at`; it does
+not call the standalone lease helper that changes that timestamp. Managed
+occurrences use gateway admission and never fall back to local enqueue. Active
 and authenticated recurring authority, ASM schedules, suspension, cancellation,
 and restart reconciliation require separate end-to-end coverage. Existing public
 schedule validation still applies; this transport does not grant broader scope.
 
 `api/schedules/managed_occurrences.py` now supplies an opt-in PostgreSQL intent
-store, also not wired into the runner yet. It persists one pending occurrence per
+store used by that runner. It persists one pending occurrence per
 schedule, freezes the submitted request, fences stale leases, and commits the
 admission receipt and next cadence together. Changing the gateway while an
 occurrence is unresolved fails closed for reconciliation. The database fixture
 tests concurrent claims, reconnect/retry, immutable input, stale-lease rejection,
 gateway-change denial and paused schedules against real disposable PostgreSQL.
-Runner wiring, secret-free canonical payload construction, full lifecycle handling
-and live scheduled execution still remain release gates.
+Only validated normal passive schedules are currently translated to public Scan
+requests; unsupported option fields are rejected rather than silently dropped.
+Active/authenticated and ASM occurrences remain unavailable in managed mode.
+Full lifecycle handling, deployment credential provisioning and live scheduled
+execution still remain release gates. Do not enable the SaaS scheduling capability
+based solely on the transport, persistence and orchestration fixture tests.

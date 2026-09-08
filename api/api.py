@@ -3102,6 +3102,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
     entire loop, which could starve the shared API pool when many schedules
     fire together or when a single schedule got slow (e.g. Redis push delay).
     """
+    from schedules.managed_runner import run_due as run_managed_schedules
+
+    if await run_managed_schedules(pool):
+        return
     r = get_redis()
     now = utc_now()
 

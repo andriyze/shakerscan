@@ -1,8 +1,7 @@
 """Opt-in transport for scheduler admission through an operator-owned gateway.
 
-Not wired into the scheduler yet: integration must persist occurrence identity
-across leases/restarts before invoking this adapter. Never fall back to local
-execution after a managed dispatch failure.
+The managed runner persists occurrence identity across leases/restarts before
+invoking this adapter. Never fall back to local execution after a managed failure.
 """
 
 from __future__ import annotations
@@ -51,6 +50,10 @@ class ManagedScheduleDispatcher:
         self._origin = origin.rstrip("/")
         self._token = token
         self._transport = transport
+
+    @property
+    def origin(self):
+        return self._origin
 
     async def dispatch(
         self, schedule_id: str, occurrence_id: str, payload: dict[str, Any]
