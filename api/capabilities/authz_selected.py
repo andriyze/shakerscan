@@ -82,6 +82,18 @@ def _unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _own_identifier(obj: Mapping[str, Any]) -> str | None:
+    """The single identifier an object declares for itself, or None when it declares none.
+
+    Several id keys, a boolean, or a non-scalar leaves the object unidentified rather
+    than picking one, so an ambiguous document can never be mistaken for the selection.
+    """
+    ids = [v for k, v in obj.items() if str(k).lower() in {"id", "uuid"}]
+    if len(ids) != 1 or isinstance(ids[0], bool) or not isinstance(ids[0], (str, int)):
+        return None
+    return str(ids[0])
+
+
 def _document(response: Mapping[str, Any], identifier: str) -> tuple[str | None, str]:
     """Return a canonical object only from complete, non-error JSON evidence.
 
@@ -107,16 +119,20 @@ def _document(response: Mapping[str, Any], identifier: str) -> tuple[str | None,
         for _ in range(4):
             if not isinstance(obj, dict) or any(str(k).lower() in {"error", "errors"} for k in obj):
                 return None, "response_not_object"
-            ids = [v for k, v in obj.items() if k.lower() in {"id", "uuid"}]
-            if ids:
-                if len(ids) != 1 or isinstance(ids[0], bool) or not isinstance(ids[0], (str, int)) or str(ids[0]) != identifier:
+            if any(str(k).lower() in {"id", "uuid"} for k in obj):
+                if _own_identifier(obj) != identifier:
                     return None, "response_object_mismatch"
                 if len(obj) <= 1:
                     return None, "object_has_no_content"
                 return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False), "object_observed"
             children = [v for v in obj.values() if isinstance(v, dict)]
             if len(children) != 1:
-                return None, "response_object_ambiguous"
+                # An envelope may carry sibling objects beside the one requested. Descend
+                # only when exactly one sibling declares the requested identifier as its
+                # own; the comparison then covers that object, not the whole envelope.
+                children = [c for c in children if _own_identifier(c) == identifier]
+                if len(children) != 1:
+                    return None, "response_object_ambiguous"
             obj = children[0]
     except (ValueError, TypeError, RecursionError):
         return None, "response_not_valid_json"

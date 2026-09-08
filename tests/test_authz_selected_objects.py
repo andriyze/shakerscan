@@ -253,3 +253,43 @@ def test_deadline_retains_partial_observations_without_continuing(monkeypatch):
     assert result["requests_attempted"] == 2 and len(calls) == 2
     assert result["reason"] == "selected_object_deadline_exceeded"
     assert not result["cross_access_observed"]
+
+
+def _envelope(identifier="101", *, sibling_id=None):
+    """An envelope carrying the requested object beside an unrelated sibling object."""
+    sibling = {"transaction_id": "t-1", "amount": 10}
+    if sibling_id is not None:
+        sibling["id"] = sibling_id
+    return json.dumps({"selection": {"id": identifier, "private_note": "private fixture content"},
+                       "related": sibling})
+
+
+def test_a_sibling_object_beside_the_selection_does_not_hide_it():
+    """Composite envelopes are ordinary API shape; refusing them left such routes unexaminable."""
+    result, _ = run_case({0: response(body=_envelope("202")),
+                          **{i: response(body=_envelope()) for i in (1, 2, 3)}})
+    assert result["secondary_baseline_valid"] is True
+    assert result["cross_access_observed"] is True
+
+
+def test_the_comparison_covers_the_identified_object_not_the_envelope():
+    """Only the selection is compared, so an unrelated sibling cannot mask or fake equivalence."""
+    owner = json.dumps({"selection": {"id": "101", "private_note": "private fixture content"},
+                        "related": {"amount": 10}})
+    crossing = json.dumps({"selection": {"id": "101", "private_note": "private fixture content"},
+                           "related": {"amount": 99}})
+    result, _ = run_case({0: response(body=_envelope("202")), 1: response(body=owner),
+                          2: response(body=crossing), 3: response(body=owner)})
+    assert result["responses_equivalent"] is True
+
+
+def test_two_siblings_claiming_the_identifier_stay_ambiguous():
+    body = json.dumps({"a": {"id": "101", "note": "one"}, "b": {"id": "101", "note": "two"}})
+    result, _ = run_case({0: response(body=body)})
+    assert result["secondary_baseline_valid"] is False
+
+
+def test_an_envelope_whose_siblings_never_claim_the_identifier_stays_ambiguous():
+    result, _ = run_case({0: response(body=_envelope("999", sibling_id="888"))})
+    assert result["secondary_baseline_valid"] is False
+    assert result["reason"] == "secondary_baseline_response_object_ambiguous"
