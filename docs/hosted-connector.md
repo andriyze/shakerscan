@@ -85,3 +85,13 @@ admission, preserve unknown outcomes, and never fall back to local enqueue. Acti
 and authenticated recurring authority, ASM schedules, suspension, cancellation,
 and restart reconciliation require separate end-to-end coverage. Existing public
 schedule validation still applies; this transport does not grant broader scope.
+
+`api/schedules/managed_occurrences.py` now supplies an opt-in PostgreSQL intent
+store, also not wired into the runner yet. It persists one pending occurrence per
+schedule, freezes the submitted request, fences stale leases, and commits the
+admission receipt and next cadence together. Changing the gateway while an
+occurrence is unresolved fails closed for reconciliation. The database fixture
+tests concurrent claims, reconnect/retry, immutable input, stale-lease rejection,
+gateway-change denial and paused schedules against real disposable PostgreSQL.
+Runner wiring, secret-free canonical payload construction, full lifecycle handling
+and live scheduled execution still remain release gates.
