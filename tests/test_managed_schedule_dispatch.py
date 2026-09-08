@@ -61,3 +61,30 @@ def test_denial_or_uncertainty_never_becomes_success(status):
 def test_refuses_unsafe_origin(origin):
     with pytest.raises(ValueError):
         ManagedScheduleDispatcher(origin, "fixture-only")
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (200, {"schema_version": "schedule-admission/v1", "state": "accepted", "scan_id": SCAN}, "accepted"),
+    (200, {"schema_version": "schedule-admission/v1", "state": "denied"}, "denied"),
+    (200, {"schema_version": "schedule-admission/v1", "state": "unknown"}, "retry"),
+    (200, {"schema_version": "schedule-admission/v1", "state": "accepted", "scan_id": "invalid"}, "retry"),
+    (200, {"state": "denied"}, "retry"),
+    (404, {}, "retry"), (401, {}, "retry"), (403, {}, "retry"),
+    (503, {}, "retry"), (307, {}, "retry"),
+])
+def test_lookup_never_posts_or_treats_missing_receipt_as_denial(status, body, expected):
+    seen = []
+
+    def gateway(request):
+        seen.append(request)
+        return httpx.Response(status, json=body, headers={"location": "https://other.test"})
+
+    dispatcher = ManagedScheduleDispatcher(
+        "https://tenant.test", "fixture-only", transport=httpx.MockTransport(gateway)
+    )
+    result = asyncio.run(dispatcher.lookup(SCHEDULE, OCCURRENCE))
+    assert result.state == expected
+    assert len(seen) == 1 and seen[0].method == "GET"
+    assert str(seen[0].url) == (
+        "https://tenant.test/_hosted/schedule-dispatches/" + occurrence_key(SCHEDULE, OCCURRENCE)
+    )

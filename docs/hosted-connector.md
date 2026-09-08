@@ -98,8 +98,10 @@ gateway-change denial and paused schedules against real disposable PostgreSQL.
 Active schedules with unresolved occurrences remain eligible for reconciliation
 even after their next due time or options change. Retries use the frozen request;
 new option validation is deferred until a new occurrence. Paused schedules are
-excluded because retrying admission could still create work; read-only receipt
-reconciliation for paused/deleted schedules is not delivered yet.
+excluded because retrying admission could still create work. The transport's
+`lookup` method can read `schedule-admission/v1` receipts without POSTing; missing
+receipts, authentication failures and unsupported gateways stay indeterminate.
+This is not yet wired into paused/deleted occurrence reconciliation in the runner.
 Only validated normal passive schedules are currently translated to public Scan
 requests; unsupported option fields are rejected rather than silently dropped.
 An accepted occurrence stamps the schedule's last-run time atomically with its

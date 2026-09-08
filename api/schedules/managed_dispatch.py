@@ -55,6 +55,41 @@ class ManagedScheduleDispatcher:
     def origin(self):
         return self._origin
 
+    async def lookup(self, schedule_id: str, occurrence_id: str) -> DispatchOutcome:
+        """Read admission without retrying execution, including for paused work.
+
+        A missing receipt, expired credential or old gateway is indeterminate,
+        never evidence that the original work was denied or can be resubmitted.
+        """
+        key = occurrence_key(schedule_id, occurrence_id)
+        try:
+            async with asyncio.timeout(20):
+                async with httpx.AsyncClient(
+                    transport=self._transport, trust_env=False,
+                    follow_redirects=False, timeout=15,
+                ) as client:
+                    async with client.stream(
+                        "GET", self._origin + "/_hosted/schedule-dispatches/" + key,
+                        headers={"Authorization": "Bearer " + self._token},
+                    ) as response:
+                        if response.status_code != 200:
+                            return DispatchOutcome("retry", "admission_unconfirmed")
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > 16384:
+                                return DispatchOutcome("retry", "invalid_receipt")
+                        data = json.loads(body)
+                        if not isinstance(data, dict) or data.get("schema_version") != "schedule-admission/v1":
+                            return DispatchOutcome("retry", "invalid_receipt")
+                        if data.get("state") == "accepted":
+                            return DispatchOutcome("accepted", "admitted", str(UUID(data["scan_id"])))
+                        if data.get("state") == "denied":
+                            return DispatchOutcome("denied", "admission_denied")
+        except (httpx.HTTPError, TimeoutError, ValueError, TypeError, KeyError):
+            pass
+        return DispatchOutcome("retry", "admission_unconfirmed")
+
     async def dispatch(
         self, schedule_id: str, occurrence_id: str, payload: dict[str, Any]
     ) -> DispatchOutcome:
