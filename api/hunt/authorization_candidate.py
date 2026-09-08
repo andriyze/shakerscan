@@ -1,13 +1,7 @@
-"""Materialize a proven-to-have-happened authorization lead as a non-authoritative candidate.
+"""Retain an observed authorization lead without promoting it to proof.
 
-Selected-object mode deliberately does not claim that cross-access is forbidden: the access rule
-comes from business context.  But once the operator reviewed a proposal with expected_access=denied
-and the canonical authz action reproduced stable access to the exact selected object, silently
-leaving the result as an isolated workflow response makes Hunt lose a useful lead.
-
-This module bridges that result into the existing investigation_candidates store.  The candidate is
-explicitly unverified, has no verifier contract, and carries only canonical action/receipt/
-transaction references.  It cannot mutate finding proof state.
+Candidate creation requires the existing reviewed, receipt-backed crossing. Readback
+preserves historical associations independently of a later attempt's assessment.
 """
 from __future__ import annotations
 
@@ -20,7 +14,8 @@ except ModuleNotFoundError:
     from .. import investigation_candidates
 
 from .authorization_evidence import AuthorizationWorkflowError, mapping
-from .authorization_repository import uid
+from .authorization_history import with_candidate_history
+from .authorization_repository import MAX_ATTEMPTS, uid
 
 
 LINK_TYPE = "authorization_candidate_link"
@@ -28,12 +23,7 @@ SOURCE_KIND = "hunt_authorization"
 
 
 def candidate_plan(state: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the bounded candidate material for one exact potential violation.
-
-    Nothing is produced for unknown/shared/denied/incomplete outcomes.  A selected-object crossing
-    remains technical access evidence, not authorization proof, so the returned plan has no
-    verifier contract and says so in both its claim and observation context.
-    """
+    """Return bounded material for a lead, never authorization proof."""
     attempts = state.get("attempts")
     latest = attempts[-1] if isinstance(attempts, list) and attempts else None
     if not isinstance(latest, Mapping):
@@ -110,7 +100,7 @@ def _link_reference(state: Mapping[str, Any], plan: Mapping[str, Any]) -> tuple[
 
 async def _linked_candidate(conn: Any, service: Any, hunt_id: Any, link_key: str,
                             attempt: Any) -> tuple[Mapping[str, Any], dict[str, Any] | None]:
-    """Resolve the candidate this attempt already produced, or None when it produced none."""
+    """Resolve an existing link within the Hunt's target, without creating one."""
     run = await service.repo.run(conn, hunt_id)
     row = await conn.fetchrow(
         "SELECT attributes FROM application_graph_nodes WHERE target_id=$1 "
@@ -121,8 +111,9 @@ async def _linked_candidate(conn: Any, service: Any, hunt_id: Any, link_key: str
     if not link:
         return run, None
     existing = await conn.fetchrow(
-        "SELECT id,status,fingerprint FROM investigation_candidates WHERE id=$1::uuid",
-        str(link.get("candidate_id") or ""),
+        "SELECT id,status,fingerprint FROM investigation_candidates "
+        "WHERE id=$1::uuid AND target_id=$2::uuid",
+        str(link.get("candidate_id") or ""), str(run["target_id"]),
     )
     if not existing:
         raise AuthorizationWorkflowError(
@@ -137,68 +128,61 @@ async def _linked_candidate(conn: Any, service: Any, hunt_id: Any, link_key: str
 
 
 async def attach_authorization_candidate(service: Any, hunt_id: Any, state: Mapping[str, Any]) -> dict[str, Any]:
-    """Report the candidate this attempt already produced, creating and sending nothing.
-
-    Approval and a later readback describe one durable state, so a resumed session sees the lead
-    it recorded rather than concluding none exists. A read must never materialize one itself.
-    """
-    plan = candidate_plan(state)
-    result = dict(state)
-    result["candidate"] = None
-    if plan is None:
-        return result
-    _, _, link_key, _ = _link_reference(state, plan)
-    async with service.pool.acquire() as conn:
-        _, candidate = await _linked_candidate(
-            conn, service, hunt_id, link_key, plan["observation_context"]["attempt"])
-    result["candidate"] = candidate
-    return result
+    """Read every retained attempt association; a later result cannot erase history."""
+    # These are immutable proposal properties, not the latest attempt's outcome.
+    # Other proposal kinds have never materialized links through this bridge.
+    if state.get("baseline_kind") != "own_object" or state.get("expected_access") != "denied":
+        return with_candidate_history(state, [])
+    attempts = state.get("attempts") or []
+    if not isinstance(attempts, list) or len(attempts) > MAX_ATTEMPTS:
+        raise AuthorizationWorkflowError("Invalid investigation attempt history")
+    history = []
+    if attempts:
+        proposal_id = uid(state.get("proposal_id"))
+        async with service.pool.acquire() as conn:
+            for attempt in attempts:
+                link_key = f"authz:{proposal_id}:candidate:{attempt['action_id']}"
+                _, candidate = await _linked_candidate(
+                    conn, service, hunt_id, link_key, attempt["attempt"])
+                if candidate:
+                    history.append(candidate)
+    return with_candidate_history(state, history)
 
 
 async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapping[str, Any]) -> dict[str, Any]:
-    """Create at most one candidate observation for this proposal attempt, transactionally.
+    """Materialize at most one observation per proposal attempt, including concurrent retries.
 
-    Re-approving the same canonical attempt is idempotent. A later real retry may append a new
-    observation to the same fingerprint because it is new evidence, while the deterministic link
-    prevents repeated reads/retries of one action from spamming the observation ledger.
+    Lock the existing immutable proposal BEFORE checking its link. A transaction alone
+    is insufficient: two READ COMMITTED callers can both observe a missing link. All
+    writes and the link commit together; read-only requests never take this write path.
     """
     plan = candidate_plan(state)
-    result = dict(state)
     if plan is None:
-        result["candidate"] = None
-        return result
+        return await attach_authorization_candidate(service, hunt_id, state)
 
     proposal_id, action_id, link_key, link_id = _link_reference(state, plan)
     attempt = plan["observation_context"]["attempt"]
-
     async with service.pool.acquire() as conn:
         async with conn.transaction():
-            run, existing = await _linked_candidate(conn, service, hunt_id, link_key, attempt)
-            if existing:
-                result["candidate"] = existing
-                return result
-
-            candidate = investigation_candidates.normalize_candidate(
-                plane="web", target_id=str(run["target_id"]), hunt_run_id=str(run["id"]),
-                family=plan["family"], locus=plan["locus"], title=plan["title"],
-                claim=plan["claim"], severity=plan["severity"],
-                evidence_refs=plan["evidence_refs"],
-                verifier_contract_id=plan["verifier_contract_id"], source_kind=SOURCE_KIND,
-            )
-            created = await investigation_candidates.upsert_candidate(
-                conn, candidate, created_by="hunt_authorization_workflow",
-                observation_context=plan["observation_context"],
-            )
-            await service.repo.insert_node(
-                conn, run, link_id, LINK_TYPE, link_key,
-                {"hunt_id": str(run["id"]), "proposal_id": str(proposal_id),
-                 "action_id": action_id, "candidate_id": created["id"],
-                 "candidate_fingerprint": created["fingerprint"],
-                 "authoritative": False},
-            )
-            result["candidate"] = {
-                "id": created["id"], "status": created["status"],
-                "fingerprint": created["fingerprint"], "authoritative": False,
-                "created_from_attempt": attempt,
-            }
-    return result
+            run = await service.repo.run(conn, hunt_id)
+            await service.repo.proposal(conn, run, proposal_id, lock=True)
+            _, existing = await _linked_candidate(conn, service, hunt_id, link_key, attempt)
+            if not existing:
+                candidate = investigation_candidates.normalize_candidate(
+                    plane="web", target_id=str(run["target_id"]), hunt_run_id=str(run["id"]),
+                    family=plan["family"], locus=plan["locus"], title=plan["title"],
+                    claim=plan["claim"], severity=plan["severity"],
+                    evidence_refs=plan["evidence_refs"],
+                    verifier_contract_id=plan["verifier_contract_id"], source_kind=SOURCE_KIND,
+                )
+                created = await investigation_candidates.upsert_candidate(
+                    conn, candidate, created_by="hunt_authorization_workflow",
+                    observation_context=plan["observation_context"],
+                )
+                await service.repo.insert_node(
+                    conn, run, link_id, LINK_TYPE, link_key,
+                    {"hunt_id": str(run["id"]), "proposal_id": str(proposal_id),
+                     "action_id": action_id, "candidate_id": created["id"],
+                     "candidate_fingerprint": created["fingerprint"], "authoritative": False},
+                )
+    return await attach_authorization_candidate(service, hunt_id, state)

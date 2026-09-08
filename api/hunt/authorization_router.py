@@ -70,7 +70,8 @@ async def _call(awaitable):
 @router.post("/hunts/{hunt_id}/authorization-investigations")
 async def investigate_authorization(hunt_id: UUID, request: AuthorizationInvestigateRequest, service: Service):
     """Propose a same-Hunt captured GET comparison without sending target traffic."""
-    return await _call(service.propose(hunt_id, **request.model_dump()))
+    state = await _call(service.propose(hunt_id, **request.model_dump()))
+    return await _call(attach_authorization_candidate(service, hunt_id, state))
 
 
 @router.get("/hunts/{hunt_id}/authorization-investigations/{proposal_id}")
@@ -93,7 +94,8 @@ async def approve_authorization_investigation(hunt_id: UUID, proposal_id: UUID, 
 @router.post("/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip")
 async def skip_authorization_investigation(hunt_id: UUID, proposal_id: UUID, service: Service):
     """Record a deferral, not an executed/refuted experiment. Reconsideration stays possible."""
-    return await _call(service.skip(hunt_id, proposal_id))
+    state = await _call(service.skip(hunt_id, proposal_id))
+    return await _call(attach_authorization_candidate(service, hunt_id, state))
 
 
 @router.get("/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction")
