@@ -98,7 +98,11 @@ def test_retrying_after_a_new_inconclusive_attempt_keeps_the_issue_open():
     assert "session expired" in resumed["proposals"][0].why
     briefing = store.resume_briefing()
     assert briefing["open_questions"] and not briefing["settled"]
-    assert store.route_conclusion("GET", "/orders/{id}")["weakness_demonstrated"] is True
+    # The latest attempt is inconclusive, so the route is not *currently* demonstrated, but the
+    # earlier demonstration is retained rather than reinterpreted as fixed.
+    conclusion = store.route_conclusion("GET", "/orders/{id}")
+    assert conclusion["weakness_demonstrated"] is False
+    assert conclusion["historical_weakness_demonstrated"] is True
 
 
 def test_same_attempt_read_twice_is_not_two_executions():

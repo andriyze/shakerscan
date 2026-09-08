@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from .experiment_conditions import freeze, thaw
+
 OBSERVED, INFERRED, CONFIRMED, UNKNOWN = "observed", "inferred", "confirmed", "unknown"
 CERTAINTIES = frozenset({OBSERVED, INFERRED, CONFIRMED, UNKNOWN})
 SUPPORTED, REFUTED, INCONCLUSIVE = "supported", "refuted", "inconclusive"
@@ -86,6 +88,11 @@ class Experiment:
     def __post_init__(self) -> None:
         if self.outcome not in OUTCOMES:
             raise ValueError(f"unknown outcome: {self.outcome}")
+        if not isinstance(self.conditions, Mapping):
+            raise TypeError("experiment conditions must be an object")
+        # Snapshot to an immutable JSON value so a later mutation of the caller's dict cannot
+        # change this experiment's identity, and reject non-JSON conditions up front.
+        object.__setattr__(self, "conditions", freeze(self.conditions))
 
     @property
     def key(self) -> str:
@@ -93,7 +100,7 @@ class Experiment:
             "route": f"{self.method.upper()} {self.route_template}",
             "object": object_key(self.collection, self.identifier),
             "actor": self.actor_principal, "subject": self.subject_principal,
-            "conditions": dict(sorted(self.conditions.items())), "hypothesis": self.hypothesis,
+            "conditions": thaw(self.conditions), "hypothesis": self.hypothesis,
         }, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
@@ -156,7 +163,7 @@ class InvestigationMemory:
             "settled": experiment.outcome in {SUPPORTED, REFUTED},
             "ever_supported": any(a["outcome"] == SUPPORTED for a in attempts),
             "hypothesis": experiment.hypothesis, "actor_principal": experiment.actor_principal,
-            "subject_principal": experiment.subject_principal, "conditions": dict(experiment.conditions),
+            "subject_principal": experiment.subject_principal, "conditions": thaw(experiment.conditions),
             "outcome": experiment.outcome, "detail": experiment.detail, "at": experiment.at,
             "settles": f"only object {subject} for actor {experiment.actor_principal} under these conditions; it does not describe the route as a whole",
             "route": route, "object": subject,
@@ -164,8 +171,16 @@ class InvestigationMemory:
         return self._experiment_record(experiment.key)
 
     def _experiments(self) -> list[dict[str, Any]]:
-        return [dict(n.get("attributes") or {}) for n in self._store.nodes(self._target_id)
-                if n.get("node_type") == NODE_EXPERIMENT]
+        records = [dict(n.get("attributes") or {}) for n in self._store.nodes(self._target_id)
+                   if n.get("node_type") == NODE_EXPERIMENT]
+        for record in records:
+            # Older rows persisted a strongest-ever outcome/settlement. Re-derive both from the
+            # latest attempt on every read, without mutating or discarding retained attempt history.
+            attempts = record.get("attempts") or []
+            latest = attempts[-1].get("outcome", INCONCLUSIVE) if attempts else INCONCLUSIVE
+            record["outcome"] = latest
+            record["settled"] = latest in {SUPPORTED, REFUTED}
+        return records
 
     def _experiment_record(self, key: str) -> dict[str, Any]:
         return next((r for r in self._experiments() if r.get("experiment_key") == key), {})
@@ -180,28 +195,34 @@ class InvestigationMemory:
                 attributes = dict(edge.get("attributes") or {})
                 attributes["principal"] = str(edge.get("src_key", "")).removeprefix("principal:")
                 claims.append(attributes)
-        if len(claims) == 1:
-            return claims[0]
-        if claims:
+        if len({claim["principal"] for claim in claims}) > 1:
+            # Conflicting owners stay explicit and unresolved; never silently pick the first row.
             return {"principal": None, "certainty": UNKNOWN,
-                    "basis": "multiple ownership claims require review; exclusivity is not established", "claims": claims}
+                    "basis": "multiple ownership claims require reconciliation; shared access is possible",
+                    "claims": sorted(claims, key=lambda claim: claim["principal"])}
+        if claims:
+            return claims[0]
         return {"principal": None, "certainty": UNKNOWN, "basis": "no ownership evidence recorded"}
 
     def route_conclusion(self, method: str, template: str) -> dict[str, Any]:
         route = route_key(method, template)
         experiments = [r for r in self._experiments() if r.get("route") == route]
         outcomes = {name: 0 for name in sorted(OUTCOMES)}
-        latest_outcomes = dict(outcomes)
         for item in experiments:
-            reached = {a.get("outcome") for a in item.get("attempts") or []}
-            strongest = SUPPORTED if SUPPORTED in reached else REFUTED if REFUTED in reached else INCONCLUSIVE
-            outcomes[strongest] += 1
-            latest_outcomes[item.get("outcome", INCONCLUSIVE)] += 1
+            # Count the latest recorded attempt per exact context, not a strongest-ever verdict and
+            # not a claim about the live deployment.
+            attempts = item.get("attempts") or []
+            latest = attempts[-1].get("outcome", INCONCLUSIVE) if attempts else INCONCLUSIVE
+            outcomes[latest] += 1
         demonstrated = bool(outcomes[SUPPORTED])
+        historical = any(a.get("outcome") == SUPPORTED
+                         for item in experiments for a in item.get("attempts") or [])
         return {
             "route": route, "experiments": len(experiments), "outcomes": outcomes,
-            "latest_outcomes": latest_outcomes, "weakness_demonstrated": demonstrated,
-            "weakness_demonstrated_is_historical": True, "examined": bool(experiments),
+            "weakness_demonstrated": demonstrated,
+            "historical_weakness_demonstrated": historical,
+            "outcome_basis": "latest recorded attempt per experiment context; not live verification",
+            "examined": bool(experiments),
             "tested_pairs": sorted({f"{r.get('actor_principal')}->{r.get('subject_principal')}" for r in experiments}),
             "verdict": ("authorization weakness demonstrated on at least one tested pair"
                         if demonstrated else "no authorization weakness demonstrated on the pairs tested; untested pairs and objects remain unexamined"
