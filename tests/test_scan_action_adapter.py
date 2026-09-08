@@ -753,6 +753,100 @@ def test_database_neutral_batch_checkpoints_and_resumes_each_candidate(monkeypat
     assert all(len(attempt_id) == 64 for attempt_id in backend.attempts[action.action_id])
 
 
+def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeypatch):
+    """A candidate whose request cannot be resolved must fail only its own attempt.
+
+    The 2.2.0-era batch called execution_request_for_manifest_candidate with no per-candidate
+    guard, so a ScanWorkManifestError (a ValueError) from one candidate propagated out and the
+    orchestrator failed the entire verify.sqli/verify.xss action -- every other candidate in the
+    slice, sqli-search included, lost its verdict and the family read as gapped. Regression traced
+    from the worker log (`adapter raised ValueError`), 2026-09-06.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["first"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["second"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    action = _action(
+        "verify.xss.batch.00000", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+
+    # The first candidate the batch reaches cannot be resolved; the second resolves normally.
+    real_resolver = action_adapter_module.execution_request_for_manifest_candidate
+    seen = {"raised": False}
+
+    def flaky_resolver(endpoints, manifest, index):
+        if not seen["raised"]:
+            seen["raised"] = True
+            raise action_adapter_module.ScanWorkManifestError("candidate manifest index is invalid")
+        return real_resolver(endpoints, manifest, index)
+
+    calls = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        calls.append(adapter._process_payload["execution_target"])
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "xss_probe", "response_sha256": "e" * 64},),
+            execution_started=True, parser_version="dalfox-jsonl/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module, "execution_request_for_manifest_candidate", flaky_resolver)
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    # The action is NOT failed: it completed the resolvable candidate and recorded the other as a
+    # failed attempt. Both candidates are accounted for; the good one executed.
+    assert result.status != "failed", result.status
+    assert len(calls) == 1, "the resolvable candidate must still execute"
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    statuses = sorted(str(item.get("status")) for item in attempts.values())
+    assert statuses == ["failed", "success"], statuses
+    assert any(
+        "candidate_failed" in str(err)
+        for item in attempts.values() for err in (item.get("errors") or ())
+    )
+
+
 def test_browser_proof_attempts_fragment_candidate_without_server_signal(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(
@@ -1231,6 +1325,34 @@ def test_database_neutral_finalizer_reads_only_durable_results_and_observations(
     assert receipt.status == "success"
     assert receipt.observations[0]["kind"] == "scan_report"
     assert receipt.redacted_execution["target_traffic"] is False
+
+
+@pytest.mark.parametrize("action_id", ["baseline.http", "baseline.security_txt"])
+def test_http_archive_principal_matches_transmitted_credentials(monkeypatch, action_id):
+    action = _action(action_id, "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    captured = {}
+
+    async def execute_bound(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "response": {"status": 200}, "request": {"path": "/"}}
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name: _principal(lane),
+    )
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    if action_id == "baseline.http":
+        assert captured["trusted_headers"]
+        assert captured["principal_slot"] == "primary"
+    else:
+        assert captured["trusted_headers"] is None
+        assert captured["principal_slot"] == "anonymous"
 
 
 def test_database_neutral_http_receipt_drops_body_and_redacts_urls(monkeypatch):

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
 
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
 from runtime.models import TargetBinding
+from .authz_selected import compare_selected_objects, selected_object_pair
 
 try:
     from scanner_tools.url_redaction import redact_path
@@ -184,7 +187,9 @@ async def verify_target_bound_object_authorization(
             },
         }
 
+    selected_pair = selected_object_pair(normalized_routes) if len(routes) == 2 else None
     request_count = 0
+    started = time.monotonic()
     contract_violation: AuthzVerificationContractError | None = None
 
     async def bounded_fetch(
@@ -216,14 +221,25 @@ async def verify_target_bound_object_authorization(
             "", "", parsed.path or "/", parsed.query, "",
         ))
         captured: WorkerPrivateHTTPResponse | None = None
+        archive_metadata: dict[str, Any] = {}
 
         def retain(response: WorkerPrivateHTTPResponse) -> None:
             nonlocal captured
             captured = response
 
+        def record(transaction: dict[str, Any]) -> None:
+            # Completeness is a transport observation, not guessed from a
+            # possibly truncated JSON prefix. Raw bodies stay worker-private.
+            archive_metadata.update({
+                "complete": transaction.get("response_digest_scope") == "complete"
+                and transaction.get("response_body_truncated") is False,
+            })
+            if transaction_recorder is not None:
+                transaction_recorder(transaction)
+
         result = await execute_bound_http_request(
             origin,
-            {"method": "GET", "path": path},
+            {"method": "GET", "path": path, **({"follow_redirects": False} if selected_pair else {})},
             target=target,
             allow_write=False,
             trusted_headers=supplied,
@@ -231,7 +247,7 @@ async def verify_target_bound_object_authorization(
             selected_headers=["content-type"],
             timeout_seconds=max(1, min(15, int(timeout))),
             private_response_sink=retain,
-            transaction_recorder=transaction_recorder,
+            transaction_recorder=record if selected_pair else transaction_recorder,
         )
         if isinstance(result.get("request"), Mapping):
             request_count += 1
@@ -253,7 +269,25 @@ async def verify_target_bound_object_authorization(
             "body": captured.body()[:MAX_AUTHZ_BODY_CHARACTERS].decode(
                 "utf-8", errors="replace",
             ),
-            "error": None if result.get("ok") else result.get("error"),
+            "error": None if result.get("ok") else result.get("error") or "request_failed",
+            "complete": archive_metadata.get("complete", False),
+        }
+
+    if selected_pair:
+        try:
+            from scanner_tools.cancellation import scanner_cancel_requested
+        except ModuleNotFoundError:
+            from scanner.scanner_tools.cancellation import scanner_cancel_requested
+        observation = await compare_selected_objects(
+            normalized_routes, fetcher=bounded_fetch, primary_headers=primary,
+            secondary_headers=secondary, cancelled=scanner_cancel_requested,
+        )
+        # This is access evidence only. Do not manufacture a listing, feed an
+        # invented absence assertion to the validator, or promote a finding.
+        return {
+            "ok": True, "status": "partial" if observation.get("partial") else "success", "observation": observation,
+            "budget_consumed": {"http_requests": request_count,
+                                "tool_wall_seconds": math.ceil(time.monotonic() - started)},
         }
 
     try:

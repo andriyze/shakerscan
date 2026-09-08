@@ -1,8 +1,10 @@
 'use client'
+import { featureEnabled, navigationAllowed } from '@/lib/workspaceCapabilities'
+import { WorkspaceFeature } from '@/components/WorkspaceBoundary'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { workerCapacityLabel, workerCountLabel } from '@/lib/labels'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowRight, CheckCircle2, CircleHelp, ListTodo, Minus, Plus, RadioTower, ScanLine, Server, ShieldAlert, Target, Trash2, Workflow } from 'lucide-react'
 import {
   clearQueue, formatDate, getDashboard, getExposureAssets, getGradeColor, getGungnirStatus,
@@ -118,6 +120,7 @@ export default function Dashboard() {
   }
 
   const fetchWorkers = async (force = false) => {
+    if (!featureEnabled('worker_status') && !featureEnabled('worker_admin')) return
     if (workersInFlight.current && !force) return
     workersInFlight.current = true
     try {
@@ -125,6 +128,7 @@ export default function Dashboard() {
       setWorkers(workerData)
       setWorkersError(workerData?.error || null)
     } catch (err) {
+      setWorkers(null)
       setWorkersError('Workers unavailable')
     } finally {
       workersInFlight.current = false
@@ -132,6 +136,7 @@ export default function Dashboard() {
   }
 
   const fetchGungnirStatus = async (force = false) => {
+    if (!featureEnabled('ct_monitor')) return
     if (gungnirInFlight.current && !force) return
     gungnirInFlight.current = true
     try {
@@ -152,9 +157,9 @@ export default function Dashboard() {
     overviewInFlight.current = true
     try {
       const [exposureResult, targetsResult, timelineResult] = await Promise.allSettled([
-        getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }),
+        featureEnabled('exposure') ? getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }) : Promise.resolve(null),
         getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' }),
-        getMissionTimeline({ limit: 12 }),
+        featureEnabled('timeline') ? getMissionTimeline({ limit: 12 }) : Promise.resolve({ events: [] }),
       ])
       if (exposureResult.status === 'fulfilled') setExposure(exposureResult.value)
       if (targetsResult.status === 'fulfilled') setGroupedTargets(targetsResult.value.domains || [])
@@ -207,7 +212,9 @@ export default function Dashboard() {
   const handleManualRefresh = async () => {
     if (refreshing) return
     setRefreshing(true)
-    const [ok] = await Promise.all([fetchDashboard(false), fetchOverview()])
+    const [ok] = await Promise.all([
+      fetchDashboard(false), fetchOverview(), fetchWorkers(true), fetchQueueStats(),
+    ])
     setRefreshing(false)
     if (ok === false) {
       toast.error('Failed to refresh dashboard')
@@ -334,7 +341,7 @@ export default function Dashboard() {
                 )}
               </>
             )}
-            <button
+            <WorkspaceFeature name="worker_admin"><button
               type="button"
               onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
               aria-label="Emergency clear pending jobs"
@@ -343,10 +350,10 @@ export default function Dashboard() {
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="text-[10px]">Emergency clear</span>
-            </button>
+            </button></WorkspaceFeature>
           </div>
 
-          <div
+          <WorkspaceFeature name="worker_status"><div
             id="workers"
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
             title={workersError || workerCapacityLabel({
@@ -358,7 +365,7 @@ export default function Dashboard() {
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
-              {workersKnown ? totalAvailable : '--'}
+              {workersKnown ? totalAvailable : 'Unknown'}
             </span>
             <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
@@ -386,7 +393,7 @@ export default function Dashboard() {
                 {workerCount} running · max {maxWorkers}
               </span>
             )}
-            <span className="h-5 w-px bg-gray-800" aria-hidden="true" />
+            <WorkspaceFeature name="worker_admin"><span className="h-5 w-px bg-gray-800" aria-hidden="true" />
             <button
               type="button"
               onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
@@ -409,7 +416,7 @@ export default function Dashboard() {
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
-            {fleetEnabled && (
+            </WorkspaceFeature>{fleetEnabled && (
               <Link
                 href="/fleet"
                 className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
@@ -420,7 +427,7 @@ export default function Dashboard() {
             )}
           </div>
 
-          <button
+          </WorkspaceFeature><WorkspaceFeature name="ct_monitor"><button
             type="button"
             onClick={handleGungnirToggle}
             disabled={gungnirActionLoading}
@@ -440,6 +447,7 @@ export default function Dashboard() {
             <span className="text-gray-500">{gungnirActionLoading ? '…' : gungnir?.running ? 'on' : 'off'}</span>
           </button>
 
+          </WorkspaceFeature>
           <LastUpdated updatedAt={lastUpdated} onRefresh={handleManualRefresh} refreshing={refreshing} />
         </div>
       </div>
@@ -469,9 +477,9 @@ export default function Dashboard() {
 
       <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <SecurityPosture exposure={scopedExposure} loading={overviewLoading} />
+      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} loading={overviewLoading} /></WorkspaceFeature>
 
-      {cohortView === 'all' ? (
+      <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
       ) : (
         <Card className="p-4 text-sm text-gray-400">
@@ -480,13 +488,14 @@ export default function Dashboard() {
         </Card>
       )}
 
-      <CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} />
+      </WorkspaceFeature>
+      <WorkspaceFeature name="asm"><CoverageOverview exposure={scopedExposure} coverage={coverage} loading={overviewLoading} /></WorkspaceFeature>
 
-      <ActionCenter items={scopedActions} loading={dashboardLoading && !data} />
+      <ActionCenter items={scopedActions.filter(item => item.href && navigationAllowed(item.href))} loading={dashboardLoading && !data} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <LatestResults scans={recentScans} loading={dashboardLoading && !data} />
-        <RecentActivity events={meaningfulActivity} loading={overviewLoading} />
+        <WorkspaceFeature name="timeline"><RecentActivity events={meaningfulActivity} loading={overviewLoading} /></WorkspaceFeature>
       </div>
     </div>
   )

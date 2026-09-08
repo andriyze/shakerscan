@@ -294,7 +294,7 @@ class ResolvedCredential:
     def interactive_http(self) -> InteractiveHTTPCredential:
         self._require_open()
         if self.profile.auth_kind not in {
-            "form_login", "oauth_client_credentials", "oauth_password",
+            "form_login", "oauth_client_credentials", "oauth_password", "json_login",
         }:
             raise CredentialResolutionError("credential is not an interactive HTTP profile")
         return InteractiveHTTPCredential(

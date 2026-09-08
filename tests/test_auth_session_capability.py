@@ -357,3 +357,87 @@ def test_worker_private_http_response_repr_hides_body_headers_and_cookies():
     assert "response-worker-private-cookie" not in rendered
     assert "authorization" in rendered
     assert "session" in rendered
+
+
+def test_json_login_posts_a_json_body_and_extracts_a_nested_bearer():
+    """A JSON API login: POST {email,password} JSON, read the JWT out of the response body.
+
+    Fails without the json_login branch (form_login/oauth post form_body, and the token
+    extractor read only access_token, not a nested authentication.token as Juice Shop returns).
+    """
+    calls = []
+    password = "json-worker-private-password"
+    jwt = "worker.private.jwt-value"
+
+    async def request_executor(origin, args, **kwargs):
+        calls.append((origin, args, kwargs))
+        kwargs["private_response_sink"](_private_response(
+            200,
+            body=json.dumps({"authentication": {"token": jwt, "umail": "x@y.z"}}),
+            headers={"content-type": "application/json"},
+            final_url="https://app.example.test/rest/user/login",
+        ))
+        return {
+            "ok": True,
+            "request": {"method": args["method"], "path": args["path"]},
+            "response": {"status": 200},
+        }
+
+    session = asyncio.run(establish_target_bound_http_session(
+        TargetBoundSessionCredential(
+            lane="primary",
+            auth_kind="json_login",
+            endpoint_url="/rest/user/login",
+            binding_digest="c" * 64,
+            username="operator@example.test",
+            secret=password,
+        ),
+        target=TARGET,
+        request_executor=request_executor,
+    ))
+
+    assert session.established is True
+    assert session.headers() == {"Authorization": f"Bearer {jwt}"}
+    # one POST, JSON body, an email-shaped username goes in "email"
+    assert len(calls) == 1
+    assert calls[0][1]["method"] == "POST"
+    assert calls[0][1]["json_body"] == {
+        "email": "operator@example.test",
+        "password": password,
+    }
+    assert "form_body" not in calls[0][1]
+    assert calls[0][2]["allow_write"] is True
+    public = session.execution_result()
+    serialized = json.dumps(public)
+    assert password not in serialized
+    assert jwt not in serialized
+
+
+def test_json_login_puts_a_non_email_identity_in_the_username_field():
+    captured = {}
+
+    async def request_executor(origin, args, **kwargs):
+        captured["body"] = args.get("json_body")
+        kwargs["private_response_sink"](_private_response(
+            200,
+            body=json.dumps({"token": "t.value"}),
+            headers={"content-type": "application/json"},
+            final_url="https://app.example.test/api/login",
+        ))
+        return {"ok": True, "request": {"method": args["method"], "path": args["path"]},
+                "response": {"status": 200}}
+
+    session = asyncio.run(establish_target_bound_http_session(
+        TargetBoundSessionCredential(
+            lane="secondary",
+            auth_kind="json_login",
+            endpoint_url="/api/login",
+            binding_digest="d" * 64,
+            username="operator",
+            secret="pw",
+        ),
+        target=TARGET,
+        request_executor=request_executor,
+    ))
+    assert session.headers() == {"Authorization": "Bearer t.value"}
+    assert captured["body"] == {"username": "operator", "password": "pw"}

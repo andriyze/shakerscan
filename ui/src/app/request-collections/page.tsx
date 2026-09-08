@@ -1,6 +1,8 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { UploadAttempt } from '@/lib/uploadAttempt'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
   getDevices,
@@ -95,6 +97,7 @@ export default function RequestCollectionsPage() {
   const [uploaderOpen, setUploaderOpen] = useState(false)
 
   const [uploadName, setUploadName] = useState('')
+  const uploadAttempt = useRef(new UploadAttempt())
   const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')
   const [documentText, setDocumentText] = useState('')
   const [environmentText, setEnvironmentText] = useState('')
@@ -120,7 +123,7 @@ export default function RequestCollectionsPage() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets({ limit: 500 }), getDevices({ limit: 500 })])
+    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
       .then(([web, connected]) => {
         if (cancelled) return
         setTargets(usableWebTargets(web.targets || []))
@@ -219,6 +222,7 @@ export default function RequestCollectionsPage() {
   }, [replayPolicy])
 
   function openUploader() {
+    uploadAttempt.current.reset()
     setUploadName('')
     setUploadFormat('auto')
     setDocumentText('')
@@ -250,7 +254,7 @@ export default function RequestCollectionsPage() {
     setUploadErrors({})
     setBusy(true)
     try {
-      const created = await createRequestCollection({
+      const payload = {
         target_id: targetId,
         name: uploadName.trim() || undefined,
         format: uploadFormat,
@@ -258,7 +262,10 @@ export default function RequestCollectionsPage() {
         environment,
         environment_name: environmentName.trim() || undefined,
         base_url: targetKind === 'device' && baseUrl.trim() ? baseUrl.trim() : undefined,
-      })
+      }
+      const retryKey = await uploadAttempt.current.keyFor(payload)
+      const created = await createRequestCollection(payload, retryKey)
+      uploadAttempt.current.reset()
       setUploaderOpen(false)
       await loadCollections()
       setSelectedId(created.id)
@@ -392,7 +399,7 @@ export default function RequestCollectionsPage() {
           <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
             <option value="web">Web application</option>
             <option value="api">API</option>
-            <option value="device">Connected device</option>
+            {featureEnabled('devices') && <option value="device">Connected device</option>}
           </Select>
         </Field>
         <Field label="Collection owner">

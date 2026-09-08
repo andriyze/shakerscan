@@ -387,3 +387,8 @@ __all__ = [
     "suggest_hunt_skills",
     "unbind_hunt_skill",
 ]
+
+
+from .authorization_router import router as _authorization_router
+
+router.include_router(_authorization_router)

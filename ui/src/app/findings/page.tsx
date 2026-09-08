@@ -1,7 +1,8 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useEffect, useState, useRef, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
@@ -369,9 +370,9 @@ function FindingsContent() {
             <Link href="/findings/candidates" className={buttonClasses('secondary')}>
               Investigation candidates
             </Link>
-            <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+            {featureEnabled('engine_admin') && <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
               Advanced cleanup
-            </Button>
+            </Button>}
           </>
         }
       />
@@ -404,7 +405,7 @@ function FindingsContent() {
       </details>
 
       {/* Cleanup Panel */}
-      {showCleanup && (
+      {featureEnabled('engine_admin') && showCleanup && (
         <Card className="p-4 space-y-4">
           <h3 className="text-sm font-medium text-white">Cleanup Old Findings</h3>
           <div className="flex flex-wrap items-end gap-4">

@@ -99,6 +99,7 @@ CredentialAuthKind = Literal[
     "form_login",
     "oauth_client_credentials",
     "oauth_password",
+    "json_login",
     "custom_headers",
     "query_parameter",
     "ssh_password",
@@ -186,7 +187,7 @@ def _safe_credential_capabilities(
         return ()
     if auth_kind == "query_parameter":
         return ("collections.replay_safe",)
-    if auth_kind in {"form_login", "oauth_client_credentials", "oauth_password"}:
+    if auth_kind in {"form_login", "oauth_client_credentials", "oauth_password", "json_login"}:
         return (
             "auth.session.establish",
             "auth.session.refresh",

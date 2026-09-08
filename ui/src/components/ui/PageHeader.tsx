@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { ArrowLeft } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { boundedDisplayText } from '@/lib/targetChoices'

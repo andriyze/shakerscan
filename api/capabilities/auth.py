@@ -23,7 +23,7 @@ except ModuleNotFoundError:
 
 
 SESSION_AUTH_KINDS = frozenset({
-    "form_login", "oauth_client_credentials", "oauth_password",
+    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
 })
 MAX_SESSION_FORM_BYTES = 16_384
 MAX_SESSION_FIELDS = 50
@@ -359,9 +359,29 @@ def _session_headers(
         payload = json.loads(response.body().decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         payload = None
-    if isinstance(payload, dict) and isinstance(payload.get("access_token"), str):
-        token = str(payload["access_token"])
-        token_type = str(payload.get("token_type") or "Bearer")
+    if isinstance(payload, dict):
+        # A JSON login returns the bearer in the response body. Search a bounded set of
+        # well-known locations: the OAuth-standard access_token, common top-level aliases,
+        # and one level of the containers real APIs nest an auth result under (Juice Shop
+        # uses authentication.token). The set is fixed, not target-configurable, so it
+        # cannot be steered into reading an arbitrary field.
+        token = ""
+        token_type = "Bearer"
+        token_keys = ("access_token", "token", "jwt", "id_token", "authToken")
+        containers = [payload]
+        for holder in ("authentication", "data", "result", "auth"):
+            nested = payload.get(holder)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for scope in containers:
+            for key in token_keys:
+                value = scope.get(key)
+                if isinstance(value, str) and value:
+                    token = value
+                    token_type = str(scope.get("token_type") or "Bearer")
+                    break
+            if token:
+                break
         if (
             token
             and token.isascii()
@@ -526,6 +546,35 @@ async def establish_target_bound_http_session(
                 target=target,
                 allow_write=True,
                 cookies=inherited_cookies,
+                timeout_seconds=15,
+                private_response_sink=capture,
+                principal_slot=credential.lane,
+            )
+            request_count += 1 if isinstance(post_result.get("request"), Mapping) else 0
+        elif credential.auth_kind == "json_login":
+            # A JSON API login: POST a JSON credential body to the endpoint and read the
+            # bearer token back out of the response body (form_login parses an HTML form;
+            # the OAuth kinds post a form-encoded grant; neither matches a JSON+JWT API,
+            # which is the common modern case). The identity field key is inferred from the
+            # username itself -- an address goes in "email", anything else in "username" --
+            # so no per-target field configuration is required. The token is extracted from a
+            # bounded set of well-known locations by ``_session_headers`` below.
+            json_body: dict[str, str] = {}
+            if credential.username:
+                key = "email" if "@" in credential.username else "username"
+                json_body[key] = credential.username
+            if credential.secret:
+                json_body["password"] = credential.secret
+            if not json_body:
+                raise SessionCredentialContractError(
+                    "JSON login requires a username, a secret, or both"
+                )
+            post_result = await request_executor(
+                origin,
+                {"method": "POST", "path": endpoint_path, "json_body": json_body},
+                target=target,
+                allow_write=True,
+                trusted_headers={"Accept": "application/json"},
                 timeout_seconds=15,
                 private_response_sink=capture,
                 principal_slot=credential.lane,

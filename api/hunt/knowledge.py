@@ -14,6 +14,9 @@ import json
 from typing import Any, Mapping
 import uuid
 
+from .endpoint_grouping import group_endpoint_rows
+from .graph_projection import project_graph_node
+
 
 MAX_QUERY_ROWS = 500
 
@@ -35,7 +38,7 @@ QUERIES = {
     "findings": QuerySpec("findings", "title, severity, status, tool, url, last_verification_verdict, last_seen_at", "last_seen_at", ("severity", "status", "verified_only")),
     "hypotheses": QuerySpec("hypotheses", "family, title, status, confidence, source, dedupe_key, updated_at", "updated_at", ("family", "status")),
     "principals": QuerySpec("target_principals", "label, role, tenant_id, auth_state, is_active, updated_at", "updated_at", ("role", "auth_state")),
-    "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, last_seen_at", "last_seen_at"),
+    "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, attributes, last_seen_at", "last_seen_at", ("node_type", "hunt_id")),
     "graph_edges": QuerySpec("application_graph_edges", "src_key, edge_type, dst_key, last_seen_at", "last_seen_at"),
     "receipts": QuerySpec("tool_receipts", "tool_name, status, redacted_argv, created_at", "created_at", ("status",)),
     "notes": QuerySpec("tool_receipts", "metadata_json, created_at", "created_at"),
@@ -83,12 +86,90 @@ def _filter_values(spec: QuerySpec, supplied: Mapping[str, Any]) -> dict[str, An
     return values
 
 
+#: Bounded projection, not a count of the entire inventory. Filters precede this
+#: limit. Continuation binds the selected rows' digest so changes require restart
+#: instead of making an offset silently skip/repeat groups.
+MAX_GROUPING_ROWS = 20_000
+
+
+async def _endpoint_group_page(
+    conn: Any, *, target_id: Any, limit: int, cursor: str | None, scope: str,
+    values: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Page a deterministic, filtered projection; raw endpoint reads are unchanged."""
+    fingerprint = hashlib.sha256(json.dumps(dict(values), sort_keys=True).encode()).hexdigest()
+    offset = 0
+    position: dict[str, Any] = {}
+    if cursor is not None:
+        position = _decode(cursor)
+        offset = position.get("offset")
+        if (type(position.get("v")) is not int or position["v"] != 2
+                or position.get("scope") != scope or position.get("filter") != fingerprint
+                or type(offset) is not int or not 0 <= offset <= MAX_GROUPING_ROWS
+                or not isinstance(position.get("snapshot"), str)):
+            raise KnowledgeQueryError("Cursor does not match this knowledge query")
+    params: list[Any] = [target_id]
+    where = ["target_id=$1", "COALESCE(test_status,'')<>'gone'"]
+    for key, value in sorted(values.items()):
+        if key == "id":
+            try:
+                value = uuid.UUID(value)
+            except ValueError as exc:
+                raise KnowledgeQueryError("id must be a UUID") from exc
+        params.append(value)
+        placeholder = f"${len(params)}"
+        where.append(f"path ILIKE '%'||{placeholder}||'%'" if key == "path_contains"
+                     else f"{key}={placeholder}")
+    rows = [dict(row) for row in await conn.fetch(
+        "SELECT id, method, path, auth_state, test_status, last_verdict, param_shape, "
+        "param_location, content_type, last_http_status, priority_score FROM target_endpoints "
+        f"WHERE {' AND '.join(where)} ORDER BY id ASC LIMIT {MAX_GROUPING_ROWS + 1}",
+        *params,
+    )]
+    snapshot = hashlib.sha256(json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode()).hexdigest()
+    if cursor is not None and position["snapshot"] != snapshot:
+        raise KnowledgeQueryError("Grouped inventory changed; restart without a cursor")
+    truncated = len(rows) > MAX_GROUPING_ROWS
+    groups = group_endpoint_rows(rows[:MAX_GROUPING_ROWS])
+    if offset > len(groups):
+        raise KnowledgeQueryError("Cursor does not match this knowledge query")
+    page = groups[offset:offset + limit]
+    has_more = len(groups) > offset + limit
+    return {
+        "ok": True, "kind": "endpoint_groups", "supported": True,
+        "count": len(page), "rows": [g.as_row() for g in page],
+        "has_more": has_more,
+        "next_cursor": _encode({"v": 2, "scope": scope, "filter": fingerprint,
+                                "snapshot": snapshot, "offset": offset + limit})
+        if has_more else None,
+        "group_count": len(groups),
+        "sampled_requests": sum(g.sample_count for g in groups),
+        "inventory_rows_read": min(len(rows), MAX_GROUPING_ROWS),
+        "inventory_truncated": truncated,
+        "snapshot_id": snapshot,
+        "grouping_scope": "filtered_inventory",
+    }
+
+
 async def query_knowledge_page(
     conn: Any, *, target_id: Any, kind: str, device: bool = False,
     filters: Mapping[str, Any] | None = None, limit: int = 100,
     cursor: str | None = None,
 ) -> dict[str, Any]:
     kind = "receipts" if kind == "tool_receipts" else kind
+    if kind == "endpoint_groups":
+        values = _filter_values(QUERIES["endpoints"], filters or {})
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
+            raise KnowledgeQueryError(f"limit must be between 1 and {MAX_QUERY_ROWS}")
+        if device:
+            return {"ok": True, "kind": kind, "supported": False, "count": 0, "rows": [],
+                    "has_more": False, "next_cursor": None}
+        return await _endpoint_group_page(
+            conn, target_id=target_id, limit=limit, cursor=cursor,
+            scope=f"web:{target_id}:endpoint_groups", values=values,
+        )
     if kind not in QUERIES:
         raise KnowledgeQueryError("Unsupported knowledge kind")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:
@@ -125,6 +206,12 @@ async def query_knowledge_page(
                 where.append(f"id={bind(uuid.UUID(value))}")
             except ValueError as exc:
                 raise KnowledgeQueryError("id must be a UUID") from exc
+        elif key == "hunt_id":
+            try:
+                hunt_id = str(uuid.UUID(value))
+            except ValueError as exc:
+                raise KnowledgeQueryError("hunt_id must be a UUID") from exc
+            where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
         elif key == "verified_only":
@@ -171,4 +258,6 @@ async def query_knowledge_page(
         })
     for row in rows:
         row.pop("page_timestamp", None)
+    if kind == "graph_nodes":
+        rows = [project_graph_node(row) for row in rows]
     return {"ok": True, "kind": kind, "supported": True, "count": len(rows), "rows": rows, "has_more": has_more, "next_cursor": next_cursor}

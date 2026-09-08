@@ -1013,7 +1013,7 @@ class ScanActionPlanCompiler:
                 and reference is not None
                 and lane in {"primary", "secondary"}
                 and str(reference.get("auth_kind") or "") in {
-                    "form_login", "oauth_client_credentials", "oauth_password",
+                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
                 }
             ):
                 add(

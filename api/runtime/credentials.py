@@ -26,6 +26,7 @@ HTTP_CREDENTIAL_KINDS = frozenset({
     "form_login",
     "oauth_client_credentials",
     "oauth_password",
+    "json_login",
     "custom_headers",
     "query_parameter",
 })
@@ -46,6 +47,7 @@ IDENTITY_PAIR_KINDS = frozenset({
     "basic_auth",
     "form_login",
     "oauth_password",
+    "json_login",
 })
 CREDENTIAL_KIND_ALIASES = {
     "multi_header": "custom_headers",
@@ -247,7 +249,7 @@ def build_credential_secret(
     endpoint = _endpoint(
         endpoint_url,
         name="endpoint_url",
-        required=kind in {"form_login", "oauth_client_credentials", "oauth_password"},
+        required=kind in {"form_login", "oauth_client_credentials", "oauth_password", "json_login"},
     )
     client = _text(
         client_id,
@@ -368,7 +370,7 @@ def public_credential_configuration(material: Mapping[str, Any]) -> dict[str, An
         "parameter_name": material.get("parameter_name"),
         "browser_storage_key": material.get("browser_storage_key"),
         "interactive_exchange_required": kind in {
-            "form_login", "oauth_client_credentials", "oauth_password",
+            "form_login", "oauth_client_credentials", "oauth_password", "json_login",
         },
         "secret_values_visible": False,
     }

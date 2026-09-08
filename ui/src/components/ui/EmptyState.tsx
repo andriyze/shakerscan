@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { Button, buttonClasses } from './Button'
 import { Card } from './Card'
 

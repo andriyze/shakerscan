@@ -1,4 +1,5 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
@@ -45,6 +46,7 @@ const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'cookie', label: 'Cookie' },
   { value: 'basic_auth', label: 'Basic authentication' },
   { value: 'form_login', label: 'Form login' },
+  { value: 'json_login', label: 'JSON login' },
   { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
   { value: 'oauth_password', label: 'OAuth password flow' },
   { value: 'custom_headers', label: 'Custom headers' },
@@ -120,7 +122,7 @@ function isSsh(kind: CredentialAuthKind): boolean {
 // Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half
 // of the username/secret pair on its own, so neither field is individually required -- but at
 // least one must be present. A UI test asserts this list matches the backend constant.
-const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password']
+const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password', 'json_login']
 
 function isIdentityPair(kind: CredentialAuthKind): boolean {
   return IDENTITY_PAIR_KINDS.includes(kind)
@@ -132,7 +134,7 @@ function showsUsername(kind: CredentialAuthKind): boolean {
 }
 
 function needsEndpoint(kind: CredentialAuthKind): boolean {
-  return ['form_login', 'oauth_client_credentials', 'oauth_password'].includes(kind)
+  return ['form_login', 'oauth_client_credentials', 'oauth_password', 'json_login'].includes(kind)
 }
 
 function validateDraft(draft: Draft, rotating: boolean): DraftErrors {
@@ -243,7 +245,7 @@ export default function CredentialsPage() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets({ limit: 500 }), getDevices({ limit: 500 })])
+    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
       .then(([web, connected]) => {
         if (cancelled) return
         setTargets(usableWebTargets(web.targets || []))
@@ -472,8 +474,8 @@ export default function CredentialsPage() {
             <Select value={targetKind} onChange={(event) => changeTargetKind(event.target.value as CredentialTargetKind)}>
               <option value="web">Web</option>
               <option value="api">API</option>
-              <option value="network">Network / SSH</option>
-              <option value="device">Connected device</option>
+              {featureEnabled('network_testing') && <option value="network">Network / SSH</option>}
+              {featureEnabled('devices') && <option value="device">Connected device</option>}
             </Select>
           </Field>
           <Field label="Bound target">

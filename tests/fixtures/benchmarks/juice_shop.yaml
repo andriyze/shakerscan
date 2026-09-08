@@ -23,21 +23,24 @@ auth:
 # far the engine still is from the bar. Setting only the shipped numbers would make a green
 # scorecard read as "meets its bar" when it means "no worse than the day we lowered it".
 quality_bar:
-  min_expected_recall: 0.67          # 6 of the 9 expected classes
-  require_browser_proven_xss: true   # Juice Shop's DOM XSS should be browser-proven
-  require_reliable_grade: true       # coverage complete enough to trust the grade
-  max_known_expectation_gaps: 0      # every declared gap is a debt against this bar
+  # The release bar is set at the SHIPPED level (operator decision, 2026-09-06). Four releases,
+  # 2.0.0 through 2.2.0, certified with this bar waived as declared debt while measuring the same
+  # 0.44 each time; the decision is to stop renewing that waiver, hold the measured level as the
+  # bar, and move the effort to Hunt. The answer key (`expected`) is unchanged and the five
+  # unreachable classes stay declared under `gates`, so the distance to the intended standard
+  # (0.67, a browser-proven DOM XSS, a reliable grade, no gaps) stays visible on every card through
+  # the gap list, and a NEW miss, a recall drop, or a sixth gap still fails.
+  min_expected_recall: 0.44          # 4 of the 9 expected classes, measured on the funded thorough authenticated run
+  require_browser_proven_xss: false  # xss-dom-search is a declared gap: no DOM/fragment discovery exists
+  require_reliable_grade: false      # out of reach of budget tuning inside the wall ceiling (below)
+  max_known_expectation_gaps: 5      # exactly the declared gaps; the list may shrink, never grow
   # This subset is a developer progress signal only. Release qualification uses
   # --enforce-quality, which always binds every check in the complete bar.
-  # `grade_reliable` requires every selected
-  # family complete AND no unproven critical/high, and a thorough scan cannot fund that
-  # inside its 3,600-second wall ceiling -- funding the proof families enough time to
-  # reach a verdict is what pushed the passive-template and exposure continuation batches
-  # into `insufficient_plan_budget`. That trade is correct (proof outranks breadth) and it
-  # puts the check out of reach of budget tuning.
-  #
-  # The known shortfall therefore blocks 2.0.0 until the engine and evidence close it.
-  # Regression gates below still catch decay during ordinary development runs.
+  # `grade_reliable` requires every selected family complete AND no unproven critical/high, and
+  # a thorough scan cannot fund that inside its 3,600-second wall ceiling -- funding the proof
+  # families enough time to reach a verdict is what pushed the passive-template and exposure
+  # continuation batches into `insufficient_plan_budget`. That trade is correct (proof outranks
+  # breadth) and it puts the check out of reach of budget tuning.
   enforced: []
 
 # The expectations below are NOT reduced to what the engine currently proves: they describe what a

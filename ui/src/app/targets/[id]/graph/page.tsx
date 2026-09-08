@@ -1,8 +1,9 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import {
   generateApplicationGraphHypotheses,
   getApplicationGraph,
@@ -164,7 +165,7 @@ function GraphContent() {
       <SectionCard
         title="Summary"
         actions={
-          <Button
+          featureEnabled('hunt') && <Button
             type="button"
             variant="secondary"
             onClick={() => void generateLeads()}

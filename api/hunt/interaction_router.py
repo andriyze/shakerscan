@@ -209,7 +209,11 @@ class HuntQueryRequest(BaseModel):
     kind: Literal[
         "summary", "endpoints", "findings", "principals", "services", "scans",
         "collections", "candidates", "notes", "receipts", "hypotheses",
-        "graph_nodes", "graph_edges"
+        "graph_nodes", "graph_edges",
+        # Opt-in grouped frontier: the same inventory collapsed into route templates, so the
+        # first page is not dominated by repeated samples of one handler. "endpoints" is
+        # unchanged for callers that want raw samples.
+        "endpoint_groups",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -1538,7 +1542,7 @@ async def _execute_hunt_capability_lifecycle(
                 validated_scope_receipt_id = current_scope_receipt_id
             used = _hunt_json(run["budget_used_json"], {})
             budget = _hunt_json(run["budget_json"], {})
-            if name == "candidate.verify":
+            if name in {"candidate.verify", "authz.verify"}:
                 if int(used.get("verifications") or 0) >= int(
                     budget.get("max_verifications") or 0
                 ):

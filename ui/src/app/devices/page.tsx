@@ -1,6 +1,6 @@
 'use client'
 
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Router, ShieldCheck } from 'lucide-react'
 import {

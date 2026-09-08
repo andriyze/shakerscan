@@ -127,7 +127,7 @@ _SCAN_V2_BASELINE_CAPABILITIES = (
 )
 SCAN_V2_ZEROABLE_LIMITS = frozenset({"max_state_changing_requests"})
 SCAN_V2_INTERACTIVE_AUTH_KINDS = frozenset({
-    "form_login", "oauth_client_credentials", "oauth_password",
+    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
 })
 SCAN_V2_SECONDARY_AUTH_KINDS = frozenset({
     "authorization_header", "bearer_token", "cookie", "basic_auth", "form_login",

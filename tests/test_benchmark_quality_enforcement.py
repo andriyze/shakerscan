@@ -67,20 +67,26 @@ def test_an_unknown_enforced_name_is_rejected():
     assert "names checks that do not exist" in SOURCE
 
 
-def test_the_declared_standard_survives_whatever_is_bound():
-    """Shrinking the bar to what the engine proves would destroy the measurement.
+def test_the_release_bar_is_pinned_to_the_declared_shipped_level():
+    """The bar is the shipped level, pinned to what the regression gates declare.
 
-    `enforced` is only an incremental developer signal; the standard itself never
-    moves and the release invocation binds every check.
+    Operator decision (2026-09-06): after four releases certified with the bar waived at the
+    same measurement, the bar holds the measured level instead of a waived aspiration. The
+    answer key itself never moves, and the gap list is the visible distance to the intended
+    standard. Pinning the bar to the regression gates means it cannot drift to an arbitrary
+    number: recall equals the declared floor and the gap allowance equals the declared gaps.
+    `enforced` stays an incremental developer signal; the release invocation binds every check.
     """
     import yaml
-    bar = yaml.safe_load(
+    fixture = yaml.safe_load(
         (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()
-    )["quality_bar"]
-    assert bar["min_expected_recall"] == 0.67
-    assert bar["require_browser_proven_xss"] is True
-    assert bar["require_reliable_grade"] is True
-    assert bar["max_known_expectation_gaps"] == 0
+    )
+    bar = fixture["quality_bar"]
+    gates = fixture["gates"]
+    assert bar["min_expected_recall"] == gates["min_expected_recall"]
+    assert bar["max_known_expectation_gaps"] == len(gates["known_expectation_gaps"])
+    assert bar["require_browser_proven_xss"] is gates["require_browser_proven_xss"]
+    assert bar["require_reliable_grade"] is gates["require_reliable_grade"]
     assert isinstance(bar["enforced"], list)
     assert "release_disposition" not in bar
 
@@ -97,22 +103,35 @@ def test_juice_shop_qualification_requires_two_principals():
     assert auth["user1_login"] == auth["user2_login"]
 
 
-def test_even_perfect_runtime_metrics_cannot_waive_declared_expectation_gaps():
+def test_the_gap_list_may_shrink_but_never_grow_past_the_shipped_level():
+    """A card at the shipped level passes; declaring one more gap fails the bar.
+
+    The bar allows exactly the gaps the fixture declares. Closing one is recorded, not
+    penalised; adding one silently lowers the shipped level and must fail.
+    """
+    import copy
     import yaml
     from scripts.benchmark_targets import apply_quality_bar
 
     fixture = yaml.safe_load(
         (ROOT / "tests/fixtures/benchmarks/juice_shop.yaml").read_text()
     )
-    card = {
-        "expected_recall": 1.0,
-        "browser_proven_high_critical_families": ["xss"],
-        "grade_reliable": True,
+    at_shipped_level = {
+        "expected_recall": fixture["gates"]["min_expected_recall"],
+        "browser_proven_high_critical_families": [],
+        "grade_reliable": False,
     }
-    apply_quality_bar(card, fixture)
+    apply_quality_bar(at_shipped_level, fixture)
+    assert at_shipped_level["quality_passed"] is True
+    assert at_shipped_level["quality_release_contract"]["status"] == "full_bar"
 
+    grown = copy.deepcopy(fixture)
+    grown["gates"]["known_expectation_gaps"].append(
+        {"id": "sqli-search", "reason": "a class that used to be found"}
+    )
+    card = dict(at_shipped_level)
+    apply_quality_bar(card, grown)
     assert card["quality_passed"] is False
-    assert card["quality_release_contract_passed"] is False
     assert card["quality_release_contract"] == {
         "status": "unaccepted_shortfall",
         "accepted_failed_gates": [],

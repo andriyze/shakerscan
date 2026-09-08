@@ -143,13 +143,13 @@ export async function listRequestCollectionInventory(
 export async function createRequestCollection(payload: {
   target_id: string
   document: unknown
-} & Omit<GeneratedRequestCollectionCreate, 'target_id' | 'document'>): Promise<SharedRequestCollection & {
+} & Omit<GeneratedRequestCollectionCreate, 'target_id' | 'document'>, idempotencyKey?: string): Promise<SharedRequestCollection & {
   environment?: RequestCollectionEnvironment | null
   binding?: RequestCollectionBinding | null
 }> {
   const response = await fetch(`${API_URL}/request-collections`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     body: JSON.stringify(payload),
   })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to upload request collection'))

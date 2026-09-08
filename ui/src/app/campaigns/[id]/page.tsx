@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { useParams } from 'next/navigation'
 import { ArrowLeft } from 'lucide-react'
 import { getCampaign, formatDate, type CampaignDetailResponse } from '@/lib/api'

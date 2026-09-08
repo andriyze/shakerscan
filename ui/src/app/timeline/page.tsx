@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { getMissionTimeline, getTargets, formatDate, type Target, type TimelineEvent } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'

@@ -1,0 +1,50 @@
+{
+  "schema_version": "endpoint-reality-sample/v3",
+  "purpose": "Independently labeled endpoint sample for evaluating whether the PRODUCTION reachability filter (and any proposed replacement) can separate real routes from discovery noise without demoting real endpoints. Labels are ground truth derived from the target application's known route structure, NEVER from the probe result being evaluated.",
+  "target": "OWASP Juice Shop (lab fixture)",
+  "v2_change": "Route template and request sample are now labeled SEPARATELY. v1 collapsed them and called /api/Cards/search a 'phantom endpoint'. It is not a separate endpoint at all: it is the real route GET /api/Cards/{id} carrying the invalid id 'search'. Conflating the two makes de-noising look like a classification problem when much of it is a GROUPING problem -- thousands of junk samples of a handful of real templates.",
+  "v3_change": "Adds explicit route_label=unknown cases; an unknown object id is not a substitute for an unknown route. Score template retention and useful-representative retention separately from sample filtering. Template identity includes method and auth_context. No useful sample for a template means working-request retention is untested, not successful. Unknown labels describe fixture knowledge, not proof that a route can never be resolved.",
+  "labels": {
+    "route_label": {
+      "real": "The route template exists and is served by the application.",
+      "absent": "No route template matches; the application has no handler for this shape.",
+      "client_route": "Resolved in the browser, not server-addressable.",
+      "unknown": "Cannot be established as ground truth."
+    },
+    "sample_label": {
+      "valid": "This concrete request identifies a real object / is a well-formed request for the template.",
+      "invalid": "Well-formed route, but this parameter value does not identify a real object.",
+      "not_parameterised": "The template takes no parameter, so the sample IS the route.",
+      "unknown": "Cannot be established as ground truth."
+    }
+  },
+  "scoring_notes": "The production filter exposes keep/drop, not existence judgments: keeping a row does not prove it real. Dropping a route_label=unknown sample is reported separately; zero unknown cases is NOT TESTED. Dropping an invalid sample is not losing its real template if another sample preserves it; retaining only junk must not conceal loss of all useful representatives. Live evaluation is anonymous only and rejects non-anonymous auth_context labels. These labels never enter production filtering.",
+  "entries": [
+    {"route_template": "/rest/user/login", "request_sample": "/rest/user/login", "method": "POST", "route_label": "real", "sample_label": "not_parameterised", "category": "method_specific", "basis": "Documented auth endpoint. POST is the real verb; a GET probe reports on GET only."},
+    {"route_template": "/rest/products/search", "request_sample": "/rest/products/search", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "public", "basis": "Documented search endpoint; the verified SQLi locus."},
+    {"route_template": "/api/Feedbacks", "request_sample": "/api/Feedbacks", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "public_collection", "basis": "Sequelize model collection route, publicly readable."},
+    {"route_template": "/api/Users", "request_sample": "/api/Users", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "protected_collection", "basis": "Model collection route; the answer key's BFLA locus."},
+    {"route_template": "/api/Addresss", "request_sample": "/api/Addresss", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "protected_collection", "basis": "Model collection route, caller-scoped; verified caller-scoped in this session."},
+    {"route_template": "/api/Cards", "request_sample": "/api/Cards", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "protected_collection", "basis": "Model collection route requiring auth."},
+    {"route_template": "/rest/admin/application-version", "request_sample": "/rest/admin/application-version", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "public", "basis": "Documented rest route."},
+    {"route_template": "/ftp", "request_sample": "/ftp", "method": "GET", "route_label": "real", "sample_label": "not_parameterised", "category": "public", "basis": "Documented exposed directory; a verified sensitive-exposure locus."},
+
+    {"route_template": "/rest/basket/{id}", "request_sample": "/rest/basket/1", "method": "GET", "route_label": "real", "sample_label": "unknown", "category": "protected_object", "basis": "Real object route; whether basket id 1 exists in this instance is not established here."},
+    {"route_template": "/api/Cards/{id}", "request_sample": "/api/Cards/999999", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "protected_object", "basis": "Real object route with an id that does not exist. Auth answers before the object lookup, so HTTP cannot show which."},
+
+    {"route_template": "/api/Cards/{id}", "request_sample": "/api/Cards/search/", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "junk_sample_of_real_template", "basis": "NOT a separate endpoint. The model router binds 'search' as {id}. v1 mislabeled this a phantom; it is a real template with an invalid sample, and it is why an evidence ranking promoted it."},
+    {"route_template": "/api/Cards/{id}", "request_sample": "/api/Cards/admin", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "junk_sample_of_real_template", "basis": "Wordlist token bound as {id} by the model router."},
+    {"route_template": "/api/Cards/{id}", "request_sample": "/api/Cards/2fa", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "junk_sample_of_real_template", "basis": "Wordlist token bound as {id}."},
+    {"route_template": "/api/Addresss/{id}", "request_sample": "/api/Addresss/basket", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "junk_sample_of_real_template", "basis": "Wordlist token bound as {id}."},
+    {"route_template": "/api/Addresss/{id}", "request_sample": "/api/Addresss/coupon", "method": "GET", "route_label": "real", "sample_label": "invalid", "category": "junk_sample_of_real_template", "basis": "Wordlist token bound as {id}."},
+
+    {"route_template": "/api/{model}", "request_sample": "/api/zz9-shakerscan-unlikely-model-a1b2", "method": "GET", "route_label": "absent", "sample_label": "invalid", "category": "invented", "basis": "Model routes are generated per model; no handler exists for an unknown model name."},
+    {"route_template": "/rest/{unknown}", "request_sample": "/rest/zz9-shakerscan-unlikely-path-a1b2", "method": "GET", "route_label": "absent", "sample_label": "invalid", "category": "invented", "basis": "Deliberately implausible control path with no handler."},
+
+    {"route_template": "/#/search", "request_sample": "/#/search", "method": "GET", "route_label": "client_route", "sample_label": "not_parameterised", "category": "client_side", "basis": "Angular fragment route; the server returns the app shell for any fragment."},
+    {"route_template": "/#/login", "request_sample": "/#/login", "method": "GET", "route_label": "client_route", "sample_label": "not_parameterised", "category": "client_side", "basis": "Angular fragment route."},
+
+    {"route_template": "/rest/user/login", "request_sample": "/rest/user/login", "method": "GET", "route_label": "unknown", "sample_label": "unknown", "category": "unverified_method", "basis": "This fixture establishes POST login, not a GET handler. Its GET route existence has not been independently established; neither a POST declaration nor an anonymous error resolves that gap."},
+    {"route_template": "/api/Cards/{id}/history", "request_sample": "/api/Cards/1/history", "method": "GET", "route_label": "unknown", "sample_label": "unknown", "category": "unverified_nested_route", "basis": "A nested candidate whose handler and access policy have not been independently established in this fixture. Do not infer existence or absence from an auth-masked response. This is intentionally unverified, not an asserted hidden route."}
+  ]
+}

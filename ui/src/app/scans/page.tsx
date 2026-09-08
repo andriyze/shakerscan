@@ -1,7 +1,8 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { getScans, cancelScan, getCampaigns, getDomains, getGradeColor, formatDate, formatDuration, submitScanV2, type Campaign, type Scan } from '@/lib/api'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -254,6 +255,7 @@ function ScansContent() {
   }, [statusFilter, domainFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
   const fetchActiveHunts = useCallback(async (): Promise<boolean> => {
+    if (!featureEnabled('hunt')) return true
     try {
       const data = await getCampaigns({ status: 'active', limit: 50 })
       setActiveHunts((data.campaigns || []).filter((campaign) => campaign.campaign_type === 'autonomous_research'))

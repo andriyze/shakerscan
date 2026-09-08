@@ -1078,7 +1078,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "auth_kind": {
                     "type": "string",
                     "enum": [
-                        "form_login", "oauth_client_credentials", "oauth_password",
+                        "form_login", "oauth_client_credentials", "oauth_password", "json_login",
                     ],
                 },
                 "credential_binding_digest": {

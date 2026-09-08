@@ -1127,6 +1127,34 @@ async def _run_schema_migrations_once(pool) -> None:
                 ON public_api_idempotency(updated_at)
             """)
 
+            # json_login is a first-class interactive session auth kind (A1 auth/session
+            # convergence, 2026-09-06). Existing databases carry the pre-json_login CHECK
+            # constraints on credential_profiles.auth_kind and auth_sessions.auth_kind; widen
+            # them in place. Drop-then-add keeps this idempotent across rolling restarts.
+            await conn.execute(
+                "ALTER TABLE credential_profiles "
+                "DROP CONSTRAINT IF EXISTS credential_profiles_auth_kind_check"
+            )
+            await conn.execute("""
+                ALTER TABLE credential_profiles
+                ADD CONSTRAINT credential_profiles_auth_kind_check CHECK (auth_kind IN (
+                    'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
+                    'form_login','oauth_client_credentials','oauth_password','json_login',
+                    'custom_headers','query_parameter',
+                    'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
+                ))
+            """)
+            await conn.execute(
+                "ALTER TABLE auth_sessions "
+                "DROP CONSTRAINT IF EXISTS auth_sessions_auth_kind_check"
+            )
+            await conn.execute("""
+                ALTER TABLE auth_sessions
+                ADD CONSTRAINT auth_sessions_auth_kind_check CHECK (
+                    auth_kind IN ('form_login','oauth_client_credentials','oauth_password','json_login')
+                )
+            """)
+
             # findings table verification columns
             await conn.execute("""
                 ALTER TABLE findings

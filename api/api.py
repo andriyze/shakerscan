@@ -2845,7 +2845,7 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
 
 
 async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
-    """Fail old local Scan rows only when no queued payload or live lease remains."""
+    """Surface uncertain old handoffs without claiming non-execution or freeing capacity."""
     r = get_redis()
     try:
         queued_job_ids = {
@@ -2853,8 +2853,8 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
             for raw in queue_payloads(r, QUEUE_NAME, include_leased=True)
         }
     except Exception:
-        # Queue visibility is authoritative for this repair. Never infer an
-        # orphan when Redis cannot prove the payload/lease is absent.
+        # Even successful queue visibility is only a snapshot, not proof that
+        # no execution occurred. An unavailable snapshot cannot diagnose a handoff.
         return 0
 
     repaired = 0
@@ -2877,31 +2877,18 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
                 continue
             updated = await conn.fetchrow(
                 """UPDATE scans
-                   SET status='failed', progress=100, current_phase='queue_handoff_lost',
-                       completed_at=NOW(),
-                       error_message='Scan was pending but no queue entry or live lease remained after 10 minutes. No target traffic was started; retry this Scan.'
+                   SET current_phase='queue_handoff_unknown',
+                       error_message='Queue handoff could not be confirmed. Execution outcome remains unknown; do not submit a replacement.'
                    WHERE id=$1 AND status IN ('pending','queued')
+                     AND current_phase IS DISTINCT FROM 'queue_handoff_unknown'
                    RETURNING id, parent_scan_id""",
                 row["id"],
             )
             if not updated:
                 continue
             repaired += 1
-            if job_id:
-                r.hset(f"job:{job_id}", mapping={
-                    "status": "failed",
-                    "progress": "100",
-                    "current_phase": "queue_handoff_lost",
-                    "error": "Queue entry or live lease was lost before execution",
-                })
-                r.expire(f"job:{job_id}", 86400)
-            parent_id = updated.get("parent_scan_id")
-            if parent_id:
-                await parallel_scan.reconcile_parallel_parent(
-                    conn, str(parent_id), r, QUEUE_NAME
-                )
     if repaired:
-        print(f"[cleanup] failed {repaired} orphaned pending Scan handoff(s)", flush=True)
+        print(f"[cleanup] flagged {repaired} uncertain pending Scan handoff(s)", flush=True)
     return repaired
 
 
@@ -3102,6 +3089,10 @@ async def run_due_schedules(pool: asyncpg.Pool):
     entire loop, which could starve the shared API pool when many schedules
     fire together or when a single schedule got slow (e.g. Redis push delay).
     """
+    from schedules.managed_runner import run_due as run_managed_schedules
+
+    if await run_managed_schedules(pool):
+        return
     r = get_redis()
     now = utc_now()
 
@@ -11374,7 +11365,7 @@ async def _submit_scan(
             options_payload["credential_action_name"] = credential_action_name
             if any(
                 str(item.get("auth_kind") or "") in {
-                    "form_login", "oauth_client_credentials", "oauth_password",
+                    "form_login", "oauth_client_credentials", "oauth_password", "json_login",
                 }
                 for item in credential_refs
             ):
@@ -11561,6 +11552,12 @@ async def _submit_scan(
                  json.dumps(options_payload.get("resolved_scan_budget") or {}),
                  json.dumps({"status": "pending", "reasons": []}),
                  json.dumps(canonical_job_payload), canonical_job.payload_digest)
+            try:
+                from public_retry_context import bind_scan_acceptance
+            except ModuleNotFoundError:
+                from api.public_retry_context import bind_scan_acceptance
+
+            await bind_scan_acceptance(conn, scan_id)
             action_store = PostgresScanActionStore()
             await action_store.persist_plan(
                 conn, plan=scan_action_plan,
@@ -11626,29 +11623,16 @@ async def _submit_scan(
     if parallel_enabled:
         _configure_scan_plan_job(job_data, parallel_worker_count)
     try:
-        enqueue_job(r, QUEUE_NAME, job_data)
-    except RouteCapacityExceeded as exc:
-        await _mark_scan_enqueue_failed(
-            scan_id,
-            "Scan was not queued because the fleet placement-route registry is at capacity.",
-            command_result.get("id") if command_result else None,
-        )
-        raise _route_capacity_http_exception(exc) from exc
-    except Exception as exc:
-        logger.exception("Failed to enqueue submitted scan %s", scan_id)
-        await _mark_scan_enqueue_failed(
-            scan_id,
-            "Scan was not queued because the queue service was unavailable.",
-            command_result.get("id") if command_result else None,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "scan_queue_unavailable",
-                "message": "The scan was recorded as failed because the queue did not accept it.",
-            },
-        ) from exc
-    r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
+        from scan_queue_handoff import enqueue_recorded_scan
+    except ModuleNotFoundError:
+        from api.scan_queue_handoff import enqueue_recorded_scan
+    await enqueue_recorded_scan(
+        redis=r, queue_name=QUEUE_NAME, payload=job_data,
+        scan_id=scan_id, job_id=job_id, target=scan_target,
+        enqueue=enqueue_job, mark_failed=_mark_scan_enqueue_failed,
+        capacity_http_error=_route_capacity_http_exception,
+        command_result_id=command_result.get("id") if command_result else None,
+    )
 
     response = {
         'scan_id': scan_id,
@@ -13488,6 +13472,12 @@ app.include_router(hunt_run_router)
 
 _configure_http_archive_router(lambda: db_pool)
 app.include_router(_http_archive_router)
+
+try:
+    from public_retry_receipts import router as _public_retry_receipts_router
+except ModuleNotFoundError:
+    from api.public_retry_receipts import router as _public_retry_receipts_router
+app.include_router(_public_retry_receipts_router)
 
 
 # =============================================================================

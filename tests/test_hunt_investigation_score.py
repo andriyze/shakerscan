@@ -7,7 +7,7 @@ def inputs():
     record = {"schema_version": "hunt-record/v1", "hunt": {"hunt_id": "h1", "target_id": "t1", "status": "completed"},
               "decision_trace": [{"action_id": "a1", "status": "completed", "result": {
                   "reference_ids": {"finding_ids": ["f1"]},
-                  "budget_accounting": {"basis": "exact_settlement", "actual": {"http_requests": 4}, "reserved": {"http_requests": 24}}}}],
+                  "budget_accounting": {"basis": "exact_settlement", "charge_basis": "capability_reported_settlement", "actual": {"http_requests": 4}, "reserved": {"http_requests": 24}}}}],
               "methodology_trace": [{"event_type": "bound", "skill_id": "selected"},
                   {"event_type": "used", "skill_id": "executed", "body_sha256": "digest", "action_id": "a1"}]}
     oracle = {"hunt_id": "h1", "target_id": "t1", "baseline_fingerprints": ["old"],

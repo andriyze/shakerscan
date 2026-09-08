@@ -230,6 +230,11 @@ def test_path_prefix_and_soft404_matches():
     assert a._soft404_matches(("200", 13212), ("500", 3060)) is False  # status differs
     assert a._soft404_matches(("200", 631), ("200", 75055)) is False   # size differs
     assert a._soft404_matches(("ERR", -1), ("500", 3060)) is False     # inconclusive
+    # An unmeasurable body size is inconclusive, not a match. Size is the only
+    # discriminator once the status matches, and this module keeps an endpoint whenever
+    # the probe cannot decide -- dropping a real endpoint is the harmful error.
+    assert a._soft404_matches(("401", -1), ("401", 83)) is False       # probe size unknown
+    assert a._soft404_matches(("401", 83), ("401", -1)) is False       # signature size unknown
 
 
 def test_is_unreachable_classification():
@@ -1514,3 +1519,19 @@ def test_probe_path_status_keeps_auth_off_argv(monkeypatch):
     assert "secret-token-xyz" not in " ".join(captured["cmd"])
     assert "-K" in captured["cmd"] and "-" in captured["cmd"]
     assert b"secret-token-xyz" in (captured["stdin"] or b"")
+
+
+def test_the_reachability_filter_says_so_when_it_disables_itself(caplog):
+    """Above max_probe the filter keeps every entry, which silently lets a whole batch of
+    phantoms into the inventory. It must announce that, or "did ingestion exceed the
+    limit?" cannot be answered after the fact."""
+    import asyncio as _asyncio
+
+    worklist = [f"GET /p{i}" for i in range(6)]
+    with caplog.at_level("WARNING"):
+        kept = _asyncio.run(a.filter_reachable_worklist(
+            "https://example.test", worklist, max_probe=3,
+        ))
+    assert kept == worklist                     # nothing dropped
+    assert "max_probe=3" in caplog.text         # and the skip is visible
+    assert "6 unique paths" in caplog.text

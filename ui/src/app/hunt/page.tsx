@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from 'react'
 import { HUNT_SESSION_NON_AUTONOMOUS_NOTICE, huntStatusLabel } from '@/lib/labels'
 import { useSearchParams } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { Compass, ShieldCheck } from 'lucide-react'
 import {
   getDevices,

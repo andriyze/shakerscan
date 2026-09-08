@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -665,6 +666,9 @@ _SOFT404_MAX_PREFIXES = 16
 _SOFT404_DECOY_TOKENS = ("zz9-shakerscan-probe-404a7", "zz9-shakerscan-probe-404a7/qx8w2")
 
 
+logger = logging.getLogger(__name__)
+
+
 def _soft404_enabled() -> bool:
     return str(os.environ.get("ASM_SOFT404_DETECT", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
@@ -686,7 +690,14 @@ def _soft404_matches(probe: tuple[str, int], signature: tuple[str, int]) -> bool
     if probe[0] != signature[0] or probe[0] in ("ERR", ""):
         return False
     if probe[1] < 0 or signature[1] < 0:
-        return True  # status matched and size is unknown -> treat as match
+        # Size is the only thing separating a real endpoint from the prefix's not-found
+        # response once the status matches, so without it the comparison is inconclusive
+        # -- and this module's bias is that an inconclusive probe KEEPS the endpoint. It
+        # previously returned True here, dropping on uncertainty, which contradicted the
+        # stated bias and made the harmful error (discarding a real endpoint) the default.
+        # Measured on a labeled sample, a demoted real route is a missed vulnerability
+        # while a kept phantom is only noise, so uncertainty must resolve to "keep".
+        return False
     tol = max(_SOFT404_SIZE_TOL_BYTES, int(signature[1] * _SOFT404_SIZE_TOL_FRAC))
     return abs(probe[1] - signature[1]) <= tol
 
@@ -886,7 +897,17 @@ async def filter_reachable_worklist(
 
     probe_paths = [p for p in by_path if p != "__unparsed__"]
     if len(probe_paths) > max_probe:
-        return entries  # too many to probe within budget; don't block, keep all
+        # Too many to probe within budget: keep everything rather than block ingestion.
+        # This silently disables reality filtering for the whole batch, so every phantom
+        # in it reaches the inventory and later the Hunt frontier. Say so: without this
+        # line there is no way to tell from the outside whether the filter ran, and
+        # "does real ingestion exceed the limit?" is unanswerable after the fact.
+        logger.warning(
+            "asm reachability filter skipped: %d unique paths exceeds max_probe=%d; "
+            "keeping all entries unfiltered for %s",
+            len(probe_paths), max_probe, base_url,
+        )
+        return entries
 
     auth_config = _probe_auth_curl_config(options)
     sem = asyncio.Semaphore(max(1, concurrency))

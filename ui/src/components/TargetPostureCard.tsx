@@ -1,6 +1,6 @@
 'use client'
 
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import type { ReactElement } from 'react'
 
 import { Card } from '@/components/ui'

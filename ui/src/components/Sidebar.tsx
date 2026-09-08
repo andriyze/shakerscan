@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import {
   Activity,
   BookOpen,
@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
+import { navigationAllowed } from '@/lib/workspaceCapabilities'
 import {
   deriveBuildIdentity,
   formatBuildIdentity,
@@ -206,6 +207,7 @@ function NavContent({
       items: group.items.filter((item) => (
         (showAll || !item.advanced)
         && (!item.fleetOnly || fleetEnabled)
+        && navigationAllowed(item.href)
       )),
     }))
     .filter((group) => group.items.length > 0)

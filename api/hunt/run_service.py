@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import importlib
 import json
+import re
 from typing import Any, Mapping
 import uuid
 
@@ -331,6 +332,9 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     item = _row_dict(row)
     input_summary = _decode_json(item.get("input_summary"), {})
     result_summary = _decode_json(item.get("result_summary"), {})
+    experiment_key = input_summary.get("experiment_key")
+    if not isinstance(experiment_key, str) or not re.fullmatch(r"[0-9a-f]{32}", experiment_key):
+        experiment_key = None
     def numeric_budget(value: Any) -> dict[str, int | float]:
         if not isinstance(value, Mapping):
             return {}
@@ -382,6 +386,7 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         "status": item.get("status"),
         "input_digest": input_summary.get("input_digest"),
         "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
+        "experiment_key": experiment_key,
         "receipt_id": str(item.get("receipt_id")) if item.get("receipt_id") else None,
         "started_at": item.get("started_at"),
         "completed_at": item.get("completed_at"),
