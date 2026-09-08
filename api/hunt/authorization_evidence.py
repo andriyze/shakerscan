@@ -11,6 +11,8 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 import uuid
 
+from .authorization_selected import selected_outcome
+
 
 class AuthorizationWorkflowError(ValueError):
     def __init__(self, message: str, status_code: int = 409) -> None:
@@ -144,6 +146,9 @@ def attributed_outcome(
         result["reason"] = "Execution is incomplete, blocked or failed; no authorization conclusion is justified"
         return result
     result["receipt_id"] = str(action["receipt_id"])
+    if proposal.get("baseline_kind") == "own_object":
+        return selected_outcome(result, proposal, attempt,
+                                _observations(mapping(action.get("result_summary"))), transactions)
     for observation in _observations(mapping(action.get("result_summary"))):
         if (observation.get("kind") == "authz_differential"
                 and observation.get("proof_state") == "verified"

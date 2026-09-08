@@ -1,7 +1,7 @@
 """Reference-only API for assisted GET authorization investigations."""
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +20,8 @@ class AuthorizationInvestigateRequest(BaseModel):
     baseline_capture_id: UUID
     primary_session_ref: UUID
     secondary_session_ref: UUID
+    baseline_kind: Literal["collection", "own_object"] = "collection"
+    expected_access: Literal["unknown", "denied", "allowed"] = "unknown"
 
 
 class AuthorizationApproveRequest(BaseModel):

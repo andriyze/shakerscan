@@ -2,140 +2,171 @@
 
 ## Status and boundary
 
-**Status:** Implemented prototype with live-stack and efficacy acceptance pending.
+The GET-only workflow is connected to the Hunt REST API. Proposal and attempt
+references use the existing PostgreSQL `application_graph_nodes` table; canonical
+Hunt actions, receipts and HTTP transactions own execution and its evidence.
+There is no new registry, credential store, database migration or finding-promotion
+path. The API provides collection-based and no-listing selected-object modes.
 
-The GET-only prototype is connected to the Hunt REST API. Proposal and attempt
-references are persisted in the existing PostgreSQL `application_graph_nodes`
-table; execution and outcomes remain owned by canonical `hunt_actions`, receipts,
-and HTTP transactions. No new scanner, capability registry, credential store, or
-finding-promotion path is introduced.
+The no-listing mode is tested against a loopback fixture whose parent endpoint
+returns HTTP 500, including vulnerable, protected and shared objects. API tests
+exercise the real routes, service, repository SQL and capability comparison with
+a substituted queue/transport boundary and SQLite. This is not deployed-worker,
+PostgreSQL-locking, Juice Shop recall or pentester-productivity acceptance. Rebuild
+the API and workers before live evaluation; an older worker may still execute the
+collection verifier and cannot produce the new selected-object evidence.
 
-This is an integration implementation, not a measured pentester-productivity or
-vulnerability-recall result. Local tests exercise the real FastAPI routes and
-repository SQL through a SQLite adapter while substituting the canonical worker
-boundary. Live PostgreSQL, the deployed API/worker path, and the independent
-planner evaluation still require acceptance. New MCP tools and UI controls are
-not included. See [Hunt investigation evaluation](hunt-investigation-evaluation.md)
-for the separate efficacy protocol.
+## Select captured requests
 
-## Supported captures
+Start a web/API Hunt with the existing policy and approval authority. Establish
+primary and secondary sessions with `auth.session.establish`. Use `http.request`
+with the respective opaque `session_ref`, then obtain transaction IDs from
+`/hunts/{hunt_id}/http-transactions`.
 
-Start a web/API Hunt with the existing explicit policy and approval authority.
-Establish its primary and secondary sessions through `auth.session.establish`.
-Use `http.request` with the resulting opaque `session_ref` to capture both:
+Both captures must belong to this Hunt and the selected sessions, have successful,
+complete responses, and refer to the same frozen origin. Requests are body-free
+GETs without custom headers, query strings, fragments or request-collection
+options. Identifier-addressed paths support numeric, UUID and long hexadecimal
+IDs; this shape does not establish ownership or entitlement.
 
-- the primary principal's GET of a specific object;
-- the secondary principal's GET of that object's collection listing.
+### Collection mode (existing default)
 
-Find their transaction IDs in `/hunts/{hunt_id}/http-transactions`. The first
-integration accepts only captures from the **same Hunt**, the selected sessions,
-and the same frozen origin. The baseline must be the object's direct parent
-collection. A successful listing response alone does not prove that the listing
-is complete or that an object is exclusively owned.
+Select the primary object's capture and the secondary principal's collection
+listing. The baseline must be the object's direct parent collection. The existing
+collection verifier may choose another object: its finding cannot settle the
+selection unless canonical evidence attributes it to that exact object and URL.
+Successful listing status alone does not prove listing completeness or entitlement.
 
-Requests must be body-free GETs without query strings, fragments, custom headers,
-or request-collection/redirect options. Unsupported or redacted captures are
-rejected rather than silently reconstructed differently. Numeric IDs, UUIDs and
-long hexadecimal IDs are supported; identifier shape is only a proposal hint.
-Slugs, nested/query/body IDs, prior-Scan captures and no-listing investigations
-remain unsupported by this workflow.
+### Own-object mode (no listing required)
 
-## Propose, review, and approve
+Select the primary capture of object X and the secondary capture of a different
+object Y in the same collection. The baseline is **Y itself**, not a collection
+endpoint. It need not be possible to list the collection at all.
 
-`POST /hunts/{hunt_id}/authorization-investigations` accepts references only:
+The bounded comparison makes at most four GETs:
+
+1. Y as secondary: establish a fresh successful reference response.
+2. X as primary: establish the selected object's response.
+3. X as secondary: test the exact selected object, never a discovered sibling.
+4. X as primary again: check that the object remained stable during comparison.
+
+The last request is unnecessary after a denial or unusable response. Responses
+must be complete HTTP 200 JSON objects with a matching `id` or `uuid` field
+(case-insensitive), optionally inside object wrappers. An array, error/login
+response, ambiguous object, missing ID or truncated response cannot establish
+cross-access. Canonical object content must match the secondary response and
+remain stable across the primary reads. Query/body IDs, slugs, custom-header
+replays and arbitrary JSON selectors are not supported by this first mode.
+
+The existing `authz.verify` capability recognizes an ordered `routes` array of
+exactly two distinct, same-collection concrete object URLs as this selected-object
+comparison: **[primary selection, secondary reference]**. It never invents or
+fetches their parent. A collection-plus-object inventory continues to use the
+listing verifier. Callers needing collection-driven discovery must provide the
+collection route rather than relying on two object URLs as an unordered inventory.
+The existing session resolution, frozen transport, approvals, cancellation and
+four-request budget remain authoritative. No new MCP tool is needed for the
+capability itself; proposal/review/resume remain REST operations.
+
+## Propose and review
+
+`POST /hunts/{hunt_id}/authorization-investigations` accepts capture/session
+references. For no-listing testing:
 
 ```json
 {
-  "capture_id": "<primary-object-transaction UUID>",
-  "baseline_capture_id": "<secondary-listing-transaction UUID>",
+  "capture_id": "<primary-object-X transaction UUID>",
+  "baseline_capture_id": "<secondary-object-Y transaction UUID>",
   "primary_session_ref": "<primary-session UUID>",
-  "secondary_session_ref": "<secondary-session UUID>"
+  "secondary_session_ref": "<secondary-session UUID>",
+  "baseline_kind": "own_object",
+  "expected_access": "denied"
 }
 ```
 
-The response includes `proposal_id`, `proposal_digest`, evidence requirements,
-limitations, captured-request references, and an inert reproduction plan. Creating
-or reading a proposal makes no target request.
+Omitting `baseline_kind` retains `collection` mode. `expected_access` defaults to
+`unknown`; `denied` or `allowed` are supported only in own-object mode. The
+expectation is **operator-declared interpretation context, not proof or execution
+authority**. A wrong declaration cannot promote a finding.
 
-After reviewing it, call
-`POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve`:
+The response carries the proposal ID/digest, evidence requirements, limitations,
+inert reproduction plan and previous attempts. Creating or reading it sends no
+target traffic. The digest binds the mode, expectation, capture identities,
+sessions and capability input; changing them requires a fresh review.
+
+After reviewing, call `POST .../{proposal_id}/approve`:
 
 ```json
 {
-  "proposal_digest": "<digest returned by the proposal>",
+  "proposal_digest": "<reviewed proposal digest>",
   "confirm": true,
   "attempt": 1,
   "retry_settled": false
 }
 ```
 
-This delegates to the **existing** `authz.verify` lifecycle with the two sessions
-and the referenced baseline/object routes. Human confirmation does not grant
-additional scope, bypass approval receipts, increase budgets, or permit mutation.
-Canonical execution revalidates authority and credentials and owns cancellation,
-worker dispatch, idempotency, evidence and budget settlement.
+Approval invokes the existing `authz.verify` lifecycle. It neither expands scope
+nor bypasses credential/approval/budget checks. `POST .../{proposal_id}/skip`
+records a deferral, not an execution or refutation; it does not cancel an already
+admitted action.
 
-`POST .../{proposal_id}/skip` records a deferral without marking the experiment
-executed or refuted. It does not cancel an already admitted action; use the
-canonical Hunt cancellation endpoint for that.
+## Read the result without overclaiming
 
-## Read, resume, and reproduce
+`GET .../{proposal_id}` reconstructs state from persistent proposal/attempt
+references and canonical records. `GET .../{proposal_id}/reproduction` returns
+an inert plan using capture references, not a replay or raw secrets.
 
-`GET .../{proposal_id}` rebuilds the investigation from persistent references and
-canonical action records. It returns all bounded attempts, the latest scoped
-explanation, open questions, settled state and evidence references. The in-memory
-object is only a request-local projection: losing it does not lose the recorded
-investigation.
+For own-object mode, the API distinguishes:
 
-`GET .../{proposal_id}/reproduction` returns an **inert plan**, not a replay:
-secondary collection baseline, primary selected object, secondary selected object.
-The steps reference the original captured requests; secrets and raw HTTP bodies
-are not copied into the proposal. Execute any retest through the same reviewed
-approval path, not through a read endpoint.
+| Observed result | Meaning |
+|---|---|
+| `cross_access_observed=true`, `potential_violation` | X was read by secondary contrary to the declared restriction: an evidence-backed lead requiring entitlement review. |
+| `entitlement_unknown` | X was read by both; establish the actual access rule before alleging a vulnerability. |
+| `shared_access_as_declared` | The observed crossing is consistent with declared shared access; no violation is asserted. |
+| `access_denied` | Secondary received 403 for this exact X while reference reads succeeded. This attempt is refuted, not the entire route declared safe. |
+| `inconclusive` | Missing/unstable/mismatched content, partial evidence, errors, or invalid authentication prevented the comparison. Inspect `comparison_reason` and action-linked transactions. |
 
-Only server-owned action records can supply an outcome. A supported result must
-match this attempt's Hunt, canonical action, exact input digest, receipt,
-principal pair, collection, selected object digest and canonical verified
-observation. Another object's finding, a top-level `vulnerable` flag or a supplied
-`proven=true` never confirms the selected object.
+**Cross-access is not authorization proof.** Own-object mode never manufactures
+an `absent_from_listing` fact or sets `proof_state=verified`. A complete crossing
+sets `evidence_gathering_complete` and directs the pentester to review entitlement
+rather than blindly repeat the same requests; its authorization outcome stays
+inconclusive until independently adjudicated. Raw content remains in the existing
+archive; the comparison exposes hashes and exact action/transaction references.
 
-An aggregate completed replay does not refute the selection. A scoped denial is
-reported only when this action's exact GET transactions show successful primary
-access and secondary 403. Missing evidence, authentication errors, other-object
-results and incomplete execution stay inconclusive. A denial for one request
-never means the whole route is safe.
+Attribution requires the canonical action/input/receipt plus the matching object,
+reference-request hashes and complete action-linked transaction sequence. Another
+object's proof, an aggregate scanner flag, copied observation or client-supplied
+`proven=true` cannot settle this proposal. Collection-mode verified evidence retains
+its original validator path; this workflow never creates or promotes findings.
 
-The existing verifier is collection-oriented and may choose a different object.
-This integration preserves that limitation instead of attributing its finding to
-the selected request. Canonical verified observations can be reported here, but
-this workflow does not itself create or promote a finding. Persisted finding
-acceptance and a scored human/planner run remain separate milestones.
+## Retry and resume
 
-## Retries and restart recovery
+Reuse the same attempt number after a lost response or interrupted admission.
+Canonical idempotency recovers the existing action without another execution.
+New attempts use consecutive numbers up to 20; definitive prior outcomes require
+`retry_settled=true`. An unfinished admitted attempt must be recovered first.
+Changed sessions, captures or target binding require a new reviewed proposal.
+Completed Hunts remain readable but cannot authorize fresh traffic.
 
-Re-submit the **same attempt number** to recover a lost response or a crash before
-or after admission. A deterministic idempotency key maps it to the existing Hunt
-capability action. A completed action is read, not executed again. An admitted
-but unfinished action cannot be bypassed by requesting the next attempt.
-
-A genuinely new attempt uses the next consecutive number (up to 20). Definitive
-prior outcomes require `retry_settled: true`; inconclusive attempts remain open.
-History is append-only through immutable action references. Changed captures,
-sessions or target binding require a fresh proposal and review. Finished Hunts
-and expired sessions do not erase history, but cannot authorize new execution.
+The in-memory briefing is a request-local projection, not the durable store.
+Reopening the database and constructing a new service restores attempt history,
+objects, principals, evidence references and unresolved questions without execution.
 
 ## Validation
 
 ```bash
-python -m pytest -q tests/test_hunt_authorization_api.py \
-  tests/test_authorization_integration_regressions.py \
-  tests/test_authorization_workflow.py tests/test_investigation_memory.py
+python -m pytest -q tests/test_authz_selected_objects.py \
+  tests/test_hunt_selected_object_workflow.py
 ```
 
-The API tests cover proposal isolation, exact input and object attribution,
-strict confirmation, rejected request shapes, same-Hunt sessions, denial/error
-semantics, bounded sequential retries, idempotency, deferral, and a completely
-new service reading file-backed state after restart. Their SQLite transaction
-adapter is not evidence of PostgreSQL locking behavior or deployed worker
-acceptance. Do not substitute these tests for the live PostgreSQL and current
-worker acceptance required by the Hunt evaluation protocol.
+These tests cover the missing-listing case, protected selections beside vulnerable
+siblings, shared objects, status/JSON/fidelity errors, cancellation and deadline,
+exact attribution, digest review, idempotency, relational persistence and resume.
+They substitute the queue/session-resolution and frozen-address transport boundary;
+the loopback HTTP exchange and comparison are real. SQLite is not PostgreSQL
+locking acceptance. Existing collection, authorization API and scope regression
+suites must also pass in the full checkout.
+
+Use [the independent evaluation protocol](hunt-investigation-evaluation.md) for a
+current-worker live target and human/planner assessment. Do not count a new lead
+as a verified finding or convert these tests into a measured recall claim.

@@ -21,6 +21,7 @@ from .authorization_repository import (
 )
 from .authorization_workflow import CapturedRequest, investigate
 from .investigation_memory import Experiment, InMemoryGraphStore, InvestigationMemory
+from .authorization_selected import capability_input, selected_object_pair
 
 
 Executor = Callable[[str, str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
@@ -79,16 +80,28 @@ class AuthorizationInvestigationService:
         request = CapturedRequest("GET", path, "primary")
         if not request.addresses_an_object:
             raise AuthorizationWorkflowError("The selected capture is not a supported identifier-addressed GET", 422)
-        if (baseline_path.rstrip("/") != f"/{request.collection}"
+        if values.get("baseline_kind") == "own_object":
+            if selected_object_pair([capture["url"], baseline["url"]]) is None:
+                raise AuthorizationWorkflowError("Select two distinct identifier-addressed object GETs in the same origin and collection; no listing is required", 422)
+            if capture.get("status_code") != 200 or baseline.get("status_code") != 200:
+                raise AuthorizationWorkflowError("Selected-object comparison requires HTTP 200 object captures", 422)
+        elif (baseline_path.rstrip("/") != f"/{request.collection}"
                 or urlsplit(capture["url"]).netloc != urlsplit(baseline["url"]).netloc
                 or urlsplit(capture["url"]).scheme != urlsplit(baseline["url"]).scheme):
             raise AuthorizationWorkflowError("The baseline must address the same origin and resource collection as the selected object", 422)
         return primary, secondary, capture, baseline
 
     async def propose(self, hunt_id: Any, *, capture_id: Any, baseline_capture_id: Any,
-                      primary_session_ref: Any, secondary_session_ref: Any) -> dict[str, Any]:
+                      primary_session_ref: Any, secondary_session_ref: Any,
+                      baseline_kind: str = "collection", expected_access: str = "unknown") -> dict[str, Any]:
+        if baseline_kind not in {"collection", "own_object"} or expected_access not in {"unknown", "denied", "allowed"}:
+            raise AuthorizationWorkflowError("Unsupported baseline kind or access expectation", 422)
+        if baseline_kind == "collection" and expected_access != "unknown":
+            raise AuthorizationWorkflowError("Access expectations are supported only by the selected-object comparison", 422)
         refs = {"capture_id": str(uid(capture_id)), "baseline_capture_id": str(uid(baseline_capture_id)),
                 "primary_session_ref": str(uid(primary_session_ref)), "secondary_session_ref": str(uid(secondary_session_ref))}
+        if baseline_kind == "own_object":
+            refs.update(baseline_kind=baseline_kind, expected_access=expected_access)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 run = await self.repo.run(conn, hunt_id)
@@ -109,10 +122,20 @@ class AuthorizationInvestigationService:
                     "public_consumer_url": self.public_proof_url(capture["url"], base_origin=origin, object_id=request.identifier),
                     "public_baseline_url": self.public_proof_url(baseline["url"], base_origin=origin),
                     "evidence_needed": list(proposal.evidence_needed),
-                    "capability_input_sha256": digest({"primary_session_ref": refs["primary_session_ref"],
-                                                       "secondary_session_ref": refs["secondary_session_ref"],
-                                                       "routes": [baseline["url"], capture["url"]]}),
+                    "capability_input_sha256": digest(capability_input(refs, capture, baseline)),
                 }
+                if baseline_kind == "own_object":
+                    _, own_id = selected_object_pair([capture["url"], baseline["url"]])
+                    binding.update(
+                        baseline_resource_id_sha256=hashlib.sha256(own_id.encode()).hexdigest(),
+                        public_baseline_url=self.public_proof_url(baseline["url"], base_origin=origin, object_id=own_id),
+                        evidence_needed=[
+                            "a fresh successful secondary read of its own captured object, not a collection listing",
+                            "the exact selected object read as primary, then secondary, then primary again",
+                            "complete JSON with matching object IDs and stable equivalent selected-object content",
+                            "independent evidence of the expected access restriction; distinct IDs or matching responses do not prove entitlement",
+                        ],
+                    )
                 proposal_digest = digest(binding)
                 proposal_id = uuid.uuid5(uid(run["id"]), "authorization:" + proposal_digest)
                 document = {**binding, "proposal_id": str(proposal_id), "proposal_digest": proposal_digest}
@@ -142,6 +165,9 @@ class AuthorizationInvestigationService:
         memory = InvestigationMemory(InMemoryGraphStore(), target_id=run["target_id"])
         template = urlsplit(proposal["public_consumer_url"]).path
         collection = urlsplit(proposal["public_baseline_url"]).path
+        own_object = proposal.get("baseline_kind") == "own_object"
+        if own_object:
+            collection = template.rstrip("/").rpartition("/")[0]
         for attempt in attempts:
             if attempt["execution_status"] not in TERMINAL_ACTION_STATES:
                 continue
@@ -156,7 +182,7 @@ class AuthorizationInvestigationService:
                 **({"at": attempt["completed_at"]} if attempt.get("completed_at") else {}),
             ))
         latest = attempts[-1] if attempts else None
-        return {
+        result = {
             "schema_version": "hunt-authorization/v1", "hunt_id": str(run["id"]),
             "proposal_id": proposal["proposal_id"], "proposal_digest": proposal["proposal_digest"],
             "capture_id": proposal["capture_id"], "baseline_capture_id": proposal["baseline_capture_id"],
@@ -180,6 +206,26 @@ class AuthorizationInvestigationService:
                             "Skipping records a deferral and does not cancel an already admitted action",
                             "Canonical evidence is reported; this workflow never promotes findings or replaces proof validation"],
         }
+        if own_object:
+            result.update(
+                baseline_kind="own_object", expected_access=proposal["expected_access"],
+                expectation_source="operator_declared_not_proof",
+                cross_access_observed=bool(latest and latest.get("cross_access_observed")),
+                authorization_assessment=latest.get("authorization_assessment", "not_examined") if latest else "not_examined",
+                evidence_gathering_complete=bool(latest and (
+                    latest.get("cross_access_observed") or latest.get("authorization_assessment") == "access_denied")),
+            )
+            result["next_step"] = ("review_access_expectation_without_repeating_the_same_requests"
+                                   if result["cross_access_observed"]
+                                   else "investigate_other_objects_or_conditions" if result["settled"]
+                                   else "review_missing_evidence_before_approving_or_retrying")
+            result["reproduction"][0]["establishes"] = "secondary's own-object reference; no listing is requested"
+            result["reproduction"].append({"as": "primary", "method": "GET", "capture_id": proposal["capture_id"], "establishes": "selected-object stability after the crossing"})
+            result["limitations"][1:3] = [
+                "Two complete JSON object GETs in the same collection; the selected object is addressed exactly, never chosen from a listing",
+                "Cross-access is evidence, not entitlement proof. Declared expectations cannot promote a finding; review shared/public access before asserting a vulnerability",
+            ]
+        return result
 
     async def approve(self, hunt_id: Any, proposal_id: Any, *, proposal_digest: str,
                       confirm: bool, attempt: int = 1, retry_settled: bool = False) -> dict[str, Any]:
@@ -215,12 +261,10 @@ class AuthorizationInvestigationService:
                             or request_identity(capture) != proposal["capture_sha256"]
                             or request_identity(baseline) != proposal["baseline_sha256"]):
                         raise AuthorizationWorkflowError("The captures, sessions or target changed; create and approve a fresh proposal")
-                    capability_input = {"primary_session_ref": proposal["primary_session_ref"],
-                                        "secondary_session_ref": proposal["secondary_session_ref"],
-                                        "routes": [baseline["url"], capture["url"]]}
+                    inputs = capability_input(proposal, capture, baseline)
                     idempotency_key = f"authz-investigation:{proposal_id}:{attempt}"
                     link = {"hunt_id": str(run["id"]), "proposal_id": str(proposal_id), "attempt": attempt,
-                            "idempotency_key": idempotency_key, "input_digest": digest(capability_input),
+                            "idempotency_key": idempotency_key, "input_digest": digest(inputs),
                             "action_id": str(canonical_action_id(run["id"], idempotency_key))}
                     if existing and existing != link:
                         raise AuthorizationWorkflowError("The persisted attempt binding changed")
@@ -229,7 +273,7 @@ class AuthorizationInvestigationService:
         # No database lock is held across a worker call. Canonical idempotency,
         # approvals, session checks, cancellation and budgets stay authoritative.
         if not replay_finished:
-            await self.execute(str(hunt_id), idempotency_key, capability_input)
+            await self.execute(str(hunt_id), idempotency_key, inputs)
         return await self.read(hunt_id, proposal_id)
 
     async def skip(self, hunt_id: Any, proposal_id: Any) -> dict[str, Any]:
