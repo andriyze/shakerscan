@@ -502,9 +502,17 @@ def test_hunt_finish_refuses_in_flight_actions_and_reservations(source):
 
 
 def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
+    def effective_routes(routes):
+        for route in routes:
+            included = getattr(route, "original_router", None)
+            if included is not None and getattr(included, "routes", None) is not None:
+                yield from effective_routes(included.routes)
+            else:
+                yield route
+
     paths = {
         (frozenset(route.methods or ()), route.path, route.name)
-        for route in run_router.router.routes
+        for route in effective_routes(run_router.router.routes)
     }
     assert paths == {
         (frozenset({"POST"}), "/hunts", "start_hunt"),
@@ -527,4 +535,29 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/resume", "resume_hunt"),
+        (
+            frozenset({"POST"}),
+            "/hunts/{hunt_id}/authorization-investigations",
+            "investigate_authorization",
+        ),
+        (
+            frozenset({"GET"}),
+            "/hunts/{hunt_id}/authorization-investigations/{proposal_id}",
+            "read_authorization_investigation",
+        ),
+        (
+            frozenset({"POST"}),
+            "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
+            "approve_authorization_investigation",
+        ),
+        (
+            frozenset({"POST"}),
+            "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
+            "skip_authorization_investigation",
+        ),
+        (
+            frozenset({"GET"}),
+            "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
+            "authorization_reproduction",
+        ),
     }

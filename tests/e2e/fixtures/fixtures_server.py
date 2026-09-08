@@ -204,6 +204,12 @@ def _authz_route(handler: http.server.BaseHTTPRequestHandler, path: str) -> bool
         handler._send(404, {"error": "not_found"})
         return True
 
+    # This fixture shares the server with the older parity authorization route
+    # (/authz/orders/owner-order). Claim only the namespaces introduced for the
+    # investigation fixture so unrelated /authz routes keep their exact behavior.
+    if parts[0] not in {"public", "vuln", "safe"}:
+        return False
+
     caller, error = _authz_caller(handler)
     if error is not None:
         handler._send(error, {"error": "authentication_required"})

@@ -1388,6 +1388,41 @@
     "name": "get_hunt"
   },
   {
+    "path": "/hunts/{hunt_id}/authorization-investigations",
+    "methods": [
+      "POST"
+    ],
+    "name": "investigate_authorization"
+  },
+  {
+    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "read_authorization_investigation"
+  },
+  {
+    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
+    "methods": [
+      "POST"
+    ],
+    "name": "approve_authorization_investigation"
+  },
+  {
+    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
+    "methods": [
+      "GET"
+    ],
+    "name": "authorization_reproduction"
+  },
+  {
+    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
+    "methods": [
+      "POST"
+    ],
+    "name": "skip_authorization_investigation"
+  },
+  {
     "path": "/hunts/{hunt_id}/cancel",
     "methods": [
       "POST"

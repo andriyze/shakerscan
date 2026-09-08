@@ -1,5 +1,7 @@
 # Hunt architecture — AI-augmented penetration testing
 
+**Status:** Implemented direction with explicitly pending release acceptance; reconciled 2026-09-07.
+
 This is the canonical product direction for Hunt (operator direction, 2026-09-07), followed by the
 current measured state and how the 2.3.0 workstreams map onto it. It supersedes the earlier A0
 findings-only version of this file; those findings are preserved below under "Current state."

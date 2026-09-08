@@ -2,6 +2,8 @@
 
 ## Status and boundary
 
+**Status:** Implemented prototype with live-stack and efficacy acceptance pending.
+
 The GET-only prototype is connected to the Hunt REST API. Proposal and attempt
 references are persisted in the existing PostgreSQL `application_graph_nodes`
 table; execution and outcomes remain owned by canonical `hunt_actions`, receipts,

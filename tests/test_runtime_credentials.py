@@ -227,6 +227,7 @@ def test_envelope_kind_cannot_be_reinterpreted():
 _PAIR_KIND_EXTRAS = {
     "basic_auth": {},
     "form_login": {"endpoint_url": "/login"},
+    "json_login": {"endpoint_url": "/login"},
     "oauth_password": {"endpoint_url": "/oauth/token"},
 }
 
