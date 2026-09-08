@@ -68,3 +68,20 @@ resume without duplicate work, tenant/scope denial and bounded execution with ev
 Keep all remote behavior opt-in and regression-test normal standalone Hunt. A connector
 to hosted execution is not a runner into the customer's private network; that requires
 a separate outbound runner design and placement policy.
+
+## Scheduled execution integration status
+
+`api/schedules/managed_dispatch.py` provides a tested, opt-in HTTPS dispatch
+transport for an operator-owned admission gateway. It rejects redirects, bounds
+response size and request time, preserves a caller-supplied occurrence identity
+across retries, and never treats denied/uncertain admission as successful execution.
+This adapter is **not connected to the scheduler yet** and does not enable hosted
+schedules or change standalone scheduling.
+
+Before wiring it in, persist an occurrence UUID separately from `next_run_at`:
+the current claim helper changes `next_run_at` to lease time, which cannot be used
+as a stable retry identity. Integration must route every managed occurrence through
+admission, preserve unknown outcomes, and never fall back to local enqueue. Active
+and authenticated recurring authority, ASM schedules, suspension, cancellation,
+and restart reconciliation require separate end-to-end coverage. Existing public
+schedule validation still applies; this transport does not grant broader scope.
