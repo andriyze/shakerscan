@@ -29,6 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .experiment_conditions import freeze, thaw
 from .investigation_memory import (
     INCONCLUSIVE,
     REFUTED,
@@ -91,6 +92,11 @@ class ProposedExperiment:
     conditions: Mapping[str, Any] = field(default_factory=dict)
     risk: str = "read-only cross-principal replay (GET only)"
 
+    def __post_init__(self):
+        if not isinstance(self.conditions, Mapping):
+            raise TypeError("experiment conditions must be an object")
+        object.__setattr__(self, "conditions", freeze(self.conditions))
+
     def as_experiment(self, outcome: str) -> Experiment:
         return Experiment(
             hypothesis=self.hypothesis,
@@ -101,7 +107,7 @@ class ProposedExperiment:
             actor_principal=self.actor_principal,
             subject_principal=self.subject_principal,
             outcome=outcome,
-            conditions=dict(self.conditions),
+            conditions=thaw(self.conditions),
         )
 
     def as_row(self) -> dict[str, Any]:
@@ -114,7 +120,7 @@ class ProposedExperiment:
             "actor_principal": self.actor_principal,
             "subject_principal": self.subject_principal,
             "evidence_needed": list(self.evidence_needed),
-            "conditions": dict(self.conditions),
+            "conditions": thaw(self.conditions),
             "risk": self.risk,
         }
 

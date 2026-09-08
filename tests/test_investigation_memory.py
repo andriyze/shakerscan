@@ -47,6 +47,30 @@ def _experiment(**overrides):
     return Experiment(**base)
 
 
+def test_experiment_identity_snapshots_nested_conditions(memory):
+    original = {"session": {"versions": [1, 2]}, "deployment": "release-a"}
+    experiment = _experiment(conditions=original)
+    identity = experiment.key
+    original["session"]["versions"].append(3)
+    original["deployment"] = "release-b"
+    assert experiment.key == identity
+    assert experiment.conditions["session"]["versions"] == (1, 2)
+    with pytest.raises(TypeError):
+        experiment.conditions["session"]["versions"] = ()
+    memory.record_experiment(experiment)
+    assert memory.already_tried(experiment)["conditions"] == {
+        "session": {"versions": [1, 2]}, "deployment": "release-a",
+    }
+    assert _experiment(conditions=original).key != identity
+
+
+@pytest.mark.parametrize("conditions", [{1: "ambiguous-key"}, {"value": float("nan")},
+                                        {"value": object()}, ["not-an-object"]])
+def test_experiment_rejects_non_json_conditions(conditions):
+    with pytest.raises((ValueError, TypeError)):
+        _experiment(conditions=conditions)
+
+
 def test_a_successful_read_is_recorded_as_access_not_authorization(memory):
     """The distinction the whole module exists for."""
     recorded = memory.record_access(AccessObservation(

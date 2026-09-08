@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any
+
+from .experiment_conditions import freeze, thaw
 
 # How much weight a recorded relationship carries. `observed` is something we saw happen;
 # `inferred` is reasoning that may be wrong; `confirmed` requires deterministic proof; `unknown`
@@ -134,6 +137,9 @@ class Experiment:
     def __post_init__(self) -> None:
         if self.outcome not in OUTCOMES:
             raise ValueError(f"unknown outcome: {self.outcome}")
+        if not isinstance(self.conditions, Mapping):
+            raise TypeError("experiment conditions must be an object")
+        object.__setattr__(self, "conditions", freeze(self.conditions))
 
     @property
     def key(self) -> str:
@@ -147,7 +153,7 @@ class Experiment:
             "object": object_key(self.collection, self.identifier),
             "actor": self.actor_principal,
             "subject": self.subject_principal,
-            "conditions": dict(sorted(self.conditions.items())),
+            "conditions": thaw(self.conditions),
             "hypothesis": self.hypothesis,
         }, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
@@ -229,7 +235,7 @@ class InvestigationMemory:
             "hypothesis": experiment.hypothesis,
             "actor_principal": experiment.actor_principal,
             "subject_principal": experiment.subject_principal,
-            "conditions": dict(experiment.conditions),
+            "conditions": thaw(experiment.conditions),
             "outcome": experiment.outcome,
             "detail": experiment.detail,
             "at": experiment.at,

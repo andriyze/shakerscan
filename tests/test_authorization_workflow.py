@@ -100,6 +100,20 @@ def captured(mode="vuln"):
     return CapturedRequest(method="GET", path=f"/authz/{mode}/orders/1001", principal="user-a")
 
 
+def test_proposal_export_cannot_mutate_approved_conditions(memory):
+    from dataclasses import replace
+
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    supplied = {"credentials": {"versions": [1, 2]}}
+    proposal = replace(proposal, conditions=supplied)
+    identity = proposal.as_experiment(INCONCLUSIVE).key
+    supplied["credentials"]["versions"].append(3)
+    exported = proposal.as_row()
+    exported["conditions"]["credentials"]["versions"].append(4)
+    assert proposal.as_experiment(INCONCLUSIVE).key == identity
+    assert proposal.conditions["credentials"]["versions"] == (1, 2)
+
+
 # -- investigate ---------------------------------------------------------------------------
 
 def test_a_captured_request_yields_a_proposal_with_the_evidence_it_needs(memory):
