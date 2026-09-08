@@ -1,4 +1,5 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
@@ -384,14 +385,14 @@ function EvidenceContent() {
         </SectionCard>
       )}
 
-      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
+      {featureEnabled('engine_admin') && <details className="rounded-lg border border-gray-800 bg-gray-950/30">
         <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
           Advanced: export and retention administration
         </summary>
         <div className="border-t border-gray-800 p-4">
           <EvidenceRetentionPanel findingId={findingFilter || undefined} />
         </div>
-      </details>
+      </details>}
 
       <EvidenceObjectModal objectId={modalObjectId} onClose={() => {
         setModalObjectId(null)
