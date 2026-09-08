@@ -536,6 +536,17 @@ def test_mcp_hunt_capability_replays_with_the_same_caller_key():
     assert second["structuredContent"]["mcp_generated_idempotency_key"] is False
 
 
+def test_mcp_forwards_experiment_reference_outside_capability_input():
+    client = ManifestHuntClient()
+    client.call_tool("shakerscan_hunt_capability", {
+        "hunt_id": client.HUNT_ID, "capability_name": "http.request",
+        "experiment_key": "a" * 32,
+        "input": {"method": "GET", "path": "/"},
+    })
+    assert client.calls[-1][2]["experiment_key"] == "a" * 32
+    assert "experiment_key" not in client.calls[-1][2]["input"]
+
+
 @pytest.mark.parametrize(
     ("client", "arguments", "message"),
     [

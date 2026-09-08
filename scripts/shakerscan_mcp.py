@@ -339,6 +339,10 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
                 "pattern": DEFAULT_CAPABILITY_PATTERN,
             },
             "input": {"type": "object"},
+            "experiment_key": {
+                "type": "string", "pattern": r"^[0-9a-f]{32}$",
+                "description": "Optional proposal identity, not proof or authorization.",
+            },
             "idempotency_key": {
                 "type": "string", "minLength": 8, "maxLength": 200,
                 "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
@@ -817,6 +821,7 @@ class ArsenalClient:
                 payload = {
                     "idempotency_key": idempotency_key,
                     "input": capability_input,
+                    **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
             result = self.request_json(hunt_tool.method, path, payload or None)
             if name == "shakerscan_hunt_capability":
