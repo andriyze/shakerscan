@@ -8,12 +8,12 @@ same surface classification and body limits as the running ASGI application.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any, Awaitable, Callable, Mapping
-
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
 
 PUBLIC_V2_SURFACE_PREFIXES: dict[str, tuple[str, ...]] = {
     "scan": ("/scan/contracts", "/scans"),
@@ -260,7 +260,6 @@ class PublicV2IdempotencyMiddleware:
             })
             return
 
-        claimed = False
         async with pool.acquire() as conn:
             inserted = await conn.fetchrow(
                 """INSERT INTO public_api_idempotency (
@@ -270,9 +269,7 @@ class PublicV2IdempotencyMiddleware:
                    RETURNING method""",
                 method, path, key_digest, request_digest,
             )
-            if inserted:
-                claimed = True
-            else:
+            if not inserted:
                 row = await conn.fetchrow(
                     """SELECT * FROM public_api_idempotency
                        WHERE method=$1 AND path=$2 AND key_sha256=$3""",
@@ -287,23 +284,13 @@ class PublicV2IdempotencyMiddleware:
                 if row and row.get("state") == "completed":
                     await self._replay(send, row)
                     return
-                reclaimed = await conn.fetchrow(
-                    """UPDATE public_api_idempotency
-                       SET updated_at=NOW()
-                       WHERE method=$1 AND path=$2 AND key_sha256=$3
-                         AND request_sha256=$4 AND state='processing'
-                         AND updated_at < NOW() - INTERVAL '10 minutes'
-                       RETURNING method""",
-                    method, path, key_digest, request_digest,
-                )
-                if reclaimed:
-                    claimed = True
-                else:
-                    await self._json_response(send, 409, {
-                        "error": "idempotency_request_in_progress",
-                        "message": "A request with this Idempotency-Key is still processing.",
-                    })
-                    return
+                # Age cannot prove that execution did not occur. Preserve the
+                # original reservation until authoritative outcome recovery.
+                await self._json_response(send, 409, {
+                    "error": "idempotency_request_in_progress",
+                    "message": "This request is processing or its outcome is unconfirmed.",
+                })
+                return
 
         index = 0
 
@@ -320,18 +307,9 @@ class PublicV2IdempotencyMiddleware:
         async def capture_send(message: dict[str, Any]) -> None:
             response_messages.append(message)
 
-        try:
-            await self.app(scope, replay_receive, capture_send)
-        except BaseException:
-            if claimed:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """DELETE FROM public_api_idempotency
-                           WHERE method=$1 AND path=$2 AND key_sha256=$3
-                             AND request_sha256=$4 AND state='processing'""",
-                        method, path, key_digest, request_digest,
-                    )
-            raise
+        # An exception or cancellation may follow a committed/enqueued action.
+        # Do not erase its reservation and make a retry execute it again.
+        await self.app(scope, replay_receive, capture_send)
 
         start = next((
             item for item in response_messages
@@ -356,6 +334,15 @@ class PublicV2IdempotencyMiddleware:
             and "json" in content_type
             and len(response_body) <= _MAX_IDEMPOTENT_RESPONSE_BYTES
         )
+        try:
+            rejection = json.loads(response_body)
+        except (ValueError, UnicodeError):
+            rejection = None
+        definitive_rejection = (
+            status in {400, 401, 403, 404, 405, 413, 415, 422, 429}
+            and isinstance(rejection, dict)
+            and not any(rejection.get(field) for field in ("scan_id", "retest_id", "job_id", "id"))
+        )
         async with pool.acquire() as conn:
             if cacheable:
                 await conn.execute(
@@ -368,7 +355,7 @@ class PublicV2IdempotencyMiddleware:
                     method, path, key_digest, request_digest, status,
                     json.dumps(response_headers, sort_keys=True), response_body,
                 )
-            else:
+            elif definitive_rejection:
                 await conn.execute(
                     """DELETE FROM public_api_idempotency
                        WHERE method=$1 AND path=$2 AND key_sha256=$3
@@ -429,9 +416,9 @@ def add_public_v2_idempotency_openapi(openapi: dict[str, Any]) -> dict[str, Any]
 
 
 __all__ = [
+    "PUBLIC_V2_IDEMPOTENCY_HEADER",
     "PUBLIC_V2_SURFACE_PREFIXES",
     "PUBLIC_V2_WRITE_BODY_LIMITS",
-    "PUBLIC_V2_IDEMPOTENCY_HEADER",
     "PublicV2BodyLimitMiddleware",
     "PublicV2IdempotencyMiddleware",
     "add_public_v2_idempotency_openapi",
