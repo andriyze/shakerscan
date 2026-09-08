@@ -1,4 +1,5 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
@@ -164,7 +165,7 @@ function GraphContent() {
       <SectionCard
         title="Summary"
         actions={
-          <Button
+          featureEnabled('hunt') && <Button
             type="button"
             variant="secondary"
             onClick={() => void generateLeads()}
