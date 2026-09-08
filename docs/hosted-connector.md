@@ -110,13 +110,18 @@ Active retries also perform receipt lookup before POSTing. Authentication failur
 unrecognized 404s and unknown outcomes retain pending intent instead of becoming
 denials. Only the configured gateway's explicit missing-record response permits
 another same-key admission attempt; a fresh occurrence is dispatched normally.
-Only validated normal passive schedules are currently translated to public Scan
-requests; unsupported option fields are rejected rather than silently dropped.
+Validated normal passive/active schedules and opaque credential-profile or collection
+selection references are translated to public Scan requests. Create/update use this
+validation only with complete managed configuration; standalone validation is unchanged.
+Raw secrets, saved approval receipts and unsupported fields are rejected. Each run
+still requires current gateway admission and fresh approval where applicable.
 An accepted occurrence stamps the schedule's last-run time atomically with its
 receipt and next due time. Denials, retries and stale lease replays do not stamp
 a successful dispatch. This is admission history, not proof of scan completion.
 
-Active/authenticated and ASM occurrences remain unavailable in managed mode.
+Active/authenticated intent now has validation/transport coverage, but live execution
+acceptance and deployment integration remain incomplete. State-changing HTTP,
+network-discovery and ASM schedules still require further admission integration.
 Full lifecycle handling, deployment credential provisioning and live scheduled
 execution still remain release gates. Do not enable the SaaS scheduling capability
 based solely on the transport, persistence and orchestration fixture tests.

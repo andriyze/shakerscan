@@ -71,8 +71,8 @@ def test_managed_dispatch_uses_persisted_payload_and_receipt(monkeypatch, state,
     "options",
     [
         {"auth_header": "synthetic-secret"},
-        {"credential_profile_ids": [str(uuid4())]},
-        {"policy": {"active_testing": True}},
+        {"credential_profile_ids": ["not-a-profile-id"]},
+        {"approval_receipt_id": str(uuid4())},
         {"custom_endpoints": ["GET /private"]},
     ],
 )

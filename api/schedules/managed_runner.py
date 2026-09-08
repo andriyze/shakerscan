@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from . import managed_occurrences as occurrences
-from . import managed_recovery
+from . import managed_options, managed_recovery
 from . import router as schedule_ops
 from .managed_dispatch import ManagedScheduleDispatcher
 
@@ -29,16 +29,7 @@ def scan_payload(schedule):
             "Managed scheduled action requires its own admission integration"
         )
     options = schedule_ops._schedule_options_dict(schedule["scan_options"])
-    contract, _ = schedule_ops._resolve_normal_schedule_options(options)
-    controls = {"kind", "scan_generation", "budget_profile", "policy", "advanced"}
-    if set(options) - controls:
-        raise ValueError("Managed schedule contains unsupported option fields")
-    return {
-        "target": str(schedule["target_url"]),
-        "budget_profile": contract.budget_profile,
-        "policy": options.get("policy") or {"active_testing": False},
-        "advanced": options.get("advanced") or {},
-    }
+    return managed_options.validate(options, target=str(schedule["target_url"]))
 
 
 async def run_due(pool, *, dispatcher=None, now=None):

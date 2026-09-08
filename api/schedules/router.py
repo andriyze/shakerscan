@@ -200,6 +200,13 @@ _NORMAL_SCHEDULE_UNSUPPORTED_SELECTION_FIELDS = {
 }
 
 
+def _validate_normal_schedule_options(options):
+    from . import managed_options
+    if managed_options.enabled():
+        return managed_options.validate(options)
+    return _resolve_normal_schedule_options(options)
+
+
 def _resolve_normal_schedule_options(
     scan_options: Mapping[str, Any],
 ) -> tuple[Any, ScanOptions]:
@@ -821,7 +828,7 @@ async def create_schedule(request: ScheduleCreate):
                 ),
             )
         try:
-            _resolve_normal_schedule_options(scan_options)
+            _validate_normal_schedule_options(scan_options)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     elif schedule_kind == "asm_improve":
@@ -1072,7 +1079,7 @@ async def update_schedule(schedule_id: str, request: ScheduleUpdate):
         # available even for an invalid legacy row.
         if effective_schedule_kind == "normal_scan" and request.is_active is not False:
             try:
-                _resolve_normal_schedule_options(effective_scan_options)
+                _validate_normal_schedule_options(effective_scan_options)
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         elif effective_schedule_kind == "asm_improve" and request.is_active is not False:
