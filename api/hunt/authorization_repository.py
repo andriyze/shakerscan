@@ -11,6 +11,7 @@ import json
 import uuid
 
 from .authorization_evidence import AuthorizationWorkflowError, canonical_action_id, digest, mapping
+from .authorization_receipt import receipt_backed_action
 
 
 PROPOSAL_TYPE = "authorization_proposal"
@@ -117,7 +118,22 @@ class PostgresAuthorizationRepository:
             "SELECT id,hunt_run_id,capability_name,status,input_summary,result_summary,receipt_id,started_at,completed_at "
             "FROM hunt_actions WHERE id=$1 AND hunt_run_id=$2", uid(action_id), uid(run["id"]),
         )
-        return dict(row) if row else None
+        if not row:
+            return None
+        action = dict(row)
+        summary = mapping(action.get("result_summary"))
+        if (action.get("capability_name") == "authz.verify"
+                and action.get("status") in {"completed", "partial"}
+                and "budget_reservation_id" in summary):
+            reservation = await conn.fetchrow(
+                "SELECT id,owner_kind,owner_id,action_id,action_digest,capability_name,"
+                "status,execution_receipt_hash,receipt_json FROM budget_reservations "
+                "WHERE id=$1 AND owner_kind='hunt' AND owner_id=$2 "
+                "AND action_id=$3 AND capability_name='authz.verify'",
+                str(summary.get("budget_reservation_id") or ""), str(run["id"]), str(uid(action_id)),
+            )
+            action = receipt_backed_action(action, reservation, target_id=run["target_id"])
+        return action
 
     async def transactions(self, conn: Any, run: Mapping[str, Any], action_id: Any) -> list[dict[str, Any]]:
         rows = await conn.fetch(

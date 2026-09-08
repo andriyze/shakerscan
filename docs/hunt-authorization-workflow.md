@@ -1,5 +1,7 @@
 # Assisted authorization investigations
 
+**Status**: Implemented REST workflow; receipt-backed attribution has component regression coverage. Live-worker efficacy and pentester-productivity acceptance remain required.
+
 ## Status and boundary
 
 The GET-only workflow is connected to the Hunt REST API. Proposal and attempt
@@ -106,7 +108,11 @@ After reviewing, call `POST .../{proposal_id}/approve`:
 ```
 
 Approval invokes the existing `authz.verify` lifecycle. It neither expands scope
-nor bypasses credential/approval/budget checks. `POST .../{proposal_id}/skip`
+nor bypasses credential/approval/budget checks. `authz.verify` and `candidate.verify`
+share the existing `max_verifications` admission counter. Each newly admitted
+action spends one slot; an idempotent replay spends none. This counts verification
+attempts, not confirmed vulnerabilities. HTTP/time reservations remain separate.
+Historical actions are not retroactively charged. `POST .../{proposal_id}/skip`
 records a deferral, not an execution or refutation; it does not cancel an already
 admitted action.
 
@@ -115,6 +121,19 @@ admitted action.
 `GET .../{proposal_id}` reconstructs state from persistent proposal/attempt
 references and canonical records. `GET .../{proposal_id}/reproduction` returns
 an inert plan using capture references, not a replay or raw secrets.
+
+HTTP workers persist observations in `budget_reservations.receipt_json`; their
+`hunt_actions.result_summary` contains execution metadata, not necessarily the
+observations. The repository validates the existing receipt's content address,
+reservation, action, Hunt, target and capability links before projecting its
+observations into the read result. Missing or mismatched worker receipts fail
+explicitly; an inline summary cannot substitute for their evidence. Historical
+inline results without a worker-reservation reference remain readable.
+
+Existing attempts affected only by this reader mismatch can be read again after
+updating the API, without another target request, provided their canonical receipt
+and required transactions were retained. Re-reading evidence does not change the
+recorded execution, proof state, or original budget usage.
 
 For own-object mode, the API distinguishes:
 
@@ -156,16 +175,20 @@ objects, principals, evidence references and unresolved questions without execut
 
 ```bash
 python -m pytest -q tests/test_authz_selected_objects.py \
-  tests/test_hunt_selected_object_workflow.py
+  tests/test_hunt_selected_object_workflow.py \
+  tests/test_authorization_receipt_resume.py \
+  tests/test_hunt_authz_verification_limit.py
 ```
 
 These tests cover the missing-listing case, protected selections beside vulnerable
 siblings, shared objects, status/JSON/fidelity errors, cancellation and deadline,
 exact attribution, digest review, idempotency, relational persistence and resume.
 They substitute the queue/session-resolution and frozen-address transport boundary;
-the loopback HTTP exchange and comparison are real. SQLite is not PostgreSQL
-locking acceptance. Existing collection, authorization API and scope regression
-suites must also pass in the full checkout.
+the loopback HTTP exchange and comparison are real. Receipt-resume regressions
+also exercise the real comparison and canonical receipt serialization with the
+production metadata-only action layout. SQLite is not PostgreSQL locking
+acceptance. Existing collection, authorization API and scope regression suites
+must also pass in the full checkout.
 
 Use [the independent evaluation protocol](hunt-investigation-evaluation.md) for a
 current-worker live target and human/planner assessment. Do not count a new lead
