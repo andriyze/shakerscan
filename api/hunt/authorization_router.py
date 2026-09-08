@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+from .authorization_candidate import ensure_authorization_candidate
 from .authorization_evidence import AuthorizationWorkflowError
 from .authorization_service import AuthorizationInvestigationService
 
@@ -81,7 +82,11 @@ async def read_authorization_investigation(hunt_id: UUID, proposal_id: UUID, ser
 @router.post("/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve")
 async def approve_authorization_investigation(hunt_id: UUID, proposal_id: UUID, request: AuthorizationApproveRequest, service: Service):
     """Run the frozen proposal through canonical capability approval and budget gates."""
-    return await _call(service.approve(hunt_id, proposal_id, **request.model_dump()))
+    state = await _call(service.approve(hunt_id, proposal_id, **request.model_dump()))
+    # A stable own-object crossing with an operator-reviewed denied-access expectation is useful
+    # even though it is not deterministic authorization proof. Put that lead in Hunt's canonical
+    # candidate backlog, explicitly unverified, instead of losing it inside this workflow response.
+    return await _call(ensure_authorization_candidate(service, hunt_id, state))
 
 
 @router.post("/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip")
