@@ -157,7 +157,7 @@ export default function Dashboard() {
     overviewInFlight.current = true
     try {
       const [exposureResult, targetsResult, timelineResult] = await Promise.allSettled([
-        featureEnabled('asm') ? getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }) : Promise.resolve(null),
+        featureEnabled('exposure') ? getExposureAssets({ limit: 1000, cohort: cohortViewRef.current }) : Promise.resolve(null),
         getTargetsGrouped({ sort_by: 'active_findings_count', sort_order: 'desc' }),
         featureEnabled('timeline') ? getMissionTimeline({ limit: 12 }) : Promise.resolve({ events: [] }),
       ])
@@ -477,7 +477,7 @@ export default function Dashboard() {
 
       <CohortScopeBar value={cohortView} onChange={setCohortView} counts={cohortCounts} />
 
-      <WorkspaceFeature name="asm"><SecurityPosture exposure={scopedExposure} loading={overviewLoading} /></WorkspaceFeature>
+      <WorkspaceFeature name="exposure"><SecurityPosture exposure={scopedExposure} loading={overviewLoading} /></WorkspaceFeature>
 
       <WorkspaceFeature name="timeline">{cohortView === 'all' ? (
         <ChangesStrip storageKey="dashboard" />
