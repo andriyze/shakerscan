@@ -229,9 +229,9 @@ class InvestigationMemory:
             "experiment_key": experiment.key,
             "attempts": attempts,
             "attempt_count": len(attempts),
-            # Settled once any attempt reached a definite outcome; an inconclusive run leaves the
-            # experiment open and retryable rather than closing it.
-            "settled": any(a["outcome"] in {SUPPORTED, REFUTED} for a in attempts),
+            # Historical proof remains in attempts, but cannot settle a later
+            # inconclusive retry or replace its recorded outcome.
+            "settled": experiment.outcome in {SUPPORTED, REFUTED},
             "hypothesis": experiment.hypothesis,
             "actor_principal": experiment.actor_principal,
             "subject_principal": experiment.subject_principal,
@@ -250,11 +250,19 @@ class InvestigationMemory:
         return self._experiment_record(experiment.key)
 
     def _experiments(self) -> list[dict[str, Any]]:
-        return [
+        records = [
             dict(node.get("attributes") or {})
             for node in self._store.nodes(self._target_id)
             if node.get("node_type") == NODE_EXPERIMENT
         ]
+        for record in records:
+            attempts = record.get("attempts") or []
+            latest = attempts[-1].get("outcome", INCONCLUSIVE) if attempts else INCONCLUSIVE
+            # Derive this on reads too: older stored rows used strongest-ever
+            # settlement. Do not mutate or discard their retained history.
+            record["outcome"] = latest
+            record["settled"] = latest in {SUPPORTED, REFUTED}
+        return records
 
     def _experiment_record(self, key: str) -> dict[str, Any]:
         for record in self._experiments():
@@ -287,10 +295,10 @@ class InvestigationMemory:
         experiments = [r for r in self._experiments() if r.get("route") == route]
         outcomes = {name: 0 for name in sorted(OUTCOMES)}
         for item in experiments:
-            # An experiment counts once, by the strongest outcome any of its attempts reached.
-            reached = {a.get("outcome") for a in (item.get("attempts") or [])}
-            latest = (SUPPORTED if SUPPORTED in reached
-                      else REFUTED if REFUTED in reached else INCONCLUSIVE)
+            # This is the latest recorded attempt for each exact context, not a
+            # strongest-ever verdict or a claim about the live deployment.
+            attempts = item.get("attempts") or []
+            latest = attempts[-1].get("outcome", INCONCLUSIVE) if attempts else INCONCLUSIVE
             outcomes[latest] = outcomes.get(latest, 0) + 1
         demonstrated = bool(outcomes.get(SUPPORTED))
         return {
@@ -300,6 +308,11 @@ class InvestigationMemory:
             # Read this, not the prose. The two verdict strings differ only by a leading "no",
             # so a consumer matching on substrings gets the answer exactly backwards.
             "weakness_demonstrated": demonstrated,
+            "historical_weakness_demonstrated": any(
+                attempt.get("outcome") == SUPPORTED
+                for item in experiments for attempt in item.get("attempts") or []
+            ),
+            "outcome_basis": "latest recorded attempt per experiment context; not live verification",
             "examined": bool(experiments),
             "tested_pairs": sorted({
                 f"{item.get('actor_principal')}->{item.get('subject_principal')}"

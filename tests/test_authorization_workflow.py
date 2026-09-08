@@ -114,6 +114,15 @@ def test_proposal_export_cannot_mutate_approved_conditions(memory):
     assert proposal.conditions["credentials"]["versions"] == (1, 2)
 
 
+def test_inconclusive_retry_reopens_previously_supported_experiment(memory):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    memory.record_experiment(proposal.as_experiment(SUPPORTED))
+    memory.record_experiment(proposal.as_experiment(INCONCLUSIVE))
+    again = investigate(captured(), available_principals=PRINCIPALS, memory=memory)
+    assert len(again["proposals"]) == 1
+    assert "previous attempt was inconclusive" in again["proposals"][0].why
+
+
 # -- investigate ---------------------------------------------------------------------------
 
 def test_a_captured_request_yields_a_proposal_with_the_evidence_it_needs(memory):
