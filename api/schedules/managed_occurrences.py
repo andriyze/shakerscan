@@ -119,8 +119,11 @@ async def settle(
             return False
         if state != "retry":
             await conn.execute(
-                "UPDATE schedules SET next_run_at=$1,updated_at=NOW() WHERE id=$2",
+                """UPDATE schedules SET next_run_at=$1,updated_at=NOW(),
+                last_run_at=CASE WHEN $3 THEN NOW() ELSE last_run_at END
+                WHERE id=$2""",
                 next_run_at,
                 row["schedule_id"],
+                state == "accepted",
             )
         return True

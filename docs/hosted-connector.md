@@ -97,6 +97,10 @@ tests concurrent claims, reconnect/retry, immutable input, stale-lease rejection
 gateway-change denial and paused schedules against real disposable PostgreSQL.
 Only validated normal passive schedules are currently translated to public Scan
 requests; unsupported option fields are rejected rather than silently dropped.
+An accepted occurrence stamps the schedule's last-run time atomically with its
+receipt and next due time. Denials, retries and stale lease replays do not stamp
+a successful dispatch. This is admission history, not proof of scan completion.
+
 Active/authenticated and ASM occurrences remain unavailable in managed mode.
 Full lifecycle handling, deployment credential provisioning and live scheduled
 execution still remain release gates. Do not enable the SaaS scheduling capability

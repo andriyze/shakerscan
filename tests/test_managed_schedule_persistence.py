@@ -25,6 +25,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
             async with pool.acquire() as conn:
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY,is_active BOOLEAN,next_run_at TIMESTAMPTZ,
+                    last_run_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ DEFAULT NOW())""")
             await store.initialize(pool)
             now = datetime.now(timezone.utc)
@@ -68,6 +69,10 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
             assert await store.settle(
                 pool, second["id"], second["lease_id"], state="retry"
             )
+            async with pool.acquire() as conn:
+                assert await conn.fetchval(
+                    "SELECT last_run_at FROM schedules WHERE id=$1", schedule
+                ) is None
             third = await store.claim(
                 pool, schedule, "https://gateway.test", {}, now=later
             )
@@ -94,6 +99,30 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                     first["id"],
                 )
                 assert receipt["state"] == "accepted" and receipt["scan_id"] == scan
+                last_run = await conn.fetchval(
+                    "SELECT last_run_at FROM schedules WHERE id=$1", schedule
+                )
+                assert last_run is not None
+            denied = await store.claim(
+                pool, schedule, "https://gateway.test", payload, now=next_due
+            )
+            assert await store.settle(
+                pool, denied["id"], denied["lease_id"], state="denied",
+                next_run_at=next_due + timedelta(days=1),
+            )
+            async with pool.acquire() as conn:
+                assert await conn.fetchval(
+                    "SELECT last_run_at FROM schedules WHERE id=$1", schedule
+                ) == last_run
+                # Replaying an obsolete accepted lease cannot stamp another run.
+            assert not await store.settle(
+                pool, third["id"], third["lease_id"], state="accepted",
+                next_run_at=next_due, scan_id=scan,
+            )
+            async with pool.acquire() as conn:
+                assert await conn.fetchval(
+                    "SELECT last_run_at FROM schedules WHERE id=$1", schedule
+                ) == last_run
                 await conn.execute(
                     "UPDATE schedules SET is_active=false WHERE id=$1", schedule
                 )
