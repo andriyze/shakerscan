@@ -7,7 +7,7 @@
 // touching shared primitives other pages depend on.
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { ArrowRight, ShieldCheck } from 'lucide-react'
 import { Badge, Card } from '@/components/ui'
 import type { Campaign, ResearchBudget, ResearchEpisode, ResearchEpisodeDetail } from '@/lib/api'

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { History } from 'lucide-react'
 import { getExposureChanges, type ExposureChangeCategory, type ExposureChangesResponse } from '@/lib/api'
 import styles from './exposure.module.css'

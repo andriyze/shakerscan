@@ -439,15 +439,22 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
         inputs = _read_json(args.input, default={})
         if not isinstance(inputs, dict):
             raise CliError("Hunt capability input must be one JSON object")
+        experiment_key = getattr(args, "experiment_key", None)
+        if experiment_key is not None and (
+            len(experiment_key) != 32 or any(char not in "0123456789abcdef" for char in experiment_key)
+        ):
+            raise CliError("experiment key must be 32 lowercase hexadecimal characters")
         key = _validate_idempotency_key(args.idempotency_key) or _content_idempotency_key(
             args.hunt_id, args.capability_name, inputs,
+            *([experiment_key] if experiment_key is not None else []),
         )
         response = client.post(
             "/hunts/{}/capabilities/{}".format(
                 urllib.parse.quote(args.hunt_id, safe=""),
                 urllib.parse.quote(args.capability_name, safe=""),
             ),
-            {"idempotency_key": key, "input": inputs},
+            {"idempotency_key": key, "input": inputs,
+             **({"experiment_key": experiment_key} if experiment_key is not None else {})},
         )
         return {"idempotency_key": key, "response": response}
     if args.hunt_command == "candidate":
@@ -872,6 +879,7 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_call.add_argument("capability_name")
     hunt_call.add_argument("--input", metavar="FILE", help="JSON object; use - for stdin")
     hunt_call.add_argument("--idempotency-key")
+    hunt_call.add_argument("--experiment-key", help="Optional proposal identity; does not grant authority")
 
     hunt_candidate = hunt_commands.add_parser("candidate", help="Record a bounded investigation candidate")
     hunt_candidate.add_argument("hunt_id")

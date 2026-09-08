@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { Card, CardSkeleton, ErrorState, Modal, useToast } from '@/components/ui'
 import {
   AlertTriangle,

@@ -1327,6 +1327,34 @@ def test_database_neutral_finalizer_reads_only_durable_results_and_observations(
     assert receipt.redacted_execution["target_traffic"] is False
 
 
+@pytest.mark.parametrize("action_id", ["baseline.http", "baseline.security_txt"])
+def test_http_archive_principal_matches_transmitted_credentials(monkeypatch, action_id):
+    action = _action(action_id, "http.request", 0)
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+    captured = {}
+
+    async def execute_bound(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "response": {"status": 200}, "request": {"path": "/"}}
+
+    monkeypatch.setattr(action_adapter_module, "execute_bound_http_request", execute_bound)
+    monkeypatch.setattr(
+        action_adapter_module, "resolve_scan_http_principal",
+        lambda _options, *, lane, capability_name: _principal(lane),
+    )
+    receipt = asyncio.run(_dispatcher(plan, Backend())(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    if action_id == "baseline.http":
+        assert captured["trusted_headers"]
+        assert captured["principal_slot"] == "primary"
+    else:
+        assert captured["trusted_headers"] is None
+        assert captured["principal_slot"] == "anonymous"
+
+
 def test_database_neutral_http_receipt_drops_body_and_redacts_urls(monkeypatch):
     action = _action("baseline.http", "http.request", 0)
     plan = ScanActionPlan(

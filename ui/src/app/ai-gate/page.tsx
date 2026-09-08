@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { Bot, CheckCircle2, Clipboard, Download, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
 import AISurfaceInventoryPanel from '@/components/AISurfaceInventoryPanel'
 import {

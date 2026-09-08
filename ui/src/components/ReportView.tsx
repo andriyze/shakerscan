@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import ExportPDFButton from '@/components/ExportPDFButton'
 import ComplianceSection from '@/components/ComplianceSection'
 import RemediationSummary from '@/components/RemediationSummary'

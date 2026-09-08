@@ -1,7 +1,11 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import Sidebar from '@/components/Sidebar'
+import WorkspaceBoundary from '@/components/WorkspaceBoundary'
 import { ToastProvider } from '@/components/ui/Toast'
+
+// Deployment mode is runtime configuration, not a public-image build-time setting.
+export const dynamic = 'force-dynamic'
 
 export const metadata: Metadata = {
   title: 'ShakerScan',
@@ -23,12 +27,14 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen bg-gray-950 text-gray-100">
         <ToastProvider>
-          <div className="flex min-h-screen flex-col md:flex-row">
-            <Sidebar />
-            <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">
-              {children}
-            </main>
-          </div>
+          <WorkspaceBoundary managed={process.env.SHAKERSCAN_MANAGED_UI === 'true'}>
+            <div className="flex min-h-screen flex-col md:flex-row">
+              <Sidebar />
+              <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">
+                {children}
+              </main>
+            </div>
+          </WorkspaceBoundary>
         </ToastProvider>
       </body>
     </html>

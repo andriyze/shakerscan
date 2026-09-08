@@ -47,6 +47,63 @@ def _experiment(**overrides):
     return Experiment(**base)
 
 
+def test_experiment_identity_snapshots_nested_conditions(memory):
+    original = {"session": {"versions": [1, 2]}, "deployment": "release-a"}
+    experiment = _experiment(conditions=original)
+    identity = experiment.key
+    original["session"]["versions"].append(3)
+    original["deployment"] = "release-b"
+    assert experiment.key == identity
+    assert experiment.conditions["session"]["versions"] == (1, 2)
+    with pytest.raises(TypeError):
+        experiment.conditions["session"]["versions"] = ()
+    memory.record_experiment(experiment)
+    assert memory.already_tried(experiment)["conditions"] == {
+        "session": {"versions": [1, 2]}, "deployment": "release-a",
+    }
+    assert _experiment(conditions=original).key != identity
+
+
+@pytest.mark.parametrize("conditions", [{1: "ambiguous-key"}, {"value": float("nan")},
+                                        {"value": object()}, ["not-an-object"]])
+def test_experiment_rejects_non_json_conditions(conditions):
+    with pytest.raises((ValueError, TypeError)):
+        _experiment(conditions=conditions)
+
+
+@pytest.mark.parametrize("latest", [INCONCLUSIVE, REFUTED])
+def test_historical_proof_cannot_override_latest_attempt(memory, latest):
+    memory.record_experiment(_experiment(outcome=SUPPORTED))
+    memory.record_experiment(_experiment(outcome=latest))
+    result = memory.already_tried(_experiment())
+    assert [attempt["outcome"] for attempt in result["attempts"]] == [SUPPORTED, latest]
+    assert result["settled"] is (latest == REFUTED)
+    conclusion = memory.route_conclusion("GET", "/authz/vuln/orders/{id}")
+    assert conclusion["weakness_demonstrated"] is False
+    assert conclusion["historical_weakness_demonstrated"] is True
+    assert conclusion["outcomes"][latest] == 1
+    assert conclusion["outcomes"][SUPPORTED] == 0
+    assert "not live verification" in conclusion["outcome_basis"]
+    briefing = memory.resume_briefing()
+    if latest == INCONCLUSIVE:
+        assert not briefing["settled"]
+        assert briefing["open_questions"]
+
+
+def test_legacy_strongest_ever_settlement_is_corrected_when_read(memory):
+    experiment = _experiment(outcome=INCONCLUSIVE)
+    memory.record_experiment(_experiment(outcome=SUPPORTED))
+    memory.record_experiment(experiment)
+    # Reproduce the old persisted projection without altering attempt history.
+    for node in memory._store.nodes(TARGET):
+        if node["node_key"] == f"experiment:{experiment.key}":
+            node["attributes"]["settled"] = True
+    resumed = InvestigationMemory(memory._store, target_id=TARGET)
+    assert resumed.already_tried(experiment)["settled"] is False
+    assert len(resumed.already_tried(experiment)["attempts"]) == 2
+    assert resumed.resume_briefing()["open_questions"]
+
+
 def test_a_successful_read_is_recorded_as_access_not_authorization(memory):
     """The distinction the whole module exists for."""
     recorded = memory.record_access(AccessObservation(
@@ -57,6 +114,22 @@ def test_a_successful_read_is_recorded_as_access_not_authorization(memory):
     assert "does NOT establish who is authorised" in recorded["means"]
     # Reaching an object must not create an ownership claim.
     assert memory.ownership_of("orders", "1001")["certainty"] == UNKNOWN
+
+
+@pytest.mark.parametrize("owners", [("user-a", "user-b"), ("user-b", "user-a")])
+def test_multiple_ownership_claims_never_choose_first_row(memory, owners):
+    for owner in owners:
+        memory.claim_ownership(OwnershipClaim(
+            collection="orders", identifier="1001", principal=owner,
+            basis=f"fixture evidence for {owner}", certainty=CONFIRMED,
+        ))
+    ownership = memory.ownership_of("orders", "1001")
+    assert ownership["principal"] is None
+    assert ownership["certainty"] == UNKNOWN
+    assert [claim["principal"] for claim in ownership["claims"]] == ["user-a", "user-b"]
+    assert all(claim["certainty"] == CONFIRMED for claim in ownership["claims"])
+    assert "shared access is possible" in ownership["basis"]
+    assert memory.ownership_of("invoices", "1001")["certainty"] == UNKNOWN
 
 
 def test_ownership_is_unknown_until_something_asserts_it(memory):

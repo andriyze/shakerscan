@@ -10,7 +10,7 @@
  */
 'use client'
 
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 
 import type { DeviceAgentSession } from '@/lib/api'
 import { Card } from '@/components/ui'

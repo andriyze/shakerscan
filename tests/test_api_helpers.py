@@ -21508,7 +21508,8 @@ def test_queue_stats_treats_worker_leased_pending_handoff_as_consistent(monkeypa
     assert redis.jobs["job:leased-planning-job"] == {"status": "queued"}
 
 
-def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypatch):
+@pytest.mark.parametrize("visibility", ["missing", "queued", "running", "unavailable", "claimed"])
+def test_orphaned_pending_scan_handoff_retains_uncertainty(monkeypatch, visibility):
     scan_id = uuid.UUID("56565656-5656-4656-8656-565656565656")
 
     class Conn:
@@ -21521,7 +21522,13 @@ def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypa
             return [{"id": scan_id, "job_id": "lost-job", "parent_scan_id": None}]
 
         async def fetchrow(self, query, row_id):
-            assert "queue_handoff_lost" in query
+            assert "queue_handoff_unknown" in query
+            assert "status='failed'" not in query
+            assert "completed_at=" not in query
+            assert "retry this Scan" not in query
+            assert "AND status IN ('pending','queued')" in query
+            if visibility == "claimed":
+                return None
             self.updated.append(row_id)
             return {"id": row_id, "parent_scan_id": None}
 
@@ -21530,6 +21537,8 @@ def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypa
             self.jobs = {}
 
         def hgetall(self, _key):
+            if visibility == "running":
+                return {"status": "running", "heartbeat": "fixture"}
             return {}
 
         def hset(self, key, mapping):
@@ -21541,14 +21550,19 @@ def test_orphaned_pending_scan_handoff_fails_instead_of_waiting_forever(monkeypa
     conn = Conn()
     redis = Redis()
     monkeypatch.setattr(api_module, "get_redis", lambda: redis)
-    monkeypatch.setattr(api_module, "queue_payloads", lambda *_args, **_kwargs: [])
+    def queue_snapshot(*args, **kwargs):
+        assert kwargs["include_leased"] is True
+        if visibility == "unavailable":
+            raise TimeoutError("queue visibility unavailable")
+        return [json.dumps({"job_id": "lost-job"})] if visibility == "queued" else []
+
+    monkeypatch.setattr(api_module, "queue_payloads", queue_snapshot)
 
     repaired = asyncio.run(api_module.cleanup_orphaned_scan_queue_handoffs(_FakePool(conn)))
 
-    assert repaired == 1
-    assert conn.updated == [scan_id]
-    assert redis.jobs["job:lost-job"]["status"] == "failed"
-    assert redis.jobs["job:lost-job"]["current_phase"] == "queue_handoff_lost"
+    assert repaired == int(visibility == "missing")
+    assert conn.updated == ([scan_id] if visibility == "missing" else [])
+    assert redis.jobs == {}
 
 
 def test_model_intake_report_summary_preserves_only_safe_file_identity():

@@ -1,10 +1,11 @@
 'use client'
+import { featureEnabled } from '@/lib/workspaceCapabilities'
 
 import { startHuntV2Native } from '@/lib/huntV2'
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { BrainCircuit, Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import {
   formatDate,
   createTargetPolicyApproval,
@@ -677,7 +678,9 @@ function FindingDetailContent() {
   const retestUnsupportedMessage =
     finding?.retest_unsupported_reason === 'model_intake'
       ? 'Model Intake findings are re-checked by re-running the Model Intake scan for the artifact.'
-      : 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
+      : featureEnabled('engine_admin')
+        ? 'No deterministic prover covers this finding type. Enable AI verification in AI settings to retest it.'
+        : 'No automated retest is available for this finding type in this workspace.'
   const manualVerifyCommands = evidenceStringList(rawEvidenceObject, 'verify_commands')
   const aiProbePrompt = evidenceString(rawEvidenceObject, 'prompt')
   const aiResponseExcerpt = evidenceString(rawEvidenceObject, 'response_excerpt')
@@ -721,7 +724,7 @@ function FindingDetailContent() {
           <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {!deviceFinding && <button
+          {featureEnabled('hunt') && !deviceFinding && <button
             type="button"
             onClick={() => setAutonomousConfirmOpen(true)}
             disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
@@ -739,7 +742,7 @@ function FindingDetailContent() {
             <BrainCircuit className="h-4 w-4" />
             Verify finding
           </button>}
-          {!deviceFinding && (!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
+          {featureEnabled('hunt') && !deviceFinding && (!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
             <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
               {hasPendingRetest
                 ? 'Available after the current proof replay finishes.'

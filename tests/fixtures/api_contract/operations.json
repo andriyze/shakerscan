@@ -975,31 +975,6 @@
     "operation_id": "get_hunt_hunts__hunt_id__get"
   },
   {
-    "path": "/hunts/{hunt_id}/authorization-investigations",
-    "method": "post",
-    "operation_id": "investigate_authorization_hunts__hunt_id__authorization_investigations_post"
-  },
-  {
-    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}",
-    "method": "get",
-    "operation_id": "read_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__get"
-  },
-  {
-    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
-    "method": "post",
-    "operation_id": "approve_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__approve_post"
-  },
-  {
-    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
-    "method": "get",
-    "operation_id": "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get"
-  },
-  {
-    "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
-    "method": "post",
-    "operation_id": "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post"
-  },
-  {
     "path": "/hunts/{hunt_id}/cancel",
     "method": "post",
     "operation_id": "cancel_hunt_hunts__hunt_id__cancel_post"

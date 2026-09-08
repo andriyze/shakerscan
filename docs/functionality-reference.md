@@ -1510,8 +1510,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 409 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 343 | `api/**/*.py` |
+| Public REST operations | 405 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 339 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1521,7 +1521,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 377 | Python sources + Compose manifests |
+| Runtime environment keys | 379 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -1733,11 +1733,6 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/hunts/contract` | `get_hunt_contract` |
 | `GET` | `/hunts/lifecycle-metrics` | `get_hunt_lifecycle_metrics` |
 | `GET` | `/hunts/{hunt_id}` | `get_hunt` |
-| `POST` | `/hunts/{hunt_id}/authorization-investigations` | `investigate_authorization` |
-| `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}` | `read_authorization_investigation` |
-| `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve` | `approve_authorization_investigation` |
-| `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction` | `authorization_reproduction` |
-| `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip` | `skip_authorization_investigation` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
 | `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
@@ -1858,6 +1853,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `GET` | `/scans` | `list_scans` |
 | `POST` | `/scans` | `submit_scan_endpoint` |
 | `POST` | `/scans/batch` | `submit_batch_endpoint` |
+| `GET` | `/scans/dispatch-receipts/lookup` | `scan_dispatch_receipt` |
 | `GET` | `/scans/{scan_id}` | `get_scan` |
 | `GET` | `/scans/{scan_id}/actions` | `get_scan_actions` |
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
@@ -2602,6 +2598,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_RUNTIME_DIR` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_SCHEDULE_DISPATCH_ORIGIN` | `api/schedules/managed_options.py`, `api/schedules/managed_runner.py` |
+| `SHAKERSCAN_SCHEDULE_DISPATCH_TOKEN` | `api/schedules/managed_options.py`, `api/schedules/managed_runner.py` |
 | `SHAKERSCAN_SKILLS_DIR` | `api/hunt/skills.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |

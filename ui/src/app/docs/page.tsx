@@ -6,6 +6,7 @@ import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Card, PageHeader } from '@/components/ui'
 import { SHAKERSCAN_DOCUMENTATION_BLOB_URL } from '@/lib/repository'
+import WorkspaceDocs from '@/components/WorkspaceDocs'
 
 export const dynamic = 'force-dynamic'
 
@@ -127,7 +128,7 @@ export default async function DocsPage() {
   const readme = await loadReadme()
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <WorkspaceDocs><div className="mx-auto max-w-5xl">
       <PageHeader
         title="Documentation"
         icon={<BookOpen className="h-5 w-5" />}
@@ -165,6 +166,6 @@ export default async function DocsPage() {
           </div>
         )}
       </Card>
-    </div>
+    </div></WorkspaceDocs>
   )
 }

@@ -219,7 +219,7 @@ def test_envelope_kind_cannot_be_reinterpreted():
 
 # --- Identity pair kinds: either half alone is a complete identity ---------------------
 #
-# basic_auth, form_login and oauth_password accept a username, a secret, or both. A target
+# basic_auth, form_login, json_login and oauth_password accept either identity half. A target
 # may publish a shared secret with no account name, or an account whose secret arrives
 # through a separate flow. SSH is excluded on purpose: a login with neither a password nor a
 # key cannot authenticate, so accepting one would only defer the failure to execution time.
@@ -227,7 +227,7 @@ def test_envelope_kind_cannot_be_reinterpreted():
 _PAIR_KIND_EXTRAS = {
     "basic_auth": {},
     "form_login": {"endpoint_url": "/login"},
-    "json_login": {"endpoint_url": "/login"},
+    "json_login": {"endpoint_url": "/api/login"},
     "oauth_password": {"endpoint_url": "/oauth/token"},
 }
 
@@ -342,7 +342,7 @@ def test_a_one_sided_profile_can_still_find_its_login_form():
     import sys
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "api"))
-    from capabilities.auth import _form_fields  # noqa: E402
+    from capabilities.auth import _form_fields
 
     username_only = "<form method=post action=/login><input name=username></form>"
     password_only = (
@@ -366,7 +366,7 @@ def test_a_one_sided_profile_can_still_find_its_login_form():
     # A credential holding both halves still requires a form offering both.
     _, user, fields = _form_fields(both, "http://t/login")
     assert user == "username" and fields["__password_field__"] == "password"
-    from capabilities.auth import SessionCredentialContractError  # noqa: E402
+    from capabilities.auth import SessionCredentialContractError
 
     with pytest.raises(SessionCredentialContractError):
         _form_fields(username_only, "http://t/login")
@@ -376,7 +376,10 @@ def test_username_only_auth_does_not_submit_to_a_newsletter_form():
     import sys
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "api"))
-    from capabilities.auth import _form_fields, SessionCredentialContractError  # noqa: E402
+    from capabilities.auth import (
+        SessionCredentialContractError,
+        _form_fields,
+    )
 
     newsletter = (
         '<form method="post" action="/newsletter">'

@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 170,
+  "component_schema_count": 168,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -32,8 +32,6 @@
     "AsmPruneRequest": "9069ec31f55d97689b07c0c4135cd48ac235b6bff92fba8f422924563f13bad0",
     "AsmReconRequest": "5a5c108b0e4b68823adc89dd6095ea5a81b05b0899f1e14b72dd49db86c64b3a",
     "AsmTestRequest": "7c309e5682705ac5bbff27aa194643efe32f903055bdb8cf91805d60a0c51270",
-    "AuthorizationApproveRequest": "cefcfadde62956213f3074f910d91be1b189dd8617234ddaccf011d4453b176d",
-    "AuthorizationInvestigateRequest": "778074cd1b6bd5ee1ea0b27ceb73b76983e363391157c3fe5da04e1a7b2224b5",
     "AuthzReplayExecuteRequest": "371c17d398fc9c0f5c190cc37158ff9ef792e62a281c3075b83257bb6df32542",
     "AuthzReplayPromoteRequest": "2d2377d49ca39f1dff53b16cba5508aa27c6c0386708095b976a1871e16f6ab6",
     "AutomationSettingsUpdate": "c059cd7c4db226097fbac4eac917e57a3a8b6e434f1c31069c622ba8fea84f5e",
@@ -86,7 +84,7 @@
     "HuntCandidateRequest": "7a890f858641b412dd5b74a13342c278a09b816d10c4980b8225c58994231972",
     "HuntCandidateUpdateRequest": "d8bf357f06e099fa5b57be30706a1bc654509f14c1c01f3281f9e22a86ab8568",
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
-    "HuntCapabilityRequest": "0048d34cbebc4635761f66c0b54ca394a513e170ad6b043fc394ed4b4398414b",
+    "HuntCapabilityRequest": "43d7181016bece02b8dc00e23c5138219147fbdfd6b1c590d248d5d89646532d",
     "HuntFinishRequest": "a1b31b0b8ab44686e0049d9f83d07ad12fcf749bc9d68f93424a6abaff3fee1b",
     "HuntQueryRequest": "85eab024e213d3af43c21ff3b0dab41e58a383f29a6ac11716ed19d0a0916d97",
     "HuntSkillBindRequest": "89c12e18f3f55a126cb209590bca6163c97e3300b987c1173fafeff762ed13ac",
@@ -176,9 +174,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "7dbb8a81e8077630e27c063b8ab354f51b991e6fa74352b478f70770a2a6752c",
+  "contract_sha256": "84b546efcbfa4a4a4630bc30f6ae3c6c3fa321897ead1c2a6ff62482ad1b730e",
   "openapi": "3.1.0",
-  "operation_count": 399,
+  "operation_count": 395,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1659,36 +1657,6 @@
       "surface": "hunt",
       "tags": []
     },
-    "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}": {
-      "deprecated": false,
-      "operation_id": "read_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__get",
-      "parameters_sha256": "0131713ab8c447c9772da310f80ff3c0e9c59f93e6222963c987e0c5639a5811",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "Hunt"
-      ]
-    },
-    "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction": {
-      "deprecated": false,
-      "operation_id": "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get",
-      "parameters_sha256": "0131713ab8c447c9772da310f80ff3c0e9c59f93e6222963c987e0c5639a5811",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "Hunt"
-      ]
-    },
     "GET /hunts/{hunt_id}/http-transactions": {
       "deprecated": false,
       "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
@@ -2304,6 +2272,18 @@
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "scan",
+      "tags": []
+    },
+    "GET /scans/dispatch-receipts/lookup": {
+      "deprecated": false,
+      "operation_id": "scan_dispatch_receipt_scans_dispatch_receipts_lookup_get",
+      "parameters_sha256": "8f2ac6b39b76fc01abf08da05905d0eb5aadee4736c5baef3a24139817eb535f",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": "scan",
@@ -4180,51 +4160,6 @@
         "Hunt"
       ]
     },
-    "POST /hunts/{hunt_id}/authorization-investigations": {
-      "deprecated": false,
-      "operation_id": "investigate_authorization_hunts__hunt_id__authorization_investigations_post",
-      "parameters_sha256": "0ddb93f2ed0cd0f1854cfa1d81482bdb655a9038d26dac6c8e101a25a1e9acdf",
-      "request_schema_sha256": "375ac1da6196a7743d1aeea5996f7a7d111a55a118165b444fb2b7c71e7bd73a",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "Hunt"
-      ]
-    },
-    "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve": {
-      "deprecated": false,
-      "operation_id": "approve_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__approve_post",
-      "parameters_sha256": "0a389ba0006ecea8cb090fd1b959a416aa5ee6964460c2a2440f65a0a111e395",
-      "request_schema_sha256": "e38251c4074ab52bdb110e699221d3bd7e21bb2a61b2479cb4fe89aaf18e2d22",
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "Hunt"
-      ]
-    },
-    "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip": {
-      "deprecated": false,
-      "operation_id": "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post",
-      "parameters_sha256": "0a389ba0006ecea8cb090fd1b959a416aa5ee6964460c2a2440f65a0a111e395",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "Hunt"
-      ]
-    },
     "POST /hunts/{hunt_id}/cancel": {
       "deprecated": false,
       "operation_id": "cancel_hunt_hunts__hunt_id__cancel_post",
@@ -5439,15 +5374,10 @@
       "GET /hunts/contract",
       "GET /hunts/lifecycle-metrics",
       "GET /hunts/{hunt_id}",
-      "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}",
-      "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
       "POST /hunts",
-      "POST /hunts/{hunt_id}/authorization-investigations",
-      "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
-      "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",
       "POST /hunts/{hunt_id}/candidates/{candidate_id}/verify",
@@ -5524,6 +5454,7 @@
       "DELETE /scans/{scan_id}/http-transactions",
       "GET /scan/contracts",
       "GET /scans",
+      "GET /scans/dispatch-receipts/lookup",
       "GET /scans/{scan_id}",
       "GET /scans/{scan_id}/actions",
       "GET /scans/{scan_id}/ai-redteam-report",

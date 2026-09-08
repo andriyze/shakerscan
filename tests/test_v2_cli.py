@@ -398,6 +398,28 @@ def test_hunt_call_retry_without_explicit_key_is_content_stable():
     assert first["response"]["payload"]["input"]["limit"] == 0
 
 
+def test_hunt_call_binds_reference_and_default_retry_key():
+    class Client:
+        def get(self, path):
+            return {"capabilities": [{"name": "collections.inspect"}]}
+
+        def post(self, path, payload):
+            return payload
+
+    def call(key):
+        return v2_cli._run_hunt(_parse(
+            "hunt", "call", "hunt-1", "collections.inspect", "--experiment-key", key,
+        ), Client())
+
+    first = call("a" * 32)
+    assert first["response"]["experiment_key"] == "a" * 32
+    assert first["response"]["input"] == {}
+    assert first["idempotency_key"] == call("a" * 32)["idempotency_key"]
+    assert first["idempotency_key"] != call("b" * 32)["idempotency_key"]
+    with pytest.raises(v2_cli.CliError, match="experiment key"):
+        call("invalid")
+
+
 def test_hunt_cli_exposes_complete_lifecycle_and_uses_canonical_routes(tmp_path):
     candidate_request = tmp_path / "candidate.json"
     candidate_request.write_text(json.dumps({

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState, Suspense } from 'react'
-import Link from 'next/link'
+import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
 import { getCampaigns, formatDate, type Campaign } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'

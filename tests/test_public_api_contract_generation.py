@@ -2,25 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import subprocess
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
-
 
 pytest.importorskip("asyncpg")
 pytest.importorskip("fastapi")
 httpx = pytest.importorskip("httpx")
 
-from fastapi import Request  # noqa: E402
-from fastapi.exceptions import RequestValidationError  # noqa: E402
-from pydantic import ValidationError  # noqa: E402
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 
-from api import api as api_module  # noqa: E402
-from api.public_api_contract import (  # noqa: E402
+from api import api as api_module
+from api.public_api_contract import (
     PUBLIC_V2_SURFACE_PREFIXES,
     PUBLIC_V2_WRITE_BODY_LIMITS,
     PublicV2BodyLimitMiddleware,
@@ -29,13 +29,12 @@ from api.public_api_contract import (  # noqa: E402
     public_v2_write_body_limit,
     public_v2_write_paths,
 )
-from api.runtime.credentials import CREDENTIAL_KINDS  # noqa: E402
-from scripts.generate_public_api_contract import (  # noqa: E402
+from api.runtime.credentials import CREDENTIAL_KINDS
+from scripts.generate_public_api_contract import (
     MANIFEST_OUTPUT,
     TYPES_OUTPUT,
     build_manifest,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 WRITE_METHODS = {"post", "put", "patch", "delete"}
@@ -277,7 +276,8 @@ class _IdempotencyConnection:
         if "SELECT * FROM public_api_idempotency" in query:
             return self.rows.get(key)
         if "updated_at <" in query:
-            return None
+            # Simulate an aged processing row: the old middleware reclaimed it.
+            return {"method": args[0]}
         raise AssertionError(query)
 
     async def execute(self, query, *args):
@@ -360,6 +360,40 @@ def test_public_write_idempotency_replays_exact_response_and_rejects_key_reuse()
     assert (b"idempotency-replayed", b"true") in replay[0]["headers"]
     assert conflict[0]["status"] == 409
     assert json.loads(conflict[1]["body"])["detail"]["error"] == "idempotency_key_reused"
+
+
+@pytest.mark.parametrize("mode", ["exception", "cancelled", "timeout", "conflict", "server",
+                                 "redirect", "malformed", "contradictory"])
+def test_uncertain_public_write_cannot_be_reexecuted_by_retry(mode):
+    calls = 0
+
+    async def endpoint(_scope, _receive, send):
+        nonlocal calls
+        calls += 1
+        if mode == "exception":
+            raise RuntimeError("accepted then lost response")
+        if mode == "cancelled":
+            raise asyncio.CancelledError()
+        status = {"timeout": 408, "conflict": 409, "server": 503, "redirect": 307,
+                  "malformed": 200, "contradictory": 422}[mode]
+        body = b'{"scan_id":"accepted"}' if mode == "contradictory" else b'not-json'
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"text/plain")]})
+        await send({"type": "http.response.body", "body": body})
+
+    app = SimpleNamespace(state=SimpleNamespace(db_pool=_IdempotencyPool()))
+    middleware = PublicV2IdempotencyMiddleware(endpoint)
+    if mode in {"exception", "cancelled"}:
+        with pytest.raises(RuntimeError if mode == "exception" else asyncio.CancelledError):
+            asyncio.run(_idempotency_exchange(middleware, app, b'{}'))
+    else:
+        asyncio.run(_idempotency_exchange(middleware, app, b'{}'))
+    # A fresh middleware instance simulates request handling after a restart;
+    # the shared database fixture retains the original processing reservation.
+    retry = asyncio.run(_idempotency_exchange(PublicV2IdempotencyMiddleware(endpoint), app, b'{}'))
+    assert retry[0]["status"] == 409
+    assert calls == 1
+    assert next(iter(app.state.db_pool.conn.rows.values()))["state"] == "processing"
 
 
 def test_secret_named_public_fields_are_limited_to_encrypted_credential_writes():
