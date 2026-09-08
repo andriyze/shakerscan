@@ -15,6 +15,7 @@ from typing import Any, Mapping
 import uuid
 
 from .endpoint_grouping import group_endpoint_rows
+from .graph_projection import project_graph_node
 
 
 MAX_QUERY_ROWS = 500
@@ -37,7 +38,7 @@ QUERIES = {
     "findings": QuerySpec("findings", "title, severity, status, tool, url, last_verification_verdict, last_seen_at", "last_seen_at", ("severity", "status", "verified_only")),
     "hypotheses": QuerySpec("hypotheses", "family, title, status, confidence, source, dedupe_key, updated_at", "updated_at", ("family", "status")),
     "principals": QuerySpec("target_principals", "label, role, tenant_id, auth_state, is_active, updated_at", "updated_at", ("role", "auth_state")),
-    "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, last_seen_at", "last_seen_at"),
+    "graph_nodes": QuerySpec("application_graph_nodes", "node_type, node_key, label, attributes, last_seen_at", "last_seen_at", ("node_type", "hunt_id")),
     "graph_edges": QuerySpec("application_graph_edges", "src_key, edge_type, dst_key, last_seen_at", "last_seen_at"),
     "receipts": QuerySpec("tool_receipts", "tool_name, status, redacted_argv, created_at", "created_at", ("status",)),
     "notes": QuerySpec("tool_receipts", "metadata_json, created_at", "created_at"),
@@ -205,6 +206,12 @@ async def query_knowledge_page(
                 where.append(f"id={bind(uuid.UUID(value))}")
             except ValueError as exc:
                 raise KnowledgeQueryError("id must be a UUID") from exc
+        elif key == "hunt_id":
+            try:
+                hunt_id = str(uuid.UUID(value))
+            except ValueError as exc:
+                raise KnowledgeQueryError("hunt_id must be a UUID") from exc
+            where.append(f"attributes->>'hunt_id'={bind(hunt_id)}")
         elif key == "path_contains":
             where.append(f"path ILIKE '%'||{bind(value)}||'%'")
         elif key == "verified_only":
@@ -251,4 +258,6 @@ async def query_knowledge_page(
         })
     for row in rows:
         row.pop("page_timestamp", None)
+    if kind == "graph_nodes":
+        rows = [project_graph_node(row) for row in rows]
     return {"ok": True, "kind": kind, "supported": True, "count": len(rows), "rows": rows, "has_more": has_more, "next_cursor": next_cursor}
