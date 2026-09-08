@@ -13,6 +13,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import threading
@@ -44,6 +45,14 @@ AUTH = {"primary": {"Authorization": "Bearer test-a"},
         "secondary": {"Authorization": "Bearer test-b"}}
 
 
+class _Row(dict):
+    """asyncpg Records support .get(); sqlite3.Row does not, and callers use both."""
+
+    @classmethod
+    def wrap(cls, row):
+        return None if row is None else cls(dict(row))
+
+
 class RelationalPool:
     def __init__(self, path=":memory:"):
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -55,6 +64,8 @@ class RelationalPool:
         CREATE TABLE IF NOT EXISTS application_graph_nodes(id TEXT PRIMARY KEY,target_id TEXT,node_type TEXT,node_key TEXT,label TEXT,attributes TEXT,UNIQUE(target_id,node_type,node_key));
         CREATE TABLE IF NOT EXISTS hunt_actions(id TEXT PRIMARY KEY,hunt_run_id TEXT,capability_name TEXT,status TEXT,input_summary TEXT,result_summary TEXT,receipt_id TEXT,started_at TEXT,completed_at TEXT);
         CREATE TABLE IF NOT EXISTS http_transactions(id TEXT PRIMARY KEY,hunt_run_id TEXT,hunt_action_id TEXT,sequence INTEGER,method TEXT,url TEXT,principal_slot TEXT,request_body_bytes INTEGER,status_code INTEGER,error TEXT,truncated INTEGER);
+        CREATE TABLE IF NOT EXISTS investigation_candidates(id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),plane TEXT,target_id TEXT,device_target_id TEXT,research_episode_id TEXT,agent_hunt_run_id TEXT,device_agent_run_id TEXT,hunt_run_id TEXT,family TEXT,canonical_locus TEXT,title TEXT,claim TEXT,claimed_severity TEXT,evidence_refs TEXT,verifier_contract_id TEXT,source_kind TEXT,fingerprint TEXT UNIQUE,status TEXT,created_by TEXT,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS investigation_candidate_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,candidate_id TEXT,research_episode_id TEXT,agent_hunt_run_id TEXT,device_agent_run_id TEXT,hunt_run_id TEXT,source_kind TEXT,title TEXT,claim TEXT,claimed_severity TEXT,evidence_refs TEXT,verifier_contract_id TEXT,observation_context TEXT,created_by TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
     @asynccontextmanager
     async def acquire(self):
@@ -71,12 +82,15 @@ class RelationalPool:
             else:
                 self.db.execute("COMMIT")
     def _query(self, sql, args):
-        sql = sql.replace("::jsonb", "").replace(" FOR UPDATE", "").replace("NOW()", "CURRENT_TIMESTAMP")
+        # SQLite has no casts, row-visibility columns or locking hints; the upsert's
+        # "inserted" flag is Postgres-only, so this fixture reports every write as new.
+        sql = re.sub(r"::[a-zA-Z_]+", "", sql).replace(" FOR UPDATE", "").replace("NOW()", "CURRENT_TIMESTAMP")
+        sql = sql.replace("(xmax = 0) AS inserted", "1 AS inserted")
         return self.db.execute(sql, {str(i): str(v) if isinstance(v, uuid.UUID) else v for i, v in enumerate(args, 1)})
     async def fetchrow(self, sql, *args):
-        return self._query(sql, args).fetchone()
+        return _Row.wrap(self._query(sql, args).fetchone())
     async def fetch(self, sql, *args):
-        return self._query(sql, args).fetchall()
+        return [_Row.wrap(r) for r in self._query(sql, args).fetchall()]
     async def execute(self, sql, *args):
         self._query(sql, args)
     def seed(self, origin, mode="vulnerable", selected="101", own="202"):

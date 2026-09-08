@@ -66,3 +66,70 @@ def test_verified_or_unattributed_result_is_not_reinterpreted_as_this_unverified
     assert candidate_plan(verified) is None
     unattributed = state(selected_request_examined=False)
     assert candidate_plan(unattributed) is None
+
+
+def test_reading_an_investigation_reports_a_candidate_without_creating_one():
+    """A read must surface the recorded lead, never manufacture one or write to the store."""
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from api.hunt.authorization_candidate import attach_authorization_candidate
+
+    writes = []
+
+    class Conn:
+        async def fetchrow(self, sql, *args):
+            if "application_graph_nodes" in sql:
+                return {"attributes": {"candidate_id": "cand-1"}}
+            return {"id": "cand-1", "status": "new", "fingerprint": "f" * 64}
+
+        async def execute(self, sql, *args):
+            writes.append(sql)
+
+    class Repo:
+        async def run(self, conn, hunt_id):
+            return {"id": hunt_id, "target_id": "00000000-0000-0000-0000-0000000000aa"}
+
+    class Service:
+        repo = Repo()
+
+        class pool:
+            @staticmethod
+            @asynccontextmanager
+            async def acquire():
+                yield Conn()
+
+    result = asyncio.run(attach_authorization_candidate(
+        Service(), "00000000-0000-0000-0000-0000000000bb", state()))
+    assert result["candidate"]["id"] == "cand-1"
+    assert result["candidate"]["authoritative"] is False
+    assert result["candidate"]["created_from_attempt"] == 1
+    assert writes == []
+
+
+def test_reading_an_investigation_with_no_recorded_candidate_reports_none():
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from api.hunt.authorization_candidate import attach_authorization_candidate
+
+    class Conn:
+        async def fetchrow(self, sql, *args):
+            return None
+
+    class Repo:
+        async def run(self, conn, hunt_id):
+            return {"id": hunt_id, "target_id": "00000000-0000-0000-0000-0000000000aa"}
+
+    class Service:
+        repo = Repo()
+
+        class pool:
+            @staticmethod
+            @asynccontextmanager
+            async def acquire():
+                yield Conn()
+
+    result = asyncio.run(attach_authorization_candidate(
+        Service(), "00000000-0000-0000-0000-0000000000bb", state()))
+    assert result["candidate"] is None

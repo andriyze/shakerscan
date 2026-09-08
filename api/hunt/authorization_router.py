@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
-from .authorization_candidate import ensure_authorization_candidate
+from .authorization_candidate import attach_authorization_candidate, ensure_authorization_candidate
 from .authorization_evidence import AuthorizationWorkflowError
 from .authorization_service import AuthorizationInvestigationService
 
@@ -76,7 +76,8 @@ async def investigate_authorization(hunt_id: UUID, request: AuthorizationInvesti
 @router.get("/hunts/{hunt_id}/authorization-investigations/{proposal_id}")
 async def read_authorization_investigation(hunt_id: UUID, proposal_id: UUID, service: Service):
     """Resume from PostgreSQL and explain the canonical action evidence; never execute."""
-    return await _call(service.read(hunt_id, proposal_id))
+    state = await _call(service.read(hunt_id, proposal_id))
+    return await _call(attach_authorization_candidate(service, hunt_id, state))
 
 
 @router.post("/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve")

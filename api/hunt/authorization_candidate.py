@@ -100,6 +100,61 @@ def candidate_plan(state: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _link_reference(state: Mapping[str, Any], plan: Mapping[str, Any]) -> tuple[Any, str, str, Any]:
+    """The deterministic identity of this proposal attempt's candidate link."""
+    proposal_id = uid(state.get("proposal_id"))
+    action_id = str(plan["observation_context"]["action_id"])
+    return (proposal_id, action_id, f"authz:{proposal_id}:candidate:{action_id}",
+            uuid.uuid5(proposal_id, f"candidate:{action_id}"))
+
+
+async def _linked_candidate(conn: Any, service: Any, hunt_id: Any, link_key: str,
+                            attempt: Any) -> tuple[Mapping[str, Any], dict[str, Any] | None]:
+    """Resolve the candidate this attempt already produced, or None when it produced none."""
+    run = await service.repo.run(conn, hunt_id)
+    row = await conn.fetchrow(
+        "SELECT attributes FROM application_graph_nodes WHERE target_id=$1 "
+        "AND node_type=$2 AND node_key=$3",
+        uid(run["target_id"]), LINK_TYPE, link_key,
+    )
+    link = mapping(dict(row).get("attributes")) if row else {}
+    if not link:
+        return run, None
+    existing = await conn.fetchrow(
+        "SELECT id,status,fingerprint FROM investigation_candidates WHERE id=$1::uuid",
+        str(link.get("candidate_id") or ""),
+    )
+    if not existing:
+        raise AuthorizationWorkflowError(
+            "Authorization candidate link is inconsistent with the candidate store"
+        )
+    item = dict(existing)
+    return run, {
+        "id": str(item["id"]), "status": str(item["status"]),
+        "fingerprint": str(item["fingerprint"]), "authoritative": False,
+        "created_from_attempt": attempt,
+    }
+
+
+async def attach_authorization_candidate(service: Any, hunt_id: Any, state: Mapping[str, Any]) -> dict[str, Any]:
+    """Report the candidate this attempt already produced, creating and sending nothing.
+
+    Approval and a later readback describe one durable state, so a resumed session sees the lead
+    it recorded rather than concluding none exists. A read must never materialize one itself.
+    """
+    plan = candidate_plan(state)
+    result = dict(state)
+    result["candidate"] = None
+    if plan is None:
+        return result
+    _, _, link_key, _ = _link_reference(state, plan)
+    async with service.pool.acquire() as conn:
+        _, candidate = await _linked_candidate(
+            conn, service, hunt_id, link_key, plan["observation_context"]["attempt"])
+    result["candidate"] = candidate
+    return result
+
+
 async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapping[str, Any]) -> dict[str, Any]:
     """Create at most one candidate observation for this proposal attempt, transactionally.
 
@@ -113,36 +168,14 @@ async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapp
         result["candidate"] = None
         return result
 
-    proposal_id = uid(state.get("proposal_id"))
-    action_id = str(plan["observation_context"]["action_id"])
-    link_key = f"authz:{proposal_id}:candidate:{action_id}"
-    link_id = uuid.uuid5(proposal_id, f"candidate:{action_id}")
+    proposal_id, action_id, link_key, link_id = _link_reference(state, plan)
+    attempt = plan["observation_context"]["attempt"]
 
     async with service.pool.acquire() as conn:
         async with conn.transaction():
-            run = await service.repo.run(conn, hunt_id)
-            row = await conn.fetchrow(
-                "SELECT attributes FROM application_graph_nodes WHERE target_id=$1 "
-                "AND node_type=$2 AND node_key=$3",
-                uid(run["target_id"]), LINK_TYPE, link_key,
-            )
-            link = mapping(dict(row).get("attributes")) if row else {}
-            if link:
-                candidate_id = link.get("candidate_id")
-                existing = await conn.fetchrow(
-                    "SELECT id,status,fingerprint FROM investigation_candidates WHERE id=$1::uuid",
-                    str(candidate_id or ""),
-                )
-                if not existing:
-                    raise AuthorizationWorkflowError(
-                        "Authorization candidate link is inconsistent with the candidate store"
-                    )
-                item = dict(existing)
-                result["candidate"] = {
-                    "id": str(item["id"]), "status": str(item["status"]),
-                    "fingerprint": str(item["fingerprint"]), "authoritative": False,
-                    "created_from_attempt": plan["observation_context"]["attempt"],
-                }
+            run, existing = await _linked_candidate(conn, service, hunt_id, link_key, attempt)
+            if existing:
+                result["candidate"] = existing
                 return result
 
             candidate = investigation_candidates.normalize_candidate(
@@ -166,6 +199,6 @@ async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapp
             result["candidate"] = {
                 "id": created["id"], "status": created["status"],
                 "fingerprint": created["fingerprint"], "authoritative": False,
-                "created_from_attempt": plan["observation_context"]["attempt"],
+                "created_from_attempt": attempt,
             }
     return result
