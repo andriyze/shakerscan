@@ -6,6 +6,13 @@ import pytest
 from schedules import managed_options, router
 
 
+def test_advanced_wire_preserves_only_explicit_overrides():
+    advanced = {"max_duration_seconds": 120, "max_http_requests": 100, "max_workers": 1}
+    body = managed_options.validate({"budget_profile": "fast", "advanced": advanced})
+    assert body["advanced"] == advanced
+    assert managed_options.validate({})["advanced"] == {}
+
+
 def test_managed_active_and_opaque_inputs_are_preserved():
     profile, selection = str(uuid4()), str(uuid4())
     options = {

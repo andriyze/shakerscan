@@ -29,7 +29,9 @@ def validate(options, *, target="https://schedule-validation.invalid"):
     if set(options) - allowed:
         raise ValueError("Managed schedules accept only policy, budgets and opaque input references")
     request = ScanRequest(target=target, **options)
-    body = request.model_dump(mode="json", exclude_none=True)
+    # Do not turn nested public-model defaults into caller-supplied authority.
+    # Gateways may intentionally accept a narrower advanced override contract.
+    body = request.model_dump(mode="json", exclude_none=True, exclude_unset=True)
     body.pop("options", None)
     # This is validation, not a fabricated approval. Per-occurrence active and
     # credential approvals come from the admission gateway; no receipt is stored.
