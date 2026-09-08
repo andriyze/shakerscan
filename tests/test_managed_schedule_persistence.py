@@ -3,11 +3,15 @@
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import asyncpg
 import pytest
 from schedules import managed_occurrences as store
+from schedules import managed_recovery as recovery
+from schedules.managed_dispatch import DispatchOutcome
 
 
 def test_occurrence_survives_retry_restart_edits_and_stale_lease():
@@ -145,6 +149,51 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 )
                 is None
             )
+            for deleted in (False, True):
+                recovering = uuid4()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO schedules(id,is_active,next_run_at) VALUES($1,true,$2)",
+                        recovering, now,
+                    )
+                claimed = await store.claim(
+                    pool, recovering, "https://gateway.test", payload, now=now
+                )
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "DELETE FROM schedules WHERE id=$1" if deleted else
+                        "UPDATE schedules SET is_active=false WHERE id=$1", recovering,
+                    )
+                assert await recovery.pending(pool, "https://gateway.test", now) == []
+                assert await recovery.pending(pool, "https://changed.test", later) == []
+                items = await recovery.pending(pool, "https://gateway.test", later)
+                assert [r["id"] for r in items] == [claimed["id"]]
+                assert not await recovery.record(
+                    pool, items[0], "https://gateway.test",
+                    DispatchOutcome("retry", "unknown"), later,
+                )
+                admitted = DispatchOutcome("accepted", "admitted", str(uuid4()))
+                if not deleted:
+                    async with pool.acquire() as conn:
+                        await conn.execute("UPDATE schedules SET is_active=true WHERE id=$1", recovering)
+                    assert not await recovery.record(pool, items[0], "https://gateway.test", admitted, later)
+                    async with pool.acquire() as conn:
+                        await conn.execute("UPDATE schedules SET is_active=false WHERE id=$1", recovering)
+                dispatcher = SimpleNamespace(
+                    origin="https://gateway.test", lookup=AsyncMock(return_value=admitted)
+                )
+                await recovery.reconcile(pool, dispatcher, later)
+                dispatcher.lookup.assert_awaited_once_with(str(recovering), str(claimed["id"]))
+                assert await recovery.pending(pool, "https://gateway.test", later) == []
+                async with pool.acquire() as conn:
+                    saved = await conn.fetchrow(
+                        "SELECT state,scan_id FROM managed_schedule_occurrences WHERE id=$1", claimed["id"]
+                    )
+                    assert saved["state"] == "accepted" and str(saved["scan_id"]) == admitted.scan_id
+                    if not deleted:
+                        assert await conn.fetchval(
+                            "SELECT next_run_at FROM schedules WHERE id=$1", recovering
+                        ) == now
         finally:
             await pool.close()
             await bootstrap.execute(f"DROP SCHEMA {schema} CASCADE")

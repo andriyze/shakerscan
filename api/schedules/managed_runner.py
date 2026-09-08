@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from . import managed_occurrences as occurrences
+from . import managed_recovery
 from . import router as schedule_ops
 from .managed_dispatch import ManagedScheduleDispatcher
 
@@ -51,6 +52,7 @@ async def run_due(pool, *, dispatcher=None, now=None):
         return False
     now = now or datetime.now(timezone.utc)
     await occurrences.initialize(pool)
+    await managed_recovery.reconcile(pool, dispatcher, now)
     for schedule in await occurrences.fetch_dispatchable(pool, now=now):
         try:
             occurrence = await occurrences.claim(

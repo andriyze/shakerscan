@@ -101,7 +101,11 @@ new option validation is deferred until a new occurrence. Paused schedules are
 excluded because retrying admission could still create work. The transport's
 `lookup` method can read `schedule-admission/v1` receipts without POSTing; missing
 receipts, authentication failures and unsupported gateways stay indeterminate.
-This is not yet wired into paused/deleted occurrence reconciliation in the runner.
+The runner now reconciles paused/deleted occurrences through this read-only lookup
+after their execution lease expires, only against the currently configured origin.
+It retains unknown intent, fences concurrent resume, and preserves cadence while
+recording accepted receipts. Real PostgreSQL fixtures cover these cases; production
+credential provisioning, deployment and live lifecycle acceptance remain pending.
 Only validated normal passive schedules are currently translated to public Scan
 requests; unsupported option fields are rejected rather than silently dropped.
 An accepted occurrence stamps the schedule's last-run time atomically with its

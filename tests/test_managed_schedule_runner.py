@@ -13,6 +13,11 @@ from schedules.managed_dispatch import DispatchOutcome
 from tests.api_sources import definition_source
 
 
+@pytest.fixture(autouse=True)
+def recovery_fixture(monkeypatch):
+    monkeypatch.setattr(runner.managed_recovery, "reconcile", AsyncMock())
+
+
 def test_unconfigured_mode_is_standalone_and_partial_configuration_fails(monkeypatch):
     monkeypatch.delenv("SHAKERSCAN_SCHEDULE_DISPATCH_ORIGIN", raising=False)
     monkeypatch.delenv("SHAKERSCAN_SCHEDULE_DISPATCH_TOKEN", raising=False)
