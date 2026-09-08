@@ -1,5 +1,5 @@
 'use client'
-import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { featureEnabled, workspaceScanCeiling } from '@/lib/workspaceCapabilities'
 
 import { useEffect, useMemo, useState } from 'react'
 import { placementPreviewLabel } from '@/lib/labels'
@@ -358,7 +358,7 @@ export default function NewScanPage() {
       const parsed = Number(value)
       const definition = scanContract?.advanced_limits.find((item) => item.name === key)
       const minimum = definition?.minimum ?? (key === 'max_state_changing_requests' ? 0 : 1)
-      const profileCeiling = definition?.profile_ceilings[budgetProfile]
+      const profileCeiling = workspaceScanCeiling(key, definition?.profile_ceilings[budgetProfile])
       if (!Number.isSafeInteger(parsed) || parsed < minimum) {
         setError(`${ADVANCED_LIMITS.find(([name]) => name === key)?.[1] || key} must be at least ${minimum}.`)
         return
@@ -522,7 +522,7 @@ export default function NewScanPage() {
                   <span className="mt-1 block text-sm text-gray-400">{budget.description}</span>
                   <span className="mt-3 block text-xs text-gray-500">
                     {serverLimits
-                      ? `${Math.round(serverLimits.max_duration_seconds / 60)} min · ${formatLimit(serverLimits.max_http_requests)} requests`
+                      ? `${Math.round(workspaceScanCeiling('max_duration_seconds', serverLimits.max_duration_seconds)! / 60)} min · ${formatLimit(workspaceScanCeiling('max_http_requests', serverLimits.max_http_requests)!)} requests`
                       : budget.limits}
                   </span>
                 </button>
@@ -710,7 +710,7 @@ export default function NewScanPage() {
                   {ADVANCED_LIMITS.filter(([key]) => featureEnabled('extended_scan_limits') || ['max_duration_seconds', 'max_http_requests', 'max_workers'].includes(key)).map(([key, label]) => {
                     const definition = scanContract?.advanced_limits.find((item) => item.name === key)
                     const minimum = definition?.minimum ?? (key === 'max_state_changing_requests' ? 0 : 1)
-                    const maximum = definition?.profile_ceilings[budgetProfile] ?? definition?.maximum
+                    const maximum = workspaceScanCeiling(key, definition?.profile_ceilings[budgetProfile] ?? definition?.maximum)
                     return (
                       <label key={key} className="text-xs text-gray-400">
                         {label}

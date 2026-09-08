@@ -5,6 +5,15 @@ export type WorkspaceCapabilities = {
   features: Record<string, { state: 'enabled' | 'unavailable' | 'excluded' | 'setup_required'; reason?: string }>
   navigation: Record<string, string>
   ui_routes: string[]
+  scan_limits?: Record<string, number>
+}
+
+export function workspaceScanCeiling(name: string, engineCeiling?: number): number | undefined {
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  const hosted = policy?.schema === 'shakerscan.workspace-capabilities/v1'
+    && policy.mode === 'managed' ? policy.scan_limits?.[name] : undefined
+  if (typeof hosted !== 'number' || !Number.isSafeInteger(hosted) || hosted < 1) return engineCeiling
+  return engineCeiling === undefined ? hosted : Math.min(hosted, engineCeiling)
 }
 
 declare global {
