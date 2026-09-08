@@ -52,7 +52,13 @@ def _origin(url: str) -> tuple[str, str | None, int]:
 
 
 def supported_capture(row: Mapping[str, Any], origins: list[str]) -> str:
-    """Validate, never repair, a captured request. Returns its exact path."""
+    """Validate request shape and response prerequisites; return the exact path.
+
+    Both proposal creation and approval revalidation use this for the selected
+    object and collection baseline. A failed capture cannot establish either.
+    Passing these metadata checks does not establish listing completeness,
+    ownership, entitlement, or even collection shape; proof remains worker-owned.
+    """
     url = row.get("url")
     if (str(row.get("method") or "").upper() != "GET"
             or row.get("request_body_bytes") != 0):
@@ -69,6 +75,24 @@ def supported_capture(row: Mapping[str, Any], origins: list[str]) -> str:
             raise AuthorizationWorkflowError("Captured request is outside this Hunt's frozen origins", 409)
         if not parts.path.startswith("/") or "//" in parts.path or "<" in parts.path or ">" in parts.path:
             raise ValueError("unreplayable path")
+        # A URL-shaped HTTP 500 was previously accepted as the secondary listing,
+        # wasting a human approval and a budgeted action that could not prove a
+        # crossing. Reject unusable observations before creating an experiment.
+        # Do not include error text or response contents: they may contain secrets.
+        if row.get("error"):
+            raise AuthorizationWorkflowError(
+                "The capture has a transport error; it cannot establish an object view or collection baseline. Capture a successful response first", 422,
+            )
+        status = row.get("status_code")
+        if type(status) is not int or not 200 <= status < 300:
+            label = f"HTTP {status}" if type(status) is int else "no valid HTTP status"
+            raise AuthorizationWorkflowError(
+                f"The capture returned {label}, not a usable object view or collection baseline. This listing-based workflow requires a successful baseline; capture usable evidence before proposing or approving", 422,
+            )
+        if status in {204, 205, 206} or row.get("truncated") not in (False, 0):
+            raise AuthorizationWorkflowError(
+                "The captured response is empty, partial, or its completeness is unknown; capture a complete object view and collection baseline first", 422,
+            )
         return parts.path
     except ValueError as exc:
         if isinstance(exc, AuthorizationWorkflowError):
