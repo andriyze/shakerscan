@@ -312,3 +312,27 @@ def test_the_patched_twin_is_refuted_by_evidence_not_by_an_absent_flag(base_url,
     outcome, why = outcome_from_result(proposal, execute(base_url, proposal, "safe"))
     assert outcome == REFUTED
     assert "no cross-principal evidence" in why
+
+
+@pytest.mark.parametrize("result", [
+    {"replays_completed": 1, "findings": []},
+    {"findings": [{"evidence": ["malformed"]}]},
+    {"endpoint_attempts": [{"requested_object_id": "2002", "status": "completed"}]},
+])
+def test_aggregate_completion_and_unrelated_or_malformed_evidence_are_inconclusive(memory, result):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    assert outcome_from_result(proposal, result)[0] == INCONCLUSIVE
+
+
+@pytest.mark.parametrize("field,value", [
+    ("method", "POST"), ("producer_endpoint", "GET /invoices"),
+    ("consumer_endpoint", "GET /authz/vuln/orders/2002"),
+])
+def test_same_object_id_in_a_different_request_cannot_support_proposal(memory, field, value):
+    proposal = investigate(captured(), available_principals=PRINCIPALS, memory=memory)["proposals"][0]
+    evidence = {
+        "proof_type": "cross_principal_replay", "requested_object_id": "1001",
+        "method": "GET", "producer_endpoint": "GET /authz/vuln/orders",
+        "consumer_endpoint": "GET /authz/vuln/orders/1001", field: value,
+    }
+    assert outcome_from_result(proposal, {"findings": [{"evidence": evidence}]})[0] == INCONCLUSIVE

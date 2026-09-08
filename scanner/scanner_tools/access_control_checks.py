@@ -3182,6 +3182,8 @@ async def authz_resource_replay_test(
                     property_names=ref.get("sensitive_fields") or [],
                 )
                 attempt["attempted_params_count"] = 1
+                attempt["requested_object_id"] = object_id
+                attempt["method"] = "GET"
                 results["replays_attempted"] += 1
                 try:
                     owner_resp = await fetcher(
@@ -3203,6 +3205,8 @@ async def authz_resource_replay_test(
 
                 owner_status = _auth_response_status(owner_resp)
                 attacker_status = _auth_response_status(attacker_resp)
+                attempt["owner_status"] = owner_status
+                attempt["attacker_status"] = attacker_status
                 owner_body = str(owner_resp.get("body") or "")
                 attacker_body = str(attacker_resp.get("body") or "")
                 attempt["completed_params_count"] = 1

@@ -25,8 +25,9 @@ the durable memory, so a resumed session spends its budget on what is still open
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from .investigation_memory import (
     INCONCLUSIVE,
@@ -92,18 +93,28 @@ class ProposedExperiment:
 
     def as_experiment(self, outcome: str) -> Experiment:
         return Experiment(
-            hypothesis=self.hypothesis, route_template=self.route_template, method=self.method,
-            collection=self.collection, identifier=self.identifier,
-            actor_principal=self.actor_principal, subject_principal=self.subject_principal,
-            outcome=outcome, conditions=dict(self.conditions),
+            hypothesis=self.hypothesis,
+            route_template=self.route_template,
+            method=self.method,
+            collection=self.collection,
+            identifier=self.identifier,
+            actor_principal=self.actor_principal,
+            subject_principal=self.subject_principal,
+            outcome=outcome,
+            conditions=dict(self.conditions),
         )
 
     def as_row(self) -> dict[str, Any]:
         return {
-            "hypothesis": self.hypothesis, "why": self.why, "method": self.method,
-            "route_template": self.route_template, "object": f"{self.collection}/{self.identifier}",
-            "actor_principal": self.actor_principal, "subject_principal": self.subject_principal,
-            "evidence_needed": list(self.evidence_needed), "conditions": dict(self.conditions),
+            "hypothesis": self.hypothesis,
+            "why": self.why,
+            "method": self.method,
+            "route_template": self.route_template,
+            "object": f"{self.collection}/{self.identifier}",
+            "actor_principal": self.actor_principal,
+            "subject_principal": self.subject_principal,
+            "evidence_needed": list(self.evidence_needed),
+            "conditions": dict(self.conditions),
             "risk": self.risk,
         }
 
@@ -128,18 +139,22 @@ def investigate(
         return {
             "proposals": [],
             "not_proposed": [
-                f"{request.method.upper()} is not supported by this workflow. A cross-principal "
-                "replay of a mutating request requires separate mutation authorization and exact "
-                "request-body preservation; capture the corresponding GET, or drive the mutation "
-                "through an explicitly authorized path."
+                (
+                    f"{request.method.upper()} is not supported by this workflow. A cross-principal "
+                    "replay of a mutating request requires separate mutation authorization and exact "
+                    "request-body preservation; capture the corresponding GET, or drive the mutation "
+                    "through an explicitly authorized path."
+                )
             ],
         }
     if not request.addresses_an_object:
         return {
             "proposals": [],
             "not_proposed": [
-                "This request does not address a specific object, so there is no ownership "
-                "boundary to cross. Capture a request that names one."
+                (
+                    "This request does not address a specific object, so there is no ownership "
+                    "boundary to cross. Capture a request that names one."
+                )
             ],
         }
 
@@ -148,8 +163,10 @@ def investigate(
         return {
             "proposals": [],
             "not_proposed": [
-                "A cross-principal test needs a second principal; only "
-                f"{request.principal!r} is available."
+                (
+                    "A cross-principal test needs a second principal; only "
+                    f"{request.principal!r} is available."
+                )
             ],
         }
 
@@ -167,9 +184,12 @@ def investigate(
                 f"currently {ownership.get('certainty', UNKNOWN)}, so the replay also has to "
                 "establish whose object it is."
             ),
-            method=request.method, route_template=request.route_template,
-            collection=request.collection, identifier=request.identifier,
-            actor_principal=other, subject_principal=request.principal,
+            method=request.method,
+            route_template=request.route_template,
+            collection=request.collection,
+            identifier=request.identifier,
+            actor_principal=other,
+            subject_principal=request.principal,
             evidence_needed=(
                 f"the collection listing as {other}, to establish their own baseline",
                 f"the object read as {request.principal}, the owner's view",
@@ -188,17 +208,21 @@ def investigate(
             # Inconclusive is an open question, not a closed one: re-propose it, and say why it
             # is coming back so the pentester can fix the prerequisite instead of repeating it
             # blindly.
-            proposal = replace(proposal, why=(
-                f"{proposal.why} A previous attempt was inconclusive after "
-                f"{prior.get('attempt_count')} try/tries; retry once the missing evidence "
-                "(baseline listing, or a live session for both principals) is available."
-            ))
+            proposal = replace(
+                proposal,
+                why=(
+                    f"{proposal.why} A previous attempt was inconclusive after "
+                    f"{prior.get('attempt_count')} try/tries; retry once the missing evidence "
+                    "(baseline listing, or a live session for both principals) is available."
+                ),
+            )
         proposals.append(proposal)
     return {"proposals": proposals, "not_proposed": withheld}
 
 
 def outcome_from_result(
-    proposal: "ProposedExperiment", result: Mapping[str, Any],
+    proposal: ProposedExperiment,
+    result: Mapping[str, Any],
 ) -> tuple[str, str]:
     """Derive this proposal's outcome from the proof evidence, not from an aggregate flag.
 
@@ -210,9 +234,19 @@ def outcome_from_result(
     findings = [f for f in (result.get("findings") or []) if isinstance(f, Mapping)]
     for finding in findings:
         evidence = finding.get("evidence") or {}
+        if not isinstance(evidence, Mapping):
+            continue
         if str(evidence.get("proof_type") or "") != "cross_principal_replay":
             continue
         if str(evidence.get("requested_object_id") or "") != str(proposal.identifier):
+            continue
+        if evidence.get("method") != proposal.method or evidence.get(
+            "producer_endpoint"
+        ) != (f"{proposal.method} /{proposal.collection.lstrip('/')}"):
+            continue
+        if evidence.get("consumer_endpoint") != (
+            f"{proposal.method} /{proposal.collection.lstrip('/')}/{proposal.identifier}"
+        ):
             continue
         return SUPPORTED, (
             f"evidence names object {proposal.identifier}: owner "
@@ -220,20 +254,41 @@ def outcome_from_result(
             "absent from the actor's own listing"
         )
     if findings:
-        others = sorted({
-            str((f.get("evidence") or {}).get("requested_object_id") or "?") for f in findings
-        })
+        others = sorted(
+            {
+                str(f["evidence"].get("requested_object_id") or "?")
+                for f in findings
+                if isinstance(f.get("evidence"), Mapping)
+            }
+        )
         return INCONCLUSIVE, (
             f"the run produced findings for {', '.join(others)}, none of which is "
             f"{proposal.identifier}; this proposal is unproven and another object's finding "
             "cannot stand in for it"
         )
-    if result.get("replays_completed"):
-        return REFUTED, (
-            "the replay completed and produced no cross-principal evidence for "
-            f"object {proposal.identifier}"
-        )
-    return INCONCLUSIVE, "no replay completed, so nothing was established"
+    for attempt in result.get("endpoint_attempts") or []:
+        if not isinstance(attempt, Mapping):
+            continue
+        if (
+            str(attempt.get("requested_object_id") or "") == str(proposal.identifier)
+            and attempt.get("method") == proposal.method
+            and attempt.get("producer_endpoint")
+            == f"{proposal.method} /{proposal.collection.lstrip('/')}"
+            and attempt.get("consumer_endpoint")
+            == f"{proposal.method} /{proposal.collection.lstrip('/')}/{proposal.identifier}"
+            and attempt.get("status") == "completed"
+            and attempt.get("owner_status") == 200
+            and type(attempt.get("attacker_status")) is int
+            and attempt.get("attacker_status") in {403, 404}
+        ):
+            return REFUTED, (
+                "the selected object's replay was explicitly denied; no cross-principal evidence "
+                f"for object {proposal.identifier} in this attempt"
+            )
+    return (
+        INCONCLUSIVE,
+        "no bound denial or proof for the selected object was established",
+    )
 
 
 def explain(
@@ -299,20 +354,32 @@ def explain(
     }
 
 
-def reproduction(proposal: ProposedExperiment, *, origin: str = "") -> list[dict[str, str]]:
+def reproduction(
+    proposal: ProposedExperiment, *, origin: str = ""
+) -> list[dict[str, str]]:
     """The minimal ordered sequence that re-establishes the result, and nothing more."""
     base = origin.rstrip("/")
     collection_path = f"{base}/{proposal.collection}"
     object_path = f"{collection_path}/{proposal.identifier}"
     return [
-        {"step": "1", "as": proposal.actor_principal, "request": f"GET {collection_path}",
-         "establishes": "the actor's own baseline for this collection"},
-        {"step": "2", "as": proposal.subject_principal,
-         "request": f"{proposal.method.upper()} {object_path}",
-         "establishes": "the owner's view of the object"},
-        {"step": "3", "as": proposal.actor_principal,
-         "request": f"{proposal.method.upper()} {object_path}",
-         "establishes": "whether the actor receives an object absent from their baseline"},
+        {
+            "step": "1",
+            "as": proposal.actor_principal,
+            "request": f"GET {collection_path}",
+            "establishes": "the actor's own baseline for this collection",
+        },
+        {
+            "step": "2",
+            "as": proposal.subject_principal,
+            "request": f"{proposal.method.upper()} {object_path}",
+            "establishes": "the owner's view of the object",
+        },
+        {
+            "step": "3",
+            "as": proposal.actor_principal,
+            "request": f"{proposal.method.upper()} {object_path}",
+            "establishes": "whether the actor receives an object absent from their baseline",
+        },
     ]
 
 
