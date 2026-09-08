@@ -33,7 +33,7 @@
     "AsmReconRequest": "5a5c108b0e4b68823adc89dd6095ea5a81b05b0899f1e14b72dd49db86c64b3a",
     "AsmTestRequest": "7c309e5682705ac5bbff27aa194643efe32f903055bdb8cf91805d60a0c51270",
     "AuthorizationApproveRequest": "cefcfadde62956213f3074f910d91be1b189dd8617234ddaccf011d4453b176d",
-    "AuthorizationInvestigateRequest": "9a1586da8bded2047fd03dd48d4aace1eba6124fe7eeb75efe3669be23ff83ea",
+    "AuthorizationInvestigateRequest": "778074cd1b6bd5ee1ea0b27ceb73b76983e363391157c3fe5da04e1a7b2224b5",
     "AuthzReplayExecuteRequest": "371c17d398fc9c0f5c190cc37158ff9ef792e62a281c3075b83257bb6df32542",
     "AuthzReplayPromoteRequest": "2d2377d49ca39f1dff53b16cba5508aa27c6c0386708095b976a1871e16f6ab6",
     "AutomationSettingsUpdate": "c059cd7c4db226097fbac4eac917e57a3a8b6e434f1c31069c622ba8fea84f5e",
@@ -176,7 +176,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "2c93b46cb5ae045d92b5cba3d5f1ae427b2f9cfa809869b54039bbe8f6105627",
+  "contract_sha256": "7dbb8a81e8077630e27c063b8ab354f51b991e6fa74352b478f70770a2a6752c",
   "openapi": "3.1.0",
   "operation_count": 399,
   "operations": {
