@@ -1,5 +1,7 @@
 # Hosted workspace connector (read-only preview)
 
+**Status:** Read-only hosted-workspace preview connector; not an enabled capability in the 2.3.0 release.
+
 This is a small HTTPS client and stdio MCP adapter, not a scanner installation or a
 customer-network execution agent. It does not require Docker. The SaaS gateway must
 implement `shakerscan.workspace-capabilities/v1` and the pairing endpoints first.

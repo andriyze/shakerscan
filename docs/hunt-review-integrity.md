@@ -1,5 +1,7 @@
 # Hunt evidence review and continuity
 
+**Status:** Implemented review/integrity tooling on the 2.3.0 integration branch; offline scorer and CI gate only, no live efficacy measurement.
+
 This change builds on the recorded live acceptance in `hunt-authorization-behavior.md`
 at `bbaa84c9`, documented by `80abc5d0`. Those two positive leads and the no-lead
 control remain acceptance evidence, not a human-productivity study or verified recall gain.

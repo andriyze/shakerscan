@@ -152,6 +152,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
   "credentials": {
     "interactive_auth_kinds": [
       "form_login",
+      "json_login",
       "oauth_client_credentials",
       "oauth_password"
     ],
@@ -195,6 +196,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
       "cookie",
       "custom_headers",
       "form_login",
+      "json_login",
       "oauth_client_credentials",
       "oauth_password"
     ]
@@ -357,7 +359,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
 } as const
 
 export type ScanBudgetProfile = "fast" | "balanced" | "thorough" | "deep"
-export type ScanCredentialAuthKind = "api_key_header" | "authorization_header" | "basic_auth" | "bearer_token" | "cookie" | "custom_headers" | "form_login" | "oauth_client_credentials" | "oauth_password"
+export type ScanCredentialAuthKind = "api_key_header" | "authorization_header" | "basic_auth" | "bearer_token" | "cookie" | "custom_headers" | "form_login" | "json_login" | "oauth_client_credentials" | "oauth_password"
 export type ScanReplayPolicy = "confirmed_active" | "discovery_only" | "safe_authentication" | "safe_reads"
 export type ScanTargetKind = 'web' | 'api'
 
