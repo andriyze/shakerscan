@@ -23,16 +23,20 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
         pool = await asyncpg.create_pool(dsn, server_settings={"search_path": schema})
         try:
             async with pool.acquire() as conn:
+                await conn.execute("CREATE TABLE targets (id UUID PRIMARY KEY, url TEXT)")
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY,is_active BOOLEAN,next_run_at TIMESTAMPTZ,
-                    last_run_at TIMESTAMPTZ,
+                    last_run_at TIMESTAMPTZ,target_id UUID,
                     updated_at TIMESTAMPTZ DEFAULT NOW())""")
             await store.initialize(pool)
             now = datetime.now(timezone.utc)
             schedule = uuid4()
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "INSERT INTO schedules(id,is_active,next_run_at) VALUES($1,true,$2)",
+                    "INSERT INTO targets(id,url) VALUES($1,'https://example.test')", schedule
+                )
+                await conn.execute(
+                    "INSERT INTO schedules(id,is_active,next_run_at,target_id) VALUES($1,true,$2,$1)",
                     schedule,
                     now,
                 )
@@ -55,10 +59,18 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 dsn, server_settings={"search_path": schema}
             )
             later = now + timedelta(minutes=3)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE schedules SET next_run_at=$1 WHERE id=$2",
+                    now + timedelta(days=1), schedule,
+                )
+            assert [s["id"] for s in await store.fetch_dispatchable(pool, now=later)] == [schedule]
+            def invalid_edit():
+                raise ValueError("New schedule configuration needs review")
             with pytest.raises(ValueError, match="original gateway"):
                 await store.claim(pool, schedule, "https://changed.test", {}, now=later)
             second = await store.claim(
-                pool, schedule, "https://gateway.test", {}, now=later
+                pool, schedule, "https://gateway.test", invalid_edit, now=later
             )
             assert second["id"] == first["id"]
             assert second["payload"] == payload
@@ -126,6 +138,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 await conn.execute(
                     "UPDATE schedules SET is_active=false WHERE id=$1", schedule
                 )
+            assert await store.fetch_dispatchable(pool, now=next_due) == []
             assert (
                 await store.claim(
                     pool, schedule, "https://gateway.test", payload, now=next_due

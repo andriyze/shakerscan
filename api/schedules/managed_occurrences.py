@@ -29,12 +29,32 @@ async def initialize(pool):
         await conn.execute(SCHEMA)
 
 
+async def fetch_dispatchable(pool, *, now):
+    """Include unresolved active intent even if its next cadence was edited.
+
+    Paused schedules are not dispatched: a retry may still create work at the
+    gateway. Their pending receipts require a future read-only reconciliation path.
+    """
+    async with pool.acquire() as conn:
+        return list(await conn.fetch(
+            """SELECT s.*, t.url AS target_url FROM schedules s
+            JOIN targets t ON t.id=s.target_id
+            WHERE s.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
+                SELECT 1 FROM managed_schedule_occurrences o
+                WHERE o.schedule_id=s.id AND o.state='pending'
+            ))""",
+            now,
+        ))
+
+
 async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
     """Freeze a validated, opaque-reference-only public Scan request once.
 
     An unresolved occurrence keeps its original payload and gateway across config
     edits and retries. Callers must use the returned fields, not their new input.
-    No token or raw target credential belongs in validated_payload.
+    No token or raw target credential belongs in validated_payload. It may be a
+    synchronous validation factory, invoked only for a new occurrence, never to
+    reinterpret already-persisted intent after an edit.
     """
     schedule_id = UUID(str(schedule_id))
     if now.tzinfo is None:
@@ -57,6 +77,7 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
         if not row:
             if not schedule["next_run_at"] or schedule["next_run_at"] > now:
                 return None
+            payload = validated_payload() if callable(validated_payload) else validated_payload
             row = await conn.fetchrow(
                 """INSERT INTO managed_schedule_occurrences
                 (id,schedule_id,gateway_origin,payload,due_at,state)
@@ -64,7 +85,7 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
                 uuid4(),
                 schedule_id,
                 gateway_origin,
-                json.dumps(validated_payload),
+                json.dumps(payload),
                 schedule["next_run_at"],
             )
         row = await conn.fetchrow(

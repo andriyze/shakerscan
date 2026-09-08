@@ -51,14 +51,13 @@ async def run_due(pool, *, dispatcher=None, now=None):
         return False
     now = now or datetime.now(timezone.utc)
     await occurrences.initialize(pool)
-    for schedule in await schedule_ops.fetch_due_schedules(pool, now=now):
+    for schedule in await occurrences.fetch_dispatchable(pool, now=now):
         try:
-            payload = scan_payload(schedule)
             occurrence = await occurrences.claim(
                 pool,
                 schedule["id"],
                 dispatcher.origin,
-                payload,
+                lambda schedule=schedule: scan_payload(schedule),
                 now=now,
             )
             if occurrence is None:

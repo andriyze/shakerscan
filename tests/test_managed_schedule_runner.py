@@ -23,13 +23,14 @@ def test_unconfigured_mode_is_standalone_and_partial_configuration_fails(monkeyp
 
 
 @pytest.mark.parametrize("state", ["retry", "accepted", "denied"])
-def test_managed_dispatch_uses_persisted_payload_and_receipt(monkeypatch, state):
+@pytest.mark.parametrize("edited_options", [{}, {"policy": {"active_testing": True}}])
+def test_managed_dispatch_uses_persisted_payload_and_receipt(monkeypatch, state, edited_options):
     now = datetime.now(timezone.utc)
     schedule_id, occurrence_id, lease_id = uuid4(), uuid4(), uuid4()
     schedule = {
         "id": schedule_id,
         "target_url": "https://example.test",
-        "scan_options": {},
+        "scan_options": edited_options,
         "schedule_kind": "normal_scan",
     }
     persisted = {"target": "https://example.test", "budget_profile": "fast"}
@@ -42,7 +43,7 @@ def test_managed_dispatch_uses_persisted_payload_and_receipt(monkeypatch, state)
     monkeypatch.setattr(runner.occurrences, "claim", claim)
     monkeypatch.setattr(runner.occurrences, "settle", settle)
     monkeypatch.setattr(
-        runner.schedule_ops, "fetch_due_schedules", AsyncMock(return_value=[schedule])
+        runner.occurrences, "fetch_dispatchable", AsyncMock(return_value=[schedule])
     )
     monkeypatch.setattr(runner.schedule_ops, "schedule_next_run_at", lambda _: now)
     dispatcher = type("Dispatcher", (), {"origin": "https://gateway.test"})()
@@ -83,11 +84,13 @@ def test_payload_does_not_silently_drop_unsupported_authority(options):
 
 def test_unsupported_managed_kind_never_falls_back(monkeypatch):
     monkeypatch.setattr(runner.occurrences, "initialize", AsyncMock())
-    claim = AsyncMock()
+    async def validate_new(_pool, _id, _origin, factory, **_kwargs):
+        factory()
+    claim = AsyncMock(side_effect=validate_new)
     monkeypatch.setattr(runner.occurrences, "claim", claim)
     monkeypatch.setattr(
-        runner.schedule_ops,
-        "fetch_due_schedules",
+        runner.occurrences,
+        "fetch_dispatchable",
         AsyncMock(
             return_value=[
                 {
@@ -103,7 +106,7 @@ def test_unsupported_managed_kind_never_falls_back(monkeypatch):
         "Dispatcher", (), {"origin": "https://gateway.test", "dispatch": AsyncMock()}
     )()
     assert asyncio.run(runner.run_due(None, dispatcher=dispatcher)) is True
-    claim.assert_not_awaited()
+    claim.assert_awaited_once()
     dispatcher.dispatch.assert_not_awaited()
 
 

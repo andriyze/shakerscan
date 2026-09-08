@@ -95,6 +95,11 @@ admission receipt and next cadence together. Changing the gateway while an
 occurrence is unresolved fails closed for reconciliation. The database fixture
 tests concurrent claims, reconnect/retry, immutable input, stale-lease rejection,
 gateway-change denial and paused schedules against real disposable PostgreSQL.
+Active schedules with unresolved occurrences remain eligible for reconciliation
+even after their next due time or options change. Retries use the frozen request;
+new option validation is deferred until a new occurrence. Paused schedules are
+excluded because retrying admission could still create work; read-only receipt
+reconciliation for paused/deleted schedules is not delivered yet.
 Only validated normal passive schedules are currently translated to public Scan
 requests; unsupported option fields are rejected rather than silently dropped.
 An accepted occurrence stamps the schedule's last-run time atomically with its
