@@ -514,7 +514,7 @@ export default function NewScanPage() {
           <h2 className="font-medium text-white">Budget</h2>
           <p className="mt-1 text-xs text-gray-500">Budgets are hard ceilings, not separate scan modes.</p>
           <div className="mt-4 grid gap-3 md:grid-cols-3" role="group" aria-label="Scan budget">
-            {BUDGETS.map((budget) => {
+            {BUDGETS.filter(budget => budget.value !== 'deep' || featureEnabled('deep_scan')).map((budget) => {
               const serverLimits = scanContract?.budget_profiles[budget.value]
               return (
                 <button key={budget.value} type="button" aria-pressed={budgetProfile === budget.value} onClick={() => { setBudgetProfile(budget.value); setError(null) }} className={`rounded-lg border p-4 text-left transition-colors ${budgetProfile === budget.value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-700 bg-gray-950 hover:border-gray-600'}`}>
@@ -627,12 +627,12 @@ export default function NewScanPage() {
                 <span><span className="block text-sm font-medium text-white">Single worker — recommended</span><span className="mt-1 block text-xs text-gray-500">Release-authoritative execution with one coherent action graph.</span></span>
               </span>
             </label>
-            <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
+            {featureEnabled('worker_admin') && <label className={`rounded-lg border p-4 ${topology === 'parallel' ? 'border-amber-600 bg-amber-950/20' : 'border-gray-800'}`}>
               <span className="flex items-start gap-3">
                 <input type="radio" name="scan-topology" value="parallel" checked={topology === 'parallel'} onChange={() => setTopology('parallel')} />
                 <span><span className="block text-sm font-medium text-white">Parallel — experimental</span><span className="mt-1 block text-xs text-gray-500">Explicit multi-worker fan-out; validate results against single-worker execution.</span></span>
               </span>
-            </label>
+            </label>}
           </div>
           <div className="mt-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
             <p>Placement preview: {workerStats ? placementPreviewLabel(topology, currentWorkerCount) : 'checking compatible current workers…'}.</p>
@@ -707,7 +707,7 @@ export default function NewScanPage() {
                 <h3 className="text-sm font-medium text-gray-300">Custom budget ceilings</h3>
                 <p className="mt-1 text-xs text-gray-500">Whole numbers only. Zero is an explicit deny ceiling where the server contract permits it.</p>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  {ADVANCED_LIMITS.map(([key, label]) => {
+                  {ADVANCED_LIMITS.filter(([key]) => featureEnabled('extended_scan_limits') || ['max_duration_seconds', 'max_http_requests', 'max_workers'].includes(key)).map(([key, label]) => {
                     const definition = scanContract?.advanced_limits.find((item) => item.name === key)
                     const minimum = definition?.minimum ?? (key === 'max_state_changing_requests' ? 0 : 1)
                     const maximum = definition?.profile_ceilings[budgetProfile] ?? definition?.maximum
