@@ -90,7 +90,10 @@ def test_payload_does_not_silently_drop_unsupported_authority(options):
 def test_unsupported_managed_kind_never_falls_back(monkeypatch):
     monkeypatch.setattr(runner.occurrences, "initialize", AsyncMock())
     async def validate_new(_pool, _id, _origin, factory, **_kwargs):
-        factory()
+        factory({
+            "target_url": "https://example.test", "scan_options": {},
+            "schedule_kind": "asm_improve",
+        })
     claim = AsyncMock(side_effect=validate_new)
     monkeypatch.setattr(runner.occurrences, "claim", claim)
     monkeypatch.setattr(

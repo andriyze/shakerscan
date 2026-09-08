@@ -50,7 +50,7 @@ async def run_due(pool, *, dispatcher=None, now=None):
                 pool,
                 schedule["id"],
                 dispatcher.origin,
-                lambda schedule=schedule: scan_payload(schedule),
+                scan_payload,
                 now=now,
             )
             if occurrence is None:

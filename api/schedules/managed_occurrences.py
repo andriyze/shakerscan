@@ -53,7 +53,8 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
     An unresolved occurrence keeps its original payload and gateway across config
     edits and retries. Callers must use the returned fields, not their new input.
     No token or raw target credential belongs in validated_payload. It may be a
-    synchronous validation factory, invoked only for a new occurrence, never to
+    synchronous validation factory accepting the locked current schedule, invoked
+    only for a new occurrence, never to
     reinterpret already-persisted intent after an edit.
     """
     schedule_id = UUID(str(schedule_id))
@@ -61,7 +62,7 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
         raise ValueError("An aware UTC-compatible timestamp is required")
     async with pool.acquire() as conn, conn.transaction():
         schedule = await conn.fetchrow(
-            "SELECT is_active,next_run_at FROM schedules WHERE id=$1 FOR UPDATE",
+            "SELECT * FROM schedules WHERE id=$1 FOR UPDATE",
             schedule_id,
         )
         if not schedule or not schedule["is_active"]:
@@ -78,7 +79,17 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
         if not row:
             if not schedule["next_run_at"] or schedule["next_run_at"] > now:
                 return None
-            payload = validated_payload() if callable(validated_payload) else validated_payload
+            if callable(validated_payload):
+                target_url = await conn.fetchval(
+                    "SELECT url FROM targets WHERE id=$1 FOR SHARE", schedule["target_id"]
+                )
+                if target_url is None:
+                    raise ValueError("Scheduled target no longer exists")
+                current = dict(schedule)
+                current["target_url"] = target_url
+                payload = validated_payload(current)
+            else:
+                payload = validated_payload
             row = await conn.fetchrow(
                 """INSERT INTO managed_schedule_occurrences
                 (id,schedule_id,gateway_origin,payload,due_at,state)

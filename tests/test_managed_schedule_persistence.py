@@ -1,6 +1,7 @@
 """Real PostgreSQL acceptance using an explicitly supplied disposable database."""
 
 import asyncio
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY,is_active BOOLEAN,next_run_at TIMESTAMPTZ,
                     last_run_at TIMESTAMPTZ,target_id UUID,
+                    scan_options JSONB NOT NULL DEFAULT '{"budget_profile":"balanced"}',
                     updated_at TIMESTAMPTZ DEFAULT NOW())""")
             await store.initialize(pool)
             now = datetime.now(timezone.utc)
@@ -45,13 +47,34 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                     now,
                 )
             payload = {
-                "target": "https://example.test",
+                "target": "https://updated.example.test",
                 "policy": {"active_testing": False},
+                "budget_profile": "fast",
             }
+            stale = (await store.fetch_dispatchable(pool, now=now))[0]
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE targets SET url=$1 WHERE id=$2", payload["target"], schedule
+                )
+                await conn.execute(
+                    "UPDATE schedules SET scan_options=$1 WHERE id=$2",
+                    json.dumps({"budget_profile": "fast"}), schedule,
+                )
+            assert stale["target_url"] != payload["target"]
+            assert json.loads(stale["scan_options"])["budget_profile"] == "balanced"
+            validated = []
+
+            def current_payload(locked):
+                validated.append(locked["target_url"])
+                return {
+                    "target": locked["target_url"], "policy": {"active_testing": False},
+                    "budget_profile": json.loads(locked["scan_options"])["budget_profile"],
+                }
+
             claims = await asyncio.gather(
                 *[
                     store.claim(
-                        pool, schedule, "https://gateway.test", payload, now=now
+                        pool, schedule, "https://gateway.test", current_payload, now=now
                     )
                     for _ in range(2)
                 ]
@@ -59,6 +82,8 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
             assert sum(x is not None for x in claims) == 1
             first = next(x for x in claims if x)
             assert first["new_occurrence"] is True
+            assert first["payload"] == payload
+            assert validated == [payload["target"]]
             await pool.close()
             pool = await asyncpg.create_pool(
                 dsn, server_settings={"search_path": schema}
@@ -70,7 +95,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                     now + timedelta(days=1), schedule,
                 )
             assert [s["id"] for s in await store.fetch_dispatchable(pool, now=later)] == [schedule]
-            def invalid_edit():
+            def invalid_edit(_locked):
                 raise ValueError("New schedule configuration needs review")
             with pytest.raises(ValueError, match="original gateway"):
                 await store.claim(pool, schedule, "https://changed.test", {}, now=later)
