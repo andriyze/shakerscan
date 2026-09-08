@@ -1,50 +1,40 @@
-"""The assisted authorization workflow: propose, explain, resume, reproduce.
+"""GET-only authorization proposals and explanations, never an execution authority.
 
-What this is
-------------
-The thin layer that turns "here is a request I captured" into an investigation a pentester can
-drive. It answers five things and nothing else:
-
-    investigate  -> hypotheses worth testing and the evidence each one needs
-    approve/skip -> the exact experiment to run, or a different direction
-    explain      -> what actually differed between the principals, and how sure we are
-    resume       -> the facts, settled results and open questions from before the interruption
-    reproduce    -> the minimal ordered sequence that re-establishes a result
-
-What this deliberately is not
------------------------------
-It does not execute, and it does not decide. Execution goes through the existing capability path,
-and whether something is proven is settled by the deterministic differential and its validator --
-never here. A proposal is a suggestion with its reasoning attached, which the human approves,
-modifies or rejects. Nothing in this module may promote a finding.
-
-It also does not re-propose work the investigation has already done: proposals are filtered against
-the durable memory, so a resumed session spends its budget on what is still open.
+Production uses captured-request references and the canonical Hunt action lifecycle.
+This module also supports the local fixture workflow. Neither a proposed outcome nor
+an aggregate scanner flag is proof about the particular object being investigated.
 """
-
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
+from urllib.parse import unquote, urlsplit
 
 from .investigation_memory import (
-    INCONCLUSIVE,
-    REFUTED,
-    SUPPORTED,
-    UNKNOWN,
-    Experiment,
-    InvestigationMemory,
+    INCONCLUSIVE, REFUTED, SUPPORTED, UNKNOWN, Experiment, InvestigationMemory,
 )
 
-# A trailing segment that identifies an object rather than naming a route.
-_IDENTIFIER = re.compile(r"^(\d+|[0-9a-fA-F]{8,}|[0-9a-fA-F-]{36})$")
+_IDENTIFIER = re.compile(r"^(?:[0-9]+|[0-9a-fA-F]{24,}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
+
+
+def _path_parts(path: str) -> list[str]:
+    """Only a literal, query-free path is supported; never silently rewrite it."""
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        return []
+    if any(ord(c) < 33 or ord(c) == 127 for c in path) or "\\" in path:
+        return []
+    parsed = urlsplit(path)
+    if parsed.query or parsed.fragment or "?" in path or "#" in path:
+        return []
+    parts = path[1:].rstrip("/").split("/")
+    if any(not p or unquote(p) in {".", ".."} for p in parts):
+        return []
+    return parts
 
 
 @dataclass(frozen=True)
 class CapturedRequest:
-    """The request a pentester hands to Hunt to start an investigation."""
-
     method: str
     path: str
     principal: str
@@ -52,32 +42,28 @@ class CapturedRequest:
 
     @property
     def collection(self) -> str | None:
-        parts = [segment for segment in self.path.split("/") if segment]
+        parts = _path_parts(self.path)
         return "/".join(parts[:-1]) if len(parts) >= 2 else None
 
     @property
     def identifier(self) -> str | None:
-        parts = [segment for segment in self.path.split("/") if segment]
+        parts = _path_parts(self.path)
         return parts[-1] if len(parts) >= 2 else None
 
     @property
     def addresses_an_object(self) -> bool:
-        """Whether this request names a specific object, which is what makes it testable."""
-        return bool(self.identifier and _IDENTIFIER.match(self.identifier))
+        return bool(self.identifier and _IDENTIFIER.fullmatch(self.identifier))
 
     @property
     def route_template(self) -> str:
         if not self.addresses_an_object:
             return self.path
-        return "/" + "/".join(
-            [segment for segment in self.path.split("/") if segment][:-1] + ["{id}"]
-        )
+        suffix = "/" if self.path.endswith("/") else ""
+        return f"/{self.collection}/{{id}}{suffix}"
 
 
 @dataclass(frozen=True)
 class ProposedExperiment:
-    """A suggestion with its reasoning, for the human to approve, modify or skip."""
-
     hypothesis: str
     why: str
     method: str
@@ -89,6 +75,7 @@ class ProposedExperiment:
     evidence_needed: tuple[str, ...]
     conditions: Mapping[str, Any] = field(default_factory=dict)
     risk: str = "read-only cross-principal replay (GET only)"
+    request_path: str | None = None
 
     def as_experiment(self, outcome: str) -> Experiment:
         return Experiment(
@@ -109,220 +96,182 @@ class ProposedExperiment:
 
 
 def investigate(
-    request: CapturedRequest,
-    *,
-    available_principals: Sequence[str],
-    memory: InvestigationMemory,
-    retry_settled: bool = False,
+    request: CapturedRequest, *, available_principals: Sequence[str],
+    memory: InvestigationMemory, retry_settled: bool = False,
 ) -> dict[str, Any]:
-    """Propose what is worth testing about this request, and what each test would need.
-
-    Returns proposals plus the reason any were withheld, so a pentester can see that the absence
-    of a suggestion is a stated limitation rather than silence.
-    """
-    # A cross-principal replay of a mutating verb is not a read-only test: it needs separate
-    # mutation authorization and faithful body preservation, neither of which this workflow has.
-    # Proposing one and labelling it read-only would be misleading even though nothing here
-    # executes, and `reproduction` would emit the mutating request verbatim.
     if request.method.upper() != "GET":
-        return {
-            "proposals": [],
-            "not_proposed": [
-                f"{request.method.upper()} is not supported by this workflow. A cross-principal "
-                "replay of a mutating request requires separate mutation authorization and exact "
-                "request-body preservation; capture the corresponding GET, or drive the mutation "
-                "through an explicitly authorized path."
-            ],
-        }
+        return {"proposals": [], "not_proposed": [
+            f"{request.method.upper()} is not supported by this workflow. A cross-principal "
+            "replay of a mutating request requires separate mutation authorization and exact "
+            "request-body preservation."
+        ]}
     if not request.addresses_an_object:
-        return {
-            "proposals": [],
-            "not_proposed": [
-                "This request does not address a specific object, so there is no ownership "
-                "boundary to cross. Capture a request that names one."
-            ],
-        }
-
-    others = [p for p in available_principals if p != request.principal]
+        return {"proposals": [], "not_proposed": [
+            "This request does not address a specific object recognizable by this workflow. "
+            "Query, body, fragment and non-identifier object references need explicit support; "
+            "this limitation does not establish that no authorization boundary exists."
+        ]}
+    principals = list(dict.fromkeys(available_principals))
+    if request.principal not in principals:
+        return {"proposals": [], "not_proposed": ["The captured request's principal is unavailable."]}
+    others = [p for p in principals if p != request.principal]
     if not others:
-        return {
-            "proposals": [],
-            "not_proposed": [
-                "A cross-principal test needs a second principal; only "
-                f"{request.principal!r} is available."
-            ],
-        }
-
+        return {"proposals": [], "not_proposed": [
+            f"A cross-principal test needs a second principal; only {request.principal!r} is available."
+        ]}
     ownership = memory.ownership_of(request.collection, request.identifier)
     proposals, withheld = [], []
     for other in others:
         proposal = ProposedExperiment(
-            hypothesis=(
-                f"{other} can read {request.collection}/{request.identifier}, "
-                f"which {request.principal} reached"
-            ),
-            why=(
-                "The request names a specific object and a second principal exists, so "
-                "authorization can be tested by replaying it as that principal. Ownership is "
-                f"currently {ownership.get('certainty', UNKNOWN)}, so the replay also has to "
-                "establish whose object it is."
-            ),
-            method=request.method, route_template=request.route_template,
+            hypothesis=f"{other} can read {request.collection}/{request.identifier}, which {request.principal} reached",
+            why=("The captured request identifies an object and a second principal is available. "
+                 f"Ownership is {ownership.get('certainty', UNKNOWN)}; the experiment must establish "
+                 "the baseline and ownership/access evidence, not assume them."),
+            method="GET", route_template=request.route_template,
             collection=request.collection, identifier=request.identifier,
             actor_principal=other, subject_principal=request.principal,
-            evidence_needed=(
-                f"the collection listing as {other}, to establish their own baseline",
-                f"the object read as {request.principal}, the owner's view",
-                f"the same object read as {other}",
-            ),
-            conditions={"auth_context": request.auth_context},
+            evidence_needed=(f"the collection listing as {other}, to establish their own baseline",
+                             f"the object read as {request.principal}, the owner's view to be tested",
+                             f"the same object read as {other}"),
+            conditions={"auth_context": request.auth_context}, request_path=request.path,
         )
         prior = memory.already_tried(proposal.as_experiment(INCONCLUSIVE))
-        if prior is not None and prior.get("settled") and not retry_settled:
-            withheld.append(
-                f"already tested as {other}: {prior.get('outcome')} "
-                f"({prior.get('hypothesis')})"
-            )
+        # The latest attempt, not a historical success, determines whether prerequisites
+        # still leave this experiment open. Historical results remain in memory.
+        settled = bool(prior and prior.get("outcome") in {SUPPORTED, REFUTED})
+        if settled and not retry_settled:
+            withheld.append(f"already tested as {other}: {prior.get('outcome')} ({prior.get('hypothesis')})")
             continue
-        if prior is not None and not prior.get("settled"):
-            # Inconclusive is an open question, not a closed one: re-propose it, and say why it
-            # is coming back so the pentester can fix the prerequisite instead of repeating it
-            # blindly.
+        if prior and not settled:
             proposal = replace(proposal, why=(
-                f"{proposal.why} A previous attempt was inconclusive after "
-                f"{prior.get('attempt_count')} try/tries; retry once the missing evidence "
-                "(baseline listing, or a live session for both principals) is available."
+                f"{proposal.why} A previous attempt was inconclusive after {prior.get('attempt_count')} "
+                f"try/tries: {prior.get('detail') or 'baseline or principal evidence was missing'}. "
+                "Retry only after addressing the missing evidence or on explicit instruction."
             ))
         proposals.append(proposal)
     return {"proposals": proposals, "not_proposed": withheld}
 
 
-def outcome_from_result(
-    proposal: "ProposedExperiment", result: Mapping[str, Any],
-) -> tuple[str, str]:
-    """Derive this proposal's outcome from the proof evidence, not from an aggregate flag.
+def _object_url_matches(proposal: ProposedExperiment, value: Any) -> bool:
+    if not isinstance(value, str) or any(ord(c) < 32 for c in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            return False
+        expected = proposal.request_path or f"/{proposal.collection.strip('/')}/{proposal.identifier}"
+        if parsed.path != expected:
+            return False
+        origin = proposal.conditions.get("origin")
+        if origin:
+            other = urlsplit(str(origin))
+            port = lambda p: p.port or (443 if p.scheme.lower() == "https" else 80)
+            if (parsed.scheme.lower(), parsed.hostname, port(parsed)) != (other.scheme.lower(), other.hostname, port(other)):
+                return False
+        return True
+    except ValueError:
+        return False
 
-    A collection-wide differential reports that *something* under the collection was readable
-    across principals. Recording that as the proposal's result would attribute another object's
-    finding to the object the pentester selected. So a supported outcome requires a finding whose
-    evidence names this proposal's object; anything else is refuted or inconclusive.
+
+def outcome_from_result(
+    proposal: ProposedExperiment, result: Mapping[str, Any], *,
+    validator: Callable[[dict[str, Any]], Any] | None = None,
+) -> tuple[str, str]:
+    """Attribute a trusted internal differential result to this exact request.
+
+    Public routes never accept this result or a proof boolean from the caller.
+    Production instead reads its canonical, target-bound Hunt action receipt.
+    An aggregate negative count does not prove this object was even tested.
     """
-    findings = [f for f in (result.get("findings") or []) if isinstance(f, Mapping)]
-    for finding in findings:
-        evidence = finding.get("evidence") or {}
-        if str(evidence.get("proof_type") or "") != "cross_principal_replay":
+    if proposal.method.upper() != "GET":
+        return INCONCLUSIVE, "this workflow supports GET only"
+    for finding in result.get("findings") or []:
+        if not isinstance(finding, Mapping) or not isinstance(finding.get("evidence"), Mapping):
             continue
-        if str(evidence.get("requested_object_id") or "") != str(proposal.identifier):
+        evidence = finding["evidence"]
+        if (evidence.get("proof_type") != "cross_principal_replay"
+                or str(evidence.get("requested_object_id") or "") != proposal.identifier
+                or str(evidence.get("method") or "GET").upper() != "GET"
+                or not _object_url_matches(proposal, evidence.get("url") or evidence.get("consumer_endpoint") or finding.get("url"))):
             continue
-        return SUPPORTED, (
-            f"evidence names object {proposal.identifier}: owner "
-            f"{evidence.get('owner_status')} / actor {evidence.get('attacker_status')}, "
-            "absent from the actor's own listing"
-        )
-    if findings:
-        others = sorted({
-            str((f.get("evidence") or {}).get("requested_object_id") or "?") for f in findings
-        })
-        return INCONCLUSIVE, (
-            f"the run produced findings for {', '.join(others)}, none of which is "
-            f"{proposal.identifier}; this proposal is unproven and another object's finding "
-            "cannot stand in for it"
-        )
-    if result.get("replays_completed"):
-        return REFUTED, (
-            "the replay completed and produced no cross-principal evidence for "
-            f"object {proposal.identifier}"
-        )
-    return INCONCLUSIVE, "no replay completed, so nothing was established"
+        if validator is None:
+            try:
+                from scanner_tools.finding_validator import validate_object_authorization
+            except ModuleNotFoundError:
+                from scanner.scanner_tools.finding_validator import validate_object_authorization
+            validator = validate_object_authorization
+        validation = validator(dict(finding))
+        if getattr(validation, "verified", False) is not True:
+            continue
+        return SUPPORTED, f"validated cross-principal evidence names object {proposal.identifier} at the selected request"
+    return INCONCLUSIVE, (
+        f"no validated cross-principal evidence was attributed to the selected request for object {proposal.identifier}; "
+        "another object's finding or a completed collection replay cannot settle this object"
+    )
 
 
 def explain(
-    *,
-    owner_status: int,
-    attacker_status: int,
-    owner_fields: Iterable[str],
-    attacker_fields: Iterable[str],
-    object_absent_from_attacker_listing: bool | None,
+    *, owner_status: int, attacker_status: int, owner_fields: Iterable[str],
+    attacker_fields: Iterable[str], object_absent_from_attacker_listing: bool | None,
     proven: bool,
 ) -> dict[str, Any]:
-    """Say what differed between the two principals, and how much it is worth.
-
-    ``proven`` comes from the deterministic validator. This function reports; it never decides.
-    """
-    owner_set, attacker_set = set(owner_fields), set(attacker_fields)
-    shared = sorted(owner_set & attacker_set)
-    if object_absent_from_attacker_listing is None:
-        certainty = UNKNOWN
-        reading = (
-            "The attacker's own baseline was not established, so it is not possible to say "
-            "whether this object was theirs to begin with."
-        )
-    elif proven:
+    shared = sorted(set(owner_fields) & set(attacker_fields))
+    owner_ok = 200 <= owner_status < 300
+    actor_ok = 200 <= attacker_status < 300
+    certainty = UNKNOWN
+    if proven is True and owner_ok and actor_ok and object_absent_from_attacker_listing is True:
         certainty = "confirmed"
-        reading = (
-            "The second principal received an object that is absent from their own listing, so "
-            "they read data belonging to another principal."
-        )
-    elif attacker_status == owner_status and not object_absent_from_attacker_listing:
-        certainty = UNKNOWN
-        reading = (
-            "Both principals see the same response, but the object also appears in the second "
-            "principal's own listing, so this is shared access rather than a boundary crossing."
-        )
-    elif owner_status == attacker_status:
-        # Identical answers with no proof settle nothing. Reading this as enforcement would turn
-        # "we failed to demonstrate a crossing" into "the boundary held", which the evidence does
-        # not support.
-        certainty = UNKNOWN
-        reading = (
-            "Both principals were answered identically, but the crossing was not established. "
-            "This is inconclusive, not evidence of enforcement. Missing: confirmation that the "
-            "object is absent from the actor's own listing, and that the body returned to the "
-            "actor is the owner's object rather than their own."
-        )
-    else:
+        reading = "The deterministic validator confirmed a cross-principal read of data belonging to another principal."
+    elif object_absent_from_attacker_listing is None:
+        reading = ("The actor's baseline was not established, so it is not possible to say whether "
+                   "this object was theirs or shared. The outcome is inconclusive.")
+    elif owner_ok and actor_ok and object_absent_from_attacker_listing is False:
+        reading = ("The object appears in the second principal's own listing. This is consistent "
+                   "with shared access rather than a boundary crossing; equal statuses do not prove equal bodies.")
+    elif owner_ok and attacker_status == 403 and proven is not True:
         certainty = "observed"
-        reading = (
-            "The two principals were answered differently, which is consistent with the boundary "
-            "being enforced. That is not proof the route is safe elsewhere."
-        )
+        reading = ("The actor was denied this request while the first principal succeeded. "
+                   "That is not proof the route is safe elsewhere.")
+    else:
+        reading = ("This result is inconclusive, not evidence of enforcement. Missing: validated "
+                   "ownership/baseline and response evidence for this exact object and principal pair. "
+                   "Errors, expired authentication and equal status codes do not settle authorization.")
     return {
-        "owner_status": owner_status,
-        "attacker_status": attacker_status,
-        "status_differs": owner_status != attacker_status,
-        "fields_visible_to_both": shared,
+        "owner_status": owner_status, "attacker_status": attacker_status,
+        "status_differs": owner_status != attacker_status, "fields_visible_to_both": shared,
         "object_absent_from_attacker_listing": object_absent_from_attacker_listing,
-        "certainty": certainty,
-        "reading": reading,
-        # Stated on every explanation: one result describes one pair under one set of conditions.
+        "certainty": certainty, "reading": reading,
         "scope": "this pair of principals, this object, these conditions",
     }
 
 
 def reproduction(proposal: ProposedExperiment, *, origin: str = "") -> list[dict[str, str]]:
-    """The minimal ordered sequence that re-establishes the result, and nothing more."""
+    if proposal.method.upper() != "GET":
+        raise ValueError("authorization reproduction is GET-only; mutations require separate authority")
+    path = proposal.request_path or f"/{proposal.collection.strip('/')}/{proposal.identifier}"
+    if not _path_parts(path):
+        raise ValueError("reproduction requires an exact supported request path")
+    if origin:
+        parsed = urlsplit(origin)
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username
+                or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or any(ord(c) < 33 for c in origin)):
+            raise ValueError("reproduction origin is invalid")
     base = origin.rstrip("/")
-    collection_path = f"{base}/{proposal.collection}"
-    object_path = f"{collection_path}/{proposal.identifier}"
     return [
-        {"step": "1", "as": proposal.actor_principal, "request": f"GET {collection_path}",
+        {"step": "1", "as": proposal.actor_principal, "request": f"GET {base}/{proposal.collection.strip('/')}",
          "establishes": "the actor's own baseline for this collection"},
-        {"step": "2", "as": proposal.subject_principal,
-         "request": f"{proposal.method.upper()} {object_path}",
-         "establishes": "the owner's view of the object"},
-        {"step": "3", "as": proposal.actor_principal,
-         "request": f"{proposal.method.upper()} {object_path}",
-         "establishes": "whether the actor receives an object absent from their baseline"},
+        {"step": "2", "as": proposal.subject_principal, "request": f"GET {base}{path}",
+         "establishes": "the first principal's view of the selected object"},
+        {"step": "3", "as": proposal.actor_principal, "request": f"GET {base}{path}",
+         "establishes": "whether the actor receives the selected object"},
     ]
 
 
 def resume(memory: InvestigationMemory) -> dict[str, Any]:
-    """What a fresh context needs to carry on: facts, settled results, open questions."""
     briefing = memory.resume_briefing()
     briefing["next_step_hint"] = (
-        "Open questions first; an inconclusive result usually means the baseline or the "
-        "principal context was missing, not that the idea was wrong."
-        if briefing.get("open_questions")
-        else "No open questions recorded; propose a new object or principal pair."
+        "Open questions first; fix missing baseline/principal evidence before retrying."
+        if briefing.get("open_questions") else "No open questions recorded; propose a new object or principal pair."
     )
     return briefing
