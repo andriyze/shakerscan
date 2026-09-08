@@ -120,7 +120,7 @@ export default function Dashboard() {
   }
 
   const fetchWorkers = async (force = false) => {
-    if (!featureEnabled('worker_admin')) return
+    if (!featureEnabled('worker_status') && !featureEnabled('worker_admin')) return
     if (workersInFlight.current && !force) return
     workersInFlight.current = true
     try {
@@ -128,6 +128,7 @@ export default function Dashboard() {
       setWorkers(workerData)
       setWorkersError(workerData?.error || null)
     } catch (err) {
+      setWorkers(null)
       setWorkersError('Workers unavailable')
     } finally {
       workersInFlight.current = false
@@ -350,7 +351,7 @@ export default function Dashboard() {
             </button></WorkspaceFeature>
           </div>
 
-          <WorkspaceFeature name="worker_admin"><div
+          <WorkspaceFeature name="worker_status"><div
             id="workers"
             className="flex h-10 items-center gap-2 rounded-lg border border-gray-800 bg-gray-900 px-2.5"
             title={workersError || workerCapacityLabel({
@@ -362,7 +363,7 @@ export default function Dashboard() {
           >
             <Server className="h-4 w-4 shrink-0 text-gray-500" aria-hidden="true" />
             <span className="min-w-6 text-center text-sm font-medium tabular-nums text-white">
-              {workersKnown ? totalAvailable : '--'}
+              {workersKnown ? totalAvailable : 'Unknown'}
             </span>
             <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
@@ -390,7 +391,7 @@ export default function Dashboard() {
                 {workerCount} running · max {maxWorkers}
               </span>
             )}
-            <span className="h-5 w-px bg-gray-800" aria-hidden="true" />
+            <WorkspaceFeature name="worker_admin"><span className="h-5 w-px bg-gray-800" aria-hidden="true" />
             <button
               type="button"
               onClick={() => handleScale(Math.max(1, (workerCount || 1) - 1))}
@@ -413,7 +414,7 @@ export default function Dashboard() {
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
-            {fleetEnabled && (
+            </WorkspaceFeature>{fleetEnabled && (
               <Link
                 href="/fleet"
                 className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
