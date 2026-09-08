@@ -212,7 +212,9 @@ export default function Dashboard() {
   const handleManualRefresh = async () => {
     if (refreshing) return
     setRefreshing(true)
-    const [ok] = await Promise.all([fetchDashboard(false), fetchOverview()])
+    const [ok] = await Promise.all([
+      fetchDashboard(false), fetchOverview(), fetchWorkers(true), fetchQueueStats(),
+    ])
     setRefreshing(false)
     if (ok === false) {
       toast.error('Failed to refresh dashboard')
