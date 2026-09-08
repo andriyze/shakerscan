@@ -1521,7 +1521,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 377 | Python sources + Compose manifests |
+| Runtime environment keys | 379 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2597,6 +2597,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_RUNTIME_DIR` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_SCAN_SLOT_MAX_WAIT_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_SCAN_SLOT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_SCHEDULE_DISPATCH_ORIGIN` | `api/schedules/managed_options.py`, `api/schedules/managed_runner.py` |
+| `SHAKERSCAN_SCHEDULE_DISPATCH_TOKEN` | `api/schedules/managed_options.py`, `api/schedules/managed_runner.py` |
 | `SHAKERSCAN_SKILLS_DIR` | `api/hunt/skills.py` |
 | `SHAKERSCAN_STALE_DURATION_GRACE_MIN` | `api/api.py` |
 | `SHAKERSCAN_STALE_FAIL_AFTER_SECONDS` | `api/worker.py` |

@@ -1184,6 +1184,10 @@ class HuntCapabilityRequest(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
     input: dict[str, Any] = Field(default_factory=dict)
+    experiment_key: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{32}$",
+        description="Optional proposal identity; association only, never proof or authorization.",
+    )
 
 
 def _hunt_confirmed_shell_capability_input(
@@ -1350,6 +1354,7 @@ async def _execute_hunt_capability_lifecycle(
                     != capability_input_digest
                     or str(existing_input.get("idempotency_key_sha256") or "")
                     != idempotency_key_digest
+                    or existing_input.get("experiment_key") != request.experiment_key
                 ):
                     raise HTTPException(
                         status_code=409,
@@ -1913,6 +1918,7 @@ async def _execute_hunt_capability_lifecycle(
                     "input": _hunt_redacted_capability_input(name, request.input),
                     "input_digest": capability_input_digest,
                     "idempotency_key_sha256": idempotency_key_digest,
+                    **({"experiment_key": request.experiment_key} if request.experiment_key else {}),
                 }),
                 json.dumps(admission_result_summary),
             )
