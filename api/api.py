@@ -2845,7 +2845,7 @@ async def cleanup_stale_device_lifecycle(pool: asyncpg.Pool) -> None:
 
 
 async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
-    """Fail old local Scan rows only when no queued payload or live lease remains."""
+    """Surface uncertain old handoffs without claiming non-execution or freeing capacity."""
     r = get_redis()
     try:
         queued_job_ids = {
@@ -2853,8 +2853,8 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
             for raw in queue_payloads(r, QUEUE_NAME, include_leased=True)
         }
     except Exception:
-        # Queue visibility is authoritative for this repair. Never infer an
-        # orphan when Redis cannot prove the payload/lease is absent.
+        # Even successful queue visibility is only a snapshot, not proof that
+        # no execution occurred. An unavailable snapshot cannot diagnose a handoff.
         return 0
 
     repaired = 0
@@ -2877,31 +2877,18 @@ async def cleanup_orphaned_scan_queue_handoffs(pool: asyncpg.Pool) -> int:
                 continue
             updated = await conn.fetchrow(
                 """UPDATE scans
-                   SET status='failed', progress=100, current_phase='queue_handoff_lost',
-                       completed_at=NOW(),
-                       error_message='Scan was pending but no queue entry or live lease remained after 10 minutes. No target traffic was started; retry this Scan.'
+                   SET current_phase='queue_handoff_unknown',
+                       error_message='Queue handoff could not be confirmed. Execution outcome remains unknown; do not submit a replacement.'
                    WHERE id=$1 AND status IN ('pending','queued')
+                     AND current_phase IS DISTINCT FROM 'queue_handoff_unknown'
                    RETURNING id, parent_scan_id""",
                 row["id"],
             )
             if not updated:
                 continue
             repaired += 1
-            if job_id:
-                r.hset(f"job:{job_id}", mapping={
-                    "status": "failed",
-                    "progress": "100",
-                    "current_phase": "queue_handoff_lost",
-                    "error": "Queue entry or live lease was lost before execution",
-                })
-                r.expire(f"job:{job_id}", 86400)
-            parent_id = updated.get("parent_scan_id")
-            if parent_id:
-                await parallel_scan.reconcile_parallel_parent(
-                    conn, str(parent_id), r, QUEUE_NAME
-                )
     if repaired:
-        print(f"[cleanup] failed {repaired} orphaned pending Scan handoff(s)", flush=True)
+        print(f"[cleanup] flagged {repaired} uncertain pending Scan handoff(s)", flush=True)
     return repaired
 
 

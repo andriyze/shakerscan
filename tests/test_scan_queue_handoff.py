@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import HTTPException
 
-from api.scan_queue_handoff import RouteCapacityExceeded, enqueue_recorded_scan
+try:
+    from scan_queue_handoff import RouteCapacityExceeded, enqueue_recorded_scan
+except ModuleNotFoundError:
+    from api.scan_queue_handoff import RouteCapacityExceeded, enqueue_recorded_scan
 
 try:
     from job_queue import enqueue_job
