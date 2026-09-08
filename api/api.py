@@ -11636,29 +11636,16 @@ async def _submit_scan(
     if parallel_enabled:
         _configure_scan_plan_job(job_data, parallel_worker_count)
     try:
-        enqueue_job(r, QUEUE_NAME, job_data)
-    except RouteCapacityExceeded as exc:
-        await _mark_scan_enqueue_failed(
-            scan_id,
-            "Scan was not queued because the fleet placement-route registry is at capacity.",
-            command_result.get("id") if command_result else None,
-        )
-        raise _route_capacity_http_exception(exc) from exc
-    except Exception as exc:
-        logger.exception("Failed to enqueue submitted scan %s", scan_id)
-        await _mark_scan_enqueue_failed(
-            scan_id,
-            "Scan was not queued because the queue service was unavailable.",
-            command_result.get("id") if command_result else None,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "scan_queue_unavailable",
-                "message": "The scan was recorded as failed because the queue did not accept it.",
-            },
-        ) from exc
-    r.hset(f"job:{job_id}", mapping={'status': 'queued', 'target': scan_target})
+        from scan_queue_handoff import enqueue_recorded_scan
+    except ModuleNotFoundError:
+        from api.scan_queue_handoff import enqueue_recorded_scan
+    await enqueue_recorded_scan(
+        redis=r, queue_name=QUEUE_NAME, payload=job_data,
+        scan_id=scan_id, job_id=job_id, target=scan_target,
+        enqueue=enqueue_job, mark_failed=_mark_scan_enqueue_failed,
+        capacity_http_error=_route_capacity_http_exception,
+        command_result_id=command_result.get("id") if command_result else None,
+    )
 
     response = {
         'scan_id': scan_id,
