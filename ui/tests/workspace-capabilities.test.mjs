@@ -24,6 +24,17 @@ test('standalone retains features; managed deployments hide unavailable and excl
   delete global.window
 })
 
+test('server render without window matches the standalone client so nav does not hydrate-mismatch', () => {
+  delete global.window
+  assert.equal(typeof globalThis.window, 'undefined')
+  // The server has no client-injected policy; it must render the same full surface a
+  // standalone client (window defined, no policy) renders, or the nav flips on hydration.
+  assert.equal(featureEnabled('hunt'), true)
+  assert.equal(navigationAllowed('/targets'), true)
+  assert.equal(navigationAllowed('/hunt'), true)
+  assert.equal(navigationAllowed('/anything-at-all'), true)
+})
+
 test('unknown capability contracts fail closed', () => {
   global.window = { __SHAKERSCAN_CAPABILITIES__: { ...policy, schema: 'future' } }
   assert.equal(featureEnabled('targets'), false)

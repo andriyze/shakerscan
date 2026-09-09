@@ -21,16 +21,18 @@ declare global {
 }
 
 export function featureEnabled(feature: string): boolean {
-  if (typeof window === 'undefined') return false
-  const policy = window.__SHAKERSCAN_CAPABILITIES__
-  if (!policy) return true // Existing standalone deployments retain their full product surface.
+  // The server never receives the client-injected policy, so it must resolve to the same
+  // full surface a standalone client does. Forcing false on the server diverged the
+  // server markup from the client and produced a hydration mismatch (empty nav on first paint).
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  if (!policy) return true // Server render and existing standalone deployments retain their full product surface.
   return policy.schema === 'shakerscan.workspace-capabilities/v1'
     && policy.mode === 'managed' && policy.features?.[feature]?.state === 'enabled'
 }
 
 export function navigationAllowed(href: string): boolean {
-  if (typeof window === 'undefined') return false
-  const policy = window.__SHAKERSCAN_CAPABILITIES__
+  // Server render has no policy and must match the standalone client's full surface (see featureEnabled).
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
   if (!policy) return true
   if (policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed'
     || !Array.isArray(policy.ui_routes) || !policy.navigation
