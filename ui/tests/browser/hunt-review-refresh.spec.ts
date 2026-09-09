@@ -20,6 +20,10 @@ async function mockHistory(page: Page) {
     // The page also reads its parent run. A health response here crashes the
     // surrounding page before the investigation component can be exercised.
     if (path === `/hunts/${hunt}`) return route.fulfill({ json: savedRun })
+    if (path === `/hunts/${hunt}/http-transactions`) return route.fulfill({ json: {
+      fidelity: 'complete', fidelity_detail: 'Synthetic empty archive',
+      total: 0, archive_total: 0, transactions: [],
+    } })
     if (path === `/hunts/${hunt}/query`) {
       const next = route.request().postDataJSON().cursor
       const ids = empty ? [] : next ? [later] : [first]
@@ -34,7 +38,9 @@ async function mockHistory(page: Page) {
         explanation: `Saved evidence ${id}`, attempts: [], evidence_needed: [], limitations: [],
         deferral_recorded: false, selected_request_examined: false } })
     }
-    return route.fulfill({ json: { status: 'healthy', runs: [], hunts: [], targets: [], workers: [], total: 0 } })
+    // Unrelated widgets may report unavailable, but must never receive a fake
+    // successful payload that violates their own response contract.
+    return route.fulfill({ status: 404, json: { detail: 'No fixture for this read-only route' } })
   })
   return { reads, clear: () => { empty = true } }
 }
