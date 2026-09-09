@@ -34,6 +34,8 @@ jobs:
           --health-cmd "pg_isready -U postgres -d maintenance_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      # Match the source-tree import roots used by the canonical Python suite.
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/api:${{ github.workspace }}/scanner
       SHAKERSCAN_TEST_SCHEDULE_DATABASE_URL: postgresql://postgres:maintenance-ci-only@127.0.0.1:5432/maintenance_test
       CI: 'true'
       NEXT_TELEMETRY_DISABLED: '1'
@@ -41,11 +43,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Preserve reviewed transaction inputs
+      - name: Preserve exact source for reproducible maintenance failures
         run: |
           mkdir -p artifacts
           git rev-parse HEAD > artifacts/source-revision.txt
-          git archive --format=tar HEAD api/public_api_contract.py api/request_collection_api.py api/runtime/credential_store.py > artifacts/transaction-sources.tar
+          # Only tracked source, before dependencies or tests create local data.
+          # Include generators and fixtures so contract failures can be reproduced.
+          git archive --format=tar.gz HEAD > artifacts/maintenance-source.tar.gz
+          sha256sum artifacts/maintenance-source.tar.gz > artifacts/source-sha256.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: maintenance-inputs-${{ github.sha }}
