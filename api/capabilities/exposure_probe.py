@@ -12,13 +12,11 @@ well-known sensitive locations, never a benchmark answer key.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import posixpath
 import re
-import urllib.parse
 from typing import Mapping
 
 
-EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v1"
+EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v2"
 
 # Universal well-known sensitive locations. These are common across frameworks
 # and hosting stacks; discovering a real one is a finding regardless of app.
@@ -64,11 +62,12 @@ _CLASS_SEVERITY: Mapping[str, str] = {
     "environment_secret_file": "high",
     "version_control_exposure": "high",
     "confidential_file": "high",
-    "directory_listing": "high",
-    "metrics_endpoint": "high",
-    "actuator_endpoint": "high",
+    "listed_file": "info",
+    "directory_listing": "info",
+    "metrics_endpoint": "info",
+    "actuator_endpoint": "info",
     "backup_or_source_artifact": "high",
-    "exposed_api_specification": "low",
+    "exposed_api_specification": "info",
     "verbose_error_disclosure": "medium",
 }
 
@@ -96,14 +95,10 @@ _LISTING_RE = re.compile(
     r"(?i)<title>\s*(?:index of|directory listing|listing directory)"
     r"|Directory listing for /"
 )
-# A bare ``"status":`` is one of the most common keys in any JSON API, so it
-# matched every ordinary REST response and reported it as a high-severity
-# actuator exposure. Match only shapes an actuator actually produces: its
-# health status is a fixed enum, and the other keys are Spring-specific.
-_ACTUATOR_RE = re.compile(
-    r'"(?:diskSpace|_links|activeProfiles)"\s*:'
-    r'|"status"\s*:\s*"(?:UP|DOWN|OUT_OF_SERVICE|UNKNOWN)"'
-)
+# Endpoint identity is metadata, not proof of sensitive disclosure. The vendor
+# media type is specific; ordinary HAL `_links` and generic health `status`
+# values are not Spring-specific and must not be classified as actuator leaks.
+_ACTUATOR_MEDIA_TYPE = "application/vnd.spring-boot.actuator."
 _OPENAPI_RE = re.compile(r'"(?:swagger|openapi)"\s*:\s*"')
 _ERROR_RE = re.compile(
     r"Traceback \(most recent call last\)"
@@ -128,6 +123,10 @@ class ExposureSignature:
     severity: str
     matched_pattern: str
 
+    @property
+    def proves_sensitive_exposure(self) -> bool:
+        return is_sensitive_exposure_class(self.exposure_class)
+
 
 def _content_type(headers: Mapping[str, str]) -> str:
     for name, value in headers.items():
@@ -145,7 +144,8 @@ def classify_exposure(
 ) -> ExposureSignature | None:
     """Return a deterministic exposure class, or ``None`` when nothing matches.
 
-    Only a positive response with a concrete signature is a finding: a 200 that
+    A concrete response signature identifies observed content, not necessarily
+    a vulnerability. A 200 that
     merely returns the SPA shell, a 401/403/404, or an empty body is ignored so
     a soft-200 application never inflates exposure coverage.
     """
@@ -166,8 +166,8 @@ def classify_exposure(
         return _sig("version_control_exposure", "vcs_metadata")
     if _METRICS_RE.search(text) and not is_html:
         return _sig("metrics_endpoint", _METRICS_RE.pattern)
-    if _ACTUATOR_RE.search(text) and "json" in content_type:
-        return _sig("actuator_endpoint", _ACTUATOR_RE.pattern)
+    if content_type.startswith(_ACTUATOR_MEDIA_TYPE) and "+json" in content_type:
+        return _sig("actuator_endpoint", "actuator_vendor_media_type")
     if _LISTING_RE.search(text):
         return _sig("directory_listing", _LISTING_RE.pattern)
     if _OPENAPI_RE.search(text) and "json" in content_type:
@@ -180,54 +180,30 @@ def classify_exposure(
 def classify_confidential_file(
     *, path: str, status: int, headers: Mapping[str, str], body: bytes,
 ) -> ExposureSignature | None:
-    """Classify a file reached by following a discovered directory listing.
+    """Record listed-file reachability without inventing confidentiality.
 
-    The listing itself proved the directory is browsable; any non-empty,
-    non-HTML file served from it is confidential content disclosure — except a
-    file the web publishes on purpose (see ``_is_well_known_public_path``),
-    which is public by design. Secret material inside such a file is still a
-    finding because the secret-class checks run first.
+    A filename, path, content type, or the word "confidential" is not an
+    authorization oracle. Only the existing content-specific secret contracts
+    may produce verified sensitivity. RFC 8615 defines a discovery namespace,
+    not a blanket public/nonsensitive exemption for everything below it.
     """
     if status != 200 or not body:
         return None
-    secret = classify_exposure(path=path, status=status, headers=headers, body=body)
-    if secret is not None:
-        return secret
+    signature = classify_exposure(path=path, status=status, headers=headers, body=body)
+    if signature is not None:
+        return signature
     if any(marker in _content_type(headers) for marker in _HTML_TYPES):
         return None
-    if _is_well_known_public_path(path):
-        return None
-    return _sig("confidential_file", "listed_file_disclosure")
+    return _sig("listed_file", "listed_file_reachable")
 
 
-# RFC 8615 reserves ``/.well-known/`` for resources a server intends to expose
-# publicly (``security.txt`` is RFC 9116), and the site-root files below are the
-# conventional public metadata a crawler is meant to fetch. Reaching one through
-# a directory listing is not confidential disclosure; it is the file doing its
-# job. This is a standards rule about the location, not per-target knowledge.
-_WELL_KNOWN_PUBLIC_FILES: frozenset[str] = frozenset({
-    "/robots.txt",
-    "/sitemap.xml",
-    "/security.txt",
-    "/humans.txt",
-    "/ads.txt",
-    "/app-ads.txt",
-    "/favicon.ico",
-    "/browserconfig.xml",
-})
+def is_sensitive_exposure_class(exposure_class: str) -> bool:
+    """Closed promotion boundary, also applied to historical observations.
 
-
-def _is_well_known_public_path(path: str) -> bool:
-    """Whether ``path`` (a URL or path) is an intentionally public web location.
-
-    The path is normalized first so a traversal link such as
-    ``/.well-known/../backup.sql`` (which resolves to ``/backup.sql``) cannot
-    borrow the public prefix to suppress a real confidential-file finding.
+    This only narrows existing proof: it adds no signatures or probing ability.
+    Structural metadata needs independent entitlement evidence before promotion.
     """
-    resolved = urllib.parse.urlsplit(path).path if "://" in path else path
-    resolved = resolved.split("?", 1)[0].split("#", 1)[0]
-    resolved = posixpath.normpath(resolved).lower()
-    return resolved.startswith("/.well-known/") or resolved in _WELL_KNOWN_PUBLIC_FILES
+    return exposure_class in _SECRET_MATERIAL_CLASSES
 
 
 def directory_listing_links(body: bytes, *, limit: int = 20) -> tuple[str, ...]:
@@ -264,6 +240,8 @@ def redacted_exposure_excerpt(body: bytes, signature: ExposureSignature) -> str:
     For secret-material classes the body itself is the secret, so no content is
     excerpted at all — only the fact of disclosure is recorded.
     """
+    if signature.exposure_class == "listed_file":
+        return "[File reachable; sensitivity not established; content withheld]"
     if signature.exposure_class in _SECRET_MATERIAL_CLASSES:
         return f"[{signature.exposure_class} detected — content withheld]"
     text = _decode(body)
@@ -295,6 +273,7 @@ __all__ = [
     "SENSITIVE_SEED_PATHS",
     "ExposureSignature",
     "classify_confidential_file",
+    "is_sensitive_exposure_class",
     "classify_exposure",
     "directory_listing_links",
     "redacted_exposure_excerpt",
