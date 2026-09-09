@@ -31,7 +31,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 await conn.execute("CREATE TABLE targets (id UUID PRIMARY KEY, url TEXT, is_active BOOLEAN NOT NULL DEFAULT true)")
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY,is_active BOOLEAN,next_run_at TIMESTAMPTZ,
-                    last_run_at TIMESTAMPTZ,target_id UUID,
+                    last_run_at TIMESTAMPTZ,target_id UUID NOT NULL REFERENCES targets(id),
                     scan_options JSONB NOT NULL DEFAULT '{"budget_profile":"balanced"}',
                     updated_at TIMESTAMPTZ DEFAULT NOW())""")
             await store.initialize(pool)
@@ -176,21 +176,32 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                 )
                 is None
             )
-            for deleted in (False, True):
-                recovering = uuid4()
+            for mode in ('paused', 'deleted', 'archived_target'):
+                recovering, owner = uuid4(), uuid4()
                 async with pool.acquire() as conn:
                     await conn.execute(
-                        "INSERT INTO schedules(id,is_active,next_run_at) VALUES($1,true,$2)",
-                        recovering, now,
+                        "INSERT INTO targets(id,url) VALUES($1,$2)", owner, payload['target'],
+                    )
+                    await conn.execute(
+                        "INSERT INTO schedules(id,is_active,next_run_at,target_id) VALUES($1,true,$2,$3)",
+                        recovering, now, owner,
                     )
                 claimed = await store.claim(
                     pool, recovering, "https://gateway.test", payload, now=now
                 )
+                assert claimed is not None, 'Recovery must start from a real admitted occurrence'
                 async with pool.acquire() as conn:
-                    await conn.execute(
-                        "DELETE FROM schedules WHERE id=$1" if deleted else
-                        "UPDATE schedules SET is_active=false WHERE id=$1", recovering,
-                    )
+                    if mode == 'archived_target':
+                        # A legacy/in-flight schedule can remain active after its
+                        # target is archived. Only outcome lookup may continue.
+                        await conn.execute("UPDATE targets SET is_active=false WHERE id=$1", owner)
+                    else:
+                        await conn.execute(
+                            "DELETE FROM schedules WHERE id=$1" if mode == 'deleted' else
+                            "UPDATE schedules SET is_active=false WHERE id=$1", recovering,
+                        )
+                assert recovering not in [r['id'] for r in await store.fetch_dispatchable(pool, now=later)]
+                assert await store.claim(pool, recovering, "https://gateway.test", payload, now=later) is None
                 assert await recovery.pending(pool, "https://gateway.test", now) == []
                 assert await recovery.pending(pool, "https://changed.test", later) == []
                 items = await recovery.pending(pool, "https://gateway.test", later)
@@ -200,24 +211,26 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
                     DispatchOutcome("retry", "unknown"), later,
                 )
                 admitted = DispatchOutcome("accepted", "admitted", str(uuid4()))
-                if not deleted:
+                if mode == 'paused':
                     async with pool.acquire() as conn:
                         await conn.execute("UPDATE schedules SET is_active=true WHERE id=$1", recovering)
                     assert not await recovery.record(pool, items[0], "https://gateway.test", admitted, later)
                     async with pool.acquire() as conn:
                         await conn.execute("UPDATE schedules SET is_active=false WHERE id=$1", recovering)
                 dispatcher = SimpleNamespace(
-                    origin="https://gateway.test", lookup=AsyncMock(return_value=admitted)
+                    origin="https://gateway.test", lookup=AsyncMock(return_value=admitted),
+                    dispatch=AsyncMock(side_effect=AssertionError('Recovery must not dispatch')),
                 )
                 await recovery.reconcile(pool, dispatcher, later)
                 dispatcher.lookup.assert_awaited_once_with(str(recovering), str(claimed["id"]))
+                dispatcher.dispatch.assert_not_awaited()
                 assert await recovery.pending(pool, "https://gateway.test", later) == []
                 async with pool.acquire() as conn:
                     saved = await conn.fetchrow(
                         "SELECT state,scan_id FROM managed_schedule_occurrences WHERE id=$1", claimed["id"]
                     )
                     assert saved["state"] == "accepted" and str(saved["scan_id"]) == admitted.scan_id
-                    if not deleted:
+                    if mode != 'deleted':
                         assert await conn.fetchval(
                             "SELECT next_run_at FROM schedules WHERE id=$1", recovering
                         ) == now
