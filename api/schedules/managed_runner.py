@@ -65,8 +65,9 @@ async def run_due(pool, *, dispatcher=None, now=None):
                     occurrence["payload"],
                 )
             next_run = None
+            current_schedule = occurrence.get("schedule", schedule)
             if outcome.state != "retry":
-                next_run = schedule_ops.schedule_next_run_at(schedule)
+                next_run = schedule_ops.schedule_next_run_at(current_schedule)
                 if next_run.tzinfo is None:
                     next_run = next_run.replace(tzinfo=timezone.utc)
             await occurrences.settle(
@@ -76,6 +77,7 @@ async def run_due(pool, *, dispatcher=None, now=None):
                 state=outcome.state,
                 next_run_at=next_run,
                 scan_id=outcome.scan_id,
+                expected_updated_at=current_schedule.get("updated_at"),
             )
         except ValueError:
             # No payload/exception logging: future extensions may carry secrets.

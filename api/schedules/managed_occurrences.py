@@ -109,13 +109,17 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
         )
         result = dict(row)
         result["new_occurrence"] = created
+        # Cadence must come from the same locked row as the claim, not the
+        # earlier dispatchable-list snapshot. Never persist this mutable view.
+        result["schedule"] = dict(schedule)
         if isinstance(result["payload"], str):
             result["payload"] = json.loads(result["payload"])
         return result
 
 
 async def settle(
-    pool, occurrence_id, lease_id, *, state, next_run_at=None, scan_id=None
+    pool, occurrence_id, lease_id, *, state, next_run_at=None, scan_id=None,
+    expected_updated_at=None,
 ):
     """Commit receipt and cadence together; uncertain outcomes remain pending.
 
@@ -143,7 +147,8 @@ async def settle(
         row = await conn.fetchrow(
             """UPDATE managed_schedule_occurrences
             SET state=$1,scan_id=$2,lease_id=NULL,lease_until=NULL
-            WHERE id=$3 AND lease_id=$4 AND state='pending' RETURNING schedule_id""",
+            WHERE id=$3 AND lease_id=$4 AND state='pending'
+            RETURNING schedule_id,due_at""",
             "pending" if state == "retry" else state,
             identifier,
             UUID(str(occurrence_id)),
@@ -153,11 +158,17 @@ async def settle(
             return False
         if state != "retry":
             await conn.execute(
-                """UPDATE schedules SET next_run_at=$1,updated_at=NOW(),
+                """UPDATE schedules SET next_run_at=CASE
+                    WHEN is_active=true AND next_run_at IS NOT DISTINCT FROM $4
+                    AND ($5::timestamptz IS NULL OR updated_at=$5)
+                    THEN $1 ELSE next_run_at END,
+                updated_at=NOW(),
                 last_run_at=CASE WHEN $3 THEN NOW() ELSE last_run_at END
                 WHERE id=$2""",
                 next_run_at,
                 row["schedule_id"],
                 state == "accepted",
+                row["due_at"],
+                expected_updated_at,
             )
         return True
