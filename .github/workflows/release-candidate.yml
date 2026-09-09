@@ -1274,6 +1274,17 @@ jobs:
           npx --prefix ui playwright install --with-deps chromium
           make installed-stack-smoke
 
+      - name: Report exact-image actual assertions and validation completeness
+        if: always()
+        run: |
+          mkdir -p artifacts/certification
+          python3 scripts/summarize_e2e_debt.py artifacts/certification/e2e-scorecard.json \
+            --require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt \
+            --require-check 'dast:D-2 retains request-based SQLi result' \
+            --require-check 'dast:D-3 retains request-based XSS result' \
+            --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
+            > artifacts/certification/e2e-actual-assertions.json
+
       - name: Build exact-digest preservation receipt
         env:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
