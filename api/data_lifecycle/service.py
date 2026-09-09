@@ -76,6 +76,38 @@ def check_expected(payload, kind=None, entity_id=None, selection=None):
         raise HTTPException(409, 'Cleanup filters changed; inspect a new preview')
 
 
+def inspect_execution_record(row, approval_id, *, preview_hash=None, kind=None, entity_id=None, selection=None):
+    """Validate read-only replay/preflight before acquiring any writer locks.
+
+    A completed result is immutable evidence of a past operation: expiry or
+    later approval revocation must not re-execute it or prevent its replay.
+    Actual mutation repeats this check under the existing inventory locks.
+    """
+    payload = decoded(row['result_json'])
+    if not isinstance(payload, dict) or not isinstance(payload.get('manifest'), dict):
+        raise HTTPException(409, 'Stored deletion preview is invalid')
+    if digest(payload['manifest']) != payload.get('preview_hash'):
+        raise HTTPException(409, 'Stored deletion preview binding is inconsistent')
+    check_expected(payload, kind, entity_id, selection)
+    if preview_hash and not secrets.compare_digest(preview_hash, payload['preview_hash']):
+        raise HTTPException(409, 'Preview hash does not match')
+    if row['status'] == 'completed':
+        result = payload.get('result')
+        if str(row['approval_receipt_id']) != str(approval_id):
+            raise HTTPException(409, 'Preview was consumed by another approval')
+        if (not isinstance(result, dict) or result.get('operation_id') != str(row['id'])
+                or result.get('approval_receipt_id') != str(approval_id)
+                or result.get('status') != 'deleted'
+                or result.get('deleted_ids') != payload['manifest'].get('root_ids')):
+            raise HTTPException(409, 'Stored deletion result binding is inconsistent')
+        return payload, {**result, 'idempotent_replay': True}
+    if row['status'] != 'approval_required':
+        raise HTTPException(409, 'Deletion preview is not executable')
+    if datetime.now(timezone.utc) >= datetime.fromisoformat(payload['expires_at']):
+        raise HTTPException(409, 'Deletion preview expired; inspect a new preview')
+    return payload, None
+
+
 async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None, entity_id=None, selection=None):
     if not preview_id or not approval_id:
         raise HTTPException(428, 'Inspect POST /data-deletion/preview and approve its exact manifest before deleting')
@@ -85,26 +117,21 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 row = await conn.fetchrow('SELECT * FROM command_results WHERE id=$1 AND command=$2', UUID(str(preview_id)), COMMAND)
                 if not row:
                     raise HTTPException(404, 'Deletion preview not found')
-                payload = decoded(row['result_json'])
+                payload, replay = inspect_execution_record(row, approval_id, preview_hash=preview_hash,
+                    kind=kind, entity_id=entity_id, selection=selection)
+                if replay is not None:
+                    return replay
                 columns, edges = await catalog(conn)
                 plan = cascade_plan(payload['selection']['kind'], edges, columns)
                 await lock_inventory(conn, columns, plan)
                 row = await conn.fetchrow('SELECT * FROM command_results WHERE id=$1 AND command=$2 FOR UPDATE', UUID(str(preview_id)), COMMAND)
                 if not row:
                     raise HTTPException(404, 'Deletion preview not found')
-                payload = decoded(row['result_json'])
-                check_expected(payload, kind, entity_id, selection)
-                if preview_hash and not secrets.compare_digest(preview_hash, payload['preview_hash']):
-                    raise HTTPException(409, 'Preview hash does not match')
-                if row['status'] == 'completed':
-                    if str(row['approval_receipt_id']) != str(approval_id):
-                        raise HTTPException(409, 'Preview was consumed by another approval')
-                    return {**payload['result'], 'idempotent_replay': True}
-                if row['status'] != 'approval_required':
-                    raise HTTPException(409, 'Deletion preview is not executable')
+                payload, replay = inspect_execution_record(row, approval_id, preview_hash=preview_hash,
+                    kind=kind, entity_id=entity_id, selection=selection)
+                if replay is not None:
+                    return replay
                 now = datetime.now(timezone.utc)
-                if now >= datetime.fromisoformat(payload['expires_at']):
-                    raise HTTPException(409, 'Deletion preview expired; inspect a new preview')
                 approval = await conn.fetchrow('SELECT * FROM approval_receipts WHERE id=$1 FOR UPDATE', UUID(str(approval_id)))
                 validate_approval(approval, row, payload, approval_id, now)
                 roots = [UUID(v) for v in payload['manifest']['root_ids']]

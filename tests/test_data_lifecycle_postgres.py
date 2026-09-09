@@ -264,3 +264,18 @@ def test_archive_between_due_selection_and_claim_stops_both_schedulers():
             assert await c.fetchval('SELECT next_run_at FROM schedules WHERE id=$1', schedule) is None
             assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1', f) == 1
     run(scenario)
+
+
+def test_completed_deletion_replay_ignores_unrelated_writer_contention():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        preview = await service.preview(pool, {'kind':'findings','finding_ids':[str(f)]})
+        approval = await approve(pool, preview)
+        await service.execute(pool, preview['preview_id'], approval)
+        async with pool.acquire() as writer, writer.transaction():
+            # Ordinary unrelated writer holds ROW EXCLUSIVE; the previous replay
+            # tried SHARE ROW EXCLUSIVE across scans and would wait/fail.
+            await writer.execute("UPDATE scans SET current_phase='synthetic unrelated writer' WHERE id=$1", scan)
+            result = await asyncio.wait_for(service.execute(pool, preview['preview_id'], approval), timeout=1.0)
+            assert result['idempotent_replay']
+    run(scenario)
