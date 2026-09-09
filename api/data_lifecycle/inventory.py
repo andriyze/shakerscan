@@ -14,10 +14,9 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
+from .statuses import TERMINAL_BY_TABLE
 
 MAX_RECORDS = 10000
-TERMINAL = ('completed', 'cancelled', 'canceled', 'failed', 'stopped', 'expired',
-            'budget_exhausted', 'closed', 'superseded', 'skipped', 'error')
 EXECUTION_TABLES = ('scans', 'hunt_runs', 'agent_hunt_runs', 'device_agent_runs',
                     'research_episodes', 'campaigns', 'scan_campaigns', 'finding_verifications')
 PROTECTED = ('legal_hold', 'audit', 'sensitive')
@@ -188,7 +187,7 @@ async def blockers(conn, columns, owners, kind, roots):
             params.append([UUID(v) for v in owners['scan_id']])
             clauses.append(f'id=ANY(${len(params)}::uuid[])')
         if clauses:
-            params.append(list(TERMINAL))
+            params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
             active = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} WHERE '
                 f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))', *params)
             if active:

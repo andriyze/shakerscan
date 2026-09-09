@@ -225,3 +225,14 @@ def test_retained_http_history_still_honors_actual_holds(hold):
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
         assert any('http_transactions' in item for item in preview['blockers'])
     run(scenario)
+
+
+def test_terminal_blocked_research_does_not_prevent_deletion():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            await c.execute("INSERT INTO research_episodes(target_id,objective,status) VALUES($1,'Synthetic blocked research','blocked')", t)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+    run(scenario)

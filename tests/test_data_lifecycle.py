@@ -140,3 +140,30 @@ def test_preserving_sensitive_is_not_permission_to_erase_or_detach_holds():
         assert "'operational_hold'" in predicate
         assert "->'metadata_json'" in predicate
         assert "->>'retention_policy'" in predicate
+
+
+def test_terminal_statuses_remain_table_specific_and_research_is_authoritative():
+    from api.data_lifecycle.statuses import TERMINAL_BY_TABLE
+    from api.research_agent import TERMINAL_EPISODE_STATUSES
+    assert TERMINAL_BY_TABLE['research_episodes'] == TERMINAL_EPISODE_STATUSES
+    assert 'blocked' in TERMINAL_BY_TABLE['research_episodes']
+    assert 'blocked' not in TERMINAL_BY_TABLE['scans']
+    assert 'paused' not in TERMINAL_BY_TABLE['campaigns']
+    assert 'awaiting_planner' not in TERMINAL_BY_TABLE['hunt_runs']
+    assert not TERMINAL_BY_TABLE.get('future_subsystem', frozenset())
+
+
+def test_blockers_use_the_owning_subsystem_status_set():
+    from api.data_lifecycle.inventory import blockers
+    from api.data_lifecycle.statuses import TERMINAL_BY_TABLE
+    owners = dict(target_id=[str(uuid4())], device_target_id=[], ai_target_id=[], scan_id=[], finding_id=[])
+    class Connection:
+        async def fetchval(self, sql, *params):
+            if 'research_episodes' in sql:
+                return int('blocked' not in params[-1])
+            if 'scans' in sql:
+                return int('blocked' not in params[-1])
+            return 0
+    result = asyncio.run(blockers(Connection(),
+        {name: {'target_id','status'} for name in ('scans','research_episodes')}, owners, 'target', []))
+    assert len(result) == 1 and result[0].startswith('scans:')
