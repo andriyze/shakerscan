@@ -679,6 +679,20 @@
     "name": "dashboard"
   },
   {
+    "path": "/data-deletion/execute",
+    "methods": [
+      "POST"
+    ],
+    "name": "execute_record_deletion"
+  },
+  {
+    "path": "/data-deletion/preview",
+    "methods": [
+      "POST"
+    ],
+    "name": "preview_record_deletion"
+  },
+  {
     "path": "/device-agent/runs",
     "methods": [
       "GET"
@@ -2564,6 +2578,13 @@
       "PATCH"
     ],
     "name": "update_target"
+  },
+  {
+    "path": "/targets/{target_id}/archive",
+    "methods": [
+      "POST"
+    ],
+    "name": "archive_target"
   },
   {
     "path": "/targets/{target_id}/asm/activity",
