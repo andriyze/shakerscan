@@ -18,22 +18,54 @@ jobs:
   maintenance:
     if: github.ref == 'refs/heads/2.3.1'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: disposable-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd 'pg_isready -U postgres'
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RECORD_DELETION_TEST_DATABASE_URL: postgresql://postgres:disposable-test-only@127.0.0.1:5432/postgres
+      PYTHONPATH: .:api:scanner
+      NEXT_TELEMETRY_DISABLED: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - name: Export tracked source only for isolated review
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/maintenance-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          name: maintenance-source-${{ github.sha }}
-          path: ${{ runner.temp }}/maintenance-source.tar.gz
-          retention-days: 1
-          if-no-files-found: error
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - name: Apply and validate reviewed maintenance patch
         run: |
           if [ -f scripts/_maintenance_2_3_1.py ]; then
             python3 scripts/_maintenance_2_3_1.py
           fi
+      - name: Collect validation reports and reviewed changes
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/maintenance-validation"
+          git diff --stat > "$RUNNER_TEMP/maintenance-validation/change-stat.txt"
+          if [ -d artifacts ]; then cp artifacts/*.xml "$RUNNER_TEMP/maintenance-validation/" 2>/dev/null || true; fi
+          if [ -f ui/test-results/browser-results.json ]; then cp ui/test-results/browser-results.json "$RUNNER_TEMP/maintenance-validation/"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: maintenance-validation-${{ github.sha }}
+          path: ${{ runner.temp }}/maintenance-validation/
+          retention-days: 1
+          if-no-files-found: warn
       - name: Commit validated changes to the maintenance branch
         run: |
           if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
@@ -42,5 +74,5 @@ jobs:
           git config user.name 'ShakerScan maintenance'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'feat(lifecycle): implement reviewed 2.3.1 repository cleanup and deletion'
+          git commit -m 'feat(lifecycle): add reviewed target/finding deletion and clean public repository'
           git push origin HEAD:refs/heads/2.3.1
