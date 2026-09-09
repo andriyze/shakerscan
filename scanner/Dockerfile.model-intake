@@ -18,12 +18,12 @@ RUN set -eux; \
     git clone --depth 1 --branch "v${TRIVY_VERSION}" https://github.com/aquasecurity/trivy.git /src/trivy; \
     cd /src/trivy; \
     test "$(git rev-parse HEAD)" = "$TRIVY_COMMIT"; \
-    go get github.com/go-git/go-git/v5@v5.19.2 golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1 oras.land/oras-go/v2@v2.6.2; \
+    go get github.com/go-git/go-git/v5@v5.19.2 golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.2 oras.land/oras-go/v2@v2.6.2; \
     GOEXPERIMENT=jsonv2 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-X=github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION}" -o /out/trivy ./cmd/trivy; \
     git clone --depth 1 --branch "v${OSV_SCANNER_VERSION}" https://github.com/google/osv-scanner.git /src/osv-scanner; \
     cd /src/osv-scanner; \
     test "$(git rev-parse HEAD)" = "$OSV_SCANNER_COMMIT"; \
-    go get golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.1; \
+    go get golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 google.golang.org/grpc@v1.83.2; \
     CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-X=github.com/google/osv-scanner/v2/internal/version.OSVVersion=${OSV_SCANNER_VERSION} -X=github.com/google/osv-scanner/v2/cmd/osv-scanner/internal/cmd.commit=${OSV_SCANNER_COMMIT}" -o /out/osv-scanner ./cmd/osv-scanner
 
 # Verify inside the builder: PR CI and release builds execute the same checks.
@@ -37,7 +37,7 @@ RUN set -eu; \
     for tool in trivy osv-scanner; do \
       check_dep "$tool" golang.org/x/crypto v0.55.0; \
       check_dep "$tool" golang.org/x/mod v0.40.0; \
-      check_dep "$tool" google.golang.org/grpc v1.83.1; \
+      check_dep "$tool" google.golang.org/grpc v1.83.2; \
     done; \
     check_dep trivy github.com/go-git/go-git/v5 v5.19.2; \
     check_dep trivy oras.land/oras-go/v2 v2.6.2; \

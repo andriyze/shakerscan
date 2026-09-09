@@ -59,7 +59,7 @@ def test_the_model_intake_image_is_an_overlay_on_the_scanner_runtime():
     assert "AS model-intake-go-tools" in MI
     assert "golang:1.26.6-bookworm@sha256:" in MI
     assert "golang.org/x/crypto@v0.55.0" in MI
-    assert "google.golang.org/grpc@v1.83.1" in MI
+    assert "google.golang.org/grpc@v1.83.2" in MI
     assert "COPY --from=model-intake-go-tools /out/trivy" in MI
     assert "aquasecurity/trivy/releases/download" not in MI
 
