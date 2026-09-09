@@ -21,46 +21,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - name: Inspect maintenance boundaries
-        run: |
-          python3 - <<'PY'
-          import ast, pathlib, subprocess
-          files = subprocess.check_output(['git', 'ls-files'], text=True).splitlines()
-          print('=== Repository maintenance inventory ===')
-          for name in files:
-              p = pathlib.Path(name)
-              if (name.startswith(('docs/', 'benchmarks/', 'security/', 'config/', 'deploy/'))
-                  or any(x in name.lower() for x in ('result', 'report', 'retention', 'lifecycle', 'delete', 'cleanup', 'target_dedupe'))
-                  or name.startswith(('db/', '.github/workflows/'))
-                  or name in ('.gitignore', '.dockerignore', 'ui/package.json', 'api/requirements.txt', 'tests/conftest.py')):
-                  print(f'{p.stat().st_size:>9} {name}')
-          for name, symbols in {
-              'api/targets/router.py': ['delete_target', 'get_target', 'update_target'],
-              'api/finding_routes/router.py': ['delete_finding', 'cleanup_findings'],
-          }.items():
-              source = pathlib.Path(name).read_text()
-              lines = source.splitlines()
-              for node in ast.walk(ast.parse(source)):
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in symbols:
-                      start = min([node.lineno] + [d.lineno for d in node.decorator_list])
-                      print(f'=== {name}:{start}-{node.end_lineno} ===')
-                      print('\n'.join(f'{i+1}: {lines[i]}' for i in range(start-1, node.end_lineno)))
-          for name in files:
-              if name.startswith('ui/src/') and any(x in name for x in ('/targets/', '/findings/', '/components/layout', '/Sidebar', '/sidebar')):
-                  print('UI', name)
-          for name in ('api/api.py', 'api/targets/router.py', 'ui/src/lib/api.ts', 'ui/src/app/targets/page.tsx', 'ui/src/app/findings/page.tsx'):
-              p = pathlib.Path(name)
-              if not p.exists():
-                  continue
-              lines = p.read_text().splitlines()
-              for i, line in enumerate(lines):
-                  if any(x in line for x in ('configure_targets_router', 'include_router(', 'deleteTarget', 'deleteFinding', 'Delete', 'delete', 'confirm(', 'TargetDetail')):
-                      if name.endswith('api.py') and 'include_router' not in line and 'configure_targets_router' not in line:
-                          continue
-                      lo, hi = max(0, i-3), min(len(lines), i+6)
-                      print(f'=== {name}:{lo+1}-{hi} ===')
-                      print('\n'.join(f'{j+1}: {lines[j]}' for j in range(lo, hi)))
-          PY
+      - name: Export tracked source only for isolated review
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/maintenance-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-source-${{ github.sha }}
+          path: ${{ runner.temp }}/maintenance-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
       - name: Apply and validate reviewed maintenance patch
         run: |
           if [ -f scripts/_maintenance_2_3_1.py ]; then
