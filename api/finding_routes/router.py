@@ -19,7 +19,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -1360,9 +1360,13 @@ async def _resolve_finding_mutation_id(
 ) -> uuid.UUID | None:
     """Resolve legacy fingerprints without guessing across target owners."""
     try:
-        return uuid.UUID(identifier)
+        resolved = uuid.UUID(identifier)
     except ValueError:
         pass
+    else:
+        if scan_id is not None:
+            return await conn.fetchval("SELECT id FROM findings WHERE id=$1 AND scan_id=$2", resolved, scan_id)
+        return resolved
 
     fingerprints = [identifier]
     if ":" in identifier:
@@ -1456,82 +1460,61 @@ async def update_finding(
 @router.delete("/findings/{finding_id:path}")
 async def delete_finding(
     finding_id: str,
-    scan_id: Optional[str] = Query(None, description="Scope fingerprint deletion to a specific scan"),
+    scan_id: Optional[str] = Query(None, description="Scope deletion to this scan, including UUID identifiers"),
+    preview_id: Optional[uuid.UUID] = None,
+    approval_receipt_id: Optional[uuid.UUID] = None,
 ):
-    """Delete a finding by ID or fingerprint."""
-    async with _pool().acquire() as conn:
-        scan_uuid = None
-        if scan_id:
-            try:
-                scan_uuid = uuid.UUID(scan_id)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="scan_id must be a UUID") from exc
-        resolved_id = await _resolve_finding_mutation_id(
-            conn,
-            finding_id,
-            scan_id=scan_uuid,
-        )
+    """Delete exactly one previewed finding; no unapproved legacy bypass."""
+    try:
+        from data_lifecycle.service import execute
+    except ModuleNotFoundError:
+        from ..data_lifecycle.service import execute
+    if not preview_id or not approval_receipt_id:
+        raise HTTPException(status_code=428, detail="Inspect POST /data-deletion/preview and approve its exact manifest before deleting")
+    scan_value = _direct_query_value(scan_id)
+    try:
+        scan_uuid = uuid.UUID(scan_value) if scan_value else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="scan_id must be a UUID") from exc
+    try:
+        resolved_id = uuid.UUID(finding_id)
+    except ValueError:
+        async with _pool().acquire() as conn:
+            resolved_id = await _resolve_finding_mutation_id(conn, finding_id, scan_id=scan_uuid)
         if resolved_id is None:
-            raise HTTPException(status_code=404, detail="Finding not found")
-        result = await conn.fetchrow(
-            "DELETE FROM findings WHERE id = $1 RETURNING id, target_id, device_target_id",
-            resolved_id,
-        )
-        if not result:
-            raise HTTPException(status_code=404, detail="Finding not found")
-        await _refresh_finding_owner_counts(conn, [result])
-
-    return {'id': str(result['id']), 'status': 'deleted'}
+            raise HTTPException(status_code=404, detail="Finding not found; retry using the previewed UUID")
+    selection = None
+    if scan_uuid:
+        selection = {"kind": "findings", "finding_ids": [str(resolved_id)], "scan_id": str(scan_uuid)}
+    result = await execute(_pool(), preview_id, approval_receipt_id,
+                           kind="findings", entity_id=resolved_id, selection=selection)
+    return {**result, "id": str(resolved_id)}
 
 
 class FindingsCleanup(BaseModel):
-    older_than_days: int = Field(..., ge=1)
-    status: Optional[str] = None
-    root_domain: Optional[str] = None
+    older_than_days: int = Field(..., ge=1, le=3650)
+    status: Optional[Literal["active", "resolved", "false_positive", "accepted_risk"]] = None
+    root_domain: Optional[str] = Field(default=None, min_length=1, max_length=253)
     dry_run: bool = True
+    preview_id: Optional[uuid.UUID] = None
+    approval_receipt_id: Optional[uuid.UUID] = None
 
 
 @router.post("/findings/cleanup")
 async def cleanup_findings(request: FindingsCleanup):
-    """Delete old findings by age, optionally filtered by status and domain."""
-    async with _pool().acquire() as conn:
-        where = "f.last_seen_at < NOW() - INTERVAL '1 day' * $1"
-        params: list = [request.older_than_days]
-        idx = 2
-
-        if request.status:
-            where += f" AND f.status = ${idx}"
-            params.append(request.status)
-            idx += 1
-
-        if request.root_domain:
-            where += f" AND t.root_domain = ${idx}"
-            params.append(request.root_domain)
-            idx += 1
-
-        if request.dry_run:
-            count = await conn.fetchval(f"""
-                SELECT COUNT(*)
-                FROM findings f
-                LEFT JOIN targets t ON f.target_id = t.id
-                WHERE {where}
-            """, *params)
-            return {'would_delete': count, 'dry_run': True}
-        else:
-            # Use subquery to select IDs, then delete by ID
-            ids = await conn.fetch(f"""
-                SELECT f.id, f.target_id, f.device_target_id
-                FROM findings f
-                LEFT JOIN targets t ON f.target_id = t.id
-                WHERE {where}
-            """, *params)
-            if ids:
-                id_list = [r['id'] for r in ids]
-                await conn.execute(
-                    "DELETE FROM findings WHERE id = ANY($1)", id_list
-                )
-                await _refresh_finding_owner_counts(conn, ids)
-            return {'deleted': len(ids), 'dry_run': False}
+    """Age selects a bounded preview, never a fresh destructive age query."""
+    try:
+        from data_lifecycle.router import DeletionSelection
+        from data_lifecycle.service import execute, preview
+    except ModuleNotFoundError:
+        from ..data_lifecycle.router import DeletionSelection
+        from ..data_lifecycle.service import execute, preview
+    selection = DeletionSelection(kind="findings", older_than_days=request.older_than_days,
+        status=request.status, root_domain=request.root_domain).selection()
+    if request.dry_run:
+        return await preview(_pool(), selection)
+    return await execute(_pool(), request.preview_id, request.approval_receipt_id,
+                         kind="findings", selection=selection)
 
 
 class BulkFindingUpdateRequest(BaseModel):

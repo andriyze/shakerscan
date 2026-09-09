@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
@@ -718,6 +719,8 @@ function TargetsContent() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                     </Link>
+                    <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }}
+                      subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} />
                     {/* Scan Menu */}
                     <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-[100]' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
                       <button
@@ -938,6 +941,8 @@ function TargetsContent() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                       </Link>
+                      <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }}
+                        subject={subdomain.url} onDeleted={() => { void fetchTargets() }} />
                       {/* Scan Menu for Subdomain */}
                       <div className={`relative ${openScanMenu === subdomain.id ? 'z-[100]' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>
                         <button

@@ -4,7 +4,7 @@
 
 Shipped behavior belongs in `functionality-reference.md`; stop-ship and candidate evidence belong in
 `release-readiness.md`. The superseded July roadmap is preserved at
-[`archive/proposed-next-steps-2026-07.md`](archive/proposed-next-steps-2026-07.md).
+[`archive/proposed-next-steps-2026-07.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/proposed-next-steps-2026-07.md).
 
 ## 1. Freeze and qualify 2.0.0
 

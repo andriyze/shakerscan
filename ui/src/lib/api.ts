@@ -6393,26 +6393,29 @@ export async function updateFinding(
   return res.json()
 }
 
-export async function deleteFinding(id: string): Promise<{ id: string; status: string }> {
-  const res = await fetch(`${API_URL}/findings/${id}`, {
-    method: 'DELETE'
-  })
-  if (!res.ok) throw new Error('Failed to delete finding')
+/** Compatibility endpoint; callers must display a preview and obtain explicit approval first. */
+export async function deleteFinding(id: string, approval: {
+  preview_id: string
+  approval_receipt_id: string
+  scan_id?: string
+}): Promise<{ id: string; status: string }> {
+  const query = new URLSearchParams({ preview_id: approval.preview_id, approval_receipt_id: approval.approval_receipt_id })
+  if (approval.scan_id) query.set('scan_id', approval.scan_id)
+  const res = await fetch(`${API_URL}/findings/${encodeURIComponent(id)}?${query}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to delete finding'))
   return res.json()
 }
 
 export async function cleanupFindings(params: {
   older_than_days: number
-  status?: string
+  status?: 'active' | 'resolved' | 'false_positive' | 'accepted_risk'
   root_domain?: string
-  dry_run: boolean
-}): Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
+} & ({ dry_run: true } | { dry_run: false; preview_id: string; approval_receipt_id: string })):
+Promise<{ would_delete?: number; deleted?: number; dry_run: boolean }> {
   const res = await fetch(`${API_URL}/findings/cleanup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
   })
-  if (!res.ok) throw new Error('Failed to cleanup findings')
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to cleanup findings'))
   return res.json()
 }
 

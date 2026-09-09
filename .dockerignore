@@ -17,3 +17,24 @@ ui/tsconfig.tsbuildinfo
 
 *.log
 .DS_Store
+
+# Do not send operator data or retired internal ledgers to image builders.
+backups
+.shakerscan-fleet
+.claude/projects
+.claude/settings.local.json
+audit-results
+exports
+captures
+quarantine
+operator-data
+docs/archive
+ui/test-results
+ui/playwright-report
+artifacts
+*.har
+*.pcap
+*.pcapng
+*.sqlite
+*.sqlite3
+*.dump

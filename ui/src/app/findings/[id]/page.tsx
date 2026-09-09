@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { startHuntV2Native } from '@/lib/huntV2'
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
@@ -21,7 +22,6 @@ import {
   retestFinding,
   retestAiFinding,
   updateFinding,
-  deleteFinding,
   getFindingResearchProvenance,
   type Finding,
   type FindingException,
@@ -321,8 +321,6 @@ function FindingDetailContent() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [statusUpdating, setStatusUpdating] = useState(false)
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
-  const [deleting, setDeleting] = useState(false)
   const [exceptionToDelete, setExceptionToDelete] = useState<string | null>(null)
   const [exceptionDeleting, setExceptionDeleting] = useState(false)
   const [autonomousConfirmOpen, setAutonomousConfirmOpen] = useState(false)
@@ -520,21 +518,6 @@ function FindingDetailContent() {
       toast.error(err instanceof Error ? err.message : 'Failed to delete exception')
     } finally {
       setExceptionDeleting(false)
-    }
-  }
-
-  async function handleDelete() {
-    if (!finding || deleting) return
-    try {
-      setDeleting(true)
-      await deleteFinding(finding.id)
-      setDeleteConfirmOpen(false)
-      toast.success('Finding deleted')
-      router.push(backUrl)
-    } catch (err) {
-      console.error('Failed to delete finding:', err)
-      toast.error('Failed to delete finding')
-      setDeleting(false)
     }
   }
 
@@ -785,12 +768,8 @@ function FindingDetailContent() {
               {retestLoading ? 'Queueing...' : 'Retest Finding'}
             </button>
           </div>}
-          <button
-            onClick={() => setDeleteConfirmOpen(true)}
-            className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 transition-colors"
-          >
-            Delete
-          </button>
+          <DeleteRecordsButton selection={{ kind: 'findings', finding_ids: [finding.id], scan_id: finding.scan_id || undefined }}
+            subject="finding" onDeleted={() => router.push(backUrl)} />
         </div>
       </div>
 
@@ -809,16 +788,6 @@ function FindingDetailContent() {
         onCancel={() => setAutonomousConfirmOpen(false)}
       />
 
-      <ConfirmDialog
-        open={deleteConfirmOpen}
-        title="Delete finding"
-        message="Delete this finding permanently? This cannot be undone."
-        confirmLabel="Delete"
-        danger
-        busy={deleting}
-        onConfirm={handleDelete}
-        onCancel={() => setDeleteConfirmOpen(false)}
-      />
 
       <ConfirmDialog
         open={exceptionToDelete !== null}

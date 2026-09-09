@@ -36,6 +36,6 @@ endpoint comparison, and finding creation. Exact request bodies and action enums
 OpenAPI document.
 
 The pre-2.0 detailed walkthrough is preserved in
-[`archive/interactive-sessions-guide.md`](archive/interactive-sessions-guide.md) for migration
+[`archive/interactive-sessions-guide.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/interactive-sessions-guide.md) for migration
 history. It is not current operating guidance.
 

@@ -1824,19 +1824,33 @@ async def delete_target_principal_expectation(
     }
 
 
-@router.delete("/targets/{target_id}")
-async def delete_target(target_id: str):
-    """Delete a target (soft delete - sets inactive)."""
+@router.post("/targets/{target_id}/archive")
+async def archive_target(target_id: str):
+    """Hide inventory and disable automatic ASM; retain all records and evidence."""
     async with _pool().acquire() as conn:
         result = await conn.execute("""
-            UPDATE targets SET is_active = false, updated_at = NOW()
-            WHERE id = $1
-        """, uuid.UUID(target_id))
-
+            UPDATE targets SET is_active=false, asm_enabled=false, updated_at=NOW()
+            WHERE id=$1
+        """, _uuid_or_400(target_id, "target_id"))
         if result == "UPDATE 0":
             raise HTTPException(status_code=404, detail="Target not found")
+    return {"id": target_id, "status": "archived", "records_deleted": False}
 
-    return {'id': target_id, 'status': 'deleted'}
+
+@router.delete("/targets/{target_id}")
+async def delete_target(
+    target_id: str,
+    preview_id: Optional[uuid.UUID] = None,
+    approval_receipt_id: Optional[uuid.UUID] = None,
+):
+    """Permanently delete the exact previewed target inventory and cascading records."""
+    try:
+        from data_lifecycle.service import execute
+    except ModuleNotFoundError:
+        from ..data_lifecycle.service import execute
+    target_uuid = _uuid_or_400(target_id, "target_id")
+    result = await execute(_pool(), preview_id, approval_receipt_id, kind="target", entity_id=target_uuid)
+    return {**result, "id": str(target_uuid)}
 
 
 @router.post("/targets/{target_id}/scan")
