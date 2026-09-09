@@ -77,7 +77,6 @@ async def run_due(pool, *, dispatcher=None, now=None):
                 state=outcome.state,
                 next_run_at=next_run,
                 scan_id=outcome.scan_id,
-                expected_updated_at=current_schedule.get("updated_at"),
             )
         except ValueError:
             # No payload/exception logging: future extensions may carry secrets.

@@ -119,7 +119,6 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
 
 async def settle(
     pool, occurrence_id, lease_id, *, state, next_run_at=None, scan_id=None,
-    expected_updated_at=None,
 ):
     """Commit receipt and cadence together; uncertain outcomes remain pending.
 
@@ -157,10 +156,12 @@ async def settle(
         if not row:
             return False
         if state != "retry":
+            # Timing edits replace next_run_at; a rename changes only updated_at.
+            # Fence on the occurrence due time so unrelated edits cannot cause
+            # the same cadence slot to be admitted again on the next tick.
             await conn.execute(
                 """UPDATE schedules SET next_run_at=CASE
                     WHEN is_active=true AND next_run_at IS NOT DISTINCT FROM $4
-                    AND ($5::timestamptz IS NULL OR updated_at=$5)
                     THEN $1 ELSE next_run_at END,
                 updated_at=NOW(),
                 last_run_at=CASE WHEN $3 THEN NOW() ELSE last_run_at END
@@ -169,6 +170,5 @@ async def settle(
                 row["schedule_id"],
                 state == "accepted",
                 row["due_at"],
-                expected_updated_at,
             )
         return True

@@ -34,7 +34,6 @@ def test_runner_calculates_cadence_from_locked_claim_not_enumeration():
         return_value=SimpleNamespace(state="accepted", scan_id=str(uuid4()))))
     assert asyncio.run(namespace["run_due"](None, dispatcher=dispatcher, now=stamp))
     assert seen == [locked]
-    assert occurrences.settle.await_args.kwargs["expected_updated_at"] == locked["updated_at"]
 
 
 @pytest.mark.parametrize("edit", ["none", "cadence", "revision_only", "pause", "delete", "before_retry"])
@@ -78,8 +77,7 @@ def test_postgres_settlement_preserves_operator_changes(edit):
                 assert await store.settle(pool, claim["id"], claim["lease_id"], state="retry")
                 claim = await store.claim(pool, schedule_id, "https://gateway.test", {}, now=now + timedelta(seconds=2))
             assert await store.settle(pool, claim["id"], claim["lease_id"], state="accepted",
-                                      scan_id=scan_id, next_run_at=now + timedelta(days=1),
-                                      expected_updated_at=claim["schedule"]["updated_at"])
+                                      scan_id=scan_id, next_run_at=now + timedelta(days=1))
             async with pool.acquire() as conn:
                 receipt = await conn.fetchrow("SELECT state,scan_id FROM managed_schedule_occurrences WHERE id=$1", claim["id"])
                 assert receipt["state"] == "accepted" and receipt["scan_id"] == scan_id
@@ -88,7 +86,7 @@ def test_postgres_settlement_preserves_operator_changes(edit):
                     assert row is None
                 else:
                     expected = {"none": now + timedelta(days=1), "cadence": operator_next,
-                                "before_retry": operator_next, "revision_only": due, "pause": None}[edit]
+                                "before_retry": operator_next, "revision_only": now + timedelta(days=1), "pause": None}[edit]
                     assert row["next_run_at"] == expected
                     assert row["last_run_at"] is not None
                     assert row["is_active"] == (edit != "pause")
