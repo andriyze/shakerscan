@@ -16,7 +16,7 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
   await page.route('http://localhost:8080/**', async route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
-    const body = request.method() === 'POST' ? request.postDataJSON() : {}
+    const body = request.method() === 'POST' && request.postData() ? request.postDataJSON() : {}
     if (request.method() !== 'GET' && request.method() !== 'OPTIONS') writes.push({ path, body })
     if (path === '/targets/grouped') return route.fulfill({ json: {
       domains: deleted ? [] : [{ root_domain: 'example.invalid', root_target: { id: targetId, url: targetUrl,
@@ -35,6 +35,10 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
       retained: ['Historical scans and external evidence files are retained.'],
     } })
     if (path === '/arsenal/approvals') return route.fulfill({ json: { approval_receipt: { id: receiptId } } })
+    if (path === `/targets/${targetId}/archive`) {
+      deleted = true // Hidden from active inventory, not deleted from storage.
+      return route.fulfill({ json: { id: targetId, status: 'archived', records_deleted: false, schedules_paused: 1 } })
+    }
     if (path === '/data-deletion/execute') {
       executions += 1
       if (options.retry && executions === 1) return route.abort('failed')
@@ -98,4 +102,19 @@ test('findings page deletes only the selected record IDs', async ({ page }) => {
   expect(writes[0].body).toEqual({ kind: 'findings', finding_ids: [findingId] })
   await page.getByRole('dialog').getByRole('button', { name: 'Approve and delete records' }).click()
   await expect(page.getByRole('checkbox', { name: 'Select finding Synthetic lifecycle finding', exact: true })).toHaveCount(0)
+})
+
+
+test('protected target offers a separately confirmed archive, never a deletion approval', async ({ page }) => {
+  const writes = await mockApi(page, { blocked: true })
+  await page.goto('/targets')
+  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Archive target instead', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: `Archive ${targetUrl}`, exact: true })
+  await expect(dialog.getByText(/Already-admitted or running work is not cancelled/)).toBeVisible()
+  expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview'])
+  await dialog.getByRole('button', { name: 'Archive target', exact: true }).click()
+  await expect(dialog).not.toBeVisible()
+  expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview', `/targets/${targetId}/archive`])
+  await expect(page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true })).toHaveCount(0)
 })

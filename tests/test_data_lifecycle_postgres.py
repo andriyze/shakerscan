@@ -231,8 +231,36 @@ def test_terminal_blocked_research_does_not_prevent_deletion():
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
         async with pool.acquire() as c:
-            await c.execute("INSERT INTO research_episodes(target_id,objective,status) VALUES($1,'Synthetic blocked research','blocked')", t)
+            from api.research_agent import RESEARCH_EPISODE_VERSION
+            await c.execute("INSERT INTO research_episodes(target_id,objective,episode_version,status) VALUES($1,'Synthetic blocked research',$2,'blocked')", t, RESEARCH_EPISODE_VERSION)
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
         assert not preview['blockers'], preview['blockers']
         await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+    run(scenario)
+
+
+def test_archive_between_due_selection_and_claim_stops_both_schedulers():
+    from datetime import timezone, timedelta
+    from api.targets.archive import archive
+    from api.schedules.router import fetch_due_schedules, claim_due_schedule
+    from api.schedules import managed_occurrences as managed
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        schedule, now = uuid4(), datetime.now(timezone.utc)
+        async with pool.acquire() as c:
+            await c.execute("""INSERT INTO schedules(id,target_id,name,frequency,next_run_at)
+                VALUES($1,$2,'Synthetic schedule','daily',$3)""", schedule, t, now)
+            # Existing execution is explicitly not cancelled by archive.
+            await c.execute("UPDATE scans SET status='running' WHERE id=$1", scan)
+        await managed.initialize(pool)
+        assert any(row['id'] == schedule for row in await fetch_due_schedules(pool, now=now))
+        result = await archive(pool, t)
+        assert result['schedules_paused'] == 1
+        assert not await claim_due_schedule(pool, schedule_id=schedule, now=now)
+        assert await managed.claim(pool, schedule, 'https://gateway.invalid', {}, now=now) is None
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT status FROM scans WHERE id=$1', scan) == 'running'
+            assert not await c.fetchval('SELECT is_active FROM schedules WHERE id=$1', schedule)
+            assert await c.fetchval('SELECT next_run_at FROM schedules WHERE id=$1', schedule) is None
+            assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1', f) == 1
     run(scenario)

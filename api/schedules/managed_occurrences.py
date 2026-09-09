@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
+from .target_state import lock_active_schedule_target
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS managed_schedule_occurrences (
@@ -39,7 +40,7 @@ async def fetch_dispatchable(pool, *, now):
         return list(await conn.fetch(
             """SELECT s.*, t.url AS target_url FROM schedules s
             JOIN targets t ON t.id=s.target_id
-            WHERE s.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
+            WHERE s.is_active=true AND t.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
                 SELECT 1 FROM managed_schedule_occurrences o
                 WHERE o.schedule_id=s.id AND o.state='pending'
             ))""",
@@ -61,6 +62,9 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
     if now.tzinfo is None:
         raise ValueError("An aware UTC-compatible timestamp is required")
     async with pool.acquire() as conn, conn.transaction():
+        target = await lock_active_schedule_target(conn, schedule_id)
+        if target is None:
+            return None
         schedule = await conn.fetchrow(
             "SELECT * FROM schedules WHERE id=$1 FOR UPDATE",
             schedule_id,
@@ -80,13 +84,8 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
             if not schedule["next_run_at"] or schedule["next_run_at"] > now:
                 return None
             if callable(validated_payload):
-                target_url = await conn.fetchval(
-                    "SELECT url FROM targets WHERE id=$1 FOR SHARE", schedule["target_id"]
-                )
-                if target_url is None:
-                    raise ValueError("Scheduled target no longer exists")
                 current = dict(schedule)
-                current["target_url"] = target_url
+                current["target_url"] = target['url']
                 payload = validated_payload(current)
             else:
                 payload = validated_payload

@@ -720,7 +720,7 @@ function TargetsContent() {
                       </svg>
                     </Link>
                     <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }}
-                      subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} />
+                      subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                     {/* Scan Menu */}
                     <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-[100]' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
                       <button
@@ -942,7 +942,7 @@ function TargetsContent() {
                         </svg>
                       </Link>
                       <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }}
-                        subject={subdomain.url} onDeleted={() => { void fetchTargets() }} />
+                        subject={subdomain.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                       {/* Scan Menu for Subdomain */}
                       <div className={`relative ${openScanMenu === subdomain.id ? 'z-[100]' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>
                         <button

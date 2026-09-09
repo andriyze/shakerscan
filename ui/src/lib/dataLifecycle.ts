@@ -33,6 +33,11 @@ export interface DeletionResult {
   idempotent_replay: boolean
 }
 
+export async function archiveRecordTarget(targetId: string): Promise<void> {
+  const response = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}/archive`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not archive target'))
+}
+
 export async function previewRecordDeletion(selection: DeletionSelection): Promise<DeletionPreview> {
   const response = await fetch(`${API_URL}/data-deletion/preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection),

@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Optional
 import urllib.parse
 import uuid
 from zoneinfo import ZoneInfo
+from .target_state import lock_active_schedule_target
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -545,7 +546,7 @@ async def fetch_due_schedules(pool: Any, *, now: datetime) -> list[Any]:
             """SELECT s.*, t.url as target_url
                FROM schedules s
                JOIN targets t ON s.target_id = t.id
-               WHERE s.is_active = true AND s.next_run_at <= $1""",
+               WHERE s.is_active = true AND t.is_active = true AND s.next_run_at <= $1""",
             now,
         ))
 
@@ -565,7 +566,9 @@ async def claim_due_schedule(
     instead of losing it permanently.
     """
     claim_until = now + timedelta(minutes=max(1, int(lease_minutes)))
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        if await lock_active_schedule_target(conn, schedule_id) is None:
+            return False
         claimed = await conn.fetchval(
             """UPDATE schedules
                SET next_run_at=$1, updated_at=NOW()
@@ -843,10 +846,11 @@ async def create_schedule(request: ScheduleCreate):
     except (KeyError, Exception):
         raise HTTPException(status_code=400, detail=f"Invalid timezone: {request.timezone}")
 
-    async with _pool().acquire() as conn:
-        # Verify target exists
+    async with _pool().acquire() as conn, conn.transaction():
+        # Serialize with archive through the target lock. New automatic work
+        # cannot be attached to inventory that has already been archived.
         target_uuid = _uuid_or_400(request.target_id, "target id")
-        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1", target_uuid)
+        target = await conn.fetchrow("SELECT id, url FROM targets WHERE id = $1 AND is_active=true FOR SHARE", target_uuid)
         if not target:
             raise HTTPException(status_code=404, detail="Target not found")
         try:
@@ -918,7 +922,9 @@ async def get_schedule(schedule_id: str):
 @router.patch("/schedules/{schedule_id}")
 async def update_schedule(schedule_id: str, request: ScheduleUpdate):
     """Update a schedule."""
-    async with _pool().acquire() as conn:
+    async with _pool().acquire() as conn, conn.transaction():
+        if request.is_active is True and await lock_active_schedule_target(conn, _uuid_or_400(schedule_id, 'schedule_id')) is None:
+            raise HTTPException(409, 'An archived or missing target cannot have an enabled schedule')
         # Get existing schedule to check timing field changes
         existing = await conn.fetchrow(
             """SELECT s.*, t.url AS target_url

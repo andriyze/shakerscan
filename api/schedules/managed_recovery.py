@@ -8,9 +8,10 @@ async def pending(pool, origin, now):
         return await conn.fetch(
             """SELECT o.id,o.schedule_id FROM managed_schedule_occurrences o
             LEFT JOIN schedules s ON s.id=o.schedule_id
+            LEFT JOIN targets t ON t.id=s.target_id
             WHERE o.state='pending' AND o.gateway_origin=$1
             AND (o.lease_until IS NULL OR o.lease_until <= $2)
-            AND (s.id IS NULL OR s.is_active=false)
+            AND (s.id IS NULL OR s.is_active=false OR t.id IS NULL OR t.is_active=false)
             ORDER BY o.created_at LIMIT 100""",
             origin, now,
         )
@@ -23,7 +24,9 @@ async def record(pool, occurrence, origin, outcome, now):
     async with pool.acquire() as conn, conn.transaction():
         # Match claim/settle lock order; resume racing with this read wins.
         schedule = await conn.fetchrow(
-            "SELECT is_active FROM schedules WHERE id=$1 FOR UPDATE",
+            """SELECT s.is_active AND COALESCE(t.is_active,false) AS is_active
+               FROM schedules s LEFT JOIN targets t ON t.id=s.target_id
+               WHERE s.id=$1 FOR UPDATE OF s""",
             occurrence["schedule_id"],
         )
         if schedule and schedule["is_active"]:

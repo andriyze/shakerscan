@@ -28,7 +28,7 @@ def test_occurrence_survives_retry_restart_edits_and_stale_lease():
         pool = await asyncpg.create_pool(dsn, server_settings={"search_path": schema})
         try:
             async with pool.acquire() as conn:
-                await conn.execute("CREATE TABLE targets (id UUID PRIMARY KEY, url TEXT)")
+                await conn.execute("CREATE TABLE targets (id UUID PRIMARY KEY, url TEXT, is_active BOOLEAN NOT NULL DEFAULT true)")
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY,is_active BOOLEAN,next_run_at TIMESTAMPTZ,
                     last_run_at TIMESTAMPTZ,target_id UUID,

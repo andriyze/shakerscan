@@ -55,10 +55,12 @@ def test_postgres_settlement_preserves_operator_changes(edit):
             due, operator_next = now, now + timedelta(days=7)
             schedule_id, scan_id = uuid4(), uuid4()
             async with pool.acquire() as conn:
+                await conn.execute("CREATE TABLE targets (id UUID PRIMARY KEY, url TEXT, is_active BOOLEAN NOT NULL DEFAULT true)")
+                await conn.execute("INSERT INTO targets(id,url) VALUES($1,'https://example.test')", schedule_id)
                 await conn.execute("""CREATE TABLE schedules (
                     id UUID PRIMARY KEY, is_active BOOLEAN, next_run_at TIMESTAMPTZ,
-                    last_run_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL)""")
-                await conn.execute("INSERT INTO schedules VALUES($1,true,$2,NULL,$2)", schedule_id, now)
+                    last_run_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL, target_id UUID)""")
+                await conn.execute("INSERT INTO schedules VALUES($1,true,$2,NULL,$2,$1)", schedule_id, now)
             await store.initialize(pool)
             claim = await store.claim(pool, schedule_id, "https://gateway.test", {}, now=now)
             assert claim["schedule"]["updated_at"] == now
