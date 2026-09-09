@@ -258,6 +258,7 @@ COPY api/retest_routes /app/retest_routes
 COPY api/research_routes /app/research_routes
 COPY api/capabilities /app/capabilities
 COPY api/devices /app/devices
+COPY api/data_lifecycle /app/data_lifecycle
 COPY api/exposure /app/exposure
 COPY api/finding_exceptions /app/finding_exceptions
 COPY api/finding_routes /app/finding_routes
@@ -277,6 +278,9 @@ COPY api/worker_handlers /app/worker_handlers
 # API images must serve and bind the same catalog as a source checkout even
 # when /workspace contains only the minimal curl installation.
 COPY skills/web /app/skills/web
+
+# Verify the deletion API is present in the installed layout, not only in source tests.
+RUN PYTHONPATH=/app python3 -c "from data_lifecycle.router import router; assert len(router.routes) == 2"
 
 # Ensure scanner files are readable
 RUN chmod -R 755 /app/scanner_tools /app/wordlists /app/payloads /app/skills/web
