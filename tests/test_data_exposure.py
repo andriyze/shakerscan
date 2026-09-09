@@ -27,12 +27,12 @@ def _first_match(body: str):
 
 
 def test_patterns_match_honey_style_exposures():
-    # Mirrors the actual honey responses captured from the live target.
+    # Synthetic detector fixtures; never copy credentials from a live target here.
     assert _first_match('{"service_token":"eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9.aaaa.bbbb"}') in (
         "secret_token_exposure",
     )
     assert _first_match(
-        '{"iam":{"AccessKeyId":"AKIA4RCMT6DHZP7WXCQA","SecretAccessKey":"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"}}'
+        '{"iam":{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}}'
     ) == "cloud_credential_exposure"
     assert _first_match('{"keys":[{"id":"key_001","key":"FAKE_API_KEY_FULL_CANARY"}]}') == "api_key_exposure"
     assert _first_match("INFO c.acme.AuthFilter : Authorization: Bearer sk-prod-log-unsafe-001-abcdef") == (

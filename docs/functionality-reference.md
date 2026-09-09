@@ -1510,8 +1510,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 410 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 344 | `api/**/*.py` |
+| Public REST operations | 413 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 347 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1631,6 +1631,8 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `PATCH` | `/credential-profiles/{profile_id}` | `patch_credential_profile` |
 | `POST` | `/credential-profiles/{profile_id}/rotate` | `rotate_credential_profile` |
 | `GET` | `/dashboard` | `dashboard` |
+| `POST` | `/data-deletion/execute` | `execute_record_deletion` |
+| `POST` | `/data-deletion/preview` | `preview_record_deletion` |
 | `GET` | `/device-agent/runs` | `list_device_agent_runs` |
 | `GET` | `/device-agent/session/{run_id}` | `get_device_agent_session` |
 | `POST` | `/device-agent/session/{run_id}/cancel` | `cancel_device_agent_session` |
@@ -1904,6 +1906,7 @@ it is the exhaustive backstop behind the human-readable product map above.
 | `DELETE` | `/targets/{target_id}` | `delete_target` |
 | `GET` | `/targets/{target_id}` | `get_target` |
 | `PATCH` | `/targets/{target_id}` | `update_target` |
+| `POST` | `/targets/{target_id}/archive` | `archive_target` |
 | `GET` | `/targets/{target_id}/asm/activity` | `asm_activity` |
 | `GET` | `/targets/{target_id}/asm/coverage` | `asm_coverage` |
 | `GET` | `/targets/{target_id}/asm/diff` | `asm_diff` |
@@ -2836,7 +2839,7 @@ Scan feature or a second orchestration engine.
 | Getting started, install, product tour | [`README.md`](../README.md) |
 | AI-native V2 architecture and trust boundary | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) |
 | Scan execution/action/revision schemas | [`execution.py`](../api/scan/execution.py) · [`action_plan.py`](../api/scan/action_plan.py) · [`continuation.py`](../api/scan/continuation.py) |
-| Historical pre-V2 mode policy | [`archive/smart-scan-policy.md`](archive/smart-scan-policy.md) |
+| Historical pre-V2 mode policy | [`archive/smart-scan-policy.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/smart-scan-policy.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
 | Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
 | Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |

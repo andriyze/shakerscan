@@ -47,6 +47,7 @@ try:
     from capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
+        is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
         directory_listing_links,
@@ -107,6 +108,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
         EXPOSURE_PROBE_PARSER_VERSION,
+        is_sensitive_exposure_class,
         classify_confidential_file,
         classify_exposure,
         directory_listing_links,
@@ -394,15 +396,16 @@ class ScanActionAdapterError(RuntimeError):
 def _exposure_observation(
     url: str, discovered_via: str, signature: Any, result: Any,
 ) -> Mapping[str, Any]:
-    """Build one verified sensitive-exposure observation with content-free proof."""
+    """Keep reachability metadata distinct from content-specific secret proof."""
+    proven = is_sensitive_exposure_class(signature.exposure_class)
     content_type = next((
         str(value) for name, value in result.response_headers.items()
         if str(name).lower() == "content-type"
     ), "")
     return {
         "kind": "sensitive_exposure_proof",
-        "proof_state": "verified",
-        "finding_verdict": "verified",
+        "proof_state": "verified" if proven else "not_proven",
+        "finding_verdict": "verified" if proven else "not_proven",
         "exposure_class": signature.exposure_class,
         "severity": signature.severity,
         "request_url": url,
@@ -2019,8 +2022,8 @@ class DatabaseNeutralScanActionDispatcher:
                 attempt_observations.append(_exposure_observation(
                     probe_url, discovered_via, signature, result,
                 ))
-                # A browsable directory is proof its listed files are reachable;
-                # follow a bounded set to surface the confidential content itself.
+                # A listing is metadata, not proof that children are confidential.
+                # Existing bounded follow-up still records content observations.
                 if (
                     signature.exposure_class == "directory_listing"
                     and consumed["http_requests"] < http_ceiling
@@ -2043,7 +2046,7 @@ class DatabaseNeutralScanActionDispatcher:
                         ordinal += 1
                         child = await probe(child_url, ordinal)
                         child_signature = classify_confidential_file(
-                            status=child.status_code or 0,
+                            path=child_url, status=child.status_code or 0,
                             headers=child.response_headers, body=child.response_body,
                         )
                         if child_signature is not None:
@@ -2051,11 +2054,12 @@ class DatabaseNeutralScanActionDispatcher:
                                 child_url, "directory_listing_follow",
                                 child_signature, child,
                             ))
+            proven = any(item.get("proof_state") == "verified" for item in attempt_observations)
             bundled = ({
                 "kind": "candidate_attempt", "attempt_id": attempt_id,
                 "candidate_id": attempt_id[:32], "family": "sensitive_exposure",
                 "status": "success", "proof_state": (
-                    "verified" if attempt_observations else "not_proven"
+                    "verified" if proven else "not_proven"
                 ),
                 "budget_consumed": {"http_requests": 1},
             }, *attempt_observations)
@@ -2063,7 +2067,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "attempt_id": attempt_id, "candidate_id": attempt_id[:32],
                 "status": "success", "budget_consumed": {"http_requests": 1},
                 "observations": bundled,
-                "proof_state": "verified" if attempt_observations else "not_proven",
+                "proof_state": "verified" if proven else "not_proven",
             }
             if not self.cancelled():
                 await checkpoint_attempt(action.action_id, attempt)

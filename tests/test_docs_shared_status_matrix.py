@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 EXECUTION_DOC = ROOT / "docs" / "dast-asm-architecture.md"
 FLEET_DOC = ROOT / "docs" / "multi-node-architecture.md"
-DEEP_HUNT_DOC = ROOT / "docs" / "archive" / "deep-hunt-architecture.md"
+COMPATIBILITY_DOC = ROOT / "docs" / "compatibility.md"
 FUNCTIONALITY_DOC = ROOT / "docs" / "functionality-reference.md"
 RETIRED_DOCS = [
     ROOT / "docs" / "parallel-scan-architecture.md",
@@ -74,8 +74,13 @@ def test_compatibility_and_history_are_explicitly_separated():
         "v2-re-audit-2026-08-20.md",
     }
     for name in historical:
-        opening = (archive / name).read_text(encoding="utf-8")[:700].lower()
-        assert "historical" in opening, name
+        # 2.3.1 deliberately removes these documents from the public tree.
+        # Requiring their old contents would undo that cleanup, not protect a contract.
+        assert not (archive / name).exists(), name
+    archive_index = _flat(archive / "README.md")
+    assert "not current product contracts" in archive_index
+    assert "Use Git history" in archive_index
+    assert re.search(r"commit `[0-9a-f]{40}`", archive_index)
     for retired in (
         "SMART_SCAN_POLICY.md",
         "deep-hunt-architecture.md",
@@ -143,36 +148,24 @@ def test_multi_node_doc_states_semaphore_failure_posture():
     assert "A partitioned node runs uncapped." not in text
 
 
-def test_legacy_deep_hunt_reference_is_honest_about_driver_limits():
-    text = _flat(DEEP_HUNT_DOC)
-    assert "historical compatibility reference" in text
-    assert "Legacy `/agent/hunt/*` writes return `410 Gone` by default" in text
-    assert "reserves that scanner template's fail-closed maximum wire-request allowance" in text
-    assert "conservative accounting" in text
-    assert "external coding agent's tokens" in text
-    assert "between completed turns" in text
-    assert "restart during an in-flight `planning` turn" in text
-    assert "`resp_N` or `scan_N` refs" in text
-    assert "does not currently receive a citeable reference" in text
-    assert "deliberately **not ported**" in text
+def test_current_compatibility_reference_does_not_advertise_retired_drivers():
+    text = _flat(COMPATIBILITY_DOC)
+    assert "retired Hunt write routes return `410 Gone`" in text
+    assert "bounded historical reads and cancellation" in text
+    assert "not an alternate product surface" in text
+    assert "`GET /hunts/contract`" in text
     assert "mid-hunt API restart resumes" not in text
 
 
-def test_deep_hunt_doc_separates_family_names_from_contract_kinds():
-    # A debrief `family` must be a value some promoter accepts. `workflow_transition` is the invariant
-    # CONTRACT KIND (no canonical_family alias) and `injection` is accepted by neither path, yet both
-    # were once advertised. The doc must teach the closed vocabulary and the recorded skip reasons.
-    text = _flat(DEEP_HUNT_DOC)
-    assert "`family` is a closed vocabulary" in text
-    assert "ADVERTISED_FAMILIES" in text
-    assert "never the generic" in text
-    assert "the invariant **contract kind**, not a family" in text
-    assert "family_not_verifiable" in text
-    assert "do not consume `_AGENT_AUTO_VERIFY_LIMIT`" in text
-    # The Path C table row must name the FAMILY, not the contract kind.
-    assert "access_control, field_constraint, workflow |" in text
-    assert "field_constraint, workflow** — mutating" in text
-    assert "access_control, field_constraint, workflow_transition |" not in text
+def test_removed_design_details_are_not_reintroduced_as_current_contracts():
+    text = _flat(COMPATIBILITY_DOC)
+    assert "must not appear in new public write contracts" in text
+    assert "Unknown fields remain rejected" in text
+    assert "last pre-cleanup Git snapshot" in text
+    current = "\n".join(_flat(path) for path in CANONICAL_PRODUCT_DOCS)
+    # Retired promoter implementation details must not return as client guidance.
+    assert "ADVERTISED_FAMILIES" not in current
+    assert "_AGENT_AUTO_VERIFY_LIMIT" not in current
 
 
 def test_functionality_reference_does_not_overclaim_keyless_token_bounding():

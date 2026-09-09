@@ -24,5 +24,6 @@ Those inputs are translated at the API/read boundary only:
   closed.
 
 Compatibility models must be explicitly named and must not appear in new public write contracts.
-Unknown fields remain rejected at public V2 boundaries. Historical design detail lives under
-[`archive/`](archive/README.md).
+Unknown fields remain rejected at public V2 boundaries. Superseded design documents are removed
+from the current source tree, not republished as operating instructions. The
+[archive index](archive/README.md) identifies their last pre-cleanup Git snapshot.

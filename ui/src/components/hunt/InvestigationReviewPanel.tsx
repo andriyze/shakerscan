@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { listReviewProposals, readInvestigation, type InvestigationReview } from '@/lib/huntReview'
-import { assessmentText, candidateHistoryText, isReviewId } from '@/lib/huntReviewModel'
+import { assessmentText, candidateHistoryText, isReviewId, reconcileReviewSelection } from '@/lib/huntReviewModel'
 
 function Review({ huntId }: { huntId: string }) {
   const [ids, setIds] = useState<string[]>([])
@@ -17,6 +17,7 @@ function Review({ huntId }: { huntId: string }) {
   const [readError, setReadError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
   const listRequest = useRef<AbortController | null>(null)
+  const readRequest = useRef<AbortController | null>(null)
   const listing = useRef(false)
 
   async function loadPage(next: string | null) {
@@ -32,7 +33,18 @@ function Review({ huntId }: { huntId: string }) {
       setSupported(page.supported)
       setIds(current => Array.from(new Set([...(next ? current : []), ...page.ids])))
       setCursor(page.nextCursor)
-      setSelected(current => current || page.ids[0] || '')
+      if (next === null) {
+        // History replacement invalidates an in-flight read even if the selected
+        // ID survives. Re-fetch retained evidence rather than showing stale state.
+        readRequest.current?.abort()
+        setReview(null)
+        setReadError(null)
+        setReading(false)
+        setSelected(current => reconcileReviewSelection(current, page.ids))
+        setRevision(value => value + 1)
+      } else {
+        setSelected(current => current || page.ids[0] || '')
+      }
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Investigation history unavailable')
     } finally {
@@ -56,8 +68,10 @@ function Review({ huntId }: { huntId: string }) {
   useEffect(() => {
     setReview(null)
     setReadError(null)
+    setReading(false)
     if (!selected) return
     const controller = new AbortController()
+    readRequest.current = controller
     setReading(true)
     readInvestigation(huntId, selected, controller.signal)
       .then(result => { if (!controller.signal.aborted) setReview(result) })

@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 170,
+  "component_schema_count": 172,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -55,6 +55,8 @@
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
     "CredentialProfileRotate": "f023ee42779be3169d7f816b6172c0831e7a8fdde4a450720996279893b870ba",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
+    "DeletionExecution": "a55dc767725f6b0a6e9d58915878ec3206837e740bff406a1d549e8afb9f8923",
+    "DeletionSelection": "0111ad35c8d27c06caabff78152319845e803bb565441fbfc32ceb2dd0b8c3a9",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
     "DeviceCredentialProfileCreate": "b25505648ad3d2e27de4afb54586d228485d92f256a42418acb2ace596582813",
     "DeviceCredentialProfileRotate": "ca0d7a30052e7a49bc93ac150e0d63f025ae2575d52826b2506954340f8084c7",
@@ -76,7 +78,7 @@
     "FindingRetestRequest": "2cc88671e18d1fe0f59cf97de361755ea2969e4511e4451a6305d16189a639d5",
     "FindingUpdate": "849f1bda8c6983d0a2c49b738de0ebdee47beb85d1d015f5822089d3369c20ff",
     "FindingsBulkRetestRequest": "ab25332ed19114b52eb476038e2a344c40fb5ae6f672001effe32f1b47f08493",
-    "FindingsCleanup": "ab947ee6b4155043358b843da060a87e64e116fc96764328964fcc712c22f64d",
+    "FindingsCleanup": "c7182dc1be98670f7ccbd7096c4799774dc95b337e71b7d78324534fc7a5f843",
     "FleetDesiredStateRequest": "5d252965b9893f918f7e1c384cdf7118ba1bc37487b8e289bd1a327d536dd457",
     "FleetHeartbeatRequest": "9def88395e67925ba5f89d29662bf7712fb3ab57bdb8ffc810e08ebcc01bb582",
     "FleetJoinTokenRequest": "8c3590dba732bba2ce620b048c47188c3ea09bc03cae2e21e3be4ba40396759b",
@@ -176,9 +178,9 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "8a5b049288f4cdba39752255a1bf6c30e88eff145f66678bc58a674e568fad9c",
+  "contract_sha256": "fee6f059b5ceddf787c37b2baf3d026f54d1e36fcff16f1d17aa5b2d5ca8d2a0",
   "openapi": "3.1.0",
-  "operation_count": 400,
+  "operation_count": 403,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -289,7 +291,7 @@
     "DELETE /findings/{finding_id}": {
       "deprecated": false,
       "operation_id": "delete_finding_findings__finding_id__delete",
-      "parameters_sha256": "2e47456b776b91b053c129dce5d7faa12c7b8bc292a30bac0ba9b2d3035d691f",
+      "parameters_sha256": "f42736c270984c540fda5be2a67f45a6e264b285afb2f50aff710eb68911e428",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -468,7 +470,7 @@
     "DELETE /targets/{target_id}": {
       "deprecated": false,
       "operation_id": "delete_target_targets__target_id__delete",
-      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "parameters_sha256": "2b64bbb939987945f7f5b2190ce169c477c54f14fce7e4e885bf18a27db6d40d",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -3622,6 +3624,36 @@
         "credentials"
       ]
     },
+    "POST /data-deletion/execute": {
+      "deprecated": false,
+      "operation_id": "execute_record_deletion_data_deletion_execute_post",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": "56804b093f6dc180c4db16d1ef4e5b6ca62a568d4c2fcb1a73fe49b67f3d4c4a",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "Data lifecycle"
+      ]
+    },
+    "POST /data-deletion/preview": {
+      "deprecated": false,
+      "operation_id": "preview_record_deletion_data_deletion_preview_post",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": "d58a12c4513ddb714366991d26015ecd7e8ff61b8440028f8ef24d17b866f15c",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "Data lifecycle"
+      ]
+    },
     "POST /device-agent/session/{run_id}/cancel": {
       "deprecated": false,
       "operation_id": "cancel_device_agent_session_device_agent_session__run_id__cancel_post",
@@ -5089,6 +5121,19 @@
       "operation_id": "dedupe_targets_targets_dedupe_post",
       "parameters_sha256": "ce9e470c6ef80cced6de9fce3d647b77a91ccad7b7aebeaac2a23d12a57d7a56",
       "request_schema_sha256": "814acdbb156f7db3c98bda408d9326ebae7bd199bcf01cc240bfe27866a80097",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "POST /targets/{target_id}/archive": {
+      "deprecated": false,
+      "operation_id": "archive_target_targets__target_id__archive_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"

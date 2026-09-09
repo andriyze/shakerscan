@@ -65,8 +65,9 @@ async def run_due(pool, *, dispatcher=None, now=None):
                     occurrence["payload"],
                 )
             next_run = None
+            current_schedule = occurrence.get("schedule", schedule)
             if outcome.state != "retry":
-                next_run = schedule_ops.schedule_next_run_at(schedule)
+                next_run = schedule_ops.schedule_next_run_at(current_schedule)
                 if next_run.tzinfo is None:
                     next_run = next_run.replace(tzinfo=timezone.utc)
             await occurrences.settle(

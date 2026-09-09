@@ -485,6 +485,16 @@
     "operation_id": "dashboard_dashboard_get"
   },
   {
+    "path": "/data-deletion/execute",
+    "method": "post",
+    "operation_id": "execute_record_deletion_data_deletion_execute_post"
+  },
+  {
+    "path": "/data-deletion/preview",
+    "method": "post",
+    "operation_id": "preview_record_deletion_data_deletion_preview_post"
+  },
+  {
     "path": "/device-agent/runs",
     "method": "get",
     "operation_id": "list_device_agent_runs_device_agent_runs_get"
@@ -1803,6 +1813,11 @@
     "path": "/targets/{target_id}",
     "method": "patch",
     "operation_id": "update_target_targets__target_id__patch"
+  },
+  {
+    "path": "/targets/{target_id}/archive",
+    "method": "post",
+    "operation_id": "archive_target_targets__target_id__archive_post"
   },
   {
     "path": "/targets/{target_id}/asm/activity",

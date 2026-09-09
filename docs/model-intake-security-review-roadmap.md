@@ -4,7 +4,7 @@
 
 The former 2,600-line implementation roadmap mixed completed phases, proposed controls, and
 point-in-time acceptance notes. It is archived at
-[`archive/model-intake-security-review-roadmap.md`](archive/model-intake-security-review-roadmap.md).
+[`archive/model-intake-security-review-roadmap.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/model-intake-security-review-roadmap.md).
 Use this document for the supported boundary and the live OpenAPI for mechanics.
 
 ## Purpose and subject boundary

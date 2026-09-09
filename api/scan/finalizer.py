@@ -132,6 +132,11 @@ def _canonical_proof_contract_v2(
 
 
 try:
+    from capabilities.exposure_probe import is_sensitive_exposure_class
+except ModuleNotFoundError:
+    from ..capabilities.exposure_probe import is_sensitive_exposure_class
+
+try:
     from scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
 except ModuleNotFoundError:
     from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence as _apply_xss_execution_evidence
@@ -568,7 +573,7 @@ def _findings_for_action(
             kind == "sensitive_exposure_proof"
             and item.get("proof_state") == "verified"
             and item.get("finding_verdict") == "verified"
-            and str(item.get("exposure_class") or "")
+            and is_sensitive_exposure_class(str(item.get("exposure_class") or ""))
             and item.get("response_status") == 200
             and str(item.get("response_body_sha256") or "")
         ):

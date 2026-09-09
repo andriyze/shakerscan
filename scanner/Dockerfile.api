@@ -27,6 +27,7 @@ COPY --from=scanner-runtime /app/retest_routes /app/retest_routes
 COPY --from=scanner-runtime /app/research_routes /app/research_routes
 COPY --from=scanner-runtime /app/capabilities /app/capabilities
 COPY --from=scanner-runtime /app/devices /app/devices
+COPY --from=scanner-runtime /app/data_lifecycle /app/data_lifecycle
 COPY --from=scanner-runtime /app/exposure /app/exposure
 COPY --from=scanner-runtime /app/finding_exceptions /app/finding_exceptions
 COPY --from=scanner-runtime /app/finding_routes /app/finding_routes
@@ -124,6 +125,7 @@ ENV SHAKERSCAN_SOURCE_REVISION=${SCANNER_SOURCE_REVISION}
 COPY scanner/api-entrypoint.sh /app/api-entrypoint.sh
 RUN chmod 0755 /app/api-entrypoint.sh && \
     python3 -c 'import asyncpg, fastapi, playwright, redis' && \
+    PYTHONPATH=/app python3 -c 'from data_lifecycle.router import router; assert len(router.routes) == 2' && \
     test -n "$SCANNER_VERSION" && test -n "$SHAKERSCAN_SOURCE_REVISION" && \
     SCANNER_EXPECTED_VERSION="$SCANNER_VERSION" \
     SCANNER_EXPECTED_REVISION="$SHAKERSCAN_SOURCE_REVISION" \

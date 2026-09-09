@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import uuid
 
@@ -170,6 +171,10 @@ def test_schedule_pause_bypasses_target_resolution_and_clears_next_run(monkeypat
         def __init__(self):
             self.update = None
 
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
         async def fetchrow(self, _query, *_args):
             return existing
 
@@ -223,6 +228,10 @@ def test_daily_schedule_cannot_transition_to_weekly_without_a_day(monkeypatch):
     }
 
     class Connection:
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
         async def fetchrow(self, _query, *_args):
             return existing
 

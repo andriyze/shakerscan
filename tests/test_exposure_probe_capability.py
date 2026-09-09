@@ -45,13 +45,13 @@ def test_deterministic_response_signatures_classify_high_exposure():
         "/actuator/env": (b'{"activeProfiles":["prod"],"_links":{}}', "actuator_endpoint"),
     }
     for path, (body, expected) in cases.items():
-        content_type = "application/json" if expected == "actuator_endpoint" else "text/plain"
+        content_type = "application/vnd.spring-boot.actuator.v3+json" if expected == "actuator_endpoint" else "text/plain"
         signature = classify_exposure(
             path=path, status=200, headers={"Content-Type": content_type}, body=body,
         )
         assert signature is not None, path
         assert signature.exposure_class == expected
-        assert signature.severity == "high"
+        assert signature.severity == ("high" if expected in {"environment_secret_file", "version_control_exposure"} else "info")
 
 
 def test_soft_200_and_denied_responses_are_never_exposures():
@@ -85,15 +85,50 @@ def test_directory_listing_follows_only_bounded_relative_files():
     assert directory_listing_links(listing) == ("acquisitions.md",)
 
     confidential = classify_confidential_file(
-        status=200, headers={"Content-Type": "text/markdown"},
+        path="/ftp/acquisitions.md", status=200, headers={"Content-Type": "text/markdown"},
         body=b"# Internal acquisitions\nConfidential deal terms.",
     )
     assert confidential is not None
-    assert confidential.exposure_class == "confidential_file"
+    assert confidential.exposure_class == "listed_file"
+    assert not confidential.proves_sensitive_exposure
     # An HTML page reached from a listing is the app, not a confidential file.
     assert classify_confidential_file(
-        status=200, headers={"Content-Type": "text/html"}, body=b"<html>page</html>",
+        path="/ftp/page.html", status=200,
+        headers={"Content-Type": "text/html"}, body=b"<html>page</html>",
     ) is None
+
+
+def test_intentionally_public_well_known_files_are_not_confidential():
+    from api.capabilities.exposure_probe import classify_confidential_file
+
+    body = b"Contact: mailto:security@example.test\nExpires: 2027-01-01T00:00:00Z\n"
+    # Discovery location is not confidentiality evidence. Keep reachability only.
+    for path in (
+        "/.well-known/security.txt",
+        "http://host.docker.internal:3001/.well-known/security.txt",
+        "/robots.txt",
+        "/sitemap.xml",
+    ):
+        observed = classify_confidential_file(
+            path=path, status=200,
+            headers={"Content-Type": "text/plain"}, body=body,
+        )
+        assert observed.exposure_class == "listed_file", path
+        assert not observed.proves_sensitive_exposure
+    # A different path alone still does not prove confidentiality.
+    ordinary = classify_confidential_file(
+        path="/.well-known/../backup.sql", status=200,
+        headers={"Content-Type": "text/plain"}, body=b"INSERT INTO users VALUES (1);",
+    )
+    assert ordinary.exposure_class == "listed_file"
+    assert not ordinary.proves_sensitive_exposure
+    # Secret material inside a well-known file is still reported (secret check runs first).
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n"
+    leaked = classify_confidential_file(
+        path="/.well-known/security.txt", status=200,
+        headers={"Content-Type": "text/plain"}, body=key,
+    )
+    assert leaked is not None and leaked.exposure_class == "private_key_material"
 
 
 def test_secret_material_excerpt_withholds_content():
@@ -226,8 +261,8 @@ def test_ordinary_json_apis_are_not_actuator_exposures():
         ) is None, body
 
 
-def test_real_actuator_shapes_are_still_detected():
-    """Narrowing the pattern must not lose genuine actuator disclosure."""
+def test_actuator_vendor_media_type_is_metadata_not_sensitive_proof():
+    """Identifying the framework cannot establish a sensitive exposure."""
     for body in (
         b'{"activeProfiles":["prod"],"_links":{}}',
         b'{"status":"UP","components":{"db":{"status":"UP"}}}',
@@ -235,11 +270,12 @@ def test_real_actuator_shapes_are_still_detected():
     ):
         signature = classify_exposure(
             path="/actuator/health", status=200,
-            headers={"Content-Type": "application/json"}, body=body,
+            headers={"Content-Type": "application/vnd.spring-boot.actuator.v3+json"}, body=body,
         )
         assert signature is not None, body
         assert signature.exposure_class == "actuator_endpoint"
-        assert signature.severity == "high"
+        assert signature.severity == "info"
+        assert not signature.proves_sensitive_exposure
 
 
 def test_directory_listing_titles_cover_common_server_stacks():
@@ -256,7 +292,8 @@ def test_directory_listing_titles_cover_common_server_stacks():
         )
         assert signature is not None, stack
         assert signature.exposure_class == "directory_listing"
-        assert signature.severity == "high"
+        assert signature.severity == "info"
+        assert not signature.proves_sensitive_exposure
 
 
 def test_an_ordinary_html_page_is_not_a_directory_listing():
@@ -265,3 +302,37 @@ def test_an_ordinary_html_page_is_not_a_directory_listing():
         headers={"Content-Type": "text/html; charset=utf-8"},
         body=b"<html><head><title>My Shop</title></head><body>Welcome</body></html>",
     ) is None
+
+
+def test_ordinary_public_files_and_hal_do_not_prove_sensitive_disclosure():
+    for path, content_type, body in (
+        ("/downloads/LICENSE.txt", "text/plain", b"MIT License"),
+        ("/assets/logo.png", "image/png", b"\x89PNG synthetic"),
+        ("/public/prices.csv", "text/csv", b"product,price\nbook,10"),
+    ):
+        signature = classify_confidential_file(path=path, status=200,
+                    headers={"Content-Type": content_type}, body=body)
+        assert signature.exposure_class == "listed_file"
+        assert signature.severity == "info"
+        assert not signature.proves_sensitive_exposure
+        assert body.decode("utf-8", errors="replace") not in redacted_exposure_excerpt(body, signature)
+    for body in (b'{"_links":{"self":{"href":"/books"}}}', b'{"status":"UP"}',
+                 b'{"activeProfiles":[]}', b'{"diskSpace":123}'):
+        assert classify_exposure(path="/public", status=200,
+               headers={"Content-Type": "application/json"}, body=body) is None
+
+
+def test_historical_structural_proof_flags_cannot_promote_a_finding():
+    probe = _action("verify.exposure", 0, capability_name="exposure.verify_batch")
+    final = _action("finalize.report", 1, dependencies=(probe.action_id,))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                         target_binding_digest="a" * 64, actions=(probe, final))
+    for category in ("confidential_file", "listed_file", "directory_listing",
+                     "metrics_endpoint", "actuator_endpoint", "exposed_api_specification"):
+        report = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+            action_results={probe.action_id: _result_with_observation_count(probe, 1)},
+            observations={probe.action_id: ({"kind": "sensitive_exposure_proof",
+                "proof_state": "verified", "finding_verdict": "verified",
+                "exposure_class": category, "severity": "high", "response_status": 200,
+                "request_url": "https://app.example.test/public", "response_body_sha256": "c" * 64},)})
+        assert not report['findings'], category

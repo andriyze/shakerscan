@@ -1,6 +1,6 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + implementation complete; 2.3.0 broker physical-acceptance renewal pending. The fan-out
+**Status:** Design authority + implementation complete; 2.3.1 broker physical-acceptance renewal pending. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 bounded enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
@@ -16,7 +16,7 @@ digest-pinned cross-node execution with centralized results and artifacts, and d
 worker-loss/reclaim acceptance. Because 2.0.0 changes the canonical Scan and Hunt execution boundary,
 that receipt is historical and may be renewed on the frozen 2.0.0 SHA as
 operational evidence. WireGuard physical acceptance is deferred, so WireGuard remains preview code
-and is explicitly outside the 2.3.0 supported deployment boundary. Redis Stream
+and is explicitly outside the 2.3.1 supported deployment boundary. Redis Stream
 lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed

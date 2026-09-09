@@ -1,15 +1,16 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton, RecordDeletionDialog } from '@/components/lifecycle/DeleteRecordsButton'
+import { previewRecordDeletion, type DeletionPreview } from '@/lib/dataLifecycle'
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getFindings, cleanupFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
+import { getFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
 import {
   Button,
   Card,
-  ConfirmDialog,
   EmptyState,
   ErrorState,
   FindingStatusBadge,
@@ -140,10 +141,11 @@ function FindingsContent() {
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
   const [showCleanup, setShowCleanup] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [cleanupDays, setCleanupDays] = useState(90)
   const [cleanupStatus, setCleanupStatus] = useState('')
   const [cleanupDomain, setCleanupDomain] = useState('')
-  const [cleanupPreview, setCleanupPreview] = useState<number | null>(null)
+  const [cleanupPreview, setCleanupPreview] = useState<DeletionPreview | null>(null)
   const [cleanupLoading, setCleanupLoading] = useState(false)
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
 
@@ -262,44 +264,22 @@ function FindingsContent() {
   async function handleCleanupPreview() {
     setCleanupLoading(true)
     try {
-      const result = await cleanupFindings({
+      const result = await previewRecordDeletion({
+        kind: 'findings',
         older_than_days: cleanupDays,
         status: cleanupStatus || undefined,
         root_domain: cleanupDomain || undefined,
-        dry_run: true
       })
-      setCleanupPreview(result.would_delete ?? 0)
+      setCleanupPreview(result)
     } catch (err) {
       console.error('Cleanup preview failed:', err)
-      toast.error('Failed to preview cleanup')
+      toast.error(err instanceof Error ? err.message : 'Failed to preview cleanup')
     } finally {
       setCleanupLoading(false)
     }
   }
 
-  async function handleCleanupDelete() {
-    if (cleanupPreview === null || cleanupPreview === 0) return
-    setCleanupLoading(true)
-    try {
-      const result = await cleanupFindings({
-        older_than_days: cleanupDays,
-        status: cleanupStatus || undefined,
-        root_domain: cleanupDomain || undefined,
-        dry_run: false
-      })
-      const deletedCount = result.deleted ?? cleanupPreview
-      setCleanupConfirmOpen(false)
-      setShowCleanup(false)
-      setCleanupPreview(null)
-      toast.success(`Deleted ${deletedCount} finding${deletedCount !== 1 ? 's' : ''}`)
-      await fetchFindings()
-    } catch (err) {
-      console.error('Cleanup failed:', err)
-      toast.error('Failed to delete findings')
-    } finally {
-      setCleanupLoading(false)
-    }
-  }
+  useEffect(() => { setSelectedIds(new Set()) }, [findings])
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
@@ -370,7 +350,7 @@ function FindingsContent() {
             <Link href="/findings/candidates" className={buttonClasses('secondary')}>
               Investigation candidates
             </Link>
-            {featureEnabled('engine_admin') && <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+            {featureEnabled('record_deletion') && featureEnabled('engine_admin') && <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
               Advanced cleanup
             </Button>}
           </>
@@ -405,7 +385,7 @@ function FindingsContent() {
       </details>
 
       {/* Cleanup Panel */}
-      {featureEnabled('engine_admin') && showCleanup && (
+      {featureEnabled('record_deletion') && featureEnabled('engine_admin') && showCleanup && (
         <Card className="p-4 space-y-4">
           <h3 className="text-sm font-medium text-white">Cleanup Old Findings</h3>
           <div className="flex flex-wrap items-end gap-4">
@@ -462,11 +442,11 @@ function FindingsContent() {
             {cleanupPreview !== null && (
               <>
                 <span className="text-sm text-gray-400">
-                  {cleanupPreview === 0
+                  {cleanupPreview.would_delete === 0
                     ? 'No findings match'
-                    : `${cleanupPreview} finding${cleanupPreview !== 1 ? 's' : ''} will be deleted`}
+                    : `${cleanupPreview.would_delete} finding${cleanupPreview.would_delete !== 1 ? 's' : ''} will be deleted`}
                 </span>
-                {cleanupPreview > 0 && (
+                {cleanupPreview.would_delete > 0 && (
                   <button
                     onClick={() => setCleanupConfirmOpen(true)}
                     disabled={cleanupLoading}
@@ -481,16 +461,10 @@ function FindingsContent() {
         </Card>
       )}
 
-      <ConfirmDialog
-        open={cleanupConfirmOpen}
-        title="Delete old findings"
-        message={`Delete ${cleanupPreview ?? 0} finding${cleanupPreview !== 1 ? 's' : ''} permanently? This cannot be undone.`}
-        confirmLabel="Delete"
-        danger
-        busy={cleanupLoading}
-        onConfirm={handleCleanupDelete}
-        onCancel={() => setCleanupConfirmOpen(false)}
-      />
+      <RecordDeletionDialog preview={cleanupConfirmOpen ? cleanupPreview : null} subject="findings"
+        onClose={() => setCleanupConfirmOpen(false)} onDeleted={() => {
+          setShowCleanup(false); setCleanupPreview(null); void fetchFindings()
+        }} />
 
       <div className="relative">
         <Input
@@ -751,14 +725,32 @@ function FindingsContent() {
         )
       ) : (
         <Card>
+          {featureEnabled('record_deletion') && <div className="flex items-center gap-3 border-b border-gray-800 p-4">
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" aria-label="Select findings on this page"
+                checked={findings.filter(f => !f.is_candidate).length > 0 && findings.filter(f => !f.is_candidate).every(f => selectedIds.has(f.id))}
+                onChange={event => setSelectedIds(new Set(event.target.checked ? findings.filter(f => !f.is_candidate).map(f => f.id) : []))} />
+              Select this page
+            </label>
+            <DeleteRecordsButton selection={{ kind: 'findings', finding_ids: [...selectedIds] }}
+              label={`Delete selected (${selectedIds.size})`} subject="selected findings" disabled={!selectedIds.size}
+              onDeleted={() => { setSelectedIds(new Set()); void fetchFindings() }} />
+          </div>}
           <div className="divide-y divide-gray-800">
             {findings.map((finding) => {
               const sourceType = getFindingSourceType(finding)
               return (
+                <div key={finding.id} className="flex items-start">
+                  {featureEnabled('record_deletion') && !finding.is_candidate && <input type="checkbox"
+                    className="ml-4 mt-5" aria-label={`Select finding ${finding.title}`}
+                    checked={selectedIds.has(finding.id)} onChange={event => {
+                      const next = new Set(selectedIds)
+                      if (event.target.checked) next.add(finding.id); else next.delete(finding.id)
+                      setSelectedIds(next)
+                    }} />}
                 <Link
-                  key={finding.id}
                   href={buildDetailUrl(finding)}
-                  className="block p-4 hover:bg-gray-800/50 transition-colors"
+                  className="block min-w-0 flex-1 p-4 hover:bg-gray-800/50 transition-colors"
                 >
                   <div className="flex items-start gap-3">
                     <div className="flex items-center gap-3 shrink-0">
@@ -789,6 +781,7 @@ function FindingsContent() {
                     </div>
                   </div>
                 </Link>
+                </div>
               )
             })}
           </div>

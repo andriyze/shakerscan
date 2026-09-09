@@ -26,3 +26,8 @@ export function candidateHistoryText(relation?: string): string {
 export function isReviewId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 }
+
+/** A selected proposal must exist in the visible history after replacement. */
+export function reconcileReviewSelection(current: string, ids: readonly string[]): string {
+  return ids.includes(current) ? current : ids[0] || ''
+}

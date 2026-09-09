@@ -5529,6 +5529,13 @@ configure_findings_router(
 )
 app.include_router(findings_router)
 try:
+    from data_lifecycle.router import configure_data_lifecycle_router, router as data_lifecycle_router
+except ModuleNotFoundError:
+    from .data_lifecycle.router import configure_data_lifecycle_router, router as data_lifecycle_router
+configure_data_lifecycle_router(lambda: db_pool)
+app.include_router(data_lifecycle_router)
+
+try:
     from scan import sharding_policy
     from schedules import router as schedule_ops
     from schedules.router import (

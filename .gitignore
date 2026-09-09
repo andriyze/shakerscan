@@ -59,8 +59,24 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Audit evidence artifacts (screenshots, harness, matrices) — durable record is docs/AUDIT-2026-07.md
+# Operator audit evidence (historical engineering ledgers are in Git history)
 audit-results/
 
 # Test-runner XML output from scripts/run_complete_python_suite.py
 artifacts/v2-*.xml
+
+# Operator data never belongs in the public source tree.
+/exports/
+/captures/
+/quarantine/
+/operator-data/
+*.har
+*.pcap
+*.pcapng
+*.sqlite
+*.sqlite3
+*.dump
+# Deliberately reviewed synthetic fixtures may be checked in.
+!tests/fixtures/**/*.har
+!tests/fixtures/**/*.pcap
+!tests/fixtures/**/*.pcapng

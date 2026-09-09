@@ -1,0 +1,180 @@
+name: Maintenance regressions
+
+on:
+  push:
+    branches: ['2.3.1']
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'tests/test_managed_schedule*'
+      - 'tests/test_public_retry*'
+      - 'tests/test_collection*'
+      - 'tests/collection_upload_fixtures.py'
+      - 'tests/test_maintenance_acceptance_contract.py'
+      - 'tests/disposable_postgres.py'
+      - 'tests/test_target_archive_admission.py'
+      - 'tests/test_e2e_debt_summary.py'
+      - 'scripts/summarize_e2e_debt.py'
+      - 'tests/test_lifecycle_runtime_integration.py'
+      - 'tests/test_data_lifecycle_image_packaging.py'
+      - 'tests/test_install_manifest_diagnostics.py'
+      - 'tests/test_maintenance_import_layout.py'
+      - 'scanner/Dockerfile*'
+      - 'scanner/scanner_tools/build_fingerprint.py'
+      - 'scripts/generate_install_manifest.py'
+      - 'ui/**'
+      - '.github/workflows/maintenance-regressions.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: maintenance-ci-only
+          POSTGRES_DB: maintenance_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d maintenance_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Match the source-tree import roots used by the canonical Python suite.
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/api:${{ github.workspace }}/scanner
+      SHAKERSCAN_TEST_SCHEDULE_DATABASE_URL: postgresql://postgres:maintenance-ci-only@127.0.0.1:5432/maintenance_test
+      CI: 'true'
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Preserve exact source for reproducible maintenance failures
+        run: |
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-revision.txt
+          # Only tracked source, before dependencies or tests create local data.
+          # Include generators and fixtures so contract failures can be reproduced.
+          git archive --format=tar.gz HEAD > artifacts/maintenance-source.tar.gz
+          sha256sum artifacts/maintenance-source.tar.gz > artifacts/source-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-inputs-${{ github.sha }}
+          path: artifacts
+          retention-days: 3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install locked Python dependencies
+        run: python -m pip install --require-hashes -r scanner/requirements.lock
+      - name: Export current API characterization for contract review
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from api import api as api_module
+          from tests.test_api_characterization import _normalized_routes, _operations, _app_contract
+          destination = Path('artifacts/generated-api-contract')
+          destination.mkdir(parents=True, exist_ok=True)
+          for name, build in [('routes.json', _normalized_routes), ('operations.json', _operations), ('app_contract.json', _app_contract)]:
+              (destination / name).write_text(json.dumps(build(api_module.app), indent=2) + '\n', encoding='utf-8')
+          # Deliberately do not update golden fixtures: the full suite still checks drift.
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: api-characterization-${{ github.sha }}
+          path: artifacts/generated-api-contract
+          retention-days: 3
+      - name: Scheduler database and retry regression tests (no target traffic)
+        run: |
+          python -m pytest -q tests/test_managed_schedule_edits.py tests/test_managed_schedule_persistence.py tests/test_managed_schedule_runner.py tests/test_public_api_contract_generation.py tests/test_lifecycle_runtime_integration.py tests/test_data_lifecycle_image_packaging.py tests/test_install_manifest_diagnostics.py tests/test_maintenance_import_layout.py tests/test_collection_atomic_retry.py tests/test_e2e_debt_summary.py --junitxml=artifacts/maintenance-python.xml
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: UI unit tests and production build
+        working-directory: ui
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Investigation refresh browser regression (mocked API)
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run start -- --hostname 127.0.0.1 > /tmp/maintenance-ui.log 2>&1 &
+          ui_pid=$!
+          trap 'kill "$ui_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3000/hunt >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3000/hunt >/dev/null
+          npx playwright test tests/browser/hunt-review-refresh.spec.ts
+      - name: Upload maintenance test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-results-${{ github.sha }}
+          path: |
+            artifacts/maintenance-python.xml
+            ui/test-results
+            /tmp/maintenance-ui.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+  collection-upload-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: collection-ci-only
+          POSTGRES_DB: shakerscan_collection_retry_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shakerscan_collection_retry_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/api:${{ github.workspace }}/scanner
+      COLLECTION_TEST_DATABASE_URL: postgresql://postgres:collection-ci-only@127.0.0.1:5432/shakerscan_collection_retry_test
+      COLLECTION_POSTGRES_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install the locked dependency set
+        run: python -m pip install --require-hashes -r scanner/requirements.lock
+      - name: Exercise real collection route and transaction faults
+        run: |
+          mkdir -p artifacts
+          python -m pytest -q tests/test_collection_postgres_guard.py tests/test_collection_atomic_retry_postgres.py --junitxml=artifacts/collection-postgres.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse('artifacts/collection-postgres.xml').getroot().iter('testcase'))
+          assert cases and not any(case.find('skipped') is not None for case in cases), 'Required PostgreSQL acceptance did not run fully'
+          PY
+      - name: Retain collection acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: collection-postgres-${{ github.sha }}
+          path: artifacts/collection-postgres.xml
+          if-no-files-found: error
+          retention-days: 7

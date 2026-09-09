@@ -375,7 +375,13 @@ async def create_request_collection(request: RequestCollectionCreate):
         "payload_sha256": collection_digest,
         "environment_stored_separately": environment_payload is not None,
     }
-    async with _pool().acquire() as conn:
+    try:
+        from public_retry_atomic import acquire_for_atomic_retry
+    except ModuleNotFoundError:
+        from api.public_retry_atomic import acquire_for_atomic_retry
+    # A keyed upload shares the middleware transaction so its receipt and every
+    # collection/environment/binding/index change commit or roll back together.
+    async with acquire_for_atomic_retry(_pool()) as conn:
         web_target = await conn.fetchrow(
             "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
         )

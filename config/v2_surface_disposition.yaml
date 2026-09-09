@@ -73,6 +73,14 @@ surfaces:
     new_writes_allowed: true
     routes: ["/", "/health", "/metrics/*"]
 
+  - id: record-deletion
+    owner: platform
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/data-deletion/*"]
+    files: ["api/data_lifecycle/router.py"]
+
   # ------------------------------------------------------------ legacy: delete
   - id: legacy-agent-hunt
     owner: compatibility

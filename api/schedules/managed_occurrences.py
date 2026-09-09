@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
+from .target_state import lock_active_schedule_target
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS managed_schedule_occurrences (
@@ -39,7 +40,7 @@ async def fetch_dispatchable(pool, *, now):
         return list(await conn.fetch(
             """SELECT s.*, t.url AS target_url FROM schedules s
             JOIN targets t ON t.id=s.target_id
-            WHERE s.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
+            WHERE s.is_active=true AND t.is_active=true AND (s.next_run_at <= $1 OR EXISTS (
                 SELECT 1 FROM managed_schedule_occurrences o
                 WHERE o.schedule_id=s.id AND o.state='pending'
             ))""",
@@ -61,6 +62,9 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
     if now.tzinfo is None:
         raise ValueError("An aware UTC-compatible timestamp is required")
     async with pool.acquire() as conn, conn.transaction():
+        target = await lock_active_schedule_target(conn, schedule_id)
+        if target is None:
+            return None
         schedule = await conn.fetchrow(
             "SELECT * FROM schedules WHERE id=$1 FOR UPDATE",
             schedule_id,
@@ -80,13 +84,8 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
             if not schedule["next_run_at"] or schedule["next_run_at"] > now:
                 return None
             if callable(validated_payload):
-                target_url = await conn.fetchval(
-                    "SELECT url FROM targets WHERE id=$1 FOR SHARE", schedule["target_id"]
-                )
-                if target_url is None:
-                    raise ValueError("Scheduled target no longer exists")
                 current = dict(schedule)
-                current["target_url"] = target_url
+                current["target_url"] = target['url']
                 payload = validated_payload(current)
             else:
                 payload = validated_payload
@@ -109,13 +108,16 @@ async def claim(pool, schedule_id, gateway_origin, validated_payload, *, now):
         )
         result = dict(row)
         result["new_occurrence"] = created
+        # Cadence must come from the same locked row as the claim, not the
+        # earlier dispatchable-list snapshot. Never persist this mutable view.
+        result["schedule"] = dict(schedule)
         if isinstance(result["payload"], str):
             result["payload"] = json.loads(result["payload"])
         return result
 
 
 async def settle(
-    pool, occurrence_id, lease_id, *, state, next_run_at=None, scan_id=None
+    pool, occurrence_id, lease_id, *, state, next_run_at=None, scan_id=None,
 ):
     """Commit receipt and cadence together; uncertain outcomes remain pending.
 
@@ -143,7 +145,8 @@ async def settle(
         row = await conn.fetchrow(
             """UPDATE managed_schedule_occurrences
             SET state=$1,scan_id=$2,lease_id=NULL,lease_until=NULL
-            WHERE id=$3 AND lease_id=$4 AND state='pending' RETURNING schedule_id""",
+            WHERE id=$3 AND lease_id=$4 AND state='pending'
+            RETURNING schedule_id,due_at""",
             "pending" if state == "retry" else state,
             identifier,
             UUID(str(occurrence_id)),
@@ -152,12 +155,19 @@ async def settle(
         if not row:
             return False
         if state != "retry":
+            # Timing edits replace next_run_at; a rename changes only updated_at.
+            # Fence on the occurrence due time so unrelated edits cannot cause
+            # the same cadence slot to be admitted again on the next tick.
             await conn.execute(
-                """UPDATE schedules SET next_run_at=$1,updated_at=NOW(),
+                """UPDATE schedules SET next_run_at=CASE
+                    WHEN is_active=true AND next_run_at IS NOT DISTINCT FROM $4
+                    THEN $1 ELSE next_run_at END,
+                updated_at=NOW(),
                 last_run_at=CASE WHEN $3 THEN NOW() ELSE last_run_at END
                 WHERE id=$2""",
                 next_run_at,
                 row["schedule_id"],
                 state == "accepted",
+                row["due_at"],
             )
         return True
