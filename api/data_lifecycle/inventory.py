@@ -26,6 +26,7 @@ RETAINED = [
     'External evidence files and their storage index are retained, not erased.',
     'Exports, backups, detached audit records, and other targets are retained.',
     'Later scans or discovery may create a new target or finding record.',
+    'Original links of retained and detached rows are recorded in this deletion receipt.',
 ]
 
 
@@ -104,21 +105,35 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
                   for table, clauses in group.items()} for group in (deleted, detached, retained, restricted))
 
 
-def hold_predicate(alias='r') -> str:
+def hold_predicate(alias='r', *, preserving=False) -> str:
     j = f'to_jsonb({alias})'
-    checks = [f"COALESCE({j}->>'retention_class', {j}->>'retention_policy', '') IN ('legal_hold','audit','sensitive')"]
+    # Sensitive is a content classification, not itself a legal hold. It still
+    # blocks erasure, but not preservation with an exact ownership snapshot.
+    # Audit/legal holds block both erasure and detachment of original links.
+    classes = "'legal_hold','audit'" if preserving else "'legal_hold','audit','sensitive'"
+    checks = [f"COALESCE({j}->>'{field}', '') IN ({classes})"
+              for field in ('retention_class', 'retention_policy')]
     for key in ('legal_hold', 'operational_hold'):
         for obj in (j, f"{j}->'metadata_json'", f"{j}->'metadata'"):
             checks.append(f"lower(COALESCE(({obj})->>'{key}', 'false')) IN ('true','1','yes')")
     return '(' + ' OR '.join(checks) + ')'
 
 
-async def summarize(conn, table, clause, roots):
+async def summarize(conn, table, clause, roots, *, preserving=False):
+    # UUID/reference columns only: no request/response content or credentials.
+    # Preserve these exact original links in the preview hash and durable result
+    # before ON DELETE SET NULL or an explicit evidence detachment changes them.
+    fields = ('id', 'target_id', 'device_target_id', 'ai_target_id', 'scan_id',
+              'finding_id', 'hunt_run_id', 'parent_target_id')
+    links = 'jsonb_strip_nulls(jsonb_build_object(' + ','.join(
+        f"'{field}',to_jsonb(r)->'{field}'" for field in fields) + '))'
+    ownership = ", COALESCE(jsonb_agg(links ORDER BY links::text), '[]'::jsonb) AS ownership" if preserving else ''
     return dict(await conn.fetchrow(f"""
         SELECT COUNT(*)::int AS count,
                md5(COALESCE(string_agg(row_hash, '' ORDER BY row_hash), '')) AS state,
-               COALESCE(bool_or(held), false) AS held
-        FROM (SELECT md5(to_jsonb(r)::text) AS row_hash, {hold_predicate()} AS held
+               COALESCE(bool_or(held), false) AS held {ownership}
+        FROM (SELECT md5(to_jsonb(r)::text) AS row_hash,
+                     {hold_predicate(preserving=preserving)} AS held, {links} AS links
               FROM public.{ident(table)} r WHERE {clause} LIMIT {MAX_RECORDS + 1}) bounded
     """, roots))
 
@@ -201,13 +216,16 @@ async def inventory(conn, selection, roots, columns, edges):
     for name, predicates in zip(('delete', 'detach', 'retain', 'restrict'), plan):
         group = {}
         for table, clause in sorted(predicates.items()):
-            summary = await summarize(conn, table, clause, roots)
+            summary = await summarize(conn, table, clause, roots, preserving=name in {'retain', 'detach'})
+            if 'ownership' in summary:
+                summary['ownership'] = decoded(summary['ownership'])
             if summary['count']:
                 group[table] = summary
                 if summary['count'] > MAX_RECORDS:
                     issues.append(f'{table}: deletion preview exceeds the {MAX_RECORDS}-record interactive limit')
                 if summary['held']:
-                    issues.append(f'{table}: legal hold or protected evidence blocks deletion')
+                    issues.append(f'{table}: legal hold or protected evidence blocks deletion; '
+                                  'archive the target to keep its records and original ownership intact')
                 # Do not delete a row belonging to a different owner through an indirect cascade.
                 if name == 'delete' and 'target_id' in columns[table] and owners['target_id']:
                     foreign = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE ({clause}) AND target_id IS NOT NULL AND NOT target_id=ANY($2::uuid[])', roots, [UUID(v) for v in owners['target_id']])
@@ -223,7 +241,7 @@ async def inventory(conn, selection, roots, columns, edges):
     # Evidence with a plain scan_id has no target FK. Protect it even though scans survive.
     if owners['target_id'] and 'evidence_objects' in columns:
         held = await conn.fetchval(f"""SELECT COUNT(*) FROM evidence_objects r JOIN scans s ON s.id=r.scan_id
-             WHERE s.target_id=ANY($1::uuid[]) AND ({hold_predicate()} OR r.retention_delete_pending_at IS NOT NULL)""", [UUID(v) for v in owners['target_id']])
+             WHERE s.target_id=ANY($1::uuid[]) AND ({hold_predicate(preserving=True)} OR r.retention_delete_pending_at IS NOT NULL)""", [UUID(v) for v in owners['target_id']])
         if held:
             issues.append('Scan evidence is protected or has pending retention deletion')
     if plan[1].get('evidence_objects'):

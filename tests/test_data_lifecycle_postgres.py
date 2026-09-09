@@ -172,3 +172,56 @@ def test_age_execution_uses_frozen_ids_not_new_age_matches():
         assert result['deleted_ids']==[str(f)]
         async with pool.acquire() as c: assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1',newer)==1
     run(scenario)
+
+
+def test_retained_sensitive_scan_archive_keeps_original_ownership_in_receipt():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        transaction = uuid4()
+        async with pool.acquire() as c:
+            await c.execute("""INSERT INTO http_transactions(id,plane,scan_id,target_id,method,url)
+                VALUES($1,'scan',$2,$3,'GET','https://example.invalid/synthetic')""", transaction, scan, t)
+            await c.execute("UPDATE evidence_objects SET retention_class='sensitive' WHERE id=$1", evidence)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        links = preview['records']['retain']['http_transactions']['ownership']
+        assert {'id': str(transaction), 'scan_id': str(scan), 'target_id': str(t)} in links
+        receipt = await approve(pool, preview)
+        await service.execute(pool, preview['preview_id'], receipt)
+        async with pool.acquire() as c:
+            row = await c.fetchrow('SELECT target_id,scan_id,retention_class FROM http_transactions WHERE id=$1', transaction)
+            assert row['target_id'] is None and row['scan_id'] == scan and row['retention_class'] == 'sensitive'
+            payload = decoded(await c.fetchval('SELECT result_json FROM command_results WHERE id=$1', UUID(preview['preview_id'])))
+            assert payload['manifest']['records']['retain']['http_transactions']['ownership'] == links
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', evidence) == 1
+    run(scenario)
+
+
+def test_cascading_sensitive_hunt_archive_still_requires_archive_instead_of_erasure():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            hunt = await c.fetchval("INSERT INTO hunt_runs(target_kind,target_id,status) VALUES('web',$1,'completed') RETURNING id", t)
+            await c.execute("""INSERT INTO http_transactions(plane,hunt_run_id,target_id,method,url)
+                VALUES('hunt',$1,$2,'GET','https://example.invalid/synthetic')""", hunt, t)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('http_transactions' in item and 'archive' in item for item in preview['blockers'])
+        with pytest.raises(HTTPException):
+            await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 1
+    run(scenario)
+
+
+@pytest.mark.parametrize('hold', ['legal_hold', 'audit', 'explicit'])
+def test_retained_http_history_still_honors_actual_holds(hold):
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            await c.execute("""INSERT INTO http_transactions(plane,scan_id,target_id,method,url,retention_class,metadata_json)
+                VALUES('scan',$1,$2,'GET','https://example.invalid/synthetic',$3,$4::jsonb)""",
+                scan, t, 'sensitive' if hold == 'explicit' else hold,
+                json.dumps({'legal_hold': True} if hold == 'explicit' else {}))
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('http_transactions' in item for item in preview['blockers'])
+    run(scenario)

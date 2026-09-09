@@ -128,3 +128,15 @@ def test_legacy_route_cannot_consume_another_entity_preview():
 def test_execute_request_requires_hash_and_approval():
     with pytest.raises(ValidationError):
         DeletionExecution(preview_id=uuid4(), preview_hash='not-a-digest')
+
+
+def test_preserving_sensitive_is_not_permission_to_erase_or_detach_holds():
+    from api.data_lifecycle.inventory import hold_predicate
+    destructive = hold_predicate()
+    preserving = hold_predicate(preserving=True)
+    assert "'sensitive'" in destructive and "'sensitive'" not in preserving
+    for predicate in (destructive, preserving):
+        assert "'legal_hold'" in predicate and "'audit'" in predicate
+        assert "'operational_hold'" in predicate
+        assert "->'metadata_json'" in predicate
+        assert "->>'retention_policy'" in predicate
