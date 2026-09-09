@@ -3,9 +3,7 @@ name: 2.3.1 maintenance validation
 on:
   push:
     branches: ['2.3.1']
-    paths:
-      - .github/workflows/maintenance-2.3.1.yml
-      - scripts/_maintenance_2_3_1.py
+    paths: ['scripts/_maintenance_2_3_1.py', '.github/workflows/maintenance-2.3.1.yml']
 
 permissions:
   contents: write
@@ -15,28 +13,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  maintenance:
+  acceptance:
     if: github.ref == 'refs/heads/2.3.1'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16
         env:
-          POSTGRES_PASSWORD: disposable-test-only
-        ports:
-          - 5432:5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: lifecycle-ci-only
+          POSTGRES_DB: shakerscan_lifecycle_test
+        ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U postgres'
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     env:
-      RECORD_DELETION_TEST_DATABASE_URL: postgresql://postgres:disposable-test-only@127.0.0.1:5432/postgres
-      PYTHONPATH: .:api:scanner
-      NEXT_TELEMETRY_DISABLED: '1'
+      LIFECYCLE_TEST_DATABASE_URL: postgresql://postgres:lifecycle-ci-only@127.0.0.1:5432/shakerscan_lifecycle_test
+      CI: 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Apply source-pinned maintenance patch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/_maintenance_2_3_1.py
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -44,35 +46,67 @@ jobs:
           cache-dependency-path: scanner/requirements.lock
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
-          node-version: '24'
+          node-version: 24
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - name: Apply and validate reviewed maintenance patch
+      - name: Install locked dependencies
         run: |
-          if [ -f scripts/_maintenance_2_3_1.py ]; then
-            python3 scripts/_maintenance_2_3_1.py
-          fi
-      - name: Collect validation reports and reviewed changes
-        if: always()
+          python -m pip install --require-hashes -r scanner/requirements.lock
+          npm ci --prefix ui
+      - name: Generate and commit only reviewed source changes
         run: |
-          mkdir -p "$RUNNER_TEMP/maintenance-validation"
-          git diff --stat > "$RUNNER_TEMP/maintenance-validation/change-stat.txt"
-          if [ -d artifacts ]; then cp artifacts/*.xml "$RUNNER_TEMP/maintenance-validation/" 2>/dev/null || true; fi
-          if [ -f ui/test-results/browser-results.json ]; then cp ui/test-results/browser-results.json "$RUNNER_TEMP/maintenance-validation/"; fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          python scripts/generate_capability_inventory.py
+          python scripts/generate_public_api_contract.py
+          python - <<'PYCOMMIT'
+          import json, subprocess
+          allowed = json.load(open('/tmp/shakerscan-reviewed-paths.json'))
+          changed = subprocess.check_output(['git','diff','--name-only','-z']).decode().strip('\0').split('\0')
+          untracked = subprocess.check_output(['git','ls-files','--others','--exclude-standard','-z']).decode().strip('\0').split('\0')
+          assert set(changed + untracked) - {''} <= set(allowed), 'Unexpected source changes; refusing publication'
+          subprocess.run(['git','add','-A','--',*sorted(set(changed + untracked) - {''})], check=True)
+          subprocess.run(['git','config','user.name','ShakerScan maintenance'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          subprocess.run(['git','commit','-m','feat(lifecycle): add approved target and finding deletion and clean public sources'],check=True)
+          subprocess.run(['git','push','origin','HEAD:refs/heads/2.3.1'],check=True)
+          PYCOMMIT
+      - name: Verify publication and API contracts
+        run: |
+          python scripts/check_public_repo_hygiene.py
+          python scripts/generate_capability_inventory.py --check
+          python scripts/generate_public_api_contract.py --check
+          python scripts/check_documentation_policy.py
+          python scripts/check_module_size.py
+          python scripts/check_surface_dispositions.py
+      - name: Real database lifecycle and regression tests
+        run: |
+          python -m pytest -q tests/test_data_lifecycle.py tests/test_data_lifecycle_postgres.py \
+            tests/test_public_repo_hygiene.py tests/test_data_exposure.py \
+            tests/test_documentation_policy.py tests/test_v2_documentation_contract.py \
+            tests/test_public_api_contract_generation.py tests/test_retest_contract_migrations.py \
+            tests/test_finding_identity_collapse.py tests/test_target_origin_identity.py
+      - name: UI unit tests and production build
+        working-directory: ui
+        run: |
+          npm test
+          npm run build
+      - name: Desktop and mobile deletion interactions (mocked API, no scan traffic)
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium
+          npm run start -- --hostname 127.0.0.1 > /tmp/lifecycle-ui.log 2>&1 &
+          trap 'kill $(jobs -pr) 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3000/targets >/dev/null; then break; fi
+            sleep 2
+          done
+          npx playwright test tests/browser/data-lifecycle.spec.ts
+      - name: Upload browser acceptance evidence
         if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: maintenance-validation-${{ github.sha }}
-          path: ${{ runner.temp }}/maintenance-validation/
-          retention-days: 1
-          if-no-files-found: warn
-      - name: Commit validated changes to the maintenance branch
-        run: |
-          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
-            exit 0
-          fi
-          git config user.name 'ShakerScan maintenance'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'feat(lifecycle): add reviewed target/finding deletion and clean public repository'
-          git push origin HEAD:refs/heads/2.3.1
+          name: lifecycle-browser-${{ github.sha }}
+          path: |
+            ui/test-results
+            /tmp/lifecycle-ui.log
+          retention-days: 3
+          if-no-files-found: ignore
