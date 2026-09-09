@@ -12,7 +12,9 @@ well-known sensitive locations, never a benchmark answer key.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import posixpath
 import re
+import urllib.parse
 from typing import Mapping
 
 
@@ -176,21 +178,56 @@ def classify_exposure(
 
 
 def classify_confidential_file(
-    *, status: int, headers: Mapping[str, str], body: bytes,
+    *, path: str, status: int, headers: Mapping[str, str], body: bytes,
 ) -> ExposureSignature | None:
     """Classify a file reached by following a discovered directory listing.
 
     The listing itself proved the directory is browsable; any non-empty,
-    non-HTML file served from it is confidential content disclosure.
+    non-HTML file served from it is confidential content disclosure — except a
+    file the web publishes on purpose (see ``_is_well_known_public_path``),
+    which is public by design. Secret material inside such a file is still a
+    finding because the secret-class checks run first.
     """
     if status != 200 or not body:
         return None
-    secret = classify_exposure(path="", status=status, headers=headers, body=body)
+    secret = classify_exposure(path=path, status=status, headers=headers, body=body)
     if secret is not None:
         return secret
     if any(marker in _content_type(headers) for marker in _HTML_TYPES):
         return None
+    if _is_well_known_public_path(path):
+        return None
     return _sig("confidential_file", "listed_file_disclosure")
+
+
+# RFC 8615 reserves ``/.well-known/`` for resources a server intends to expose
+# publicly (``security.txt`` is RFC 9116), and the site-root files below are the
+# conventional public metadata a crawler is meant to fetch. Reaching one through
+# a directory listing is not confidential disclosure; it is the file doing its
+# job. This is a standards rule about the location, not per-target knowledge.
+_WELL_KNOWN_PUBLIC_FILES: frozenset[str] = frozenset({
+    "/robots.txt",
+    "/sitemap.xml",
+    "/security.txt",
+    "/humans.txt",
+    "/ads.txt",
+    "/app-ads.txt",
+    "/favicon.ico",
+    "/browserconfig.xml",
+})
+
+
+def _is_well_known_public_path(path: str) -> bool:
+    """Whether ``path`` (a URL or path) is an intentionally public web location.
+
+    The path is normalized first so a traversal link such as
+    ``/.well-known/../backup.sql`` (which resolves to ``/backup.sql``) cannot
+    borrow the public prefix to suppress a real confidential-file finding.
+    """
+    resolved = urllib.parse.urlsplit(path).path if "://" in path else path
+    resolved = resolved.split("?", 1)[0].split("#", 1)[0]
+    resolved = posixpath.normpath(resolved).lower()
+    return resolved.startswith("/.well-known/") or resolved in _WELL_KNOWN_PUBLIC_FILES
 
 
 def directory_listing_links(body: bytes, *, limit: int = 20) -> tuple[str, ...]:

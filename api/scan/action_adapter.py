@@ -2043,7 +2043,7 @@ class DatabaseNeutralScanActionDispatcher:
                         ordinal += 1
                         child = await probe(child_url, ordinal)
                         child_signature = classify_confidential_file(
-                            status=child.status_code or 0,
+                            path=child_url, status=child.status_code or 0,
                             headers=child.response_headers, body=child.response_body,
                         )
                         if child_signature is not None:

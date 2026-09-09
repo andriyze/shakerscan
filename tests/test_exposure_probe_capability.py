@@ -85,15 +85,46 @@ def test_directory_listing_follows_only_bounded_relative_files():
     assert directory_listing_links(listing) == ("acquisitions.md",)
 
     confidential = classify_confidential_file(
-        status=200, headers={"Content-Type": "text/markdown"},
+        path="/ftp/acquisitions.md", status=200, headers={"Content-Type": "text/markdown"},
         body=b"# Internal acquisitions\nConfidential deal terms.",
     )
     assert confidential is not None
     assert confidential.exposure_class == "confidential_file"
     # An HTML page reached from a listing is the app, not a confidential file.
     assert classify_confidential_file(
-        status=200, headers={"Content-Type": "text/html"}, body=b"<html>page</html>",
+        path="/ftp/page.html", status=200,
+        headers={"Content-Type": "text/html"}, body=b"<html>page</html>",
     ) is None
+
+
+def test_intentionally_public_well_known_files_are_not_confidential():
+    from api.capabilities.exposure_probe import classify_confidential_file
+
+    body = b"Contact: mailto:security@example.test\nExpires: 2027-01-01T00:00:00Z\n"
+    # RFC 9116 security.txt (and the rest of the RFC 8615 /.well-known/ registry)
+    # is published on purpose; reaching it via a listing is not disclosure.
+    for path in (
+        "/.well-known/security.txt",
+        "http://host.docker.internal:3001/.well-known/security.txt",
+        "/robots.txt",
+        "/sitemap.xml",
+    ):
+        assert classify_confidential_file(
+            path=path, status=200,
+            headers={"Content-Type": "text/plain"}, body=body,
+        ) is None, path
+    # A genuinely non-public file at the same depth is still confidential.
+    assert classify_confidential_file(
+        path="/.well-known/../backup.sql", status=200,
+        headers={"Content-Type": "text/plain"}, body=b"INSERT INTO users VALUES (1);",
+    ) is not None
+    # Secret material inside a well-known file is still reported (secret check runs first).
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n"
+    leaked = classify_confidential_file(
+        path="/.well-known/security.txt", status=200,
+        headers={"Content-Type": "text/plain"}, body=key,
+    )
+    assert leaked is not None and leaked.exposure_class == "private_key_material"
 
 
 def test_secret_material_excerpt_withholds_content():
