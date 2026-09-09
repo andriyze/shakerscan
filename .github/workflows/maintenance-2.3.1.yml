@@ -1,0 +1,78 @@
+name: 2.3.1 maintenance validation
+
+on:
+  push:
+    branches: ['2.3.1']
+    paths:
+      - .github/workflows/maintenance-2.3.1.yml
+      - scripts/_maintenance_2_3_1.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: maintenance-2.3.1
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    if: github.ref == 'refs/heads/2.3.1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Inspect maintenance boundaries
+        run: |
+          python3 - <<'PY'
+          import ast, pathlib, subprocess
+          files = subprocess.check_output(['git', 'ls-files'], text=True).splitlines()
+          print('=== Repository maintenance inventory ===')
+          for name in files:
+              p = pathlib.Path(name)
+              if (name.startswith(('docs/', 'benchmarks/', 'security/', 'config/', 'deploy/'))
+                  or any(x in name.lower() for x in ('result', 'report', 'retention', 'lifecycle', 'delete', 'cleanup', 'target_dedupe'))
+                  or name.startswith(('db/', '.github/workflows/'))
+                  or name in ('.gitignore', '.dockerignore', 'ui/package.json', 'api/requirements.txt', 'tests/conftest.py')):
+                  print(f'{p.stat().st_size:>9} {name}')
+          for name, symbols in {
+              'api/targets/router.py': ['delete_target', 'get_target', 'update_target'],
+              'api/finding_routes/router.py': ['delete_finding', 'cleanup_findings'],
+          }.items():
+              source = pathlib.Path(name).read_text()
+              lines = source.splitlines()
+              for node in ast.walk(ast.parse(source)):
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in symbols:
+                      start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                      print(f'=== {name}:{start}-{node.end_lineno} ===')
+                      print('\n'.join(f'{i+1}: {lines[i]}' for i in range(start-1, node.end_lineno)))
+          for name in files:
+              if name.startswith('ui/src/') and any(x in name for x in ('/targets/', '/findings/', '/components/layout', '/Sidebar', '/sidebar')):
+                  print('UI', name)
+          for name in ('api/api.py', 'api/targets/router.py', 'ui/src/lib/api.ts', 'ui/src/app/targets/page.tsx', 'ui/src/app/findings/page.tsx'):
+              p = pathlib.Path(name)
+              if not p.exists():
+                  continue
+              lines = p.read_text().splitlines()
+              for i, line in enumerate(lines):
+                  if any(x in line for x in ('configure_targets_router', 'include_router(', 'deleteTarget', 'deleteFinding', 'Delete', 'delete', 'confirm(', 'TargetDetail')):
+                      if name.endswith('api.py') and 'include_router' not in line and 'configure_targets_router' not in line:
+                          continue
+                      lo, hi = max(0, i-3), min(len(lines), i+6)
+                      print(f'=== {name}:{lo+1}-{hi} ===')
+                      print('\n'.join(f'{j+1}: {lines[j]}' for j in range(lo, hi)))
+          PY
+      - name: Apply and validate reviewed maintenance patch
+        run: |
+          if [ -f scripts/_maintenance_2_3_1.py ]; then
+            python3 scripts/_maintenance_2_3_1.py
+          fi
+      - name: Commit validated changes to the maintenance branch
+        run: |
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            exit 0
+          fi
+          git config user.name 'ShakerScan maintenance'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat(lifecycle): implement reviewed 2.3.1 repository cleanup and deletion'
+          git push origin HEAD:refs/heads/2.3.1
