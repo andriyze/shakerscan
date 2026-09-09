@@ -18,6 +18,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from tests.disposable_postgres import require_disposable_database
+from tests.collection_upload_fixtures import collection_upload_fixture
 
 DSN = os.environ.get('COLLECTION_TEST_DATABASE_URL')
 REQUIRED = os.environ.get('COLLECTION_POSTGRES_REQUIRED') == '1'
@@ -67,15 +68,12 @@ def exercise(monkeypatch, scenario):
                 patch.setattr(secrets, '_loaded', False)
                 patch.setattr(secrets, '_fernet', None)
                 target, key = uuid4(), 'collection-test:' + uuid4().hex
+                origin, payload = collection_upload_fixture(target)
                 async with pool.acquire() as c:
                     await c.execute('INSERT INTO targets(id,url,root_domain) VALUES($1,$2,$3)', target,
-                                    'https://collection.example.invalid', target.hex + '.invalid')
-                payload = {'target_id':str(target), 'name':'Synthetic ' + target.hex,
-                    'document':{'info':{'name':'Synthetic upload','schema':'v2.1'},
-                        'item':[{'name':'metadata only','request':{'method':'GET','url':'https://collection.example.invalid/items'}}]},
-                    'environment':{'name':'synthetic environment','values':[{'key':'token','value':'fixture-not-a-real-secret','enabled':True}]}}
+                                    origin, target.hex + '.collection.example.invalid')
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api_module.app), base_url='http://testserver') as client:
-                    await scenario(pool, api_module.app, atomic, patch, client, target, key, payload)
+                    await asyncio.wait_for(scenario(pool, api_module.app, atomic, patch, client, target, key, payload), 30)
     asyncio.run(run())
 
 
@@ -91,6 +89,8 @@ def test_real_upload_replays_all_rows_and_keeps_secrets_encrypted(monkeypatch):
         assert 'fixture-not-a-real-secret' not in first.text
         async with pool.acquire() as c:
             assert (await c.fetchval('SELECT encrypted_payload FROM request_collections WHERE target_id=$1',target)).startswith('enc:fernet:')
+            stored_environment = await c.fetchval('SELECT e.encrypted_payload FROM request_collection_environments e JOIN request_collections c ON c.id=e.collection_id WHERE c.target_id=$1', target)
+            assert stored_environment.startswith('enc:fernet:') and 'fixture-not-a-real-secret' not in stored_environment
         different = await client.post('/request-collections', json={**payload, 'name':'different'}, headers=headers)
         assert different.status_code == 409
     exercise(monkeypatch, scenario)
@@ -113,14 +113,18 @@ def test_real_transaction_rolls_back_rows_and_receipt_before_commit(monkeypatch,
                 await release.wait()
         patch.setattr(atomic, 'acquire_for_atomic_retry', after_effect)
         task = asyncio.create_task(client.post('/request-collections', json=payload, headers={'Idempotency-Key':key}))
-        await asyncio.wait_for(entered.wait(), 10)
-        if fault == 'cancel': task.cancel()
-        if fault == 'reject':
-            result = await asyncio.wait_for(task, 10)
-            assert result.status_code == 422
-        else:
-            with pytest.raises((asyncio.CancelledError, Exception)):
-                await asyncio.wait_for(task, 10)
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            if fault == 'cancel': task.cancel()
+            if fault == 'reject':
+                result = await asyncio.wait_for(task, 10)
+                assert result.status_code == 422
+            else:
+                with pytest.raises((asyncio.CancelledError, Exception)):
+                    await asyncio.wait_for(task, 10)
+        finally:
+            if not task.done(): task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         assert await counts(pool, target, key) == [0,0,0,0,0]
         patch.setattr(atomic, 'acquire_for_atomic_retry', original)
         result = await client.post('/request-collections', json=payload, headers={'Idempotency-Key':key})
@@ -143,12 +147,15 @@ def test_real_advisory_lock_serializes_concurrent_identical_uploads(monkeypatch)
         first = asyncio.create_task(client.post('/request-collections', json=payload, headers={'Idempotency-Key':key}))
         try:
             await asyncio.wait_for(entered.wait(), 10)
-            duplicate = await client.post('/request-collections', json=payload, headers={'Idempotency-Key':key})
+            duplicate = await asyncio.wait_for(client.post('/request-collections', json=payload, headers={'Idempotency-Key':key}), 5)
             assert duplicate.status_code == 409
             assert await counts(pool, target, key) == [0,0,0,0,0]
         finally:
             release.set()
-        assert (await asyncio.wait_for(first, 10)).status_code == 200
+            # Also release/await the first request when a duplicate assertion fails,
+            # otherwise a borrowed connection can hang pool teardown.
+            result = await asyncio.wait_for(first, 10)
+        assert result.status_code == 200
         assert await counts(pool, target, key) == [1,1,1,1,1]
     exercise(monkeypatch, scenario)
 

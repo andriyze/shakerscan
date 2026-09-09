@@ -9,14 +9,18 @@ import json
 import os
 from pathlib import Path
 import sys
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import pytest
+from tests.disposable_postgres import require_disposable_database
 
 DSN = os.environ.get('LIFECYCLE_TEST_DATABASE_URL')
-pytestmark = pytest.mark.skipif(not DSN, reason='Requires an explicit disposable local lifecycle test database')
-asyncpg = pytest.importorskip('asyncpg')
+REQUIRED = os.environ.get('LIFECYCLE_POSTGRES_REQUIRED') == '1'
+pytestmark = pytest.mark.skipif(not DSN and not REQUIRED, reason='Requires an explicit disposable local lifecycle test database')
+if REQUIRED:
+    import asyncpg
+else:
+    asyncpg = pytest.importorskip('asyncpg')
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'api'), str(ROOT / 'scanner')]
 from api.data_lifecycle import service
@@ -26,11 +30,7 @@ from fastapi import HTTPException
 
 @pytest.fixture(scope='module', autouse=True)
 def schema():
-    if not DSN:
-        pytest.skip('No disposable lifecycle database configured')
-    address = urlsplit(DSN)
-    assert address.hostname in {'localhost', '127.0.0.1', '::1'}
-    assert address.path == '/shakerscan_lifecycle_test', 'Refusing to reset a non-test database'
+    require_disposable_database(DSN or '', 'shakerscan_lifecycle_test')
 
     async def initialize():
         from retest_contract import run_schema_migrations
@@ -278,4 +278,39 @@ def test_completed_deletion_replay_ignores_unrelated_writer_contention():
             await writer.execute("UPDATE scans SET current_phase='synthetic unrelated writer' WHERE id=$1", scan)
             result = await asyncio.wait_for(service.execute(pool, preview['preview_id'], approval), timeout=1.0)
             assert result['idempotent_replay']
+    run(scenario)
+
+
+def test_archived_managed_occurrence_only_reconciles_existing_receipt():
+    from datetime import timezone
+    from api.targets.archive import archive
+    from api.schedules import managed_occurrences, managed_recovery
+    from api.schedules.managed_dispatch import DispatchOutcome
+    async def scenario(pool):
+        target, sibling, scan, finding, other, evidence = await seeded(pool)
+        schedule, now = uuid4(), datetime.now(timezone.utc)
+        origin = 'https://gateway.invalid'
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO schedules(id,target_id,name,frequency,next_run_at) VALUES($1,$2,'Synthetic managed schedule','daily',$3)", schedule, target, now)
+        await managed_occurrences.initialize(pool)
+        occurrence = await managed_occurrences.claim(pool, schedule, origin, {}, now=now)
+        assert occurrence is not None
+        await managed_occurrences.settle(pool, occurrence['id'], occurrence['lease_id'], state='retry')
+        await archive(pool, target)
+        lookups = []
+        class Dispatcher:
+            async def lookup(self, schedule_id, occurrence_id):
+                lookups.append((schedule_id, occurrence_id))
+                return DispatchOutcome('accepted', 'receipt_recorded', str(scan))
+            async def dispatch(self, *args):
+                raise AssertionError('Archive must not dispatch new work')
+        dispatcher = Dispatcher()
+        dispatcher.origin = origin
+        await managed_recovery.reconcile(pool, dispatcher, now)
+        assert lookups == [(str(schedule), str(occurrence['id']))]
+        async with pool.acquire() as conn:
+            receipt = await conn.fetchrow('SELECT state,scan_id FROM managed_schedule_occurrences WHERE id=$1', occurrence['id'])
+            assert receipt['state'] == 'accepted' and receipt['scan_id'] == scan
+            row = await conn.fetchrow('SELECT is_active,next_run_at FROM schedules WHERE id=$1', schedule)
+            assert not row['is_active'] and row['next_run_at'] is None
     run(scenario)

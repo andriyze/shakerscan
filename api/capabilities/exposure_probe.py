@@ -1,9 +1,10 @@
-"""Deterministic sensitive-exposure detection over exact target-bound responses.
+"""Content classification and narrow exposure proof over target-bound responses.
 
-This module is pure: it names universal exposure classes (secret material,
+This module is pure: it names observed content classes (secret material,
 version-control and environment files, metrics/actuator endpoints, directory
 listings, verbose errors, exposed API specs) and matches them by response
-signature only. It hardcodes no application-specific path or content so the
+signature only. Endpoint identity and reachability are observations, not proof
+that their content is confidential. It hardcodes no application-specific content so the
 same contract works on any target. The bounded batch executor that drives it
 lives in ``scan/action_adapter.py``; the curated seed here is a wordlist of
 well-known sensitive locations, never a benchmark answer key.
@@ -18,8 +19,8 @@ from typing import Mapping
 
 EXPOSURE_PROBE_PARSER_VERSION = "exposure-probe/v2"
 
-# Universal well-known sensitive locations. These are common across frameworks
-# and hosting stacks; discovering a real one is a finding regardless of app.
+# Common discovery locations across frameworks and hosting stacks. Location
+# alone never establishes sensitivity, confidentiality, or a verified finding.
 SENSITIVE_SEED_PATHS: tuple[str, ...] = (
     "/.env",
     "/.git/config",
@@ -117,7 +118,7 @@ _HREF_RE = re.compile(r'(?i)href\s*=\s*["\']([^"\'#?]+)["\']')
 
 @dataclass(frozen=True)
 class ExposureSignature:
-    """One deterministic sensitive-exposure classification."""
+    """One content classification; only an explicit subset proves sensitivity."""
 
     exposure_class: str
     severity: str

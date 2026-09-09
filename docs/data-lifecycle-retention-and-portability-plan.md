@@ -1,6 +1,6 @@
 # Data lifecycle, retention, and portability
 
-**Status:** current implemented safety contract plus remaining roadmap; reconciled 2026-08-29.
+**Status:** current implemented safety contract plus remaining roadmap; reconciled 2026-09-09.
 
 The original design plan grew into a point-in-time implementation ledger. It is preserved at
 [`archive/data-lifecycle-retention-and-portability-plan.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/data-lifecycle-retention-and-portability-plan.md).
@@ -52,8 +52,11 @@ shipped. Backup/restore operations remain documented in `upgrade-and-rollback.md
 ## 2.3.1: target and finding record deletion
 
 Target record deletion is now different from target archive. `POST /targets/{id}/archive`
-hides the asset and disables its automatic ASM; it does not cancel existing work or remove
-records. `DELETE /targets/{id}` is a permanent database-record operation requiring the preview
+hides the asset, disables automatic ASM, and pauses its recurring schedules in one transaction.
+Both scheduler claim paths recheck target activity. Archive does not cancel already admitted
+work or remove records. The target deletion dialog offers **Archive target instead** with its
+own confirmation, including when erasure is blocked by protected history.
+`DELETE /targets/{id}` is a permanent database-record operation requiring the preview
 and approval below. The Targets page exposes a delete control on each actual target, including
 subdomains. It never interprets a root-domain group as recursive ownership of every subdomain.
 
@@ -86,6 +89,10 @@ protected evidence, active work, and unresolved restrictive dependencies return 
 The complete inventory is revalidated under transaction-scoped writer locks; count updates,
 record removal, evidence-index detachment, and the durable result commit atomically. There is
 no external storage I/O in that transaction and no scheduled destructive execution.
+Completed-operation replay validates the stored manifest and approval association without
+locking writer tables. Expired pending previews fail before those locks; real deletion still
+performs locked revalidation. Run-state blockers follow each subsystem's terminal statuses;
+unknown states and resumable states remain blockers.
 
 ### What is removed, and what is retained
 
@@ -94,8 +101,16 @@ its findings and target-scoped credential profiles. The preview names the affect
 Other target IDs survive; child-target parent links are detached. Finding deletion removes only
 the selected finding records and their cascading children, then refreshes owner finding counts.
 
-Historical scans/reports, scan artifacts, request archives, exports, backups, and external
-content-addressed files are **not erased**. Finding-linked `evidence_objects` are detached before
+Historical scans/reports, scan artifacts, exports, backups, and external content-addressed
+files are **not erased**. Scan HTTP archives survive with the scan. A `sensitive` classification
+alone does not prevent preserving a row; original links of retained and detached rows are
+bound into the preview and kept in the durable operation receipt. Explicit legal/operational
+holds and protected audit records still block even an ownership detachment.
+
+Hunt HTTP archives have a cascading relationship with their Hunt: deleting a target that would
+erase sensitive Hunt history remains blocked. Use archive to hide inventory without erasing that
+history. A `sensitive` classification is not generally removed from destructive protections.
+Finding-linked `evidence_objects` are detached before
 the finding FK cascade, preserving their storage index instead of silently orphaning blobs.
 A report may therefore still contain a historical copy of a deleted finding. Run the dedicated
 approved evidence-retention operation first when removing eligible content is also intended.
@@ -107,6 +122,12 @@ operational holds block this generic operation. Managed deployments must explici
 not an API authorization mechanism. Standalone remains a single-user local application.
 
 Acceptance coverage lives in `tests/test_data_lifecycle.py`,
+`tests/test_data_lifecycle_replay.py`, `tests/test_target_archive_admission.py`,
 `tests/test_data_lifecycle_postgres.py`, and `ui/tests/browser/data-lifecycle.spec.ts`.
 The PostgreSQL test uses only the explicitly named disposable local test database; it must never
 be pointed at an existing installation.
+
+Keyed collection uploads have separate real-route acceptance in
+`tests/test_collection_atomic_retry_postgres.py`. The maintenance workflow requires that suite
+to execute against a dedicated disposable PostgreSQL database without skipped cases. Its app
+lifespan is not started, so the tests do not start schedulers, workers, or target traffic.

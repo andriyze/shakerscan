@@ -8,6 +8,8 @@ on:
       - 'ui/**'
       - 'docs/**'
       - 'tests/test_data_lifecycle*'
+      - 'tests/test_target_archive_admission.py'
+      - 'tests/disposable_postgres.py'
       - 'tests/test_public_repo_hygiene.py'
       - 'scripts/check_public_repo_hygiene.py'
       - '.github/workflows/data-lifecycle.yml'
@@ -40,6 +42,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       LIFECYCLE_TEST_DATABASE_URL: postgresql://postgres:lifecycle-ci-only@127.0.0.1:5432/shakerscan_lifecycle_test
+      LIFECYCLE_POSTGRES_REQUIRED: '1'
       CI: 'true'
       NEXT_TELEMETRY_DISABLED: '1'
     steps:
@@ -71,11 +74,20 @@ jobs:
           python scripts/check_surface_dispositions.py
       - name: Real database lifecycle and regression tests
         run: |
+          mkdir -p artifacts
           python -m pytest -q tests/test_data_lifecycle.py tests/test_data_lifecycle_postgres.py \
+            tests/test_data_lifecycle_replay.py tests/test_target_archive_admission.py \
             tests/test_public_repo_hygiene.py tests/test_data_exposure.py \
             tests/test_documentation_policy.py tests/test_v2_documentation_contract.py \
             tests/test_public_api_contract_generation.py tests/test_retest_contract_migrations.py \
-            tests/test_finding_identity_collapse.py tests/test_target_origin_identity.py
+            tests/test_finding_identity_collapse.py tests/test_target_origin_identity.py \
+            --junitxml=artifacts/lifecycle-python.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = [c for c in ET.parse('artifacts/lifecycle-python.xml').getroot().iter('testcase')
+                   if c.get('classname', '').endswith('test_data_lifecycle_postgres')]
+          assert cases and not any(c.find('skipped') is not None for c in cases), 'Required lifecycle PostgreSQL acceptance did not run fully'
+          PY
       - name: UI unit tests and production build
         working-directory: ui
         run: |
@@ -98,6 +110,7 @@ jobs:
         with:
           name: lifecycle-browser-${{ github.sha }}
           path: |
+            artifacts/lifecycle-python.xml
             ui/test-results
             /tmp/lifecycle-ui.log
           retention-days: 3

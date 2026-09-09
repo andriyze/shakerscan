@@ -3,6 +3,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
+import pytest
+from fastapi import HTTPException
 
 from api.targets.archive import archive
 from api.schedules.router import claim_due_schedule
@@ -61,3 +63,16 @@ def test_archived_target_cannot_be_claimed_by_either_scheduler():
             assert not result
             assert not any('UPDATE schedules' in sql or 'INSERT INTO' in sql for sql in conn.events)
     asyncio.run(check())
+
+
+def test_schedule_cannot_be_reenabled_after_target_archive(monkeypatch):
+    from api.schedules import router
+    conn = Connection(active=False)
+    monkeypatch.setattr(router, '_pool_provider', lambda: Pool(conn))
+    async def unexpected_resolution(_url):
+        raise AssertionError('An archived target must be refused before DNS')
+    monkeypatch.setattr(router, 'validate_schedule_target_destination', unexpected_resolution)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(router.update_schedule(str(uuid4()), router.ScheduleUpdate(is_active=True)))
+    assert error.value.status_code == 409
+    assert not any('UPDATE schedules' in sql for sql in conn.events)

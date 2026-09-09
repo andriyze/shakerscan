@@ -9,6 +9,8 @@ on:
       - 'tests/test_managed_schedule*'
       - 'tests/test_public_retry*'
       - 'tests/test_collection*'
+      - 'tests/collection_upload_fixtures.py'
+      - 'tests/test_maintenance_acceptance_contract.py'
       - 'tests/disposable_postgres.py'
       - 'tests/test_target_archive_admission.py'
       - 'tests/test_e2e_debt_summary.py'
