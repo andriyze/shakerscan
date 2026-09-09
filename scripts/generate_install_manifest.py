@@ -109,8 +109,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         current = MANIFEST.read_text(encoding="utf-8") if MANIFEST.is_file() else ""
         if current != rendered:
-            expected = dict(line.split("  ", 1) for line in rendered.splitlines())
-            actual = dict(line.split("  ", 1) for line in current.splitlines() if "  " in line)
+            expected = {
+                path: digest for digest, path in (
+                    line.split("  ", 1) for line in rendered.splitlines()
+                )
+            }
+            actual = {
+                path: digest for digest, path in (
+                    line.split("  ", 1) for line in current.splitlines() if "  " in line
+                )
+            }
             changed = sorted(
                 {path for path, digest in expected.items() if actual.get(path) != digest}
                 | {path for path in actual if path not in expected}

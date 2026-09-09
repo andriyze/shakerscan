@@ -8,6 +8,16 @@ on:
       - 'api/**'
       - 'tests/test_managed_schedule*'
       - 'tests/test_public_retry*'
+      - 'tests/test_collection_atomic_retry.py'
+      - 'tests/test_e2e_debt_summary.py'
+      - 'scripts/summarize_e2e_debt.py'
+      - 'tests/test_lifecycle_runtime_integration.py'
+      - 'tests/test_data_lifecycle_image_packaging.py'
+      - 'tests/test_install_manifest_diagnostics.py'
+      - 'tests/test_maintenance_import_layout.py'
+      - 'scanner/Dockerfile*'
+      - 'scanner/scanner_tools/build_fingerprint.py'
+      - 'scripts/generate_install_manifest.py'
       - 'ui/**'
       - '.github/workflows/maintenance-regressions.yml'
 
@@ -83,7 +93,7 @@ jobs:
           retention-days: 3
       - name: Scheduler database and retry regression tests (no target traffic)
         run: |
-          python -m pytest -q tests/test_managed_schedule_edits.py tests/test_managed_schedule_persistence.py tests/test_managed_schedule_runner.py tests/test_public_api_contract_generation.py --junitxml=artifacts/maintenance-python.xml
+          python -m pytest -q tests/test_managed_schedule_edits.py tests/test_managed_schedule_persistence.py tests/test_managed_schedule_runner.py tests/test_public_api_contract_generation.py tests/test_lifecycle_runtime_integration.py tests/test_data_lifecycle_image_packaging.py tests/test_install_manifest_diagnostics.py tests/test_maintenance_import_layout.py tests/test_collection_atomic_retry.py tests/test_e2e_debt_summary.py --junitxml=artifacts/maintenance-python.xml
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24

@@ -260,6 +260,18 @@ class PublicV2IdempotencyMiddleware:
             })
             return
 
+        if (method, path) == ("POST", "/request-collections"):
+            try:
+                from public_retry_atomic import execute_atomic_write
+            except ModuleNotFoundError:
+                from api.public_retry_atomic import execute_atomic_write
+            await execute_atomic_write(
+                self, scope=scope, messages=messages, send=send, pool=pool,
+                key_digest=key_digest, request_digest=request_digest,
+                max_response_bytes=_MAX_IDEMPOTENT_RESPONSE_BYTES, receive_after_body=receive,
+            )
+            return
+
         async with pool.acquire() as conn:
             inserted = await conn.fetchrow(
                 """INSERT INTO public_api_idempotency (
