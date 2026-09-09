@@ -1,20 +1,30 @@
-name: 2.3.1 maintenance validation
+name: Record deletion and public repository hygiene
 
 on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'db/**'
+      - 'ui/**'
+      - 'docs/**'
+      - 'tests/test_data_lifecycle*'
+      - 'tests/test_public_repo_hygiene.py'
+      - 'scripts/check_public_repo_hygiene.py'
+      - '.github/workflows/data-lifecycle.yml'
+      - '.gitignore'
+      - '.dockerignore'
   push:
-    branches: ['2.3.1']
-    paths: ['scripts/_maintenance_2_3_1.py', '.github/workflows/maintenance-2.3.1.yml']
+    branches: ['2.3.1', main]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: maintenance-2.3.1
-  cancel-in-progress: false
+  group: data-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   acceptance:
-    if: github.ref == 'refs/heads/2.3.1'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -26,19 +36,17 @@ jobs:
           POSTGRES_DB: shakerscan_lifecycle_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd pg_isready --health-interval 5s
-          --health-timeout 5s --health-retries 10
+          --health-cmd "pg_isready -U postgres -d shakerscan_lifecycle_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       LIFECYCLE_TEST_DATABASE_URL: postgresql://postgres:lifecycle-ci-only@127.0.0.1:5432/shakerscan_lifecycle_test
       CI: 'true'
+      NEXT_TELEMETRY_DISABLED: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
-      - name: Apply source-pinned maintenance patch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/_maintenance_2_3_1.py
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -53,22 +61,6 @@ jobs:
         run: |
           python -m pip install --require-hashes -r scanner/requirements.lock
           npm ci --prefix ui
-      - name: Generate and commit only reviewed source changes
-        run: |
-          python scripts/generate_capability_inventory.py
-          python scripts/generate_public_api_contract.py
-          python - <<'PYCOMMIT'
-          import json, subprocess
-          allowed = json.load(open('/tmp/shakerscan-reviewed-paths.json'))
-          changed = subprocess.check_output(['git','diff','--name-only','-z']).decode().strip('\0').split('\0')
-          untracked = subprocess.check_output(['git','ls-files','--others','--exclude-standard','-z']).decode().strip('\0').split('\0')
-          assert set(changed + untracked) - {''} <= set(allowed), 'Unexpected source changes; refusing publication'
-          subprocess.run(['git','add','-A','--',*sorted(set(changed + untracked) - {''})], check=True)
-          subprocess.run(['git','config','user.name','ShakerScan maintenance'],check=True)
-          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
-          subprocess.run(['git','commit','-m','feat(lifecycle): add approved target and finding deletion and clean public sources'],check=True)
-          subprocess.run(['git','push','origin','HEAD:refs/heads/2.3.1'],check=True)
-          PYCOMMIT
       - name: Verify publication and API contracts
         run: |
           python scripts/check_public_repo_hygiene.py
