@@ -50,7 +50,7 @@ def public_request_body_shape(value: Any) -> tuple[str | None, tuple[str, ...]]:
     except ValueError:
         # Truncated/malformed JSON must not fall through to parse_qsl: an '='
         # inside a field value would publish part of that value as a field name.
-        if text.lstrip().startswith(("{", "[", '"')):
+        if text.lstrip().startswith(("{", "[", '"', "\ufeff")):
             return None, ()
     else:
         if isinstance(decoded, Mapping):
