@@ -52,15 +52,24 @@ class Locator:
         if self.selector == SPEC.challenge_selector:
             return bool(flags.get("mfa"))
         if self.selector == SPEC.rejected_selector:
-            return bool(flags.get("rejected"))
+            return bool(flags.get("rejected") or (
+                self.page.url == SPEC.check_url and not self.page.browser.authenticated
+                and not flags.get("protected_public_marker") and not flags.get("anonymous_unknown")
+            ))
         if self.selector == SPEC.authenticated_selector:
-            return bool(flags.get("public_marker") or self.page.browser.authenticated)
+            return bool(flags.get("public_marker") or self.page.browser.authenticated or (
+                flags.get("protected_public_marker") and self.page.url == SPEC.check_url
+            ))
         return True
 
     async def fill(self, value):
         if self.page.browser.flags.get("cancel"):
             raise asyncio.CancelledError()
         self.page.browser.values.append(value)
+
+    async def wait_for(self, **kwargs):
+        if self.page.browser.flags.get("qa_assertion_missing") or not await self.is_visible():
+            raise RuntimeError(SECRET)
 
     async def click(self):
         route = await self.page.browser.send(SPEC.submit_url, "POST")
@@ -84,7 +93,7 @@ class Page:
         route = await self.browser.send(url)
         if route.aborted:
             raise RuntimeError(SECRET)
-        if url == SPEC.check_url and self.browser.flags.get("expires"):
+        if url == SPEC.check_url and self.browser.authenticated and self.browser.flags.get("expires"):
             self.browser.authenticated = False
             self.browser.flags["rejected"] = True
 
@@ -150,10 +159,15 @@ def test_success_observes_login_and_rechecks_protected_page_without_exporting_se
     assert receipt["authentication_verified"] is True
     assert receipt["login_submissions"] == 1
     assert receipt["login_response_status"] == 200
-    assert receipt["responses_received"] == receipt["requests_routed"] == 3
+    assert receipt["responses_received"] == receipt["requests_routed"] == 5
+    assert receipt["anonymous_check_verified"] is True
+    assert receipt["qa_completed"] is True
+    assert receipt["context_closed"] is True
     assert receipt["verification_basis"] == "operator_dom_assertion"
     assert browser.values == [VALUES.username, VALUES.password]
-    assert [phase for _, _, phase in browser.calls] == ["load", "login", "verify"]
+    assert [phase for _, _, phase in browser.calls] == [
+        "anonymous", "load", "login", "verify", "read_only",
+    ]
     assert SECRET not in repr(receipt) + repr(VALUES)
     assert browser.closed
 
@@ -238,7 +252,8 @@ def test_authenticated_context_allows_read_only_checks_not_further_form_submissi
             browser.authenticated = False
             browser.flags["rejected"] = True
             assert await bl.browser_authentication_state(page, SPEC) == "authentication_rejected"
-    asyncio.run(scenario())
+    with pytest.raises(bl.BrowserLoginError, match="authentication_rejected"):
+        asyncio.run(scenario())
     assert browser.closed
 
 
@@ -246,12 +261,13 @@ def test_request_ceiling_applies_after_login_as_well():
     browser = Browser()
     async def scenario():
         async with bl.authenticated_browser_page(
-            browser, workflow=replace(SPEC, max_requests=3), values=VALUES,
+            browser, workflow=replace(SPEC, max_requests=4), values=VALUES,
             transport=browser.transport,
         ):
             assert (await browser.send(ORIGIN + "/one-more")).aborted
-    asyncio.run(scenario())
-    assert len(browser.calls) == 3
+    with pytest.raises(bl.BrowserLoginError, match="request_limit_reached"):
+        asyncio.run(scenario())
+    assert len(browser.calls) == 4
 
 
 @pytest.mark.parametrize("values", [
@@ -359,3 +375,315 @@ def test_preserving_redirect_cannot_repeat_the_login_post(status):
     assert not caught.value.receipt["authentication_verified"]
     assert caught.value.receipt["login_submissions"] == 1
     assert browser.closed
+
+
+def test_public_protected_marker_fails_before_filling_credentials():
+    browser = Browser(protected_public_marker=True)
+    with pytest.raises(bl.BrowserLoginError, match="ambiguous_success_assertion"):
+        execute(browser)
+    assert browser.values == []
+    assert not any(method == "POST" for method, _, _ in browser.calls)
+    assert browser.closed
+
+
+def test_missing_anonymous_negative_signal_is_not_accepted():
+    browser = Browser(anonymous_unknown=True)
+    with pytest.raises(bl.BrowserLoginError, match="anonymous_verification_incomplete"):
+        execute(browser)
+    assert browser.values == []
+    assert browser.closed
+
+
+def test_live_receipt_is_read_only_and_tracks_post_login_requests():
+    browser = Browser()
+    async def scenario():
+        async with bl.authenticated_browser_page(
+            browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+        ) as (page, receipt):
+            before = receipt["requests_routed"]
+            await page.goto(ORIGIN + "/help")
+            assert receipt["requests_routed"] == before + 1
+            with pytest.raises(TypeError):
+                receipt["authentication_verified"] = False
+        assert receipt["status"] == "completed"
+        assert receipt["context_closed"] is True
+        assert receipt["qa_completed"] is True
+        assert receipt["requests_routed"] == len(browser.calls)
+    asyncio.run(scenario())
+
+
+def test_post_login_transport_failure_cannot_finish_with_success():
+    browser = Browser()
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="transport_failed") as caught:
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                browser.flags["transport_error"] = True
+                assert (await browser.send(ORIGIN + "/help")).aborted
+                assert receipt["authentication_verified"] is False
+        assert not receipt["authentication_verified"]
+        assert caught.value.receipt["status"] == "transport_failed"
+        assert receipt["context_closed"] is True
+    asyncio.run(scenario())
+
+
+def test_expiry_after_login_is_detected_at_context_exit():
+    browser = Browser()
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="authentication_rejected"):
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                browser.authenticated = False
+                browser.flags["rejected"] = True
+        assert not receipt["authentication_verified"]
+        assert receipt["qa_completed"] is False
+    asyncio.run(scenario())
+    assert browser.closed
+
+
+@pytest.mark.parametrize("headers", [
+    {"Content-Type": "text/html\r\nX-Secret: private"},
+    {"content-type": "text/html", "Content-Type": "text/plain"},
+    {"bad name": "value"}, {"X-Example": None}, {"X-Example": "a\x00b"},
+    {"X-Example": "x" * 65_537}, {str(i): "value" for i in range(129)},
+])
+def test_malformed_transport_headers_fail_before_browser_fulfillment(headers):
+    browser = Browser()
+    async def transport(request, phase):
+        return bl.BrowserLoginResponse(200, headers, b"synthetic")
+    browser.transport = transport
+    with pytest.raises(bl.BrowserLoginError, match="transport_failed"):
+        execute(browser)
+    assert browser.values == []
+    assert browser.closed
+
+
+@pytest.mark.parametrize("password", ["\ud800", "\u20ac" * 2_000], ids=["surrogate", "byte-limit"])
+def test_private_values_must_fit_the_utf8_byte_contract(password):
+    browser = Browser()
+    with pytest.raises(bl.BrowserLoginError, match="invalid_workflow"):
+        execute(browser, values=bl.BrowserLoginValues("name", password))
+    assert browser.values == browser.calls == []
+
+
+def test_post_login_browser_error_is_sanitized_and_invalidates_receipt():
+    browser = Browser()
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="browser_check_failed") as caught:
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                raise RuntimeError(SECRET)
+        assert SECRET not in "".join(traceback.format_exception(caught.value))
+        assert not receipt["authentication_verified"]
+        assert receipt["context_closed"] is True
+    asyncio.run(scenario())
+
+
+def test_background_transport_failure_is_settled_before_success():
+    browser = Browser()
+    original = browser.transport
+    async def transport(request, phase):
+        if request.url.endswith("/late"):
+            await asyncio.sleep(0.02)
+            raise RuntimeError(SECRET)
+        return await original(request, phase)
+    browser.transport = transport
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="transport_failed"):
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                task = asyncio.create_task(browser.send(ORIGIN + "/late"))
+                await asyncio.sleep(0)
+        await task
+        assert receipt["requests_in_flight"] == 0
+        assert not receipt["authentication_verified"]
+    asyncio.run(scenario())
+
+
+def test_fixed_qa_deadline_is_enforced_without_changing_login_timeout():
+    browser = Browser()
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="browser_check_timed_out"):
+            async with bl.authenticated_browser_page(
+                browser, workflow=replace(SPEC, qa_timeout_ms=100),
+                values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                await asyncio.sleep(1)
+        assert not receipt["authentication_verified"]
+        assert receipt["context_closed"] is True
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ceiling", [True, 0, 99, 120001, "1000"])
+def test_qa_timeout_is_validated_before_browser_work(ceiling):
+    browser = Browser()
+    with pytest.raises(bl.BrowserLoginError, match="invalid_workflow"):
+        execute(browser, spec=replace(SPEC, qa_timeout_ms=ceiling))
+    assert browser.calls == []
+
+
+def test_anonymous_redirect_to_exact_login_form_is_a_negative_control(monkeypatch):
+    original = Page.goto
+    async def redirect_anonymous(self, url, **kwargs):
+        await original(self, url, **kwargs)
+        if url == SPEC.check_url and not self.browser.authenticated:
+            self.url = SPEC.login_url
+    monkeypatch.setattr(Page, "goto", redirect_anonymous)
+    browser = Browser()
+    assert execute(browser)["anonymous_check_verified"] is True
+
+
+def test_first_transport_failure_blocks_later_admissions():
+    browser = Browser()
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="transport_failed"):
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ):
+                browser.flags["transport_error"] = True
+                assert (await browser.send(ORIGIN + "/help")).aborted
+                count = len(browser.calls)
+                browser.flags["transport_error"] = False
+                assert (await browser.send(ORIGIN + "/later")).aborted
+                assert len(browser.calls) == count
+    asyncio.run(scenario())
+
+
+def test_success_waits_for_admitted_background_response():
+    browser = Browser()
+    original = browser.transport
+    async def transport(request, phase):
+        if request.url.endswith("/late"):
+            await asyncio.sleep(0.02)
+        return await original(request, phase)
+    browser.transport = transport
+    async def scenario():
+        async with bl.authenticated_browser_page(
+            browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+        ) as (_, receipt):
+            task = asyncio.create_task(browser.send(ORIGIN + "/late"))
+            await asyncio.sleep(0)
+            assert receipt["requests_in_flight"] == 1
+        assert task.done()
+        assert receipt["requests_in_flight"] == 0
+        assert receipt["responses_received"] == receipt["requests_routed"] == 6
+        assert receipt["qa_completed"] is True
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close_error", [False, True])
+def test_post_login_cancellation_invalidates_live_receipt(close_error):
+    browser = Browser(close_error=close_error)
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError) as caught:
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                raise asyncio.CancelledError()
+        assert receipt["status"] == "cancelled"
+        assert not receipt["authentication_verified"]
+        assert receipt["cleanup_failed"] is close_error
+        if close_error:
+            assert any("cleanup failed" in note for note in caught.value.__notes__)
+    asyncio.run(scenario())
+
+
+def test_hop_headers_and_connection_nominations_do_not_reach_chromium():
+    assert bl._response_headers({
+        "Content-Type": "text/html", "Connection": "X-Hop, keep-alive", "X-Hop": "private",
+        "Keep-Alive": "timeout=5", "Content-Length": "123", "Transfer-Encoding": "chunked",
+    }) == {"content-type": "text/html"}
+
+
+def test_fixed_qa_wrapper_returns_only_finalized_content_free_results():
+    browser = Browser()
+    result = asyncio.run(bl.run_browser_login_checks(
+        browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+        checks=(bl.BrowserReadOnlyCheck(ORIGIN + "/help", "#help"),
+                bl.BrowserReadOnlyCheck(SPEC.check_url, SPEC.authenticated_selector)),
+    ))
+    assert result["status"] == "completed"
+    assert result["qa_completed"] is True
+    assert result["context_closed"] is True
+    assert result["checks_requested"] == result["checks_completed"] == 2
+    assert result["checks"] == [{"index": 0, "status": "passed"}, {"index": 1, "status": "passed"}]
+    assert result["requests_routed"] == len(browser.calls) == 7
+    assert SECRET not in repr(result)
+    assert ORIGIN not in repr(result)
+    assert "#help" not in repr(result)
+    assert browser.closed
+
+
+@pytest.mark.parametrize("checks", [
+    [None], "not-a-plan", [bl.BrowserReadOnlyCheck("https://outside.test/", "#help")],
+    [bl.BrowserReadOnlyCheck(ORIGIN + "/help", "css=#help >> text=private")],
+    [bl.BrowserReadOnlyCheck(ORIGIN + "/help", "")],
+    [bl.BrowserReadOnlyCheck(ORIGIN + "/help", "#help")] * 21,
+])
+def test_fixed_qa_plan_is_validated_before_login(checks):
+    browser = Browser()
+    with pytest.raises(bl.BrowserLoginError, match="invalid_qa_plan"):
+        asyncio.run(bl.run_browser_login_checks(
+            browser, workflow=SPEC, values=VALUES, transport=browser.transport, checks=checks,
+        ))
+    assert browser.calls == browser.values == []
+
+
+def test_fixed_qa_failure_retains_partial_results_but_not_browser_diagnostics():
+    browser = Browser(qa_assertion_missing=True)
+    with pytest.raises(bl.BrowserLoginError, match="browser_check_failed") as caught:
+        asyncio.run(bl.run_browser_login_checks(
+            browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            checks=(bl.BrowserReadOnlyCheck(ORIGIN + "/help", "#help"),),
+        ))
+    assert caught.value.receipt["checks_completed"] == 0
+    assert caught.value.receipt["checks"] == [{"index": 0, "status": "incomplete"}]
+    assert not caught.value.receipt["qa_completed"]
+    assert not caught.value.receipt["authentication_verified"]
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+    assert browser.closed
+
+
+def test_fixed_qa_authentication_only_still_performs_final_session_check():
+    browser = Browser()
+    result = asyncio.run(bl.run_browser_login_checks(
+        browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+    ))
+    assert result["checks"] == []
+    assert result["requests_routed"] == 5
+    assert result["status"] == "completed"
+
+
+def test_request_started_during_final_dom_lookup_is_settled(monkeypatch):
+    browser = Browser()
+    original_transport = browser.transport
+    original_visible = Locator.is_visible
+    tasks = []
+    async def transport(request, phase):
+        if request.url.endswith("/late"):
+            await asyncio.sleep(0.02)
+            raise RuntimeError(SECRET)
+        return await original_transport(request, phase)
+    async def visible(self):
+        if (self.selector == SPEC.authenticated_selector and browser.calls
+                and browser.calls[-1][-1] == "read_only" and not tasks):
+            tasks.append(asyncio.create_task(browser.send(ORIGIN + "/late")))
+            await asyncio.sleep(0)
+        return await original_visible(self)
+    monkeypatch.setattr(Locator, "is_visible", visible)
+    browser.transport = transport
+    async def scenario():
+        with pytest.raises(bl.BrowserLoginError, match="transport_failed"):
+            async with bl.authenticated_browser_page(
+                browser, workflow=SPEC, values=VALUES, transport=browser.transport,
+            ) as (_, receipt):
+                pass
+        assert tasks and all(task.done() for task in tasks)
+        assert not receipt["qa_completed"]
+        assert not receipt["authentication_verified"]
+        assert receipt["requests_in_flight"] == 0
+    asyncio.run(scenario())

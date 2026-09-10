@@ -25,7 +25,8 @@ ORIGIN = "http://127.0.0.1:8765"
 
 
 @pytest.mark.parametrize("storage", ["cookie", "local_storage"])
-def test_real_login_protected_navigation_and_expiry(storage):
+@pytest.mark.parametrize("mode", ["fixed_qa", "expiry"])
+def test_real_login_protected_navigation_and_expiry(storage, mode):
     async def scenario():
         from playwright.async_api import async_playwright
 
@@ -70,20 +71,39 @@ document.querySelector('#sign-in').onclick=async()=>{
             browser = await pw.chromium.launch(executable_path=CHROMIUM, headless=True,
                 args=["--no-sandbox", "--disable-background-networking", "--disable-component-update"])
             try:
-                async with bl.authenticated_browser_page(
-                    browser, workflow=workflow,
-                    values=bl.BrowserLoginValues("synthetic-user", "synthetic-password"),
-                    transport=transport,
-                ) as (page, receipt):
-                    assert receipt["authentication_verified"] is True
-                    assert receipt["login_submissions"] == 1
-                    assert "synthetic-password" not in repr(receipt)
-                    if storage == "cookie":
-                        await page.context.clear_cookies()
-                    else:
-                        await page.evaluate("localStorage.clear()")
-                    await page.goto(workflow.check_url, wait_until="domcontentloaded")
-                    assert await bl.browser_authentication_state(page, workflow) == "authentication_rejected"
+                values = bl.BrowserLoginValues("synthetic-user", "synthetic-password")
+                if mode == "fixed_qa":
+                    result = await bl.run_browser_login_checks(
+                        browser, workflow=workflow, values=values, transport=transport,
+                        checks=(bl.BrowserReadOnlyCheck(workflow.check_url, "#private-account"),),
+                    )
+                    assert result["status"] == "completed"
+                    assert result["anonymous_check_verified"] is True
+                    assert result["qa_completed"] is True
+                    assert result["context_closed"] is True
+                    assert result["login_submissions"] == 1
+                    assert result["checks_completed"] == 1
+                    assert "synthetic-password" not in repr(result)
+                else:
+                    entered = False
+                    with pytest.raises(bl.BrowserLoginError, match="authentication_rejected") as caught:
+                        async with bl.authenticated_browser_page(
+                            browser, workflow=workflow, values=values, transport=transport,
+                        ) as (page, receipt):
+                            entered = True
+                            assert receipt["authentication_verified"] is True
+                            assert receipt["login_submissions"] == 1
+                            if storage == "cookie":
+                                await page.context.clear_cookies()
+                            else:
+                                await page.evaluate("localStorage.clear()")
+                            await page.goto(workflow.check_url, wait_until="domcontentloaded")
+                            assert await bl.browser_authentication_state(page, workflow) == "authentication_rejected"
+                    # A login failure must not accidentally satisfy this expiry test.
+                    assert entered
+                    assert caught.value.receipt["context_closed"] is True
+                    assert not caught.value.receipt["authentication_verified"]
+                    assert not caught.value.receipt["qa_completed"]
             finally:
                 await browser.close()
     asyncio.run(scenario())
