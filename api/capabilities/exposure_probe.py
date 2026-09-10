@@ -64,8 +64,8 @@ _CLASS_SEVERITY: Mapping[str, str] = {
     "version_control_exposure": "high",
     "confidential_file": "high",
     "listed_file": "info",
-    "directory_listing": "info",
-    "metrics_endpoint": "info",
+    "directory_listing": "high",
+    "metrics_endpoint": "high",
     "actuator_endpoint": "info",
     "backup_or_source_artifact": "high",
     "exposed_api_specification": "info",
@@ -199,12 +199,17 @@ def classify_confidential_file(
 
 
 def is_sensitive_exposure_class(exposure_class: str) -> bool:
-    """Closed promotion boundary, also applied to historical observations.
+    """Promotion boundary, also applied to historical observations.
 
-    This only narrows existing proof: it adds no signatures or probing ability.
-    Structural metadata needs independent entitlement evidence before promotion.
+    A deterministic exposure of secret content or source, or a server autoindexing a
+    directory / serving an internal metrics endpoint, is a finding: the server state is
+    itself the proof. Pure identity or reachability — framework fingerprint
+    (``actuator_endpoint``), the mere presence of an API spec, and a file whose listing
+    establishes no sensitivity (``listed_file``) — stays an unpromoted observation; a
+    secret leaked through any of them is still caught by the content-specific classes.
+    This adds no signatures or probing ability.
     """
-    return exposure_class in _SECRET_MATERIAL_CLASSES
+    return exposure_class in _PROMOTABLE_EXPOSURE_CLASSES
 
 
 def directory_listing_links(body: bytes, *, limit: int = 20) -> tuple[str, ...]:
@@ -232,6 +237,18 @@ _SECRET_MATERIAL_CLASSES = frozenset({
     "private_key_material",
     "cloud_credential_material",
     "environment_secret_file",
+})
+
+# Classes that promote to a finding: secret/source content, plus the two deterministic
+# server-state misconfigurations (an autoindexed directory, a served metrics endpoint).
+# A listed file's mere reachability (``listed_file``), a framework fingerprint
+# (``actuator_endpoint``) and an API spec's presence are observations, not findings.
+_PROMOTABLE_EXPOSURE_CLASSES = _SECRET_MATERIAL_CLASSES | frozenset({
+    "version_control_exposure",
+    "backup_or_source_artifact",
+    "directory_listing",
+    "metrics_endpoint",
+    "verbose_error_disclosure",
 })
 
 
