@@ -3947,6 +3947,7 @@ try:
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
         UnsafeOriginGuardMiddleware,
+        _origin_is_allowed,
         add_public_v2_idempotency_openapi,
         public_v2_surface,
     )
@@ -3955,6 +3956,7 @@ except ModuleNotFoundError:
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
         UnsafeOriginGuardMiddleware,
+        _origin_is_allowed,
         add_public_v2_idempotency_openapi,
         public_v2_surface,
     )

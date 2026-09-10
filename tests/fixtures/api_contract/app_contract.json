@@ -1,10 +1,10 @@
 {
   "middleware": [
+    "CORSMiddleware",
+    "UnsafeOriginGuardMiddleware",
     "PublicV2BodyLimitMiddleware",
     "PublicV2IdempotencyMiddleware",
-    "LegacyHuntIsolationMiddleware",
-    "UnsafeOriginGuardMiddleware",
-    "CORSMiddleware"
+    "LegacyHuntIsolationMiddleware"
   ],
   "exception_handlers": [
     "HTTPException",
