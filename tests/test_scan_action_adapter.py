@@ -1002,9 +1002,8 @@ def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monk
     assert "private_key_material" in classes
     assert "metrics_endpoint" in classes
     assert "directory_listing" in classes
-    # The listing was followed; the reached file is recorded as a reachability
-    # observation (listed_file), not proven-confidential.
-    assert "listed_file" in classes
+    # The listing was followed to a file served from the browsable directory.
+    assert "confidential_file" in classes
     assert any(
         item["request_url"].endswith("/ftp/secret.md") for item in proofs
     )

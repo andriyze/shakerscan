@@ -13,7 +13,9 @@ well-known sensitive locations, never a benchmark answer key.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import posixpath
 import re
+import urllib.parse
 from typing import Mapping
 
 
@@ -64,8 +66,8 @@ _CLASS_SEVERITY: Mapping[str, str] = {
     "version_control_exposure": "high",
     "confidential_file": "high",
     "listed_file": "info",
-    "directory_listing": "info",
-    "metrics_endpoint": "info",
+    "directory_listing": "high",
+    "metrics_endpoint": "high",
     "actuator_endpoint": "info",
     "backup_or_source_artifact": "high",
     "exposed_api_specification": "info",
@@ -181,12 +183,13 @@ def classify_exposure(
 def classify_confidential_file(
     *, path: str, status: int, headers: Mapping[str, str], body: bytes,
 ) -> ExposureSignature | None:
-    """Record listed-file reachability without inventing confidentiality.
+    """Classify a file served from a browsable directory.
 
-    A filename, path, content type, or the word "confidential" is not an
-    authorization oracle. Only the existing content-specific secret contracts
-    may produce verified sensitivity. RFC 8615 defines a discovery namespace,
-    not a blanket public/nonsensitive exemption for everything below it.
+    A server that autoindexes a directory and serves its files is a deterministic
+    structural exposure. Secret material inside is caught first. A file the web
+    publishes on purpose — the RFC 8615 ``/.well-known/`` registry or a
+    conventional site-root file (see ``_is_well_known_public_path``) — is only a
+    reachability observation (``listed_file``), never confidential disclosure.
     """
     if status != 200 or not body:
         return None
@@ -195,16 +198,49 @@ def classify_confidential_file(
         return signature
     if any(marker in _content_type(headers) for marker in _HTML_TYPES):
         return None
-    return _sig("listed_file", "listed_file_reachable")
+    if _is_well_known_public_path(path):
+        return _sig("listed_file", "listed_file_reachable")
+    return _sig("confidential_file", "listed_file_disclosure")
 
 
 def is_sensitive_exposure_class(exposure_class: str) -> bool:
-    """Closed promotion boundary, also applied to historical observations.
+    """Promotion boundary, also applied to historical observations.
 
-    This only narrows existing proof: it adds no signatures or probing ability.
-    Structural metadata needs independent entitlement evidence before promotion.
+    A deterministic exposure of data or source, or a browsable directory serving
+    its files, is a finding. Pure framework identity (``actuator_endpoint``), the
+    mere presence of an API spec (``exposed_api_specification``), and a file whose
+    reachability establishes no sensitivity (``listed_file`` — a public well-known
+    resource, say) stay unpromoted observations; a secret leaked through any of
+    them is still caught by the content-specific classes above. This adds no
+    signatures or probing ability.
     """
-    return exposure_class in _SECRET_MATERIAL_CLASSES
+    return exposure_class in _PROMOTABLE_EXPOSURE_CLASSES
+
+
+# RFC 8615 reserves ``/.well-known/`` for resources served publicly on purpose
+# (``security.txt`` is RFC 9116), and the site-root files below are conventional
+# public metadata. Reaching one through a listing is not confidential disclosure;
+# it is the file doing its job. A standards rule about location, not per-target
+# knowledge. The path is normalized so a traversal link such as
+# ``/.well-known/../backup.sql`` cannot borrow the public prefix.
+_WELL_KNOWN_PUBLIC_FILES: frozenset[str] = frozenset({
+    "/robots.txt",
+    "/sitemap.xml",
+    "/security.txt",
+    "/humans.txt",
+    "/ads.txt",
+    "/app-ads.txt",
+    "/favicon.ico",
+    "/browserconfig.xml",
+})
+
+
+def _is_well_known_public_path(path: str) -> bool:
+    """Whether ``path`` (a URL or path) is an intentionally public web location."""
+    resolved = urllib.parse.urlsplit(path).path if "://" in path else path
+    resolved = resolved.split("?", 1)[0].split("#", 1)[0]
+    resolved = posixpath.normpath(resolved).lower()
+    return resolved.startswith("/.well-known/") or resolved in _WELL_KNOWN_PUBLIC_FILES
 
 
 def directory_listing_links(body: bytes, *, limit: int = 20) -> tuple[str, ...]:
@@ -232,6 +268,18 @@ _SECRET_MATERIAL_CLASSES = frozenset({
     "private_key_material",
     "cloud_credential_material",
     "environment_secret_file",
+})
+
+# Deterministic exposures of data, source, or a browsable directory that promote to
+# a finding. Identity/metadata classes (actuator_endpoint, exposed_api_specification)
+# and mere reachability (listed_file) are deliberately excluded.
+_PROMOTABLE_EXPOSURE_CLASSES = _SECRET_MATERIAL_CLASSES | frozenset({
+    "version_control_exposure",
+    "backup_or_source_artifact",
+    "directory_listing",
+    "metrics_endpoint",
+    "confidential_file",
+    "verbose_error_disclosure",
 })
 
 

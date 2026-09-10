@@ -51,7 +51,8 @@ def test_deterministic_response_signatures_classify_high_exposure():
         )
         assert signature is not None, path
         assert signature.exposure_class == expected
-        assert signature.severity == ("high" if expected in {"environment_secret_file", "version_control_exposure"} else "info")
+        # Secret and deterministic structural exposures are high; actuator identity is info metadata.
+        assert signature.severity == ("info" if expected == "actuator_endpoint" else "high")
 
 
 def test_soft_200_and_denied_responses_are_never_exposures():
@@ -89,8 +90,10 @@ def test_directory_listing_follows_only_bounded_relative_files():
         body=b"# Internal acquisitions\nConfidential deal terms.",
     )
     assert confidential is not None
-    assert confidential.exposure_class == "listed_file"
-    assert not confidential.proves_sensitive_exposure
+    # A file served from a browsable directory is a deterministic structural exposure.
+    assert confidential.exposure_class == "confidential_file"
+    assert confidential.severity == "high"
+    assert confidential.proves_sensitive_exposure
     # An HTML page reached from a listing is the app, not a confidential file.
     assert classify_confidential_file(
         path="/ftp/page.html", status=200,
@@ -115,13 +118,13 @@ def test_intentionally_public_well_known_files_are_not_confidential():
         )
         assert observed.exposure_class == "listed_file", path
         assert not observed.proves_sensitive_exposure
-    # A different path alone still does not prove confidentiality.
+    # A traversal-escaped path resolves outside the public prefix: still confidential.
     ordinary = classify_confidential_file(
         path="/.well-known/../backup.sql", status=200,
         headers={"Content-Type": "text/plain"}, body=b"INSERT INTO users VALUES (1);",
     )
-    assert ordinary.exposure_class == "listed_file"
-    assert not ordinary.proves_sensitive_exposure
+    assert ordinary.exposure_class == "confidential_file"
+    assert ordinary.proves_sensitive_exposure
     # Secret material inside a well-known file is still reported (secret check runs first).
     key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n"
     leaked = classify_confidential_file(
@@ -292,8 +295,8 @@ def test_directory_listing_titles_cover_common_server_stacks():
         )
         assert signature is not None, stack
         assert signature.exposure_class == "directory_listing"
-        assert signature.severity == "info"
-        assert not signature.proves_sensitive_exposure
+        assert signature.severity == "high"
+        assert signature.proves_sensitive_exposure
 
 
 def test_an_ordinary_html_page_is_not_a_directory_listing():
@@ -304,35 +307,50 @@ def test_an_ordinary_html_page_is_not_a_directory_listing():
     ) is None
 
 
-def test_ordinary_public_files_and_hal_do_not_prove_sensitive_disclosure():
+def test_browsable_directory_files_are_findings_but_generic_json_is_not():
+    # A file served from a browsable, non-well-known directory is a confidential-file
+    # exposure — the directory should not be browsable, whatever the specific file is.
     for path, content_type, body in (
-        ("/downloads/LICENSE.txt", "text/plain", b"MIT License"),
-        ("/assets/logo.png", "image/png", b"\x89PNG synthetic"),
+        ("/downloads/quarterly.txt", "text/plain", b"internal numbers"),
         ("/public/prices.csv", "text/csv", b"product,price\nbook,10"),
     ):
         signature = classify_confidential_file(path=path, status=200,
                     headers={"Content-Type": content_type}, body=body)
-        assert signature.exposure_class == "listed_file"
-        assert signature.severity == "info"
-        assert not signature.proves_sensitive_exposure
-        assert body.decode("utf-8", errors="replace") not in redacted_exposure_excerpt(body, signature)
+        assert signature.exposure_class == "confidential_file"
+        assert signature.severity == "high"
+        assert signature.proves_sensitive_exposure
+    # Generic HAL _links / health-status JSON is framework metadata, not an actuator or
+    # metrics leak; classify_exposure must not fire on it (the vendor media-type gate).
     for body in (b'{"_links":{"self":{"href":"/books"}}}', b'{"status":"UP"}',
                  b'{"activeProfiles":[]}', b'{"diskSpace":123}'):
         assert classify_exposure(path="/public", status=200,
                headers={"Content-Type": "application/json"}, body=body) is None
 
 
-def test_historical_structural_proof_flags_cannot_promote_a_finding():
+def _exposure_report(category):
     probe = _action("verify.exposure", 0, capability_name="exposure.verify_batch")
     final = _action("finalize.report", 1, dependencies=(probe.action_id,))
     plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
                          target_binding_digest="a" * 64, actions=(probe, final))
-    for category in ("confidential_file", "listed_file", "directory_listing",
-                     "metrics_endpoint", "actuator_endpoint", "exposed_api_specification"):
-        report = finalize_scan_report(plan=plan, target_url="https://app.example.test",
-            action_results={probe.action_id: _result_with_observation_count(probe, 1)},
-            observations={probe.action_id: ({"kind": "sensitive_exposure_proof",
-                "proof_state": "verified", "finding_verdict": "verified",
-                "exposure_class": category, "severity": "high", "response_status": 200,
-                "request_url": "https://app.example.test/public", "response_body_sha256": "c" * 64},)})
-        assert not report['findings'], category
+    return finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results={probe.action_id: _result_with_observation_count(probe, 1)},
+        observations={probe.action_id: ({"kind": "sensitive_exposure_proof",
+            "proof_state": "verified", "finding_verdict": "verified",
+            "exposure_class": category, "severity": "high", "response_status": 200,
+            "request_url": "https://app.example.test/public", "response_body_sha256": "c" * 64},)})
+
+
+def test_identity_and_reachability_classes_cannot_promote_even_with_verified_flags():
+    # Framework identity and mere reachability are not exposures the scanner can prove;
+    # the finalizer class gate blocks them even when the observation carries verified flags.
+    for category in ("listed_file", "actuator_endpoint", "exposed_api_specification"):
+        assert not _exposure_report(category)['findings'], category
+
+
+def test_deterministic_structural_exposures_promote_to_findings():
+    # Data/source exposure and a browsable directory are deterministic findings.
+    for category in ("confidential_file", "directory_listing", "metrics_endpoint",
+                     "version_control_exposure"):
+        findings = _exposure_report(category)['findings']
+        assert findings, category
+        assert findings[0]["proof_state"] == "verified"
