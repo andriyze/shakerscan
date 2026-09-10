@@ -12,11 +12,15 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Any, Mapping
 import urllib.parse
 
 
 BROWSER_STORAGE_SCHEMA = "scan-browser-storage/v1"
+# Session cookies otherwise disappear when the bootstrap Chromium exits. These
+# copies live only in worker-owned scratch, and never outlive this bounded TTL.
+BROWSER_PROFILE_COOKIE_TTL_SECONDS = 3600
 _STORAGE_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 
 
@@ -102,6 +106,7 @@ def _cookies(header: str, *, origin: str) -> list[dict[str, Any]]:
             "url": origin + "/",
             "secure": parsed.scheme.lower() == "https",
             "sameSite": "Lax",
+            "expires": int(time.time()) + BROWSER_PROFILE_COOKIE_TTL_SECONDS,
         })
     if not cookies:
         raise BrowserProfileError("browser cookie seed contains no cookies")

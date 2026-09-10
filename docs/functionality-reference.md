@@ -1501,6 +1501,15 @@ an accepted Arsenal action; local-agent output never grants execution or finding
 This appendix is generated directly from code and repository manifests. It is intentionally verbose:
 it is the exhaustive backstop behind the human-readable product map above.
 
+### Saved browser login and read-only QA
+
+`browser.login_check` is a shared credential-gated Scan/Hunt action using an
+operator-saved encrypted workflow. Select it with Scan `browser_login_profile_ids`
+or Hunt's managed principal and `browser.login_check` capability. It performs one
+login and fixed protected-page assertions, retains no exported browser state, and
+does not grant permission to other actions. See [browser login QA](browser-login-qa.md)
+for the profile contract, invocation, limits and acceptance gates.
+
 <!-- BEGIN GENERATED CAPABILITY INVENTORY -->
 
 > **Generated source inventory.** Run `python3 scripts/generate_capability_inventory.py` after

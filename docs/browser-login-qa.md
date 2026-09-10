@@ -15,12 +15,123 @@ receipt or written to a session-state export by this helper.
 CSS selector), performs GET navigations, and returns finalized counts and per-check
 indices/statuses. It does not give its caller a raw page or browser-state export.
 
-This is **not yet a public DAST/Hunt login feature**. No capability-registry entry,
-credential-profile schema, worker dispatch, encrypted browser-state persistence,
-UI workflow editor, MCP action, or automatic DAST candidate/proof integration has
-been added. Existing read-only capabilities and attack dispatch are unchanged.
-The helper must not be advertised as an enabled Scan/Hunt action before that
-integration and its real-stack acceptance pass.
+The canonical **`browser.login_check`** capability is connected to both runtimes.
+The Scan compiler emits an explicit, required `qa.browser_login_<slot>` action;
+Hunt queues it through the existing `worker_browser` path. Both construct the same
+adapter and keep the credential values and browser context inside that action.
+This is a login plus fixed read-only QA operation, not a session-export operation.
+It does not change existing `browser.navigate`/`browser.interact` permissions,
+authenticate other Scan actions, or produce candidates, vulnerability proof or
+request observations for subsequent active testing.
+
+The workflow is saved inside the existing encrypted credential envelope. Public
+metadata exposes only `browser_login_configured: true`; no selectors, private
+URLs, username or password appear in action inputs, metadata or receipts. Profile
+version and principal slot are frozen at admission and checked against the exact
+ciphertext record **before decryption**. Every transported request rechecks the
+owner, target, scope, approval, current profile version and capability binding.
+An inactive, expired, rotated or revoked profile fails closed without retry.
+
+Production execution requires the image's installed `/usr/bin/chromium`, a local
+credential-enabled worker, TLS verification for HTTPS, and an approved single-origin
+workflow. The explicit action reserves 128 HTTP attempts, one state-changing request,
+32 browser actions and 210 tool-wall seconds. The saved workflow may only narrow
+these limits. Use a budget with enough capacity (for example `balanced`); the Hunt
+`fast` profile's 20 browser-action ceiling cannot fund this action.
+
+Remote broker execution, cross-origin SSO, multi-step login, MFA/CAPTCHA automation,
+multiple `Set-Cookie` response fields, and browser state handoff to other actions
+are not supported. Unsupported transports fail closed. No new workflow-editor UI
+is included: configuration and invocation use the APIs below and the existing
+Hunt capability interface. Production acceptance still requires the real-browser
+and application-stack gates described below.
+
+## Configure and invoke
+
+Save a `form_login` or `json_login` profile through `POST /credential-profiles`,
+using the existing target ID, primary/secondary/service slot and operator-provided
+username/secret. The profile must explicitly allow `browser.login_check` and set
+`allow_active_capabilities: true` because this capability uses credentials and submits
+a login POST. The new `browser_login` field has this shape (replace the fixture URLs/selectors with the
+application's actual single-origin login and protected-page assertions):
+
+```json
+{
+  "schema_version": "browser-login-profile/v1",
+  "workflow": {
+    "origin": "https://app.example.test",
+    "login_url": "https://app.example.test/login",
+    "submit_url": "https://app.example.test/session",
+    "check_url": "https://app.example.test/account",
+    "username_selector": "#username",
+    "password_selector": "#password",
+    "submit_selector": "#sign-in",
+    "authenticated_selector": "#private-account",
+    "rejected_selector": "#login-error",
+    "challenge_selector": "#mfa",
+    "timeout_ms": 30000,
+    "qa_timeout_ms": 60000,
+    "max_requests": 64
+  },
+  "checks": [
+    {"url": "https://app.example.test/account", "visible_selector": "#private-account"}
+  ]
+}
+```
+
+The credential profile's `endpoint_url` remains required by its existing auth-kind
+contract. `browser_login` is not an action input. Rotating a browser-configured
+profile requires explicitly resubmitting the saved workflow, or explicitly setting
+`browser_login: null` to remove it; omission is rejected to prevent silent loss.
+Old queued actions do not adopt the new version after rotation.
+
+For **Scan**, use `POST /scans` with the new `browser_login_profile_ids` array,
+separate from ordinary `credential_profile_ids`. Select one or two distinct
+profiles with different principal slots. The existing approval must be target-bound,
+credential-tier, unexpired and authorize `scan.submit`.
+
+```json
+{
+  "target": "https://app.example.test",
+  "budget_profile": "balanced",
+  "browser_login_profile_ids": ["<saved-profile-uuid>"],
+  "approval_receipt_id": "<approved-scan-receipt-uuid>",
+  "policy": {
+    "preset": "custom",
+    "include_families": ["recon"],
+    "active_testing": true,
+    "allow_state_changing_http": true
+  },
+  "options": {"parallel": false}
+}
+```
+
+Selection narrows Scan execution to one worker. Explicit parallel/remote requests
+are rejected; the action cannot be copied into shards or continuation rounds.
+Action status and sanitized QA observations use the existing Scan actions/results
+interfaces. A failed required QA action is not a successful authenticated result.
+
+For **Hunt**, select the saved profile in the existing start request's
+`credential_refs.primary_credential_profile_id`, allow `browser.login_check` in
+`capabilities`, and supply the existing target-bound credential approval/scope.
+The persisted policy must explicitly include `authorization_confirmed`,
+`active_testing` and `allow_state_changing_http`. Then invoke:
+
+```text
+POST /hunts/{hunt_id}/capabilities/browser.login_check
+```
+
+```json
+{"idempotency_key": "browser-login-check-001", "input": {"as_principal": "primary"}}
+```
+
+Use `secondary` or `service` only when that slot has exactly one admitted profile
+allowing this capability. Planners cannot substitute profile IDs, profile versions,
+selectors, login steps or raw credentials in this call. The profile reference is
+resolved from the persisted Hunt context again in the worker and compared with the
+admitted input digest. Results use existing Hunt action, receipt and budget storage.
+Reuse the same idempotency key only to retrieve the same action; select a new key
+for a deliberately repeated check.
 
 ## Execution contract
 

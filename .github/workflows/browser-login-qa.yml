@@ -8,6 +8,8 @@ on:
       - 'api/hunt/**'
       - 'api/scan/**'
       - 'api/worker.py'
+      - 'api/credential_api.py'
+      - 'api/request_models.py'
       - 'scanner/scanner_tools/browser*'
       - 'tests/*browser*'
       - 'tests/integration/*browser*'
@@ -15,6 +17,17 @@ on:
   push:
     branches: [main, fix/release-2.3.1-blockers]
     paths:
+      - 'api/capabilities/browser*'
+      - 'api/runtime/**'
+      - 'api/hunt/**'
+      - 'api/scan/**'
+      - 'api/api.py'
+      - 'api/worker.py'
+      - 'api/credential_api.py'
+      - 'api/request_models.py'
+      - 'scanner/scanner_tools/browser*'
+      - 'tests/*browser*'
+      - 'tests/integration/*browser*'
       - '.github/workflows/browser-login-qa.yml'
   workflow_dispatch:
 
@@ -76,9 +89,12 @@ jobs:
           mkdir -p artifacts
           python -m pytest -q --junitxml=artifacts/browser-login-qa.xml \
             tests/test_browser_login_check.py \
+            tests/test_browser_login_action.py tests/test_browser_login_worker.py \
+            tests/test_browser_login_profile_api.py tests/test_browser_login_transport.py \
             tests/test_browser_profile.py tests/test_browser_profile_runtime.py \
             tests/test_request_shape_integrity.py tests/test_request_shape_bom.py \
             tests/integration/test_browser_login_flow.py \
+            tests/integration/test_browser_login_action_runtime.py \
             tests/integration/test_browser_profile_restore.py
       - name: Retain acceptance evidence
         if: always()

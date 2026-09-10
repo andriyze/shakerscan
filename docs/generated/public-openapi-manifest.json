@@ -51,9 +51,9 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
-    "CredentialProfileCreate": "1756c67d248e0fa0e1ff0b0cedfeaed766cdd06777eaca63f07ec64056ed8fc9",
+    "CredentialProfileCreate": "e126e6b782f64c10eeb4544e2bc0f6719234992b16c69520d41847fdc8567738",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
-    "CredentialProfileRotate": "f023ee42779be3169d7f816b6172c0831e7a8fdde4a450720996279893b870ba",
+    "CredentialProfileRotate": "4ca3ebdc99522e21b55ad4c1f39ef1ebe49103f815d8d6f566ab15b7ce24df46",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeletionExecution": "a55dc767725f6b0a6e9d58915878ec3206837e740bff406a1d549e8afb9f8923",
     "DeletionSelection": "0111ad35c8d27c06caabff78152319845e803bb565441fbfc32ceb2dd0b8c3a9",
@@ -178,7 +178,7 @@
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "fee6f059b5ceddf787c37b2baf3d026f54d1e36fcff16f1d17aa5b2d5ca8d2a0",
+  "contract_sha256": "e546d3731b5c43dbda266034d066967cbdc83c3048992f0e088bfedfcb8779ab",
   "openapi": "3.1.0",
   "operation_count": 403,
   "operations": {
@@ -4979,7 +4979,7 @@
       "deprecated": false,
       "operation_id": "submit_scan_scans_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "ffea994e0a8c4019bbb64cc4f2a35edeb310b3f962dd9e14e8ed71ef08ff4aee",
+      "request_schema_sha256": "6b993911ebd3b273ebc2f76173010c0060a268f18eb4519a858b354fc3ff07f1",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
       },

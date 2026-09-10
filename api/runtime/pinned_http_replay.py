@@ -94,6 +94,11 @@ def _insecure_tls_context() -> ssl.SSLContext:
 class PinnedAiohttpReplayTransport:
     """Send exact imported requests without performing runtime DNS resolution."""
 
+    def __init__(self, *, verify_tls: bool = False,
+                 reject_duplicate_response_headers: bool = False) -> None:
+        self.verify_tls = verify_tls
+        self.reject_duplicate_response_headers = reject_duplicate_response_headers
+
     async def send(
         self,
         request: ReplayRequest,
@@ -147,7 +152,7 @@ class PinnedAiohttpReplayTransport:
         connector = aiohttp.TCPConnector(
             resolver=resolver,
             use_dns_cache=False,
-            ssl=_insecure_tls_context(),
+            ssl=ssl.create_default_context() if self.verify_tls else _insecure_tls_context(),
             limit=1,
             force_close=True,
             happy_eyeballs_delay=0.25,
@@ -180,7 +185,18 @@ class PinnedAiohttpReplayTransport:
                         raise ReplayExecutionError(
                             "transport connected outside its frozen fallback set"
                         )
-                    body = await response.content.read(MAX_REPLAY_RESPONSE_BODY_BYTES + 1)
+                    if self.reject_duplicate_response_headers:
+                        names = [name.lower() for name, _ in response.raw_headers]
+                        if len(names) != len(set(names)):
+                            raise ReplayExecutionError("transport response contains unsupported repeated headers")
+                    # StreamReader.read(n) may return a short chunk before EOF.
+                    # Returning that chunk used to silently truncate JS/HTML.
+                    retained = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        retained.extend(chunk[:MAX_REPLAY_RESPONSE_BODY_BYTES + 1 - len(retained)])
+                        if len(retained) > MAX_REPLAY_RESPONSE_BODY_BYTES:
+                            break
+                    body = bytes(retained)
                     if len(body) > MAX_REPLAY_RESPONSE_BODY_BYTES:
                         raise ReplayExecutionError(
                             "transport response body exceeds the capture limit"

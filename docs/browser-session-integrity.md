@@ -11,7 +11,10 @@ Inputs come from worker-resolved credential material, not planner-supplied secre
 The helper validates the origin, seed, Cookie request-header form, executable, and
 fresh profile path before allocating the profile. Cookie-header attributes such as
 `Domain`, `Path`, `Secure`, and `HttpOnly` are rejected rather than silently treated as
-ordinary Cookie request-header data. Empty cookie values remain represented.
+ordinary Cookie request-header data. Empty cookie values remain represented. Private profile copies receive a bounded
+one-hour expiry so Chromium retains them across bootstrap-process restart; the
+worker still removes its scratch profile after use, and this does not extend
+server-side authentication or credential/approval expiry.
 
 During materialization, service workers are blocked. A context-level request handler
 locally fulfills only the exact-origin GET bootstrap navigation needed for

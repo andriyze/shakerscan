@@ -639,6 +639,9 @@ class BrowserInteractAdapter:
 
 
 def browser_capability_adapter(name: str):
+    if name == "browser.login_check":
+        from .browser_login_action import BrowserLoginAdapter
+        return BrowserLoginAdapter
     adapters = {
         BrowserNavigateAdapter.capability_name: BrowserNavigateAdapter,
         BrowserInteractAdapter.capability_name: BrowserInteractAdapter,

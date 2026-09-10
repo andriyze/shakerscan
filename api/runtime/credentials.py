@@ -180,6 +180,7 @@ def build_credential_secret(
     custom_headers: Any = None,
     parameter_name: Any = None,
     browser_storage_key: Any = None,
+    browser_login: Any = None,
 ) -> str:
     """Validate and serialize one plaintext envelope for immediate encryption."""
     kind = normalize_credential_kind(auth_kind)
@@ -277,6 +278,14 @@ def build_credential_secret(
         "parameter_name": resolved_parameter,
         "browser_storage_key": storage_key,
     }
+    if browser_login is not None:
+        if kind not in {"form_login", "json_login"} or not primary or not user:
+            raise CredentialContractError("browser login requires a form/json profile with both identity fields")
+        from .browser_login_contract import normalize_browser_login_profile
+        try:
+            payload["browser_login"] = normalize_browser_login_profile(browser_login)
+        except ValueError:
+            raise CredentialContractError("browser login profile configuration is invalid") from None
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -315,6 +324,7 @@ def parse_credential_secret(auth_kind: Any, decrypted_value: Any) -> dict[str, A
         parameter_name=(
             value.get("parameter_name") if kind == "query_parameter" else None
         ),
+        browser_login=value.get("browser_login"),
         browser_storage_key=(
             value.get("browser_storage_key")
             if value.get("schema_version") == CREDENTIAL_SECRET_SCHEMA else None
@@ -353,7 +363,9 @@ def immediate_http_headers(material: Mapping[str, Any]) -> dict[str, str]:
 def public_credential_configuration(material: Mapping[str, Any]) -> dict[str, Any]:
     """Return content-free configuration flags safe for profile APIs and receipts."""
     kind = str(material.get("auth_kind") or "")
+    browser = material.get("browser_login")
     return {
+        **({"browser_login_configured": True} if browser else {}),
         "schema_version": CREDENTIAL_SECRET_SCHEMA,
         "auth_kind": kind,
         "username_configured": bool(material.get("username")),
