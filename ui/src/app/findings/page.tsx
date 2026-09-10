@@ -147,6 +147,11 @@ function FindingsContent() {
   const [cleanupDomain, setCleanupDomain] = useState('')
   const [cleanupPreview, setCleanupPreview] = useState<DeletionPreview | null>(null)
   const [cleanupLoading, setCleanupLoading] = useState(false)
+  // A cleanup preview is bound to the exact filters it was requested with; a late response for
+  // stale filters must never replace the current one (the filter onChange handlers clear it too).
+  const cleanupFilterKey = JSON.stringify({ cleanupDays, cleanupStatus, cleanupDomain })
+  const latestCleanupKey = useRef(cleanupFilterKey)
+  latestCleanupKey.current = cleanupFilterKey
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
 
   const severityFilter = filters.severity || ''
@@ -262,6 +267,7 @@ function FindingsContent() {
   }
 
   async function handleCleanupPreview() {
+    const requestedKey = cleanupFilterKey
     setCleanupLoading(true)
     try {
       const result = await previewRecordDeletion({
@@ -270,10 +276,13 @@ function FindingsContent() {
         status: cleanupStatus || undefined,
         root_domain: cleanupDomain || undefined,
       })
-      setCleanupPreview(result)
+      // Ignore a late preview if the filters changed while it was pending.
+      if (latestCleanupKey.current === requestedKey) setCleanupPreview(result)
     } catch (err) {
-      console.error('Cleanup preview failed:', err)
-      toast.error(err instanceof Error ? err.message : 'Failed to preview cleanup')
+      if (latestCleanupKey.current === requestedKey) {
+        console.error('Cleanup preview failed:', err)
+        toast.error(err instanceof Error ? err.message : 'Failed to preview cleanup')
+      }
     } finally {
       setCleanupLoading(false)
     }
