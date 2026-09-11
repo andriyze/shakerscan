@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
+
 const targetId = '11111111-1111-4111-8111-111111111111'
 const findingId = '22222222-2222-4222-8222-222222222222'
 const previewId = '33333333-3333-4333-8333-333333333333'
@@ -12,8 +14,8 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
   let executions = 0
   const finding = { id: findingId, title: 'Synthetic lifecycle finding', severity: 'low', status: 'active',
     first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', target_id: targetId }
-  await page.addInitScript(() => { window.__SHAKERSCAN_API_URL__ = 'http://localhost:8080' })
-  await page.route('http://localhost:8080/**', async route => {
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
     const body = request.method() === 'POST' && request.postData() ? request.postDataJSON() : {}

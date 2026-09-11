@@ -1,6 +1,8 @@
 import { expect, test, type Page } from '@playwright/test'
 import type { HuntV2 } from '../../src/lib/huntV2'
 
+import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
+
 const hunt = '11111111-1111-4111-8111-111111111111'
 const first = '22222222-2222-4222-8222-222222222222'
 const later = '33333333-3333-4333-8333-333333333333'
@@ -14,8 +16,8 @@ const savedRun: HuntV2 = {
 async function mockHistory(page: Page) {
   let empty = false
   const reads: string[] = []
-  await page.addInitScript(() => { window.__SHAKERSCAN_API_URL__ = 'http://localhost:8080' })
-  await page.route('http://localhost:8080/**', async route => {
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const path = new URL(route.request().url()).pathname
     // The page also reads its parent run. A health response here crashes the
     // surrounding page before the investigation component can be exercised.
