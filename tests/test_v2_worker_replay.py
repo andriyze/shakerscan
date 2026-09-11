@@ -183,6 +183,68 @@ def test_pinned_transport_preserves_exact_headers_and_body_without_dns():
     assert wire.endswith(b'{"secret":"body-value"}')
 
 
+def test_pinned_transport_keeps_body_when_server_overstates_content_length():
+    # A real disclosure can arrive on a connection whose framing is broken: some
+    # directory-index and CGI middleware send more Content-Length than body and
+    # then close, so the read completes short. The transport must keep the bytes
+    # it received (a fully classifiable response) instead of discarding the whole
+    # capture as a transport failure and losing the finding.
+    marker = b"disclosed body content before the declared length"
+
+    async def drive():
+        async def serve(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: " + str(len(marker) + 16).encode() + b"\r\n"
+                b"Content-Type: text/html\r\nConnection: close\r\n\r\n"
+                + marker
+            )
+            await writer.drain()
+            # Close before sending the 16 bytes still promised by Content-Length.
+            writer.close()
+            await writer.wait_closed()
+
+        try:
+            server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("test sandbox does not permit a loopback listener")
+        port = server.sockets[0].getsockname()[1]
+        origin = f"http://replay.test:{port}"
+        plan = build_replay_plan(
+            [{"id": "probe", "method": "GET", "url": f"{origin}/probed", "headers": {}}],
+            allowed_origins=[origin],
+            default_origin=origin,
+            authorization=ReplayAuthorization(
+                active_testing=False,
+                allow_state_changing_http=False,
+                approval_receipt_id="approval-1",
+            ),
+        )
+        target = TargetBinding(
+            target_id="target-1",
+            target_kind="web",
+            canonical_host="replay.test",
+            allowed_origins=(origin,),
+            allowed_addresses=("127.0.0.1",),
+        )
+        try:
+            return await PinnedAiohttpReplayTransport(tolerate_incomplete_body=True).send(
+                plan.requests[0], target=target, timeout_seconds=3, follow_redirects=False,
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    result = asyncio.run(drive())
+    # Without the salvage path the read raises and the whole response is dropped
+    # (status_code=None, empty body). With it opted in, the received bytes are a
+    # valid 200 response the caller can still classify.
+    assert result.status_code == 200
+    assert result.response_body == marker
+    assert result.error_code == "incomplete_read"
+
+
 def test_pinned_replay_fails_over_in_stable_order_and_reports_the_real_peer():
     async def drive():
         async def serve(_reader, writer):

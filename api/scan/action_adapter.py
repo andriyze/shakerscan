@@ -1965,7 +1965,11 @@ class DatabaseNeutralScanActionDispatcher:
             except (ScanWorkManifestError, KeyError):
                 continue
 
-        transport = PinnedAiohttpReplayTransport()
+        # Content disclosure is often served by middleware that overstates
+        # Content-Length or closes mid-body (a directory index is the common
+        # case); keep the bytes already received so a real disclosure on a
+        # badly-framed response is still classified rather than dropped.
+        transport = PinnedAiohttpReplayTransport(tolerate_incomplete_body=True)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []

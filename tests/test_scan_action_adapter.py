@@ -971,7 +971,7 @@ def test_exposure_probe_batch_probes_seeds_follows_listings_and_checkpoints(monk
 
     transport = FakeTransport()
     monkeypatch.setattr(
-        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: transport,
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
     )
     action = _action(
         "verify.exposure", "exposure.verify_batch", 0,
@@ -2009,7 +2009,7 @@ def test_spec_ingest_declares_body_endpoints_from_the_fetched_spec(monkeypatch):
 
     transport = FakeTransport()
     monkeypatch.setattr(
-        action_adapter_module, "PinnedAiohttpReplayTransport", lambda: transport,
+        action_adapter_module, "PinnedAiohttpReplayTransport", lambda **_: transport,
     )
     action = _action("discover.spec", "web.spec_ingest", 0)
     plan = ScanActionPlan(

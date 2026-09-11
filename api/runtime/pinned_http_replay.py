@@ -95,9 +95,16 @@ class PinnedAiohttpReplayTransport:
     """Send exact imported requests without performing runtime DNS resolution."""
 
     def __init__(self, *, verify_tls: bool = False,
-                 reject_duplicate_response_headers: bool = False) -> None:
+                 reject_duplicate_response_headers: bool = False,
+                 tolerate_incomplete_body: bool = False) -> None:
         self.verify_tls = verify_tls
         self.reject_duplicate_response_headers = reject_duplicate_response_headers
+        # When set, a body read cut short after a valid status line keeps the
+        # bytes already received instead of failing the whole capture. Content
+        # disclosure detection wants this (a truncated directory index is still
+        # a real finding); a login or proof boundary must not, so it stays off
+        # by default and a truncated response fails closed as before.
+        self.tolerate_incomplete_body = tolerate_incomplete_body
 
     async def send(
         self,
@@ -192,10 +199,27 @@ class PinnedAiohttpReplayTransport:
                     # StreamReader.read(n) may return a short chunk before EOF.
                     # Returning that chunk used to silently truncate JS/HTML.
                     retained = bytearray()
-                    async for chunk in response.content.iter_chunked(65536):
-                        retained.extend(chunk[:MAX_REPLAY_RESPONSE_BODY_BYTES + 1 - len(retained)])
-                        if len(retained) > MAX_REPLAY_RESPONSE_BODY_BYTES:
-                            break
+                    body_incomplete = False
+                    try:
+                        async for chunk in response.content.iter_chunked(65536):
+                            retained.extend(chunk[:MAX_REPLAY_RESPONSE_BODY_BYTES + 1 - len(retained)])
+                            if len(retained) > MAX_REPLAY_RESPONSE_BODY_BYTES:
+                                break
+                    except (aiohttp.ClientPayloadError, asyncio.TimeoutError):
+                        # A server that overstates Content-Length, frames a chunked
+                        # body incorrectly, or stalls/closes after sending most of it
+                        # still delivered the bytes already received, and those bytes
+                        # are a real, classifiable response -- e.g. a directory index
+                        # whose middleware mis-sets Content-Length and then withholds
+                        # the last few bytes. Discarding the whole capture as a
+                        # transport failure drops a proven disclosure. Keep what
+                        # arrived and mark the capture partial. A read that yielded
+                        # nothing usable is still a genuine failure and re-raises to
+                        # the transport-error path below, as does any caller that has
+                        # not opted into tolerating a partial body.
+                        if not retained or not self.tolerate_incomplete_body:
+                            raise
+                        body_incomplete = True
                     body = bytes(retained)
                     if len(body) > MAX_REPLAY_RESPONSE_BODY_BYTES:
                         raise ReplayExecutionError(
@@ -213,6 +237,7 @@ class PinnedAiohttpReplayTransport:
                         response_headers=dict(response.headers),
                         response_body=body,
                         elapsed_ms=elapsed_ms,
+                        error_code="incomplete_read" if body_incomplete else None,
                     )
         except asyncio.CancelledError:
             raise
