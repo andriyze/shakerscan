@@ -1,5 +1,9 @@
 # Operator-authored browser login checks
 
+**Status:** Implemented and wired into Scan and Hunt as the `browser.login_check` capability.
+Scope is functional QA / login verification; it does not yet emit request observations for
+subsequent active testing. Describes current behavior, not a plan.
+
 ## Implemented component and current integration status
 
 `api/capabilities/browser_login.py` supplies a shared **internal functional-QA

@@ -1,5 +1,8 @@
 # Browser session materialization is not login verification
 
+**Status:** Implemented design note for the browser-login QA capability; describes current
+behavior of session seeding versus verified login, not a plan.
+
 The existing `seed_browser_profile` helper prepares private browser state. It does not
 submit a login form or prove that the application accepts a session. A session already
 stored in cookies or localStorage also does not reproduce the request that originally
