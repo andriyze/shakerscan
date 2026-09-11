@@ -195,16 +195,36 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         check_equal "action resume" "$(jq -r '.passed' "$fault_dir/scan-action-resume.json")" "true"
     fi
     if [ -n "${INSTALLED_STACK_SMOKE_BROWSER_JSON:-}" ]; then
+        browser_status=0
         PLAYWRIGHT_BASE_URL="http://127.0.0.1:$UI_PORT" \
             CI=1 \
             PLAYWRIGHT_REAL_STACK=1 \
             PLAYWRIGHT_DYNAMIC_RECORDS_REQUIRED=1 \
             SHAKERSCAN_API_URL="http://127.0.0.1:$API_PORT" \
             SHAKERSCAN_E2E_SCAN_TARGET="http://juice-shop:3000" \
-            npm --prefix "$ROOT_DIR/ui" run test:browser
+            npm --prefix "$ROOT_DIR/ui" run test:browser || browser_status=$?
+        # A failing browser suite is exactly when its report, traces, screenshots and
+        # error context are needed. Collecting them only after a successful run left a
+        # release blocker with no evidence beyond the console summary, so preserve the
+        # results first and decide the exit status afterwards.
         mkdir -p "$(dirname "$INSTALLED_STACK_SMOKE_BROWSER_JSON")"
-        cp "$ROOT_DIR/ui/test-results/browser-results.json" \
-            "$INSTALLED_STACK_SMOKE_BROWSER_JSON"
+        if [ -f "$ROOT_DIR/ui/test-results/browser-results.json" ]; then
+            cp "$ROOT_DIR/ui/test-results/browser-results.json" \
+                "$INSTALLED_STACK_SMOKE_BROWSER_JSON"
+        elif [ "$browser_status" -eq 0 ]; then
+            echo "browser suite passed but produced no report" >&2
+            exit 1
+        fi
+        if [ -n "${INSTALLED_STACK_SMOKE_BROWSER_ARTIFACT_DIR:-}" ] \
+            && [ -d "$ROOT_DIR/ui/test-results/browser" ]; then
+            mkdir -p "$INSTALLED_STACK_SMOKE_BROWSER_ARTIFACT_DIR"
+            cp -R "$ROOT_DIR/ui/test-results/browser/." \
+                "$INSTALLED_STACK_SMOKE_BROWSER_ARTIFACT_DIR/" 2>/dev/null || true
+        fi
+        if [ "$browser_status" -ne 0 ]; then
+            echo "installed-stack browser suite failed (status $browser_status)" >&2
+            exit "$browser_status"
+        fi
     fi
 fi
 
