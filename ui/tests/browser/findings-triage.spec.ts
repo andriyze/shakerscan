@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
+
 const alphaId = '55555555-5555-4555-8555-555555555555'
 const betaId = '66666666-6666-4666-8666-666666666666'
 
@@ -24,11 +26,11 @@ const nonAdminPolicy: Policy = {
 async function mockApi(page: Page, options: { policy?: Policy } = {}) {
   const writes: { path: string; body: Record<string, unknown> }[] = []
   let status = 'active'
+  await pinMockApiOrigin(page)
   await page.addInitScript((policy) => {
-    window.__SHAKERSCAN_API_URL__ = 'http://localhost:8080'
     if (policy) window.__SHAKERSCAN_CAPABILITIES__ = policy as never
   }, options.policy ?? null)
-  await page.route('http://localhost:8080/**', async route => {
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
     const body = request.method() === 'POST' && request.postData() ? request.postDataJSON() : {}

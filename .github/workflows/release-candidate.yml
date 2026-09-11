@@ -1259,6 +1259,10 @@ jobs:
           INSTALLED_STACK_SMOKE_E2E: "1"
           INSTALLED_STACK_SMOKE_E2E_SCORECARD: ${{ github.workspace }}/artifacts/certification/e2e-scorecard.json
           INSTALLED_STACK_SMOKE_BROWSER_JSON: ${{ github.workspace }}/artifacts/certification/playwright.json
+          # Traces, screenshots and error context for a failing browser suite. Without
+          # them a browser-side certification blocker can only be read from the console
+          # summary, which does not say what the page actually rendered.
+          INSTALLED_STACK_SMOKE_BROWSER_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/certification/browser
           INSTALLED_STACK_SMOKE_DAST_RECALL_JSON: ${{ github.workspace }}/artifacts/certification/dast-recall.json
           INSTALLED_STACK_SMOKE_FAULT_DIR: ${{ github.workspace }}/artifacts/certification/fault
           # Authorized acceptance of a measured DAST quality-bar shortfall: the
@@ -1273,6 +1277,15 @@ jobs:
           npm --prefix ui ci
           npx --prefix ui playwright install --with-deps chromium
           make installed-stack-smoke
+
+      - name: Preserve browser evidence from a failed certification
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: browser-evidence-${{ needs.meta.outputs.candidate_sha }}
+          path: artifacts/certification/browser
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Report exact-image actual assertions and validation completeness
         if: always()
