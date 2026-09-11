@@ -69,6 +69,22 @@ export const SEVERITY_TEXT_COLORS: Record<SeverityLevel, string> = {
   info: 'text-gray-500',
 }
 
+// Left-edge severity rail on list rows: scanning 50 rows, the rail reads as the shape of the backlog.
+export const SEVERITY_RAIL_CLASSES: Record<SeverityLevel, string> = {
+  critical: 'border-l-red-500',
+  high: 'border-l-orange-500',
+  medium: 'border-l-yellow-500',
+  low: 'border-l-blue-500',
+  info: 'border-l-gray-600',
+}
+
+export const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
+  active: 'Active',
+  resolved: 'Resolved',
+  false_positive: 'False positive',
+  accepted_risk: 'Accepted risk',
+}
+
 export const SCAN_STATUS_BADGE_STYLES: Record<ScanStatus, string> = {
   pending: 'bg-gray-500/20 text-gray-400',
   queued: 'bg-gray-500/20 text-gray-400',

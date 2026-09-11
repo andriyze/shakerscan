@@ -25,7 +25,9 @@ from scan.contracts import (  # noqa: E402
     scan_family_required_capability,
 )
 
-API = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
+# Admission compilation is a cohesive module now; keep the same source guards
+# on its actual implementation rather than looking for it in the API root.
+ADMISSION = (ROOT / "api" / "scan" / "admission_actions.py").read_text(encoding="utf-8")
 
 
 def _required_capabilities():
@@ -99,7 +101,7 @@ def test_required_capabilities_are_verified_independently_not_cumulatively():
     Each required capability must be shown to fit; they are not required to fit
     simultaneously, which no profile sizes the mutation dimension for.
     """
-    block = API[API.index('for capability_name in required_holds:'):]
+    block = ADMISSION[ADMISSION.index('for capability_name in required_holds:'):]
     block = block[:block.index("parent_plan = parent_allocation.plan")]
     assert "raise ScanBudgetAllocationError(capability_name, shortages)" in block
     assert "remaining[name] = remaining.get(name, 0) - amount" not in block, (
@@ -166,7 +168,7 @@ def test_a_bounded_active_verifier_is_satisfied_by_its_reviewed_scaled_tier():
 def test_the_continuation_check_admits_a_scaled_tier_not_only_the_full_cost():
     """The check compared the full registry cost to the residual; on a small profile
     that is always short, so it must first try a reviewed scaled tier."""
-    block = API[API.index('for capability_name in required_holds:'):]
+    block = ADMISSION[ADMISSION.index('for capability_name in required_holds:'):]
     block = block[:block.index("parent_plan = parent_allocation.plan")]
     assert "fit_reservation_scaled_profile(" in block, (
         "the continuation check rejects any bounded active verifier because it does "
@@ -178,7 +180,7 @@ def test_the_continuation_check_admits_a_scaled_tier_not_only_the_full_cost():
 def test_the_hold_is_reduced_by_required_parent_admission_traffic():
     """The reserve must subtract the required admission cost so a required
     request-collection replay is never starved by the deferred verifier hold."""
-    authority = API[API.index("def _compile_scan_admission_action_authority"):]
+    authority = ADMISSION[ADMISSION.index("def _compile_scan_admission_action_authority"):]
     authority = authority[:authority.index("parent_plan = parent_allocation.plan")]
     assert "required_admission_cost" in authority
     assert "MANDATORY_ACTION_IDS" in authority

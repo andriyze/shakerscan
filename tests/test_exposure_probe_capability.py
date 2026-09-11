@@ -51,7 +51,8 @@ def test_deterministic_response_signatures_classify_high_exposure():
         )
         assert signature is not None, path
         assert signature.exposure_class == expected
-        assert signature.severity == ("high" if expected in {"environment_secret_file", "version_control_exposure"} else "info")
+        # Secret and deterministic structural exposures are high; actuator identity is info metadata.
+        assert signature.severity == ("info" if expected == "actuator_endpoint" else "high")
 
 
 def test_soft_200_and_denied_responses_are_never_exposures():
@@ -292,8 +293,8 @@ def test_directory_listing_titles_cover_common_server_stacks():
         )
         assert signature is not None, stack
         assert signature.exposure_class == "directory_listing"
-        assert signature.severity == "info"
-        assert not signature.proves_sensitive_exposure
+        assert signature.severity == "high"
+        assert signature.proves_sensitive_exposure
 
 
 def test_an_ordinary_html_page_is_not_a_directory_listing():
@@ -327,12 +328,16 @@ def test_historical_structural_proof_flags_cannot_promote_a_finding():
     final = _action("finalize.report", 1, dependencies=(probe.action_id,))
     plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
                          target_binding_digest="a" * 64, actions=(probe, final))
-    for category in ("confidential_file", "listed_file", "directory_listing",
-                     "metrics_endpoint", "actuator_endpoint", "exposed_api_specification"):
-        report = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+    def _report(category):
+        return finalize_scan_report(plan=plan, target_url="https://app.example.test",
             action_results={probe.action_id: _result_with_observation_count(probe, 1)},
             observations={probe.action_id: ({"kind": "sensitive_exposure_proof",
                 "proof_state": "verified", "finding_verdict": "verified",
                 "exposure_class": category, "severity": "high", "response_status": 200,
                 "request_url": "https://app.example.test/public", "response_body_sha256": "c" * 64},)})
-        assert not report['findings'], category
+    # Identity or mere reachability cannot promote even when the observation carries verified flags.
+    for category in ("confidential_file", "listed_file", "actuator_endpoint", "exposed_api_specification"):
+        assert not _report(category)['findings'], category
+    # A deterministic server-state misconfiguration is a finding.
+    for category in ("directory_listing", "metrics_endpoint"):
+        assert _report(category)['findings'], category

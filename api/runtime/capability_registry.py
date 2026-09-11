@@ -13,6 +13,9 @@ from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping
 
 
+from .browser_login_contract import (BROWSER_LOGIN_BUDGET, BROWSER_LOGIN_INPUT_SCHEMA, BROWSER_LOGIN_PLANNER_SCHEMA)
+
+
 ExecutionKind = Literal[
     "internal", "http", "browser", "network_tcp", "network_udp", "external_tool"
 ]
@@ -1250,6 +1253,22 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "infrastructure-intelligence/v1",
             ("infrastructure_observation", "tool_receipt"),
             planner_visible=False,
+        ),
+        CapabilitySpec(
+            "browser.login_check",
+            "Run the operator-saved managed-profile login and fixed read-only QA checks; "
+            "return sanitized verification results, never a browser session or vulnerability proof.",
+            "browser", "credential", _HTTP_TARGETS, "playwright.login_check", "1",
+            "credential_use", dict(BROWSER_LOGIN_BUDGET),
+            {"network_reachability": True, "browser_runtime": "playwright",
+             "agent_tool_worker": True, "runtime_target_binding": True,
+             "credentials_resolved_server_side": True, "durable_reservation": True,
+             "state_changing_http": True, "operator_saved_workflow": True,
+             "local_worker_only": True},
+            BROWSER_LOGIN_INPUT_SCHEMA, "browser-login-check/v1",
+            ("browser_login_qa", "tool_receipt"),
+            default_timeout_ms=210_000, hunt_executor="worker_browser",
+            planner_input_schema=BROWSER_LOGIN_PLANNER_SCHEMA,
         ),
         CapabilitySpec(
             "browser.navigate",

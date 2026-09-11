@@ -1,0 +1,106 @@
+name: Browser login QA
+
+on:
+  pull_request:
+    paths:
+      - 'api/capabilities/browser*'
+      - 'api/runtime/**'
+      - 'api/hunt/**'
+      - 'api/scan/**'
+      - 'api/worker.py'
+      - 'api/credential_api.py'
+      - 'api/request_models.py'
+      - 'scanner/scanner_tools/browser*'
+      - 'tests/*browser*'
+      - 'tests/integration/*browser*'
+      - '.github/workflows/browser-login-qa.yml'
+  push:
+    branches: [main, fix/release-2.3.1-blockers]
+    paths:
+      - 'api/capabilities/browser*'
+      - 'api/runtime/**'
+      - 'api/hunt/**'
+      - 'api/scan/**'
+      - 'api/api.py'
+      - 'api/worker.py'
+      - 'api/credential_api.py'
+      - 'api/request_models.py'
+      - 'scanner/scanner_tools/browser*'
+      - 'tests/*browser*'
+      - 'tests/integration/*browser*'
+      - '.github/workflows/browser-login-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-login-qa-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Archive only committed source for reproducible diagnostics
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/browser-qa-source-revision.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/browser-qa-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: browser-qa-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/browser-qa-source.tar.gz
+            ${{ runner.temp }}/browser-qa-source-revision.txt
+          if-no-files-found: error
+          retention-days: 1
+  chromium-login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install locked dependencies and Chromium
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+          python -m playwright install --with-deps chromium
+          python - <<'PY'
+          import os
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as pw, open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('SHAKERSCAN_BROWSER_TEST_EXECUTABLE=' + pw.chromium.executable_path + '\n')
+          PY
+      - name: Run offline contracts and synthetic real-browser scenarios
+        env:
+          PYTHONPATH: .:api:scanner
+        run: |
+          mkdir -p artifacts
+          python -m pytest -q --junitxml=artifacts/browser-login-qa.xml \
+            tests/test_browser_login_check.py \
+            tests/test_browser_login_action.py tests/test_browser_login_worker.py \
+            tests/test_browser_login_profile_api.py tests/test_browser_login_transport.py \
+            tests/test_browser_profile.py tests/test_browser_profile_runtime.py \
+            tests/test_request_shape_integrity.py tests/test_request_shape_bom.py \
+            tests/integration/test_browser_login_flow.py \
+            tests/integration/test_browser_login_action_runtime.py \
+            tests/integration/test_browser_profile_restore.py
+      - name: Retain acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: browser-login-qa-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/browser-login-qa.xml
+          if-no-files-found: warn
+          retention-days: 14

@@ -30,6 +30,10 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+try:
+    from capabilities.browser_login_worker import prepare_hunt_browser_action
+except ModuleNotFoundError:
+    from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
@@ -1610,10 +1614,11 @@ async def _execute_hunt_capability_lifecycle(
                         environment=str(target_context.get("environment") or "unknown"),
                         scope_receipt_id=validated_scope_receipt_id,
                     )
-                    prepared_browser = browser_capability_adapter(name).prepare(
+                    prepared_browser = prepare_hunt_browser_action(name,
                         target=browser_target,
                         base_url=target_url,
-                        args=request.input,
+                        args=request.input, context=authority_context,
+                        policy={**policy, "scope_receipt_id": validated_scope_receipt_id},
                     )
                 except (BrowserCapabilityInputError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -43,6 +43,8 @@ def capability_is_allowed(
         return False
     if spec.risk_tier == "mutation" and not policy.allow_state_changing_http:
         return False
+    if spec.placement_requirements.get("state_changing_http") and not policy.allow_state_changing_http:
+        return False
     required = spec.required_approval
     if required is not None and required not in _APPROVAL_POLICIES:
         return False

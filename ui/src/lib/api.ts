@@ -6393,6 +6393,29 @@ export async function updateFinding(
   return res.json()
 }
 
+export interface BulkFindingUpdateResult {
+  updated: number
+  requested: number
+  unique_requested: number
+  not_found: number
+  status: string
+}
+
+/** Bulk triage: one status for many findings (POST /findings/bulk; 1..500 UUIDs). */
+export async function bulkUpdateFindings(
+  findingIds: string[],
+  status: 'active' | 'resolved' | 'false_positive' | 'accepted_risk',
+  notes?: string
+): Promise<BulkFindingUpdateResult> {
+  const res = await fetch(`${API_URL}/findings/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ finding_ids: findingIds, status, notes }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to update findings'))
+  return res.json()
+}
+
 /** Compatibility endpoint; callers must display a preview and obtain explicit approval first. */
 export async function deleteFinding(id: string, approval: {
   preview_id: string

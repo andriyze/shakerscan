@@ -34,6 +34,7 @@ PUBLIC_CONFIGURATION_KEYS = frozenset({
     "custom_header_names",
     "parameter_name",
     "browser_storage_key",
+    "browser_login_configured",
     "interactive_exchange_required",
     "secret_values_visible",
 })

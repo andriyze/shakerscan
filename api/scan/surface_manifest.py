@@ -39,14 +39,42 @@ def _host_in_roots(host: str, roots: Iterable[str]) -> bool:
 
 
 def _summary_status(summary: Any) -> tuple[str, str | None, bool]:
-    item = dict(summary) if isinstance(summary, Mapping) else {}
-    status = str(item.get("status") or "skipped").strip().lower()
+    """Preserve execution evidence; missing or unfamiliar output is not success."""
+    if not isinstance(summary, Mapping):
+        return "failed", "capability_summary_invalid", False
+    item = dict(summary)
+    raw_status = item.get("status")
     reason = str(item.get("reason") or "").strip()[:200] or None
+    if raw_status is None or (isinstance(raw_status, str) and not raw_status.strip()):
+        return "failed", reason or "capability_status_missing", False
+    if not isinstance(raw_status, str):
+        return "failed", reason or "capability_status_invalid", False
+    status = raw_status.strip().lower()
     if status == "cancelled":
         return "cancelled", reason or "capability_cancelled", True
+    if status in {"timed_out", "timeout"} or item.get("timed_out") is True:
+        return "timed_out", reason or "capability_timed_out", False
+    if status == "skipped":
+        return "skipped", reason or "capability_skipped", False
     if status in _DEGRADED_STATUSES:
         return ("partial" if status == "partial" else "failed"), reason, False
+    if status in {"running", "pending"}:
+        return "partial", reason or "capability_not_terminal", False
+    if status not in {"success", "complete"}:
+        # Do not echo an untrusted status into the public manifest.
+        return "failed", reason or "capability_status_unrecognized", False
+    if item.get("partial") is True:
+        return "partial", reason or "capability_partial", False
     return "complete", reason, False
+
+
+def _optional_summary(summary: Any) -> Mapping[str, Any]:
+    """Only an omitted optional producer is an intentional skip."""
+    if summary is None:
+        return {"status": "skipped"}
+    if isinstance(summary, Mapping):
+        return summary
+    return {"status": "failed", "reason": "capability_summary_invalid"}
 
 
 def _known_endpoint_url(
@@ -154,8 +182,8 @@ def build_scan_surface_manifest(
     target without a browser runtime simply does not run, and an absent summary
     is recorded as skipped rather than treated as a failure.
     """
-    browser = browser if isinstance(browser, Mapping) else {"status": "skipped"}
-    spec = spec if isinstance(spec, Mapping) else {"status": "skipped"}
+    browser = _optional_summary(browser)
+    spec = _optional_summary(spec)
     limit = max(1, min(100_000, int(max_endpoints)))
     manifest = EndpointManifest(auto_persist=False)
     allowed_origins = {

@@ -318,6 +318,7 @@ class _ScanRequestBase(BaseModel):
     policy: Optional[dict[str, Any]] = None
     request_collections: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     credential_profile_ids: list[str] = Field(default_factory=list, max_length=2)
+    browser_login_profile_ids: list[str] = Field(default_factory=list, max_length=2, description="Operator-saved browser login and read-only QA profiles; does not authenticate other Scan actions.")
     advanced: Optional[ScanAdvancedLimits] = None
     approval_receipt_id: Optional[str] = None
     options: ScanPublicCompatibilityOptions = Field(

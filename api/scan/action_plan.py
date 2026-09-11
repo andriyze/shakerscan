@@ -29,6 +29,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..runtime.models import TargetBinding
 
+try:
+    from runtime.browser_login_contract import browser_login_action_arguments
+except ModuleNotFoundError:
+    from ..runtime.browser_login_contract import browser_login_action_arguments
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
@@ -766,6 +770,7 @@ class ScanActionPlanCompiler:
         execution_plan: ScanExecutionPlan,
         target_binding: TargetBinding,
         credential_profile_refs: Sequence[Mapping[str, Any]] = (),
+        browser_login_profile_refs: Sequence[Mapping[str, Any]] = (),
         request_collection_refs: Sequence[Mapping[str, Any]] = (),
         request_manifest_refs: Mapping[str, Mapping[str, Any]] | None = None,
         endpoint_manifest_ref: Mapping[str, Any] | None = None,
@@ -1005,6 +1010,18 @@ class ScanActionPlanCompiler:
                 required=required,
                 supporting=supporting,
             ))
+
+        try:
+            browser_actions = browser_login_action_arguments(
+                browser_login_profile_refs, policy=policy,
+                max_workers=execution_plan.budget.max_workers,
+                scope=scope, continuation_round=continuation_round,
+            )
+        except ValueError as exc:
+            raise ScanActionPlanError(str(exc)) from exc
+        for browser_args in browser_actions:
+            add(f"qa.browser_login_{browser_args['as_principal']}", "resolve_inputs",
+                "browser.login_check", browser_args, required=True)
 
         for lane in ("primary", "secondary", "service", "ssh"):
             reference = lane_refs.get(lane)
@@ -1925,7 +1942,8 @@ class ScanActionPlanCompiler:
                     f"placement cannot execute capability {blueprint.capability_name}"
                 )
             if (
-                blueprint.capability_name in _BATCH_CAPABILITIES
+                (blueprint.capability_name in _BATCH_CAPABILITIES
+                 or specification.placement_requirements.get("local_worker_only"))
                 and "local" not in backends
             ):
                 raise ScanActionPlacementError(
@@ -1941,7 +1959,8 @@ class ScanActionPlanCompiler:
                 "schema_version": "scan-action-placement/v1",
                 "eligible_backends": list(
                     ("local",)
-                    if blueprint.capability_name in _BATCH_CAPABILITIES
+                    if (blueprint.capability_name in _BATCH_CAPABILITIES
+                        or specification.placement_requirements.get("local_worker_only"))
                     else backends
                 ),
                 "requirements": dict(specification.placement_requirements),

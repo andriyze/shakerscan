@@ -77,6 +77,7 @@ from capabilities.network import (
     NetworkExecutionAdapter,
     network_capability_adapter,
 )
+from capabilities.browser_login_worker import prepare_hunt_browser_action, browser_worker_policy, build_hunt_browser_adapter, build_scan_browser_login_adapter
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
 from hunt.browser_credentials import browser_session_headers
 from capabilities.http import execute_bound_http_request
@@ -11712,6 +11713,7 @@ async def _execute_reserved_deterministic_scan(
         process_runner=_execute_agent_scanner_process,
         cancelled=lambda: _scan_cancel_requested(scan_id),
         private_replay_plan_loader=load_private_replay_plan,
+        browser_login_adapter_factory=lambda action, dispatcher: build_scan_browser_login_adapter(db_pool, action=action, dispatcher=dispatcher),
     )
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
@@ -21043,14 +21045,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         hunt_policy.get("scope_receipt_id") or ""
                     ) or None,
                 )
-                policy = ScanPolicy(
-                    active_testing=bool(hunt_policy.get("active_testing")),
-                    allow_state_changing_http=False,
-                    scope_receipt_id=target.scope_receipt_id,
-                    approval_receipt_id=hunt_policy.get(
-                        "approval_receipt_id"
-                    ),
-                )
+                policy = browser_worker_policy(capability_name, policy=hunt_policy, target=target)
                 await _revalidate_hunt_action_authority(
                     conn,
                     run=run,
@@ -21060,10 +21055,9 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     capability_name=capability_name,
                 )
                 browser_adapter = browser_capability_adapter(capability_name)
-                prepared = browser_adapter.prepare(
-                    target=target,
-                    base_url=target_url,
-                    args=capability_input,
+                prepared = prepare_hunt_browser_action(capability_name,
+                    target=target, base_url=target_url, args=capability_input,
+                    context=context, policy=policy,
                 )
                 expected_input_digest = str(
                     job_data.get("expected_input_digest") or ""
@@ -21178,7 +21172,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         current=heartbeat,
                     )
 
-        executable_browser_adapter = browser_adapter(prepared, session_loader=lambda: browser_session_headers(db_pool, prepared=prepared, hunt_id=hunt_id, policy=policy))
+        executable_browser_adapter = build_hunt_browser_adapter(db_pool, prepared=prepared, hunt_id=hunt_id, policy=policy)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),

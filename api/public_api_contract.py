@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -437,11 +437,72 @@ def add_public_v2_idempotency_openapi(openapi: dict[str, Any]) -> dict[str, Any]
     return openapi
 
 
+def _origin_is_allowed(origin: str, allowed_origins: Sequence[str], allow_origin_regex: str = "") -> bool:
+    """Apply the same exact/regex origin decision to actual unsafe requests as CORS preflights.
+
+    CORS response headers are not a CSRF boundary: browsers still dispatch simple cross-origin POSTs
+    and merely hide the response. ShakerScan intentionally remains friendly to curl/agents (which do
+    not send Origin), while browser requests that do carry Origin must come from the configured UI.
+    """
+    normalized = str(origin or "").strip()
+    if not normalized:
+        return True
+    if "*" in allowed_origins:
+        return True
+    if normalized in allowed_origins:
+        return True
+    if allow_origin_regex:
+        try:
+            return re.fullmatch(allow_origin_regex, normalized) is not None
+        except re.error:
+            # Invalid security configuration fails closed for browser mutations.
+            return False
+    return False
+
+
+class UnsafeOriginGuardMiddleware:
+    """Reject disallowed browser-origin mutations before endpoint code executes.
+
+    Safe/read-only methods retain ordinary CORS behavior, and non-browser clients remain compatible
+    because requests without an Origin header are accepted.
+    """
+
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(self, app: Any, *, allow_origins: Sequence[str], allow_origin_regex: str = ""):
+        self.app = app
+        self.allow_origins = tuple(allow_origins)
+        self.allow_origin_regex = allow_origin_regex
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and str(scope.get("method") or "GET").upper() not in self._SAFE_METHODS:
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope.get("headers") or []
+            }
+            origin = headers.get("origin", "")
+            if origin and not _origin_is_allowed(origin, self.allow_origins, self.allow_origin_regex):
+                body = json.dumps({"detail": "Cross-origin browser mutation is not allowed"}).encode("utf-8")
+                await send({
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"vary", b"Origin"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
 __all__ = [
     "PUBLIC_V2_IDEMPOTENCY_HEADER",
     "PUBLIC_V2_SURFACE_PREFIXES",
     "PUBLIC_V2_WRITE_BODY_LIMITS",
     "PublicV2BodyLimitMiddleware",
+    "UnsafeOriginGuardMiddleware",
     "PublicV2IdempotencyMiddleware",
     "add_public_v2_idempotency_openapi",
     "public_v2_surface",

@@ -31,6 +31,8 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`hosted-connector.md`](hosted-connector.md) | Read-only hosted-workspace HTTPS/MCP preview connector; not an enabled release capability |
 | [`release-2.2.0-plan.md`](release-2.2.0-plan.md) | 2.2.0 audit verdicts and improvement plan: upgrade safety, the fifth image everywhere, DAST depth, release pipeline |
 | [`api-image-boundary.md`](api-image-boundary.md) | What the control-plane process executes and why the slim API image keeps Chromium and the Docker client but no scanner toolset |
+| [`browser-login-qa.md`](browser-login-qa.md) | Operator-authored `browser.login_check` capability: isolated authenticated context, DOM-marker verification, bounded read-only QA, and Scan/Hunt integration |
+| [`browser-session-integrity.md`](browser-session-integrity.md) | Why browser session materialization is not login verification, and the session-integrity guarantees the login QA helper relies on |
 | [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
 | [`multi-node-guide.md`](multi-node-guide.md) | Operate the supported outbound-HTTPS Fleet; WireGuard is preview-only |
 | [`releases/README.md`](releases/README.md) | Immutable release-note index, including published and failed/cancelled candidates |

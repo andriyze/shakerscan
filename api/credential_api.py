@@ -127,6 +127,7 @@ class CredentialProfileCreate(BaseModel):
     custom_headers: dict[str, SecretStr] | None = None
     parameter_name: str | None = Field(default=None, max_length=200)
     browser_storage_key: str | None = Field(default=None, max_length=200)
+    browser_login: dict[str, Any] | None = None
     expires_at: datetime | None = None
     allowed_capabilities: list[str] = Field(default_factory=list, max_length=128)
     allow_active_capabilities: bool = False
@@ -163,6 +164,7 @@ class CredentialProfileRotate(BaseModel):
     custom_headers: dict[str, SecretStr] | None = None
     parameter_name: str | None = Field(default=None, max_length=200)
     browser_storage_key: str | None = Field(default=None, max_length=200)
+    browser_login: dict[str, Any] | None = None
     expires_at: datetime | None = None
     clear_expiry: bool = False
     created_by: str = Field(default="api", max_length=120)
@@ -296,6 +298,7 @@ def _material(auth_kind: str, value: Any) -> tuple[str, dict[str, Any]]:
             custom_headers=_custom_headers(value.custom_headers),
             parameter_name=value.parameter_name,
             browser_storage_key=value.browser_storage_key,
+            browser_login=value.browser_login,
         )
         configuration = public_credential_configuration(
             parse_credential_secret(kind, envelope)
@@ -696,6 +699,12 @@ async def rotate_credential_profile(
         async with pool.acquire() as conn:
             async with conn.transaction():
                 existing = await _store.get_profile(conn, profile_id=profile_id)
+                if (existing.configuration.get("browser_login_configured")
+                        and "browser_login" not in payload.model_fields_set):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Resubmit browser_login when rotating this profile, or explicitly set it to null to remove the saved workflow.",
+                    )
                 envelope, configuration = _material(existing.auth_kind, payload)
                 expires_at = None if payload.clear_expiry else (
                     payload.expires_at
