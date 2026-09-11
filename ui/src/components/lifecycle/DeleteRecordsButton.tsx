@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Button, ConfirmDialog, useToast } from '@/components/ui'
+import { Button, ConfirmDialog, useToast, type ButtonVariant } from '@/components/ui'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import {
   approveRecordDeletion, executeRecordDeletion, previewRecordDeletion, archiveRecordTarget,
@@ -15,6 +15,9 @@ interface Props {
   onDeleted: (result: DeletionResult) => void
   onArchived?: () => void
   disabled?: boolean
+  /** Visual weight only; the preview/approval flow is identical. Defaults to the danger button. */
+  variant?: ButtonVariant
+  className?: string
 }
 
 export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived }: {
@@ -98,7 +101,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
   />
 }
 
-export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, disabled }: Props) {
+export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, disabled, variant = 'danger', className }: Props) {
   const toast = useToast()
   const [preview, setPreview] = useState<DeletionPreview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -143,7 +146,7 @@ export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDe
     }
   }
   return <span onClick={event => event.stopPropagation()}>
-    <Button variant="danger" disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
+    <Button variant={variant} className={className} disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
       {loading ? 'Previewing…' : label}
     </Button>
     <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} />

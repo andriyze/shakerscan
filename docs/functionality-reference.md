@@ -989,7 +989,7 @@ AI Gate, Model Intake, ASM, and Manual filters. The API `source_type` filter acc
 Scanner findings driven by a hunt are included in `deep_hunt` and excluded from `dast`, so one row
 does not present two competing sources. `model_intake` and the AI sources also filter separately
 from `dast` (R8).
-Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
+Findings support filtering, sorting, bulk status triage from the list selection dock (`POST /findings/bulk`), previewed cleanup, manual creation, and per-finding retest.
 
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
 links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in

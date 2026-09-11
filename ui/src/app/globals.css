@@ -33,3 +33,9 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #6b7280;
 }
+
+/* Triage dock entrance (findings list); applied under motion-safe: only. */
+@keyframes dock-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
