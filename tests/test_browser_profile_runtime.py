@@ -17,6 +17,11 @@ import pytest
 from scanner.scanner_tools import browser_profile as bp
 
 SECRET = "synthetic-private-value"
+# Non-sensitive filler for the simulated on-disk browser-state files. The files' presence is what
+# these fixtures reproduce; their content is never asserted. Keeping SECRET out of the file-write
+# (storage) sinks avoids a clear-text-storage false positive while SECRET still flows through the
+# error/receipt paths the leak assertions actually check.
+STATE_MARKER = "partial-state-present"
 ORIGIN = "https://browser-fixture.test"
 
 
@@ -63,7 +68,7 @@ class FakeContext:
 
     async def add_cookies(self, cookies):
         self.jar = [] if self.errors.get("drop_cookies") else cookies
-        (self.profile / "private-cookie-state").write_text(SECRET)
+        (self.profile / "private-cookie-state").write_text(STATE_MARKER)
         if self.errors.get("add_cookies"):
             raise RuntimeError(SECRET)
 
@@ -113,7 +118,7 @@ def browser(monkeypatch, tmp_path):
         state.launches.append(kwargs)
         context.profile = Path(path)
         if errors.get("launch"):
-            (context.profile / "private-partial-state").write_text(SECRET)
+            (context.profile / "private-partial-state").write_text(STATE_MARKER)
             raise RuntimeError(SECRET)
         return context
 
