@@ -60,9 +60,13 @@ own confirmation, including when erasure is blocked by protected history.
 and approval below. The Targets page exposes a delete control on each actual target, including
 subdomains. It never interprets a root-domain group as recursive ownership of every subdomain.
 
-The Findings page supports selected-record deletion and previewed age cleanup. Finding detail
-supports single-record deletion with scan scope. Investigation candidates are not finding rows
-and cannot be selected through this surface.
+The Findings page supports selected-record deletion from the selection dock (Select, choose
+rows, More, Delete selected findings) and previewed age cleanup (Advanced cleanup). Neither is a
+front-line control: bulk triage (`POST /findings/bulk`) is the dock's primary action, and in
+managed workspaces both deletion entries require the `record_deletion` and `engine_admin`
+capabilities. Finding detail supports single-record deletion with scan scope from the Manage
+record block at the end of the page. Investigation candidates are not finding rows and cannot be
+selected through this surface.
 
 ### Explicit API flow
 
@@ -118,12 +122,13 @@ No suppression/tombstone prevents future discovery or scans from creating new re
 
 Model Intake targets use their separate product lifecycle. Mixed product ownership and legal or
 operational holds block this generic operation. Managed deployments must explicitly enable the
-`record_deletion` UI capability and authorize these endpoints at their gateway; this UI flag is
-not an API authorization mechanism. Standalone remains a single-user local application.
+`record_deletion` UI capability (plus `engine_admin` for the Findings list and detail controls)
+and authorize these endpoints at their gateway; this UI flag is not an API authorization mechanism. Standalone remains a single-user local application.
 
 Acceptance coverage lives in `tests/test_data_lifecycle.py`,
 `tests/test_data_lifecycle_replay.py`, `tests/test_target_archive_admission.py`,
-`tests/test_data_lifecycle_postgres.py`, and `ui/tests/browser/data-lifecycle.spec.ts`.
+`tests/test_data_lifecycle_postgres.py`, `ui/tests/browser/data-lifecycle.spec.ts`, and
+`ui/tests/browser/findings-triage.spec.ts`.
 The PostgreSQL test uses only the explicitly named disposable local test database; it must never
 be pointed at an existing installation.
 

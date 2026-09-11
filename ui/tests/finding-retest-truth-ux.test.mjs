@@ -5,7 +5,7 @@ import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
 const detail = fs.readFileSync(path.join(root, 'src/app/findings/[id]/page.tsx'), 'utf8')
-const list = fs.readFileSync(path.join(root, 'src/app/findings/page.tsx'), 'utf8')
+const list = fs.readFileSync(path.join(root, 'src/app/findings/FindingRow.tsx'), 'utf8')
 
 test('finding surfaces distinguish canonical proof from latest retest', () => {
   assert.match(list, /finding\.latest_retest_verdict/)

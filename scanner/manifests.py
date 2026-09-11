@@ -463,7 +463,7 @@ class EndpointManifest:
     def finish_producer(
         self, name: str, *, status: str = "complete", reason: str | None = None
     ) -> None:
-        if status not in {"complete", "partial", "timed_out", "failed", "cancelled"}:
+        if status not in {"complete", "partial", "timed_out", "failed", "cancelled", "skipped"}:
             raise ValueError("invalid producer status")
         state = self.producers.setdefault(name, ProducerState())
         state.status = status

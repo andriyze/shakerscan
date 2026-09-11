@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Button, ConfirmDialog, useToast } from '@/components/ui'
+import { Button, ConfirmDialog, useToast, type ButtonVariant } from '@/components/ui'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import {
   approveRecordDeletion, executeRecordDeletion, previewRecordDeletion, archiveRecordTarget,
@@ -15,6 +15,9 @@ interface Props {
   onDeleted: (result: DeletionResult) => void
   onArchived?: () => void
   disabled?: boolean
+  /** Visual weight only; the preview/approval flow is identical. Defaults to the danger button. */
+  variant?: ButtonVariant
+  className?: string
 }
 
 export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived }: {
@@ -98,32 +101,54 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
   />
 }
 
-export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, disabled }: Props) {
+export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, disabled, variant = 'danger', className }: Props) {
   const toast = useToast()
   const [preview, setPreview] = useState<DeletionPreview | null>(null)
   const [loading, setLoading] = useState(false)
   const loadingRef = useRef(false)
   const alive = useRef(true)
+  // A preview is only valid for the exact selection it was requested with. Bind each request
+  // and stored preview to a stable value-identity so a delayed response for an older selection
+  // can never be shown — or confirmed — against the current one.
+  const selectionKey = JSON.stringify(selection)
+  const latestKey = useRef(selectionKey)
+  latestKey.current = selectionKey
+  const previewKey = useRef<string | null>(null)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  // Drop a stored preview the moment the selection changes, is cleared, or the control is disabled,
+  // so the confirm dialog can never act on a set the operator no longer has selected.
+  useEffect(() => {
+    if (previewKey.current !== null && (disabled || previewKey.current !== selectionKey)) {
+      previewKey.current = null
+      setPreview(null)
+    }
+  }, [selectionKey, disabled])
   if (!featureEnabled('record_deletion')) return null
   async function open() {
     if (loadingRef.current) return
     loadingRef.current = true
+    const requestedKey = selectionKey
     setLoading(true)
     try {
       const result = await previewRecordDeletion(selection)
-      if (alive.current) setPreview(result)
+      // Ignore a late response if the operator changed the selection while it was pending.
+      if (alive.current && latestKey.current === requestedKey) {
+        previewKey.current = requestedKey
+        setPreview(result)
+      }
     } catch (cause) {
-      if (alive.current) toast.error(cause instanceof Error ? cause.message : 'Could not preview deletion')
+      if (alive.current && latestKey.current === requestedKey) {
+        toast.error(cause instanceof Error ? cause.message : 'Could not preview deletion')
+      }
     } finally {
       loadingRef.current = false
       if (alive.current) setLoading(false)
     }
   }
   return <span onClick={event => event.stopPropagation()}>
-    <Button variant="danger" disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
+    <Button variant={variant} className={className} disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
       {loading ? 'Previewing…' : label}
     </Button>
-    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => setPreview(null)} onDeleted={onDeleted} onArchived={onArchived} />
+    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} />
   </span>
 }

@@ -989,7 +989,7 @@ AI Gate, Model Intake, ASM, and Manual filters. The API `source_type` filter acc
 Scanner findings driven by a hunt are included in `deep_hunt` and excluded from `dast`, so one row
 does not present two competing sources. `model_intake` and the AI sources also filter separately
 from `dast` (R8).
-Findings support filtering, sorting, bulk update/cleanup, manual creation, and per-finding retest.
+Findings support filtering, sorting, bulk status triage from the list selection dock (`POST /findings/bulk`), previewed cleanup, manual creation, and per-finding retest.
 
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
 links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in
@@ -1500,6 +1500,15 @@ an accepted Arsenal action; local-agent output never grants execution or finding
 
 This appendix is generated directly from code and repository manifests. It is intentionally verbose:
 it is the exhaustive backstop behind the human-readable product map above.
+
+### Saved browser login and read-only QA
+
+`browser.login_check` is a shared credential-gated Scan/Hunt action using an
+operator-saved encrypted workflow. Select it with Scan `browser_login_profile_ids`
+or Hunt's managed principal and `browser.login_check` capability. It performs one
+login and fixed protected-page assertions, retains no exported browser state, and
+does not grant permission to other actions. See [browser login QA](browser-login-qa.md)
+for the profile contract, invocation, limits and acceptance gates.
 
 <!-- BEGIN GENERATED CAPABILITY INVENTORY -->
 

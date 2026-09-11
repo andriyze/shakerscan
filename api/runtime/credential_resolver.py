@@ -306,6 +306,15 @@ class ResolvedCredential:
             scopes=tuple(str(item) for item in self._material.get("scopes") or ()),
         )
 
+    def browser_login_configuration(self) -> dict[str, Any]:
+        """Worker-private saved workflow; never include it in receipt metadata."""
+        self._require_open()
+        from .browser_login_contract import normalize_browser_login_profile
+        try:
+            return normalize_browser_login_profile(self._material.get("browser_login"))
+        except ValueError:
+            raise CredentialResolutionError("managed profile has no valid browser login workflow") from None
+
     def query_parameter(self) -> SecretQueryParameter:
         self._require_open()
         if self.profile.auth_kind != "query_parameter":
@@ -435,6 +444,8 @@ class WorkerCredentialResolver:
         target: TargetBinding,
         capability: str,
         authority: CredentialResolutionAuthority,
+        expected_version: int | None = None,
+        expected_principal_slot: str | None = None,
     ) -> AsyncIterator[ResolvedCredential]:
         # Authority is checked before even looking up the profile, and decryption comes
         # only after the exact target-bound query succeeds.
@@ -449,6 +460,18 @@ class WorkerCredentialResolver:
             )
         except CredentialStoreError as exc:
             raise CredentialResolutionError(str(exc)) from exc
+        if (
+            (expected_version is not None and (
+                type(expected_version) is not int
+                or expected_version < 1
+                or stored.metadata.current_version != expected_version
+            ))
+            or (expected_principal_slot is not None
+                and stored.metadata.principal_slot != expected_principal_slot)
+        ):
+            # Compare the exact version returned with the ciphertext, before
+            # decrypting. A separate metadata lookup would leave a rotation race.
+            raise CredentialResolutionError("credential selection changed before decryption")
         envelope = self._decrypt(stored.encrypted_secret, name="credential secret")
         private_metadata = self._decrypt(
             stored.encrypted_metadata, name="credential metadata"

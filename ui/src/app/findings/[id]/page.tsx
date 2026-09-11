@@ -768,8 +768,6 @@ function FindingDetailContent() {
               {retestLoading ? 'Queueing...' : 'Retest Finding'}
             </button>
           </div>}
-          <DeleteRecordsButton selection={{ kind: 'findings', finding_ids: [finding.id], scan_id: finding.scan_id || undefined }}
-            subject="finding" onDeleted={() => router.push(backUrl)} />
         </div>
       </div>
 
@@ -1650,6 +1648,28 @@ function FindingDetailContent() {
             <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
           </details>
         </Card>
+      )}
+
+      {/* Record deletion is an admin lifecycle action, not a triage decision, so it lives at the
+          end of the page in low emphasis. Same double gate as the Findings list. */}
+      {featureEnabled('record_deletion') && featureEnabled('engine_admin') && (
+        <section aria-labelledby="manage-record-heading" className="border-t border-gray-800 pt-6">
+          <h2 id="manage-record-heading" className="text-xs font-semibold uppercase tracking-wider text-gray-500">Manage record</h2>
+          <p className="mt-1 max-w-2xl text-sm text-gray-500">
+            Deleting removes this finding&apos;s database record permanently after a preview and approval.
+            Historical scans and evidence files are retained. To close a finding, use the lifecycle controls above instead.
+          </p>
+          <div className="mt-3">
+            <DeleteRecordsButton
+              variant="ghost"
+              className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
+              label="Delete finding"
+              subject="finding"
+              selection={{ kind: 'findings', finding_ids: [finding.id], scan_id: finding.scan_id || undefined }}
+              onDeleted={() => router.push(backUrl)}
+            />
+          </div>
+        </section>
       )}
     </div>
   )

@@ -1,29 +1,39 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
-import { DeleteRecordsButton, RecordDeletionDialog } from '@/components/lifecycle/DeleteRecordsButton'
+import { RecordDeletionDialog } from '@/components/lifecycle/DeleteRecordsButton'
 import { previewRecordDeletion, type DeletionPreview } from '@/lib/dataLifecycle'
 
 import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
-import { getFindings, getDomains, getSeverityBg, formatDate, getFindingResearchProvenance, type Finding } from '@/lib/api'
+import { getFindings, getDomains, bulkUpdateFindings, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
-import { SEVERITY_LEVELS, FINDING_STATUSES, SORT_OPTIONS, LAST_SEEN_OPTIONS, CLEANUP_AGE_OPTIONS, type FindingSourceType, type SortOption, type SortOrder } from '@/lib/constants'
+import {
+  FINDING_STATUSES,
+  FINDING_STATUS_LABELS,
+  CLEANUP_AGE_OPTIONS,
+  type FindingSourceType,
+  type FindingStatus,
+  type SortOption,
+  type SortOrder,
+} from '@/lib/constants'
+import { cn } from '@/lib/cn'
 import {
   Button,
   Card,
   EmptyState,
   ErrorState,
-  FindingStatusBadge,
-  Input,
+  Field,
   PageHeader,
-  ProofStateBadge,
-  RetestVerdictBadge,
-  SeverityBadge,
-  SourceTypeBadge,
+  Select,
   TableSkeleton,
   useToast,
   buttonClasses,
 } from '@/components/ui'
+import { BadgeLegendModal } from './BadgeLegendModal'
+import { FindingRow } from './FindingRow'
+import { FindingsToolbar } from './FindingsToolbar'
+import { TriageDock } from './TriageDock'
+import { triageOutcomeMessage } from './triage'
 
 const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
@@ -52,29 +62,6 @@ interface FindingsFilters {
   page?: number
 }
 
-const VERIFICATION_VERDICTS = [
-  'exploited',
-  'likely_vulnerable',
-  'blocked_by_security',
-  'out_of_scope_internal',
-  'false_positive',
-  'likely_fixed',
-  'inconclusive',
-  'error'
-] as const
-
-const SOURCE_TYPE_OPTIONS = [
-  { value: '', label: 'All' },
-  { value: 'dast', label: 'DAST' },
-  { value: 'device', label: 'Device' },
-  { value: 'deep_hunt', label: 'Hunt' },
-  { value: 'ai_gate', label: 'AI Gate' },
-  { value: 'ai_session', label: 'Interactive' },
-  { value: 'model_intake', label: 'Model Intake' },
-  { value: 'asm', label: 'ASM' },
-  { value: 'manual', label: 'Manual' },
-] as const
-
 type FindingSourceTypeFilter = 'dast' | 'device' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
@@ -102,16 +89,6 @@ function getFindingSourceType(finding: Finding): FindingSourceType {
   return 'DAST'
 }
 
-function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
-  if (sortBy === 'last_seen' || sortBy === 'first_seen') {
-    return sortOrder === 'desc' ? 'Newest first' : 'Oldest first'
-  }
-  if (sortBy === 'cvss') {
-    return sortOrder === 'desc' ? 'Highest first' : 'Lowest first'
-  }
-  return sortOrder === 'desc' ? 'Critical first' : 'Info first'
-}
-
 function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => void }) {
   return (
     <button
@@ -127,7 +104,7 @@ function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => 
 }
 
 function FindingsContent() {
-  const { filters, setFilter, buildUrl } = useUrlFilters<FindingsFilters>({
+  const { filters, setFilter, setFilters } = useUrlFilters<FindingsFilters>({
     defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
   })
   const toast = useToast()
@@ -140,14 +117,32 @@ function FindingsContent() {
   const [total, setTotal] = useState(0)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
+  const [legendOpen, setLegendOpen] = useState(false)
   const [showCleanup, setShowCleanup] = useState(false)
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [cleanupDays, setCleanupDays] = useState(90)
   const [cleanupStatus, setCleanupStatus] = useState('')
   const [cleanupDomain, setCleanupDomain] = useState('')
   const [cleanupPreview, setCleanupPreview] = useState<DeletionPreview | null>(null)
   const [cleanupLoading, setCleanupLoading] = useState(false)
+  // A cleanup preview is bound to the exact filters it was requested with; a late response for
+  // stale filters must never replace the current one (the filter onChange handlers clear it too).
+  const cleanupFilterKey = JSON.stringify({ cleanupDays, cleanupStatus, cleanupDomain })
+  const latestCleanupKey = useRef(cleanupFilterKey)
+  latestCleanupKey.current = cleanupFilterKey
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
+
+  // Selection is local state, not URL state: it serves triage first and never survives a refetch.
+  const [selecting, setSelecting] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [triageBusy, setTriageBusy] = useState(false)
+  const [deletePreview, setDeletePreview] = useState<DeletionPreview | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const deleteRequestKey = useRef<string | null>(null)
+  const selectButtonRef = useRef<HTMLButtonElement>(null)
+
+  // Record deletion is an admin-only lifecycle action, never a front-line triage control.
+  // Same double gate as Advanced cleanup; the dock renders no menu at all when it is off.
+  const canDeleteRecords = featureEnabled('record_deletion') && featureEnabled('engine_admin')
 
   const severityFilter = filters.severity || ''
   const statusFilter = filters.status || ''
@@ -262,6 +257,7 @@ function FindingsContent() {
   }
 
   async function handleCleanupPreview() {
+    const requestedKey = cleanupFilterKey
     setCleanupLoading(true)
     try {
       const result = await previewRecordDeletion({
@@ -270,16 +266,90 @@ function FindingsContent() {
         status: cleanupStatus || undefined,
         root_domain: cleanupDomain || undefined,
       })
-      setCleanupPreview(result)
+      // Ignore a late preview if the filters changed while it was pending.
+      if (latestCleanupKey.current === requestedKey) setCleanupPreview(result)
     } catch (err) {
-      console.error('Cleanup preview failed:', err)
-      toast.error(err instanceof Error ? err.message : 'Failed to preview cleanup')
+      if (latestCleanupKey.current === requestedKey) {
+        console.error('Cleanup preview failed:', err)
+        toast.error(err instanceof Error ? err.message : 'Failed to preview cleanup')
+      }
     } finally {
       setCleanupLoading(false)
     }
   }
 
+  // A fresh result set invalidates any selection made against the old one.
   useEffect(() => { setSelectedIds(new Set()) }, [findings])
+
+  // A deletion preview is only valid for the exact selection it was requested with.
+  const selectedKey = [...selectedIds].sort().join(',')
+  useEffect(() => {
+    if (deleteRequestKey.current !== null && deleteRequestKey.current !== selectedKey) {
+      deleteRequestKey.current = null
+      setDeletePreview(null)
+    }
+  }, [selectedKey])
+
+  const selectableFindings = findings.filter((finding) => !finding.is_candidate)
+  const allOnPageSelected = selectableFindings.length > 0 && selectableFindings.every((finding) => selectedIds.has(finding.id))
+
+  // The dock unmounts with the selection, so focus returns to the control that started it.
+  function clearSelection() {
+    setSelectedIds(new Set())
+    selectButtonRef.current?.focus()
+  }
+
+  function toggleSelecting() {
+    if (selecting) {
+      setSelecting(false)
+      setSelectedIds(new Set())
+    } else {
+      setSelecting(true)
+    }
+  }
+
+  function toggleFinding(id: string, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id); else next.delete(id)
+      return next
+    })
+  }
+
+  async function handleBulkTriage(status: FindingStatus) {
+    const ids = [...selectedIds]
+    if (!ids.length || triageBusy) return
+    setTriageBusy(true)
+    try {
+      const result = await bulkUpdateFindings(ids, status)
+      toast.success(triageOutcomeMessage(result.updated, status, result.not_found))
+      clearSelection()
+      await fetchFindings()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update findings')
+    } finally {
+      setTriageBusy(false)
+    }
+  }
+
+  async function handleDeleteSelected() {
+    const ids = [...selectedIds]
+    if (!ids.length || deleteBusy) return
+    const requestedKey = [...ids].sort().join(',')
+    deleteRequestKey.current = requestedKey
+    setDeleteBusy(true)
+    try {
+      const preview = await previewRecordDeletion({ kind: 'findings', finding_ids: ids })
+      // Ignore a late preview if the selection changed while it was pending.
+      if (deleteRequestKey.current === requestedKey) setDeletePreview(preview)
+    } catch (err) {
+      if (deleteRequestKey.current === requestedKey) {
+        toast.error(err instanceof Error ? err.message : 'Could not preview deletion')
+      }
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
@@ -313,29 +383,35 @@ function FindingsContent() {
   const PaginationControls = () => (
     totalPages > 1 ? (
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setFilter('page', page > 1 ? page - 1 : undefined)}
           disabled={page <= 1}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Previous
-        </button>
-        <span className="px-3 py-1.5 text-sm text-gray-400">
+        </Button>
+        <span className="px-1 text-sm text-gray-400 tabular-nums">
           Page {page} of {totalPages}
         </span>
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setFilter('page', page + 1)}
           disabled={page >= totalPages}
-          className="px-3 py-1.5 bg-gray-800 text-gray-400 rounded-lg text-sm hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Next
-        </button>
+        </Button>
       </div>
     ) : null
   )
 
+  const rangeStart = (page - 1) * PAGE_SIZE + 1
+  const rangeEnd = Math.min(page * PAGE_SIZE, total)
+  const dockVisible = selectedIds.size > 0
+
   return (
-    <div className="space-y-6">
+    <div className={cn('space-y-5', dockVisible && 'pb-40 sm:pb-28')}>
       <PageHeader
         title="Findings"
         description={
@@ -350,110 +426,60 @@ function FindingsContent() {
             <Link href="/findings/candidates" className={buttonClasses('secondary')}>
               Investigation candidates
             </Link>
-            {featureEnabled('record_deletion') && featureEnabled('engine_admin') && <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
+            {canDeleteRecords && <Button variant="secondary" onClick={() => { setShowCleanup(!showCleanup); setCleanupPreview(null) }}>
               Advanced cleanup
             </Button>}
           </>
         }
       />
 
-      {/* Legend: Severity / Proof / Retest / Status render as look-alike badges on each row.
-          Spell out that they are four different questions so newcomers don't conflate them. */}
-      <details className="group rounded-lg border border-gray-800 bg-gray-900/50">
-        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-2.5 text-sm text-gray-400 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg">
-          <span>What do the badges mean?</span>
-          <span aria-hidden="true" className="text-gray-600 transition-transform group-open:rotate-180">▾</span>
-        </summary>
-        <div className="grid gap-3 border-t border-gray-800 p-4 sm:grid-cols-2">
-          <div className="flex items-start gap-3">
-            <SeverityBadge severity="high" />
-            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Severity</span> — how serious it would be if real, from Critical down to Info.</p>
+      {/* Cleanup Panel (admin-only age-based deletion, previewed and approved) */}
+      {canDeleteRecords && showCleanup && (
+        <Card className="space-y-4 p-4">
+          <div>
+            <h3 className="text-sm font-medium text-white">Clean up old findings</h3>
+            <p className="mt-1 text-xs text-gray-500">Permanently deletes finding records not seen within the chosen window. Always previewed and approved first.</p>
           </div>
-          <div className="flex items-start gap-3">
-            <div className="shrink-0"><ProofStateBadge proofState="verified" /></div>
-            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Proof</span> — how sure ShakerScan is it is real: <span className="text-gray-200">Proven</span> (evidence captured), <span className="text-gray-200">Suspected</span> (a lead, not confirmed), Refuted, or Inconclusive.</p>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="shrink-0"><RetestVerdictBadge verdict="likely_vulnerable" /></div>
-            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Retest</span> — what the most recent automated re-check found.</p>
-          </div>
-          <div className="flex items-start gap-3">
-            <FindingStatusBadge status="active" />
-            <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Status</span> — your triage decision: active, resolved, false positive, or accepted risk.</p>
-          </div>
-        </div>
-      </details>
-
-      {/* Cleanup Panel */}
-      {featureEnabled('record_deletion') && featureEnabled('engine_admin') && showCleanup && (
-        <Card className="p-4 space-y-4">
-          <h3 className="text-sm font-medium text-white">Cleanup Old Findings</h3>
           <div className="flex flex-wrap items-end gap-4">
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Not seen in</label>
-              <select
-                value={cleanupDays}
-                onChange={(e) => { setCleanupDays(Number(e.target.value)); setCleanupPreview(null) }}
-                aria-label="Cleanup findings not seen in"
-                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-              >
+            <Field label="Not seen in">
+              <Select fullWidth={false} value={cleanupDays} onChange={(e) => { setCleanupDays(Number(e.target.value)); setCleanupPreview(null) }}>
                 {CLEANUP_AGE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Status (optional)</label>
-              <select
-                value={cleanupStatus}
-                onChange={(e) => { setCleanupStatus(e.target.value); setCleanupPreview(null) }}
-                aria-label="Cleanup status filter"
-                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-              >
+              </Select>
+            </Field>
+            <Field label="Status (optional)">
+              <Select fullWidth={false} value={cleanupStatus} onChange={(e) => { setCleanupStatus(e.target.value); setCleanupPreview(null) }}>
                 <option value="">Any status</option>
                 {FINDING_STATUSES.map((s) => (
-                  <option key={s} value={s}>{s.replace('_', ' ')}</option>
+                  <option key={s} value={s}>{FINDING_STATUS_LABELS[s]}</option>
                 ))}
-              </select>
-            </div>
+              </Select>
+            </Field>
             {domains.length > 0 && (
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Domain (optional)</label>
-                <select
-                  value={cleanupDomain}
-                  onChange={(e) => { setCleanupDomain(e.target.value); setCleanupPreview(null) }}
-                  aria-label="Cleanup domain filter"
-                  className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-                >
+              <Field label="Domain (optional)">
+                <Select fullWidth={false} value={cleanupDomain} onChange={(e) => { setCleanupDomain(e.target.value); setCleanupPreview(null) }}>
                   <option value="">All domains</option>
                   {domains.map((d) => (
                     <option key={d} value={d}>{d}</option>
                   ))}
-                </select>
-              </div>
+                </Select>
+              </Field>
             )}
-            <button
-              onClick={handleCleanupPreview}
-              disabled={cleanupLoading}
-              className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
-            >
-              {cleanupLoading ? 'Checking...' : 'Preview'}
-            </button>
+            <Button onClick={handleCleanupPreview} loading={cleanupLoading}>
+              {cleanupLoading ? 'Checking…' : 'Preview'}
+            </Button>
             {cleanupPreview !== null && (
               <>
-                <span className="text-sm text-gray-400">
+                <span className="text-sm text-gray-400 tabular-nums">
                   {cleanupPreview.would_delete === 0
                     ? 'No findings match'
                     : `${cleanupPreview.would_delete} finding${cleanupPreview.would_delete !== 1 ? 's' : ''} will be deleted`}
                 </span>
                 {cleanupPreview.would_delete > 0 && (
-                  <button
-                    onClick={() => setCleanupConfirmOpen(true)}
-                    disabled={cleanupLoading}
-                    className="px-3 py-1.5 bg-red-900/50 text-red-400 rounded-lg text-sm hover:bg-red-900/80 disabled:opacity-50"
-                  >
+                  <Button variant="danger" onClick={() => setCleanupConfirmOpen(true)} disabled={cleanupLoading}>
                     Delete
-                  </button>
+                  </Button>
                 )}
               </>
             )}
@@ -466,146 +492,25 @@ function FindingsContent() {
           setShowCleanup(false); setCleanupPreview(null); void fetchFindings()
         }} />
 
-      <div className="relative">
-        <Input
-          type="text"
-          placeholder="Search findings by title or URL..."
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          aria-label="Search findings by title or URL"
-        />
-      </div>
-
-      {/* Secondary filters stay available without competing with the primary
-          search, severity, and lifecycle controls. */}
-      <details className="rounded-lg border border-gray-800 bg-gray-950/30">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-400 hover:text-gray-200">
-          More filters and sorting
-        </summary>
-        <div className="flex flex-wrap items-center gap-4 border-t border-gray-800 p-4">
-        {/* User-facing finding source. Hunt includes direct AI claims and
-            DAST work launched as part of a hunt. */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Source:</label>
-          <div className="flex max-w-full flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-900 p-0.5">
-            {SOURCE_TYPE_OPTIONS.map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                onClick={() => setFilter('source_type', option.value || undefined)}
-                className={`px-2.5 py-1 text-sm rounded-md transition-colors sm:px-3 ${
-                  sourceTypeFilter === option.value
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Domain Filter */}
-        {domains.length > 0 && (
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-400">Domain:</label>
-            <select
-              value={domainFilter}
-              onChange={(e) => setFilter('domain', e.target.value || undefined)}
-              aria-label="Filter by domain"
-              className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-            >
-              <option value="">All domains</option>
-              {domains.map((domain) => (
-                <option key={domain} value={domain}>{domain}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {/* Last Seen Filter */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Last seen:</label>
-          <select
-            value={lastSeenFilter || ''}
-            onChange={(e) => setFilter('last_seen', e.target.value ? Number(e.target.value) : undefined)}
-            aria-label="Filter by last seen"
-            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-          >
-            <option value="">All time</option>
-            {LAST_SEEN_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Sort Options */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Sort by:</label>
-          <select
-            value={sortBy}
-            onChange={(e) => setFilter('sort_by', e.target.value)}
-            aria-label="Sort by"
-            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-          >
-            {SORT_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-          <button
-            onClick={() => setFilter('sort_order', sortOrder === 'desc' ? 'asc' : 'desc')}
-            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm hover:bg-gray-800 focus:outline-none focus:border-blue-500"
-            aria-label={`Toggle sort direction: ${getSortOrderLabel(sortBy, sortOrder)}`}
-            title={`Toggle sort direction: ${getSortOrderLabel(sortBy, sortOrder)}`}
-          >
-            {getSortOrderLabel(sortBy, sortOrder)}
-          </button>
-        </div>
-
-        {/* Verification Verdict Filter */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Verdict:</label>
-          <select
-            value={verificationVerdictFilter}
-            onChange={(e) => setFilter('verification_verdict', e.target.value || undefined)}
-            aria-label="Filter by verification verdict"
-            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-          >
-            <option value="">All</option>
-            {VERIFICATION_VERDICTS.map((verdict) => (
-              <option key={verdict} value={verdict}>{verdict.replaceAll('_', ' ')}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Verification Mode Filter */}
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400">Mode:</label>
-          <select
-            value={verificationModeFilter}
-            onChange={(e) => setFilter('verification_mode', e.target.value || undefined)}
-            aria-label="Filter by verification mode"
-            className="px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
-          >
-            <option value="">All</option>
-            <option value="deterministic">deterministic</option>
-            <option value="ai_driven">ai driven</option>
-          </select>
-        </div>
-
-        {/* Verified Only */}
-        <label className="flex items-center gap-2 text-sm text-gray-300">
-          <input
-            type="checkbox"
-            checked={verifiedOnlyFilter}
-            onChange={(e) => setFilter('verified_only', e.target.checked ? 'true' : undefined)}
-            className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
-          />
-          verified only
-        </label>
-
-        </div>
-      </details>
+      <FindingsToolbar
+        searchInput={searchInput}
+        onSearchInputChange={setSearchInput}
+        values={{
+          status: statusFilter,
+          severity: severityFilter,
+          sourceType: sourceTypeFilter,
+          domain: domainFilter,
+          lastSeen: lastSeenFilter,
+          verificationVerdict: verificationVerdictFilter,
+          verificationMode: verificationModeFilter,
+          verifiedOnly: verifiedOnlyFilter,
+          sortBy,
+          sortOrder,
+        }}
+        setFilter={setFilter}
+        setFilters={setFilters}
+        domains={domains}
+      />
 
       {/* Deep-link filters (arrive via links from scans/targets/exposure and
           have no visible control above) — surface each as a removable chip so
@@ -646,62 +551,35 @@ function FindingsContent() {
         </div>
       )}
 
-      {/* Severity Filter */}
-      <div className="flex gap-2 flex-wrap">
-        {SEVERITY_LEVELS.map((sev) => (
-          <button
-            key={sev}
-            onClick={() => setFilter('severity', severityFilter === sev ? undefined : sev)}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors capitalize ${
-              severityFilter === sev
-                ? getSeverityBg(sev)
-                : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-            }`}
-          >
-            {sev}
-          </button>
-        ))}
-      </div>
-
-      {/* Status Filter */}
-      <div className="flex gap-2">
-        <button
-          onClick={() => setFilter('status', undefined)}
-          className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-            !statusFilter
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-          }`}
-        >
-          all
-        </button>
-        {FINDING_STATUSES.map((status) => (
-          <button
-            key={status}
-            onClick={() => setFilter('status', status)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              statusFilter === status
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-            }`}
-          >
-            {status.replace('_', ' ')}
-          </button>
-        ))}
-      </div>
-
-      {/* Top Pagination */}
+      {/* Results line: count, legend, selection toggle, pagination */}
       {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} finding${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
-          </span>
-          <PaginationControls />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-gray-400 tabular-nums" aria-live="polite">
+            <span className="font-medium text-gray-200">{total.toLocaleString()}</span>
+            {` finding${total !== 1 ? 's' : ''}`}
+            {total > PAGE_SIZE && <span className="text-gray-500">{` · showing ${rangeStart}–${rangeEnd}`}</span>}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setLegendOpen(true)}>
+              What the badges mean
+            </Button>
+            {selectableFindings.length > 0 && (
+              <Button
+                ref={selectButtonRef}
+                variant={selecting ? 'primary' : 'ghost'}
+                size="sm"
+                aria-pressed={selecting}
+                onClick={toggleSelecting}
+              >
+                Select
+              </Button>
+            )}
+            <PaginationControls />
+          </div>
         </div>
       )}
+
+      <BadgeLegendModal open={legendOpen} onClose={() => setLegendOpen(false)} />
 
       {/* Findings List */}
       {loading && !loadError ? (
@@ -724,83 +602,62 @@ function FindingsContent() {
           />
         )
       ) : (
-        <Card>
-          {featureEnabled('record_deletion') && <div className="flex items-center gap-3 border-b border-gray-800 p-4">
-            <label className="flex items-center gap-2 text-sm text-gray-300">
-              <input type="checkbox" aria-label="Select findings on this page"
-                checked={findings.filter(f => !f.is_candidate).length > 0 && findings.filter(f => !f.is_candidate).every(f => selectedIds.has(f.id))}
-                onChange={event => setSelectedIds(new Set(event.target.checked ? findings.filter(f => !f.is_candidate).map(f => f.id) : []))} />
-              Select this page
-            </label>
-            <DeleteRecordsButton selection={{ kind: 'findings', finding_ids: [...selectedIds] }}
-              label={`Delete selected (${selectedIds.size})`} subject="selected findings" disabled={!selectedIds.size}
-              onDeleted={() => { setSelectedIds(new Set()); void fetchFindings() }} />
-          </div>}
-          <div className="divide-y divide-gray-800">
-            {findings.map((finding) => {
-              const sourceType = getFindingSourceType(finding)
-              return (
-                <div key={finding.id} className="flex items-start">
-                  {featureEnabled('record_deletion') && !finding.is_candidate && <input type="checkbox"
-                    className="ml-4 mt-5" aria-label={`Select finding ${finding.title}`}
-                    checked={selectedIds.has(finding.id)} onChange={event => {
-                      const next = new Set(selectedIds)
-                      if (event.target.checked) next.add(finding.id); else next.delete(finding.id)
-                      setSelectedIds(next)
-                    }} />}
-                <Link
-                  href={buildDetailUrl(finding)}
-                  className="block min-w-0 flex-1 p-4 hover:bg-gray-800/50 transition-colors"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="flex items-center gap-3 shrink-0">
-                      <SeverityBadge severity={finding.severity} />
-                      <ProofStateBadge proofState={finding.proof_state} />
-                      <SourceTypeBadge type={sourceType} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h3 className="text-sm font-medium text-white">{finding.title}</h3>
-                      <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                        {finding.tool && <span>Tool: {finding.tool}</span>}
-                        {finding.cwe && <span>CWE: {finding.cwe}</span>}
-                        {finding.cvss_score !== undefined && finding.cvss_score !== null && <span>CVSS: {finding.cvss_score}</span>}
-                      </div>
-                      <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                        <span>First seen: {formatDate(finding.first_seen_at)}</span>
-                        <span>Last seen: {formatDate(finding.last_seen_at)}</span>
-                      </div>
-                      {finding.url && (
-                        <p className="text-xs text-gray-600 truncate mt-1">{finding.url}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {finding.latest_retest_verdict && (
-                        <RetestVerdictBadge verdict={finding.latest_retest_verdict} />
-                      )}
-                      <FindingStatusBadge status={finding.status} />
-                    </div>
-                  </div>
-                </Link>
-                </div>
-              )
-            })}
+        <Card className="overflow-hidden">
+          {selecting && (
+            <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-2.5">
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input
+                  type="checkbox"
+                  aria-label="Select findings on this page"
+                  className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500"
+                  checked={allOnPageSelected}
+                  onChange={(event) => setSelectedIds(new Set(event.target.checked ? selectableFindings.map((finding) => finding.id) : []))}
+                />
+                Select this page
+              </label>
+              <span className="text-xs text-gray-500 tabular-nums">{selectableFindings.length} on this page</span>
+            </div>
+          )}
+          <div>
+            {findings.map((finding) => (
+              <FindingRow
+                key={finding.id}
+                finding={finding}
+                href={buildDetailUrl(finding)}
+                sourceType={getFindingSourceType(finding)}
+                selecting={selecting}
+                selected={selectedIds.has(finding.id)}
+                onToggle={(checked) => toggleFinding(finding.id, checked)}
+              />
+            ))}
           </div>
         </Card>
       )}
 
       {/* Bottom Pagination */}
-      {total > 0 && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">
-            {total <= PAGE_SIZE
-              ? `Showing ${total} finding${total !== 1 ? 's' : ''}`
-              : `Showing ${(page - 1) * PAGE_SIZE + 1}-${Math.min(page * PAGE_SIZE, total)} of ${total}`
-            }
+      {total > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span className="text-sm text-gray-500 tabular-nums">
+            {`Showing ${rangeStart}–${rangeEnd} of ${total.toLocaleString()}`}
           </span>
           <PaginationControls />
         </div>
       )}
 
+      {dockVisible && (
+        <TriageDock
+          count={selectedIds.size}
+          busy={triageBusy || deleteBusy}
+          hideStatus={statusFilter || undefined}
+          onTriage={handleBulkTriage}
+          onClear={clearSelection}
+          onDelete={canDeleteRecords ? handleDeleteSelected : undefined}
+        />
+      )}
+
+      <RecordDeletionDialog preview={deletePreview} subject="selected findings"
+        onClose={() => { deleteRequestKey.current = null; setDeletePreview(null) }}
+        onDeleted={() => { clearSelection(); void fetchFindings() }} />
     </div>
   )
 }

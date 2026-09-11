@@ -460,6 +460,7 @@ class DatabaseNeutralScanActionDispatcher:
         cancelled: Cancelled,
         private_inputs: BrokerPrivateScanInputs | None = None,
         private_replay_plan_loader: PrivateReplayPlanLoader | None = None,
+        browser_login_adapter_factory: Callable[..., Any] | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
@@ -502,6 +503,7 @@ class DatabaseNeutralScanActionDispatcher:
         self.process_runner = process_runner
         self.cancelled = cancelled
         self._private_replay_plan_loader = private_replay_plan_loader
+        self._browser_login_adapter_factory = browser_login_adapter_factory
         self._private_replay_plans = dict(
             private_inputs.replay_plans if private_inputs is not None else {}
         )
@@ -1963,7 +1965,11 @@ class DatabaseNeutralScanActionDispatcher:
             except (ScanWorkManifestError, KeyError):
                 continue
 
-        transport = PinnedAiohttpReplayTransport()
+        # Content disclosure is often served by middleware that overstates
+        # Content-Length or closes mid-body (a directory index is the common
+        # case); keep the bytes already received so a real disclosure on a
+        # badly-framed response is still classified rather than dropped.
+        transport = PinnedAiohttpReplayTransport(tolerate_incomplete_body=True)
         started_at = datetime.now(timezone.utc).isoformat()
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
@@ -3075,6 +3081,11 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> CapabilityReceipt:
         if lease.worker_id != self.worker_id:
             raise ScanActionAdapterError("action lease belongs to another worker")
+        if action.capability_name == "browser.login_check":
+            if self._browser_login_adapter_factory is None:
+                raise ScanActionAdapterError("browser login requires the local credential-enabled worker")
+            adapter = self._browser_login_adapter_factory(action, self)
+            return await self._execute_adapter(action, adapter, heartbeat, managed_cancellation=True)
         if action.action_id == "finalize.report":
             return await self._finalize(action)
         if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:

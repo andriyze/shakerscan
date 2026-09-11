@@ -47,7 +47,7 @@ def _target(
 
 def test_browser_registry_and_durable_set_are_explicit_and_bounded():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_browser")} == {
-        "browser.interact", "browser.navigate",
+        "browser.interact", "browser.navigate", "browser.login_check",
     }
     spec = CAPABILITY_REGISTRY.require("browser.navigate")
     assert spec.execution_kind == "browser"

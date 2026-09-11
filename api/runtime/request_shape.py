@@ -31,16 +31,34 @@ def _field_names(values: Any) -> tuple[str, ...]:
 
 def public_request_body_shape(value: Any) -> tuple[str | None, tuple[str, ...]]:
     """Return inferred media type and top-level field names, never field values."""
-    text = str(value or "")
-    if not text or len(text.encode("utf-8", "replace")) > MAX_REQUEST_BODY_SHAPE_BYTES:
+    # A crawler body is serialized text. Stringifying another JSON value (or
+    # bytes) can turn its representation into bogus form field names.
+    if not isinstance(value, str):
+        return None, ()
+    text = value
+    if (
+        not text
+        or len(text) > MAX_REQUEST_BODY_SHAPE_BYTES
+        or len(text.encode("utf-8", "replace")) > MAX_REQUEST_BODY_SHAPE_BYTES
+    ):
         return None, ()
     try:
         decoded = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        decoded = None
-    if isinstance(decoded, Mapping):
-        names = _field_names(decoded.keys())
-        return ("application/json", names) if names else (None, ())
+    except RecursionError:
+        # A byte-bounded body can still exceed the decoder's nesting limit.
+        return None, ()
+    except ValueError:
+        # Truncated/malformed JSON must not fall through to parse_qsl: an '='
+        # inside a field value would publish part of that value as a field name.
+        if text.lstrip().startswith(("{", "[", '"', "\ufeff")):
+            return None, ()
+    else:
+        if isinstance(decoded, Mapping):
+            names = _field_names(decoded.keys())
+            return ("application/json", names) if names else (None, ())
+        # Valid JSON arrays and scalars have no top-level named fields. In
+        # particular, never reinterpret a JSON string's contents as form data.
+        return None, ()
     if "=" not in text:
         return None, ()
     try:

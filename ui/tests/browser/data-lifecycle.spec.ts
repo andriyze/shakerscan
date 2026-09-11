@@ -97,11 +97,18 @@ test('network retry reuses its receipt instead of creating another approval', as
 test('findings page deletes only the selected record IDs', async ({ page }) => {
   const writes = await mockApi(page)
   await page.goto('/findings')
-  await page.getByRole('checkbox', { name: 'Select finding Synthetic lifecycle finding', exact: true }).check()
-  await page.getByRole('button', { name: 'Delete selected findings', exact: true }).click()
+  const rowBox = page.getByRole('checkbox', { name: 'Select finding Synthetic lifecycle finding', exact: true })
+  // Deletion is never a front-line control: no checkbox and no delete entry until the operator
+  // enters selection mode and opens the dock's More menu.
+  await expect(rowBox).toHaveCount(0)
+  await page.getByRole('button', { name: 'Select', exact: true }).click()
+  await rowBox.check()
+  await page.getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Delete selected findings', exact: true }).click()
   expect(writes[0].body).toEqual({ kind: 'findings', finding_ids: [findingId] })
   await page.getByRole('dialog').getByRole('button', { name: 'Approve and delete records' }).click()
-  await expect(page.getByRole('checkbox', { name: 'Select finding Synthetic lifecycle finding', exact: true })).toHaveCount(0)
+  await expect(rowBox).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Selection actions' })).toHaveCount(0)
 })
 
 
