@@ -1,5 +1,13 @@
 FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449eb9fd9df42f03e1b74b5b63
 
+# Debian publishes security fixes faster than the pinned base image is rebuilt, and the image
+# gate (Trivy, HIGH/CRITICAL with a fix available) fails on any OS package that lags behind.
+# Apply the distribution's current fixes at build time so the base digest can stay pinned;
+# 2026-09-13: libpcre2-8-0 10.42-1 -> 10.42-1+deb12u1 (CVE-2026-86145, CVE-2026-89161).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH=/opt/venv/bin:$PATH
