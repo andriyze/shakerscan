@@ -18791,6 +18791,7 @@ async def _execute_agent_scanner_process(
     read_streams: asyncio.Task[tuple[bytes, bytes]] | None = None
     process_started = False
     execution_uncertain = False
+    abnormal_exit = False
     process_enforcement: dict[str, Any] = {}
     browser_profile_receipt: dict[str, Any] = {}
     wire_log_counter: dict[str, Any] | None = None
@@ -19015,6 +19016,14 @@ async def _execute_agent_scanner_process(
                     redact_text((err or b"").decode("utf-8", "replace")[:300])
                     or f"exit_{returncode}"
                 )
+            elif returncode not in (0, None):
+                # The tool emitted output and then died (a signal such as the
+                # kernel's OOM kill arrives as a negative code) or reported an
+                # error. What it wrote before that is trustworthy, but it is not
+                # the whole run: the receipt must say partial, never complete.
+                status = "success"
+                abnormal_exit = True
+                error = f"exit_{returncode}"
             else:
                 status = "success"
     except FileNotFoundError:
@@ -19129,7 +19138,7 @@ async def _execute_agent_scanner_process(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
-        "partial": status == "timeout" and record_count > 0,
+        "partial": (status == "timeout" and record_count > 0) or abnormal_exit,
         "timed_out": status == "timeout",
         "output_lines": safe_lines,
         "line_count": record_count,
