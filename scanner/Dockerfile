@@ -29,7 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev && 
 # this Dockerfile concurrently, so the shared Go caches must be locked; an
 # unlocked mount can disappear underneath another build during cache cleanup.
 # Separate installs are required because Go expects packages in one `go install`
-# invocation to share a module version.
+# invocation to share a module version. Extra `module@version` arguments after the
+# tool version are per-tool lifts: katana v1.7.0 pins its JavaScript parser
+# (Mzack9999/jsluice) to a March 2026 snapshot of the pure-Go tree-sitter port whose
+# string-literal lexing is super-linear; one inline script with a few thousand
+# escaped quotes (every Next.js page carries one) took the crawler past 6 GiB in
+# 20 s and got it killed. gotreesitter v0.52.0 parses the same input in 40 MiB.
 ARG GO_INSTALL_ATTEMPTS=4
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
@@ -39,6 +44,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
       tool_name="$1"; \
       tool_package="$2"; \
       tool_version="$3"; \
+      shift 3; \
       tool_dir="/tmp/build-${tool_name}"; \
       rm -rf "${tool_dir}"; \
       mkdir -p "${tool_dir}"; \
@@ -55,6 +61,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
         golang.org/x/text@v0.41.0 \
         github.com/jackc/pgx/v5@v5.9.0 \
         google.golang.org/grpc@v1.83.2 || return 1; \
+      if [ "$#" -gt 0 ]; then go get "$@" || return 1; fi; \
       go build -mod=mod -trimpath -o "/go/bin/${tool_name}" "${tool_package}" || return 1; \
       cd /; \
       rm -rf "${tool_dir}"; \
@@ -62,7 +69,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     install_tools() { \
       build_tool tlsx github.com/projectdiscovery/tlsx/cmd/tlsx v1.3.0 && \
       build_tool httpx github.com/projectdiscovery/httpx/cmd/httpx v1.8.1 && \
-      build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 && \
+      build_tool katana github.com/projectdiscovery/katana/cmd/katana v1.7.0 \
+        github.com/odvcencio/gotreesitter@v0.52.0 && \
       build_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder v2.15.0 && \
       build_tool naabu github.com/projectdiscovery/naabu/v2/cmd/naabu v2.3.7 && \
       build_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei v3.11.1 && \
