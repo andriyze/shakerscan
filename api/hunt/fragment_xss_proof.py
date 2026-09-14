@@ -10,9 +10,9 @@ parameter keeps the Dalfox scanner.
 """
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import urllib.parse
+from dataclasses import replace
 from typing import Any
 
 try:
@@ -27,8 +27,8 @@ except ModuleNotFoundError:  # package import in host-side tests
         BrowserCapabilityInputError,
         XSSBrowserProofAdapter,
     )
-    from .capability_executor import CapabilityAdapterResult
     from ..runtime.models import TargetBinding
+    from .capability_executor import CapabilityAdapterResult
 
 
 _BENIGN_BLOCK_REASONS = frozenset({"cross_origin"})
