@@ -477,10 +477,19 @@ recreates a running UI container and verifies the baked artifact; it does not re
 API or worker fleet:
 
 ```bash
+./scanner.sh rebuild          # smallest scope covering what changed since the last completed build
 ./scanner.sh rebuild ui       # Next.js UI only
 ./scanner.sh rebuild scanner  # shared scanner runtime, API, and workers
-./scanner.sh rebuild          # complete local application image set
+./scanner.sh rebuild all      # complete local application image set
 ```
+
+Without a scope the launcher diffs the checkout against the last completed build receipt (commits
+since its revision plus modified and untracked files), names the changed paths, and picks `ui`,
+`scanner` or `all`; documentation, tests and CI files never trigger a rebuild. Every rebuild ends
+with a summary of which images were rebuilt or came from cache, the seconds per build step, and a
+post-rebuild smoke that proves one rebuilt worker still imports its runtime and runs its tools
+(`--no-smoke` skips it). The receipt (`.shakerscan-build-receipt.json`) records the same, plus the
+paths that made the build identity `-dirty`.
 
 Worker freshness is derived from scanner/API runtime content, not UI source. Immutable published
 releases still use one exact source revision and complete image set; scoped rebuilds are a local
