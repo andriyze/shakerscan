@@ -43,6 +43,35 @@ def test_blocks_private_and_loopback_outside_lab():
     assert localhost_lab.verdict == "allowed"
 
 
+def test_deployment_policy_admits_private_networks_for_production_and_records_it(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    receipt = evaluate_scope("http://10.0.0.5/app", allowed_hosts=["10.0.0.5"], environment="production")
+    assert receipt.verdict == "allowed"
+    assert not receipt.blocked_by
+    recorded = {check.name: check for check in receipt.checks}
+    assert recorded["private_network_scope"].status == "passed"
+    assert "allowed_by_deployment_policy" in recorded["private_network_scope"].message
+    assert not receipt.warnings, "a policy admission is a recorded check, not an approval request"
+    localhost = evaluate_scope("http://localhost:8080/", allowed_hosts=["localhost"], environment="production")
+    assert localhost.verdict == "allowed"
+    # A public address under the same policy is admitted without the policy marker.
+    public = evaluate_scope("https://app.example.com/", allowed_hosts=["app.example.com"], environment="production")
+    assert "private_network_scope" not in {check.name for check in public.checks}
+
+
+def test_deployment_policy_never_admits_link_local_multicast_or_unspecified(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    for host in ("169.254.169.254", "224.0.0.1", "0.0.0.0"):
+        assert "loopback_or_private_range" in blocked_by(f"http://{host}/", allowed_hosts=[host]), host
+
+
+def test_private_networks_stay_refused_without_the_opt_in(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    assert "loopback_or_private_range" in blocked_by("http://10.0.0.5/", allowed_hosts=["10.0.0.5"])
+    monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS")
+    assert "loopback_or_private_range" in blocked_by("http://192.168.1.10/", allowed_hosts=["192.168.1.10"])
+
+
 def test_blocks_broad_cidr_and_out_of_scope_hosts():
     assert "broad_cidr" in blocked_by("https://10.0.0.0/8")
     assert "host_out_of_allowed_scope" in blocked_by(

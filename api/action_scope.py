@@ -15,6 +15,8 @@ import re
 import urllib.parse
 from typing import Any
 
+import deployment_policy
+
 
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
 ALLOWED_SCHEMES = {"http", "https"}
@@ -87,26 +89,52 @@ def _host_matches(host: str, allowed_hosts: tuple[str, ...], allowed_root_domain
     return any(host == root or host.endswith(f".{root}") for root in allowed_root_domains)
 
 
-def _ip_scope_block_reason(host: str, environment: str) -> str | None:
+def _deployment_allows_private_networks(allow_private_networks: bool | None) -> bool:
+    if allow_private_networks is not None:
+        return bool(allow_private_networks)
+    return deployment_policy.private_network_targets_allowed()
+
+
+def _ip_scope_block_reason(
+    host: str,
+    environment: str,
+    *,
+    allow_private_networks: bool | None = None,
+) -> str | None:
+    """Why an address is refused, or None.
+
+    Lab environments admit everything local. A deployment that sets
+    SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow (a self-hosted installation scanning its own
+    intranet) admits loopback and private ranges for every environment; link-local, multicast,
+    reserved and unspecified addresses stay refused because they are never a web application.
+    """
     lowered = host.lower().strip("[]")
+    deployment_allows = _deployment_allows_private_networks(allow_private_networks)
     if lowered in {"localhost", "localhost.localdomain"}:
-        return None if environment in SAFE_LAB_ENVIRONMENTS else "loopback_or_private_range"
+        if environment in SAFE_LAB_ENVIRONMENTS or deployment_allows:
+            return None
+        return "loopback_or_private_range"
     try:
         ip_obj = ipaddress.ip_address(lowered)
     except ValueError:
         return None
     if environment in SAFE_LAB_ENVIRONMENTS:
         return None
-    if (
-        ip_obj.is_loopback
-        or ip_obj.is_private
-        or ip_obj.is_link_local
-        or ip_obj.is_multicast
-        or ip_obj.is_reserved
-        or ip_obj.is_unspecified
-    ):
+    if ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
         return "loopback_or_private_range"
+    if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_reserved:
+        return None if deployment_allows else "loopback_or_private_range"
     return None
+
+
+def _private_network_admitted_by_policy(host: str, environment: str) -> bool:
+    """True when only the deployment policy (not a lab label) made this address admissible."""
+    if environment in SAFE_LAB_ENVIRONMENTS:
+        return False
+    return (
+        _ip_scope_block_reason(host, environment, allow_private_networks=False) is not None
+        and _ip_scope_block_reason(host, environment) is None
+    )
 
 
 def _cidr_block_reasons(raw: str) -> list[str]:
@@ -243,6 +271,10 @@ def evaluate_scope(
             if ip_reason:
                 blocked.append(ip_reason)
                 _add_check(checks, ip_reason, "blocked", "Loopback/private/reserved network targets require lab policy.")
+            elif _private_network_admitted_by_policy(host, env):
+                # Recorded on every receipt so a scan of an internal address always shows why
+                # it was admitted: the deployment's own policy, not a lab label.
+                _add_check(checks, "private_network_scope", "passed", "Private network target admitted by deployment policy (allowed_by_deployment_policy).")
             else:
                 _add_check(checks, "loopback_or_private_range", "passed", "No blocked private network scope.")
 

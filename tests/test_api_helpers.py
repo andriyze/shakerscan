@@ -114,6 +114,35 @@ def test_worker_capacity_defaults_to_five_below_sixteen_gb(monkeypatch):
     assert api_module._compute_max_allowed_workers() == 5
 
 
+def test_worker_capacity_uses_declared_fleet_memory_without_the_docker_socket(monkeypatch):
+    """Hardened deployments have no socket; the operator declares memory instead of a silent 5."""
+    monkeypatch.delenv("SHAKERSCAN_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_MAX_ACTIVE_SCANS", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PER_WORKER_MEM_GB", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_FLEET_MEMORY_GB", raising=False)
+
+    def no_socket(*_args, **_kwargs):
+        raise OSError("no docker socket")
+
+    monkeypatch.setattr(api_module, "docker_socket_request", no_socket)
+    assert api_module._compute_max_allowed_workers() == 5
+    assert api_module.fleet_capacity_source() == {"source": "default", "memory_gb": None}
+    monkeypatch.setenv("SHAKERSCAN_FLEET_MEMORY_GB", "32")
+    assert api_module._compute_max_allowed_workers() == 25
+    assert api_module.fleet_capacity_source() == {"source": "declared", "memory_gb": 32.0}
+    assert api_module._compute_max_active_scans() == 25
+    monkeypatch.setenv("SHAKERSCAN_MAX_ACTIVE_SCANS", "10")
+    assert api_module._compute_max_active_scans() == 10
+    monkeypatch.setattr(
+        api_module,
+        "docker_socket_request",
+        lambda *_args, **_kwargs: (200, {"MemTotal": 23 * 1024 ** 3}),
+    )
+    assert api_module._compute_max_allowed_workers() == 16
+    assert api_module.fleet_capacity_source()["source"] == "docker_info"
+
+
 def test_worker_scaler_allows_oversized_fleet_to_move_down(monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_MAX_WORKERS", "5")
     containers = [
@@ -2045,6 +2074,7 @@ def test_worker_build_report_summary_uses_only_fresh_fingerprint_authority():
 
     assert summary == {
         "available": True,
+        "inventory": "docker",
         "expected_count": 2,
         "reported_count": 2,
         "current_count": 1,
@@ -2053,6 +2083,41 @@ def test_worker_build_report_summary_uses_only_fresh_fingerprint_authority():
         "fleet_uniform": False,
         "scanner_version": None,
     }
+
+
+def test_expected_worker_count_is_unknown_without_local_inventory():
+    assert api_module._expected_worker_count(None, 0) is None
+    assert api_module._expected_worker_count(None, 3) is None
+    assert api_module._expected_worker_count([], 0) == 0
+    assert api_module._expected_worker_count(["a", "b"], 1) == 3
+
+
+def test_worker_build_summary_trusts_fresh_reports_when_no_inventory_exists():
+    """A hardened deployment without the Docker socket must not look mixed or stale."""
+    now = datetime.now(timezone.utc)
+    report = json.dumps({
+        "build_fingerprint": "fp", "scanner_version": "2.3.2", "reported_at": now.isoformat(),
+    })
+    summary = api_module._worker_build_report_summary(
+        {"worker-1": report},
+        expected_fingerprint="fp", expected_version="2.3.2", expected_count=None, now=now,
+    )
+    assert summary["inventory"] == "reports"
+    assert summary["fleet_uniform"] is True and summary["scanner_version"] == "2.3.2"
+    assert summary["pending_count"] == 0 and summary["expected_count"] is None
+    stale = json.dumps({
+        "build_fingerprint": "old", "scanner_version": "2.3.1", "reported_at": now.isoformat(),
+    })
+    mixed = api_module._worker_build_report_summary(
+        {"worker-1": report, "worker-2": stale},
+        expected_fingerprint="fp", expected_version="2.3.2", expected_count=None, now=now,
+    )
+    assert mixed["fleet_uniform"] is False and mixed["stale_count"] == 1
+    counted = api_module._worker_build_report_summary(
+        {"worker-1": report},
+        expected_fingerprint="fp", expected_version="2.3.2", expected_count=2, now=now,
+    )
+    assert counted["inventory"] == "docker" and counted["fleet_uniform"] is False
 
 
 def test_worker_build_report_summary_uses_api_label_only_for_uniform_fleet():
@@ -2075,7 +2140,7 @@ def test_worker_build_report_summary_uses_api_label_only_for_uniform_fleet():
     assert summary["scanner_version"] == "display-label"
 
 
-def test_worker_build_report_summary_requires_expected_denominator_and_accepts_small_clock_skew():
+def test_worker_build_report_summary_trusts_reports_without_a_denominator_and_accepts_small_clock_skew():
     now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
     future_report = json.dumps({
         "build_fingerprint": "expected",
@@ -2095,7 +2160,12 @@ def test_worker_build_report_summary_requires_expected_denominator_and_accepts_s
         expected_count=2,
         now=now,
     )
-    assert without_denominator["fleet_uniform"] is False
+    # Without a container inventory the fresh, current report is the only authority: the
+    # fleet reads as uniform and the summary says the inventory came from reports.
+    assert without_denominator["fleet_uniform"] is True
+    assert without_denominator["inventory"] == "reports"
+    assert without_denominator["reported_count"] == 1, "a 5 s future timestamp is clock skew"
+    assert missing_worker["inventory"] == "docker"
     assert missing_worker["reported_count"] == 1
     assert missing_worker["pending_count"] == 1
     assert missing_worker["fleet_uniform"] is False
