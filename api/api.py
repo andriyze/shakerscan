@@ -512,6 +512,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
+import deployment_policy
 import agent_budget
 try:
     from scan.contracts import (
@@ -8516,6 +8517,21 @@ _WORKER_BUILD_REPORT_MAX_AGE_SECONDS = 120
 _WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS = 30
 
 
+def _expected_worker_count(
+    running_local_worker_ids: Optional[list[str]],
+    expected_remote_workers: Optional[int],
+) -> Optional[int]:
+    """The fleet denominator, or None when the local inventory is unknown.
+
+    Without the Docker socket the API cannot count local workers. A remote count of zero
+    used to turn that unknown into "expected 0", which made every reporting worker look
+    like a pending mismatch in the sidebar of a healthy hardened deployment.
+    """
+    if running_local_worker_ids is None:
+        return None
+    return len(running_local_worker_ids) + int(expected_remote_workers or 0)
+
+
 def _worker_build_report_summary(
     raw_reports: Any,
     *,
@@ -8566,15 +8582,18 @@ def _worker_build_report_summary(
     normalized_expected = max(0, int(expected_count)) if expected_count is not None else None
     count_gap = abs(normalized_expected - len(reports)) if normalized_expected is not None else 0
     pending_count += count_gap
+    # With a container inventory the denominator must match; without one (no Docker socket)
+    # the fresh reports themselves are the only authority, and a fleet whose every report
+    # carries the current fingerprint is uniform. The inventory field says which applied.
     uniform = (
         bool(reports)
-        and normalized_expected is not None
-        and len(reports) == normalized_expected
+        and (normalized_expected is None or len(reports) == normalized_expected)
         and stale_count == 0
         and pending_count == 0
     )
     return {
         "available": bool(reports) or bool(normalized_expected),
+        "inventory": "docker" if normalized_expected is not None else "reports",
         "expected_count": normalized_expected,
         "reported_count": len(reports),
         "current_count": current_count,
@@ -8659,12 +8678,7 @@ async def health():
         db_ok = False
 
     running_local_worker_ids = await asyncio.to_thread(_running_scan_worker_container_ids_best_effort)
-    expected_local_workers = len(running_local_worker_ids) if running_local_worker_ids is not None else None
-    expected_worker_count = (
-        (expected_local_workers or 0) + (expected_remote_workers or 0)
-        if expected_local_workers is not None or expected_remote_workers is not None
-        else None
-    )
+    expected_worker_count = _expected_worker_count(running_local_worker_ids, expected_remote_workers)
 
     try:
         r = get_redis()
@@ -8720,6 +8734,15 @@ async def health():
         "agent_tool_worker": _agent_tool_worker_readiness(),
         "model_intake_worker": _model_intake_worker_readiness(),
         "fleet": fleet_feature_state(),
+        # Deployment-level facts an operator or a gateway needs without the Docker socket.
+        "capacity": {
+            "max_active_scans": _compute_max_active_scans(),
+            "max_workers": _compute_max_allowed_workers(),
+            **fleet_capacity_source(),
+        },
+        "deployment_policy": {
+            "private_network_targets": deployment_policy.private_network_targets_policy(),
+        },
     }
 
 
@@ -20125,18 +20148,38 @@ async def _record_export_event(
 # scanner.sh startup sizing: reserve RAM for Docker/the OS and the supporting
 # PostgreSQL, Redis, API, and UI containers, then budget ~1GB for each worker.
 # An explicit SHAKERSCAN_MAX_WORKERS always overrides. Hard sanity bound: 200.
+_FLEET_CAPACITY_SOURCE: dict[str, Any] = {"source": "default", "memory_gb": None}
+
+
+def fleet_capacity_source() -> dict[str, Any]:
+    """How the last fleet cap was derived: docker_info, declared, env_override or default."""
+    return dict(_FLEET_CAPACITY_SOURCE)
+
+
 def _compute_max_allowed_workers() -> int:
     env_override = os.environ.get("SHAKERSCAN_MAX_WORKERS")
     if env_override:
         try:
-            return max(1, min(200, int(env_override)))
+            value = max(1, min(200, int(env_override)))
+            _FLEET_CAPACITY_SOURCE.update({"source": "env_override", "memory_gb": None})
+            return value
         except (TypeError, ValueError):
             pass
+    source = "docker_info"
     try:
         status, info = docker_socket_request("GET", "/info")
         mem_gb = (info.get("MemTotal") or 0) / 1024 ** 3 if (status == 200 and isinstance(info, dict)) else 0
     except Exception:
         mem_gb = 0
+    if mem_gb <= 0:
+        # No Docker socket (hardened Compose, ECS, Kubernetes): the operator may declare the
+        # fleet memory instead of being silently capped at the five-worker default.
+        declared = deployment_policy.fleet_memory_declaration_gb()
+        if declared:
+            mem_gb, source = declared, "declared"
+        else:
+            source = "default"
+    _FLEET_CAPACITY_SOURCE.update({"source": source, "memory_gb": round(mem_gb, 2) if mem_gb > 0 else None})
     try:
         per_worker_gb = float(os.environ.get("SHAKERSCAN_PER_WORKER_MEM_GB") or 1)
     except (TypeError, ValueError):
