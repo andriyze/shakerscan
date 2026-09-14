@@ -5,7 +5,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, authorizeTarget, revokeTargetAuthorization, type Target, type GroupedDomain } from '@/lib/api'
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
@@ -95,6 +95,8 @@ function TargetsContent() {
   const [newTargetUrl, setNewTargetUrl] = useState('')
   const [newTargetName, setNewTargetName] = useState('')
   const [newTargetCohort, setNewTargetCohort] = useState<'production' | 'staging' | 'lab' | 'demo' | 'calibration' | 'internal' | ''>('')
+  const [newTargetAuthorized, setNewTargetAuthorized] = useState(false)
+  const [authorizingTargetId, setAuthorizingTargetId] = useState<string | null>(null)
   const [urlError, setUrlError] = useState('')
   const [adding, setAdding] = useState(false)
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
@@ -208,6 +210,32 @@ function TargetsContent() {
     setUrlError('')
   }
 
+  async function handleAuthorize(targetId: string) {
+    setAuthorizingTargetId(targetId)
+    try {
+      await authorizeTarget(targetId, 'interactive-ui')
+      toast.success('Target authorized for active testing')
+      fetchTargets()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to authorize target')
+    } finally {
+      setAuthorizingTargetId(null)
+    }
+  }
+
+  async function handleRevokeAuthorization(targetId: string) {
+    setAuthorizingTargetId(targetId)
+    try {
+      await revokeTargetAuthorization(targetId, 'interactive-ui', 'revoked from the targets page')
+      toast.success('Authorization revoked')
+      fetchTargets()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to revoke authorization')
+    } finally {
+      setAuthorizingTargetId(null)
+    }
+  }
+
   async function handleAddTarget(e: React.FormEvent) {
     e.preventDefault()
     const url = newTargetUrl.trim()
@@ -219,10 +247,16 @@ function TargetsContent() {
 
     setAdding(true)
     try {
-      await createTarget(url, newTargetName.trim() || undefined, newTargetCohort || undefined)
+      await createTarget(
+        url,
+        newTargetName.trim() || undefined,
+        newTargetCohort || undefined,
+        newTargetAuthorized ? 'interactive-ui' : undefined,
+      )
       setNewTargetUrl('')
       setNewTargetName('')
       setNewTargetCohort('')
+      setNewTargetAuthorized(false)
       setUrlError('')
       setShowAddModal(false)
       toast.success('Target added')
@@ -603,6 +637,32 @@ function TargetsContent() {
                 </div>
                 {domain.root_target && (
                   <p className="text-xs text-gray-500 truncate">{boundedTargetDisplay(domain.root_target)}</p>
+                )}
+                {domain.root_target && (
+                  <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                    {domain.root_target.authorized_for_active_testing ? (
+                      <>
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">Authorized for active testing</span>
+                        <button
+                          type="button"
+                          className="text-gray-500 underline-offset-2 hover:text-gray-300 hover:underline disabled:opacity-50"
+                          disabled={authorizingTargetId === domain.root_target.id}
+                          onClick={() => handleRevokeAuthorization(domain.root_target!.id)}
+                        >
+                          Revoke
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="text-emerald-300 underline-offset-2 hover:underline disabled:opacity-50"
+                        disabled={authorizingTargetId === domain.root_target.id}
+                        onClick={() => handleAuthorize(domain.root_target!.id)}
+                      >
+                        Authorize for active testing (once)
+                      </button>
+                    )}
+                  </p>
                 )}
                 {identity.internal && (
                   <p className="mt-1 text-xs text-amber-300/80">Internal/private identity · runtime destination policy is checked before execution.</p>
@@ -1010,6 +1070,18 @@ function TargetsContent() {
               placeholder="My Website"
             />
           </Field>
+          <label className="flex items-start gap-2 text-sm text-gray-300">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={newTargetAuthorized}
+              onChange={(event) => setNewTargetAuthorized(event.target.checked)}
+            />
+            <span>
+              I own or am authorized to test this target. Records a standing authorization for
+              active testing: scans and Hunts of this target never ask again until it is revoked.
+            </span>
+          </label>
           <Field label="Cohort">
             <Select value={newTargetCohort} onChange={(event) => setNewTargetCohort(event.target.value as typeof newTargetCohort)}>
               <option value="">Unclassified</option>
