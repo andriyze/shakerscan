@@ -26,7 +26,11 @@ def private_network_targets_policy(environ: dict[str, str] | None = None) -> str
     rule). ``allow`` is meant for self-hosted installations scanning their own intranet; every
     admission under it is recorded in the scope receipt as ``allowed_by_deployment_policy``.
     """
-    value = str((environ or os.environ).get(PRIVATE_NETWORK_TARGETS_ENV) or "").strip().lower()
+    if environ is not None:
+        raw = environ.get(PRIVATE_NETWORK_TARGETS_ENV)
+    else:
+        raw = os.environ.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS")
+    value = str(raw or "").strip().lower()
     return "allow" if value in {"allow", "allowed", "1", "true", "yes", "on"} else "refuse"
 
 
@@ -36,7 +40,10 @@ def private_network_targets_allowed(environ: dict[str, str] | None = None) -> bo
 
 def fleet_memory_declaration_gb(environ: dict[str, str] | None = None) -> float | None:
     """Fleet memory declared by the operator when Docker's ``/info`` is not reachable."""
-    raw = str((environ or os.environ).get(FLEET_MEMORY_GB_ENV) or "").strip()
+    if environ is not None:
+        raw = str(environ.get(FLEET_MEMORY_GB_ENV) or "").strip()
+    else:
+        raw = str(os.environ.get("SHAKERSCAN_FLEET_MEMORY_GB") or "").strip()
     if not raw:
         return None
     try:
@@ -48,7 +55,10 @@ def fleet_memory_declaration_gb(environ: dict[str, str] | None = None) -> float 
 
 def crawler_memory_limit_bytes(environ: dict[str, str] | None = None) -> int:
     """Data-segment limit for the crawler process; 0 disables the bound."""
-    raw = str((environ or os.environ).get(CRAWLER_MEMORY_LIMIT_MB_ENV) or "").strip()
+    if environ is not None:
+        raw = str(environ.get(CRAWLER_MEMORY_LIMIT_MB_ENV) or "").strip()
+    else:
+        raw = str(os.environ.get("SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB") or "").strip()
     if not raw:
         return CRAWLER_MEMORY_LIMIT_MB_DEFAULT * 1024 * 1024
     try:

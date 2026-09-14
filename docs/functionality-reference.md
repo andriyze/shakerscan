@@ -1530,7 +1530,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 379 | Python sources + Compose manifests |
+| Runtime environment keys | 382 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2568,6 +2568,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_COMPOSE_PROJECT` | `api/api.py` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGINS` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_CORS_ALLOW_ORIGIN_REGEX` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB` | `api/deployment_policy.py` |
 | `SHAKERSCAN_CREDENTIAL_TMP_DIR` | `api/runtime/credential_resolver.py` |
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2581,6 +2582,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
 | `SHAKERSCAN_ENFORCE_FLEET_LIMITS` | `api/worker.py` |
 | `SHAKERSCAN_EXPECTED_API_FINGERPRINT` | `docker-compose.yml` |
+| `SHAKERSCAN_FLEET_MEMORY_GB` | `api/deployment_policy.py` |
 | `SHAKERSCAN_FLEET_OPERATOR_TOKEN` | `scripts/fleet_acceptance.py` |
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
@@ -2599,6 +2601,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
