@@ -3848,3 +3848,103 @@ def test_focused_family_with_endpoint_list_uses_scope_not_coverage(monkeypatch):
     )
     assert enabled is True
     assert payload["shard_strategy"] == "scope"
+
+
+def test_generic_collection_ref_carries_body_field_names_for_a_confirmed_active_selection():
+    """A JSON POST in a confirmed-active selection keeps its body field NAMES in the frozen
+    request list. The index item helper decodes ``body_field_names_json`` into
+    ``body_field_names``; reading the popped column here left every collection request
+    without body fields, so no Scan ever planned a request-body candidate."""
+    target_id = uuid.uuid4()
+    collection_id = uuid.uuid4()
+    binding_id = uuid.uuid4()
+    selection_id = uuid.uuid4()
+    selector = api_module.RequestCollectionSelection.from_mapping({
+        "path_regex": r"/dast/sqli$",
+        "safe_methods_only": False,
+        "max_requests": 1,
+    })
+    origins = ["https://api.example.test"]
+    digest = api_module.request_collection_selection_digest(
+        collection_id=collection_id,
+        payload_sha256="a" * 64,
+        binding_id=binding_id,
+        allowed_origins=origins,
+        selector=selector,
+        replay_policy="confirmed_active",
+        environment_sha256=None,
+    )
+    collection = {
+        "id": collection_id,
+        "target_id": target_id,
+        "device_target_id": None,
+        "name": "Body candidates",
+        "format": "postman",
+        "request_count": 1,
+        "safe_request_count": 0,
+        "potentially_mutating_request_count": 1,
+        "payload_sha256": "a" * 64,
+        "selection_id": selection_id,
+        "selection_binding_id": binding_id,
+        "replay_policy": "confirmed_active",
+        "selector_json": selector.public_dict(),
+        "selection_digest": digest,
+        "selected_request_count": 1,
+        "selected_mutating_count": 1,
+    }
+    binding = {
+        "id": binding_id,
+        "collection_id": collection_id,
+        "target_kind": "web",
+        "target_id": target_id,
+        "allowed_origins": origins,
+        "environment_id": None,
+        "environment_sha256": None,
+    }
+    index = [{
+        "request_id": "post-sqli",
+        "ordinal": 0,
+        "folder": "",
+        "name": "SQLi JSON body",
+        "method": "POST",
+        "redacted_url": "https://api.example.test/dast/sqli",
+        "normalized_path": "/dast/sqli",
+        "body_mode": "raw",
+        "auth_type": "none",
+        "tags_json": [],
+        "safe_method": False,
+        "supported": True,
+        "content_type": "application/json",
+        "body_field_names_json": ["id"],
+    }]
+
+    class Connection:
+        async def fetchrow(self, query, *_args):
+            if "FROM request_collections rc" in query:
+                return collection
+            if "FROM request_collection_bindings b" in query:
+                return binding
+            raise AssertionError(query)
+
+        async def fetch(self, query, *_args):
+            assert "FROM request_collection_requests" in query
+            return index
+
+    _refs, _endpoints, manifest_requests = asyncio.run(api_module._generic_collection_refs(
+        Connection(),
+        target_id=target_id,
+        target_kind="web",
+        bindings=[{
+            "collection_id": str(collection_id),
+            "binding_id": str(binding_id),
+            "selection_id": str(selection_id),
+            "replay_policy": "confirmed_active",
+        }],
+    ))
+
+    (frozen,) = manifest_requests[digest]
+    assert frozen["method"] == "POST"
+    assert frozen["content_type"] == "application/json"
+    assert frozen["body_field_names"] == ["id"]
+    assert frozen["safe_method"] is False
+    assert "1" not in json.dumps(frozen["body_field_names"])

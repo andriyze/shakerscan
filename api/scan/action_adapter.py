@@ -2688,6 +2688,7 @@ class DatabaseNeutralScanActionDispatcher:
         consumed = {name: 0 for name in action.requested_budget}
         attempted = 0
         resumed = 0
+        inapplicable = 0
         terminal_failure = False
         attempt_timed_out = False
         primary = resolve_scan_http_principal(
@@ -2696,8 +2697,18 @@ class DatabaseNeutralScanActionDispatcher:
         for offset, (manifest_index, row) in enumerate(rows):
             # A path-segment candidate (family_hints: ["sqli"]) carries the sqlmap ``*`` marker in
             # its URL; only the SQLi verifier understands it. Dalfox and the template sweeps would
-            # test the literal ``*`` as a value, so they skip it.
+            # test the literal ``*`` as a value, so they skip it. The skip is recorded and kept
+            # out of the unattempted count: counting it there reported the slice partial for
+            # "insufficient_plan_budget" over a candidate no budget could have made testable,
+            # and that false gap failed the family's coverage.
             if row.get("parameter_location") == "path" and family != "sqli":
+                inapplicable += 1
+                observations.append({
+                    "kind": "candidate_inapplicable",
+                    "candidate_id": str(row.get("candidate_id") or row.get("route_id") or ""),
+                    "family": family,
+                    "reason": "path_segment_candidate",
+                })
                 continue
             candidate_id = str(
                 row.get("candidate_id") or row.get("route_id")
@@ -2947,7 +2958,7 @@ class DatabaseNeutralScanActionDispatcher:
                 terminal_failure = True
                 errors.append(f"candidate_failed:{type(exc).__name__}")
                 continue
-        unattempted = max(0, len(rows) - attempted)
+        unattempted = max(0, len(rows) - attempted - inapplicable)
         partial = unattempted > 0 or terminal_failure
         # Say why, ahead of any per-attempt tool errors, so the durable reason is
         # the real one. A tool's own "timeout" string is not a reason code, so
@@ -2993,6 +3004,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "candidate_count": len(rows),
                 "attempted_count": attempted,
                 "resumed_count": resumed,
+                "inapplicable_count": inapplicable,
                 "unattempted_count": unattempted,
                 "checkpoint_mode": "after_each_candidate",
             },
