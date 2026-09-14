@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { buttonClasses, Toggle } from '@/components/ui'
 import { API_URL } from '@/lib/api'
-import { navigationAllowed } from '@/lib/workspaceCapabilities'
+import { DEFAULT_EDITION_LABEL, navigationAllowed, workspaceEdition } from '@/lib/workspaceCapabilities'
 import {
   deriveBuildIdentity,
   formatBuildIdentity,
@@ -191,7 +191,9 @@ function NavContent({
   onToggleShowAll,
   buildIdentity,
   fleetEnabled,
+  editionLabel,
 }: {
+  editionLabel: string
   pathname: string
   showAll: boolean
   onToggleShowAll: (value: boolean) => void
@@ -236,7 +238,7 @@ function NavContent({
           <BrandMark />
           ShakerScan
         </Link>
-        <p className="text-xs text-gray-500 mt-1">Open Source Edition</p>
+        <p className="text-xs text-gray-500 mt-1">{editionLabel}</p>
         {(buildIdentity.ui || buildIdentity.api || buildIdentity.workers) && (
           <p
             className={`mt-1 flex items-center gap-1 text-[11px] ${buildIdentity.skew ? 'text-amber-300' : 'text-gray-400'}`}
@@ -345,6 +347,11 @@ function NavContent({
 }
 
 export default function Sidebar() {
+  const [editionLabel, setEditionLabel] = useState(DEFAULT_EDITION_LABEL)
+  useEffect(() => {
+    const label = workspaceEdition()
+    if (label) setEditionLabel(label)
+  }, [])
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [showAll, setShowAll] = useState(false)
@@ -479,14 +486,14 @@ export default function Sidebar() {
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
-            <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+            <NavContent editionLabel={editionLabel} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
           </aside>
         </div>
       )}
 
       {/* Desktop: persistent sidebar. */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col overflow-y-auto overscroll-contain border-r border-gray-800 bg-gray-900 p-4 md:flex">
-        <NavContent pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
+        <NavContent editionLabel={editionLabel} pathname={pathname} showAll={showAll} onToggleShowAll={handleToggleShowAll} buildIdentity={buildIdentity} fleetEnabled={fleetEnabled} />
       </aside>
     </>
   )

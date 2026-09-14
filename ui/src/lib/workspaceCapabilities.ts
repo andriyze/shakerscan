@@ -6,6 +6,20 @@ export type WorkspaceCapabilities = {
   navigation: Record<string, string>
   ui_routes: string[]
   scan_limits?: Record<string, number>
+  // Label shown under the product name instead of "Open Source Edition" (e.g. an Enterprise
+  // gateway names its edition here). Presentation only.
+  edition?: string
+}
+
+export const DEFAULT_EDITION_LABEL = 'Open Source Edition'
+
+export function workspaceEdition(): string | undefined {
+  // Client-only: the server render always says "Open Source Edition" and the client updates the
+  // label after mount, so a managed deployment never produces a hydration mismatch.
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  if (!policy || policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') return undefined
+  const label = typeof policy.edition === 'string' ? policy.edition.trim() : ''
+  return label && label.length <= 60 ? label : undefined
 }
 
 export function workspaceScanCeiling(name: string, engineCeiling?: number): number | undefined {

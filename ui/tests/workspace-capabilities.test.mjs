@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { featureEnabled, navigationAllowed, workspaceScanCeiling } from '../src/lib/workspaceCapabilities.ts'
+import { DEFAULT_EDITION_LABEL, featureEnabled, navigationAllowed, workspaceEdition, workspaceScanCeiling } from '../src/lib/workspaceCapabilities.ts'
 
 const policy = {
   schema: 'shakerscan.workspace-capabilities/v1', mode: 'managed',
@@ -50,5 +50,24 @@ test('workspace limits narrow engine limits without changing standalone ceilings
   assert.equal(workspaceScanCeiling('max_workers'), 1)
   assert.equal(workspaceScanCeiling('max_http_requests', 5000), 5000)
   assert.equal(workspaceScanCeiling('max_http_requests', 60000), 9000)
+  delete global.window
+})
+
+
+test('the edition label comes from a managed manifest and defaults to Open Source Edition', () => {
+  delete global.window
+  assert.equal(workspaceEdition(), undefined, 'server render has no label to show')
+  assert.equal(DEFAULT_EDITION_LABEL, 'Open Source Edition')
+  global.window = {}
+  assert.equal(workspaceEdition(), undefined, 'standalone client keeps the default')
+  window.__SHAKERSCAN_CAPABILITIES__ = {
+    schema: 'shakerscan.workspace-capabilities/v1', mode: 'managed', features: {}, navigation: {}, ui_routes: [],
+    edition: '  Enterprise Edition ',
+  }
+  assert.equal(workspaceEdition(), 'Enterprise Edition')
+  window.__SHAKERSCAN_CAPABILITIES__.edition = 'x'.repeat(61)
+  assert.equal(workspaceEdition(), undefined, 'an oversized label is ignored')
+  window.__SHAKERSCAN_CAPABILITIES__ = { schema: 'other', mode: 'managed', edition: 'Enterprise Edition' }
+  assert.equal(workspaceEdition(), undefined, 'unknown contracts fail closed')
   delete global.window
 })
