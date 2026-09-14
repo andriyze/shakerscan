@@ -1875,6 +1875,21 @@
     "operation_id": "asm_test_targets__target_id__asm_test_post"
   },
   {
+    "path": "/targets/{target_id}/authorization",
+    "method": "delete",
+    "operation_id": "revoke_target_authorization_targets__target_id__authorization_delete"
+  },
+  {
+    "path": "/targets/{target_id}/authorization",
+    "method": "get",
+    "operation_id": "get_target_authorization_targets__target_id__authorization_get"
+  },
+  {
+    "path": "/targets/{target_id}/authorization",
+    "method": "post",
+    "operation_id": "authorize_target_targets__target_id__authorization_post"
+  },
+  {
     "path": "/targets/{target_id}/credential-profiles",
     "method": "get",
     "operation_id": "list_target_credential_profiles_targets__target_id__credential_profiles_get"

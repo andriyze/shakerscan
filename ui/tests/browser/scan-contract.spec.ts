@@ -113,21 +113,28 @@ test('Scan contract drives budget, zero ceilings, and migrated credential select
   await expect(page.getByText('zero allowed', { exact: false }).first()).toBeVisible()
 })
 
-test('authorized active Scan creates a target-bound approval and submits it in one flow', async ({ page }) => {
+test('authorized active Scan authorizes the target once and submits it in one flow', async ({ page }) => {
   const approvalId = '33333333-3333-4333-8333-333333333333'
   const scopeId = '44444444-4444-4444-8444-444444444444'
   let submittedPayload: any = null
+  const authorizationCalls: string[] = []
 
-  await page.route('**/arsenal/scope/preview', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ scope_receipt: { receipt_id: scopeId, verdict: 'allowed', blocked_by: [] } }),
-  }))
-  await page.route('**/arsenal/approvals', (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ approval_receipt: { id: approvalId } }),
-  }))
+  // Authorize once per target: the page reads the registered target's standing authorization
+  // and, when there is none, records it (no per-scan two-hour receipt any more).
+  await page.route(`**/targets/${target.id}/authorization`, async (route) => {
+    authorizationCalls.push(route.request().method())
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ target_id: target.id, authorization: null }) })
+      return
+    }
+    expect(route.request().postDataJSON()).toMatchObject({ approved_by: 'interactive-ui' })
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ target_id: target.id, authorization: { approval_receipt_id: approvalId, scope_receipt_id: scopeId, approved_by: 'interactive-ui', standing: true } }),
+    })
+  })
+  await page.route('**/arsenal/approvals', (route) => route.fulfill({ status: 500, body: 'a plain active scan must not mint a bounded receipt' }))
   await page.route('**/scans', async (route) => {
     submittedPayload = route.request().postDataJSON()
     await route.fulfill({
@@ -150,6 +157,7 @@ test('authorized active Scan creates a target-bound approval and submits it in o
   await submit.click()
 
   await expect(page).toHaveURL(/\/scans\/55555555-5555-4555-8555-555555555555$/)
+  expect(authorizationCalls).toEqual(['GET', 'POST'])
   expect(submittedPayload).toMatchObject({
     target: target.url,
     approval_receipt_id: approvalId,

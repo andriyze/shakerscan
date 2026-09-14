@@ -67,8 +67,8 @@ If the new command is not available in the current shell yet:
 
 Codex, Claude Code, or OpenCode must already be installed and signed in. The current agent session is
 the planner for Hunt, so no separate LLM API key needs to be stored in ShakerScan. Gated
-execution is enabled in standard installs; ShakerScan still requires target authorization and an
-expiring target-bound approval, and remains responsible for budgets, execution, and proof.
+execution is enabled in standard installs; ShakerScan still requires target authorization (once
+per target, standing until revoked), and remains responsible for budgets, execution, and proof.
 
 ### Use the CLI
 
@@ -190,7 +190,8 @@ curl -X POST http://localhost:8080/credential-profiles \
   }'
 
 # Submit only the opaque reference. Credential use requires a current,
-# target-bound approval receipt.
+# target-bound credential-tier approval receipt (plain active testing reuses
+# the target's standing authorization: POST /targets/{id}/authorization once).
 curl -X POST http://localhost:8080/scans \
   -H "Content-Type: application/json" \
   -d '{
@@ -282,8 +283,8 @@ compare anonymous and authenticated behavior when managed principals are configu
 only claims backed by real tool output.
 
 Hunt works after a standard first-time install: gated execution is on by default and the current
-coding-agent session supplies the planner. It still requires explicit target authorization and an
-expiring target-bound approval. ShakerScan keeps credentials server-side, enforces turn/request/action
+coding-agent session supplies the planner. It still requires explicit target authorization, given
+once per target and standing until revoked. ShakerScan keeps credentials server-side, enforces turn/request/action
 ceilings, blocks arbitrary write methods in the free-form loop, and promotes a Suspected finding to
 Verified only through deterministic proof.
 

@@ -2664,6 +2664,27 @@
     "name": "asm_test"
   },
   {
+    "path": "/targets/{target_id}/authorization",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "revoke_target_authorization"
+  },
+  {
+    "path": "/targets/{target_id}/authorization",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_authorization"
+  },
+  {
+    "path": "/targets/{target_id}/authorization",
+    "methods": [
+      "POST"
+    ],
+    "name": "authorize_target"
+  },
+  {
     "path": "/targets/{target_id}/credential-profiles",
     "methods": [
       "GET"

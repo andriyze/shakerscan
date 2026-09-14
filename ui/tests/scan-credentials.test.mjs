@@ -23,8 +23,15 @@ test('canonical Scan UI submits only opaque exact-target credential profile IDs'
 
 test('Scan credential selection is disabled for batches and requires explicit authority', () => {
   assert.match(scan, /Credential profiles are exact-target-bound and cannot be shared across a batch/)
-  assert.match(scan, /riskTier: credentialUse \? 'credential' : 'active'/)
+  // Credential use keeps an explicit, bounded credential-tier receipt; plain active testing
+  // reuses the target's standing authorization (authorize once per target) instead of
+  // minting a short-lived receipt on every scan.
+  assert.match(scan, /if \(credentialUse\) \{/)
+  assert.match(scan, /riskTier: 'credential'/)
   assert.match(scan, /effectiveApprovalReceipt = createdApproval\.approvalReceiptId/)
+  assert.match(scan, /await getTargetAuthorization\(approvalTargetId\)/)
+  assert.match(scan, /await authorizeTarget\(approvalTargetId, 'interactive-ui'\)/)
+  assert.match(scan, /effectiveApprovalReceipt = standing\.approval_receipt_id/)
   assert.match(scan, /selected permissions and identities/)
 })
 

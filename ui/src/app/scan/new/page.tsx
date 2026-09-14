@@ -11,6 +11,8 @@ import {
   getWorkers,
   createTarget,
   createTargetPolicyApprovalReceipt,
+  getTargetAuthorization,
+  authorizeTarget,
   previewScanContract,
   submitBatchV2,
   submitScanV2,
@@ -386,19 +388,27 @@ export default function NewScanPage() {
         if (!approvalTargetId) {
           throw new Error('The target could not be registered for active scanning.')
         }
-        let createdApproval
         try {
-          createdApproval = await createTargetPolicyApprovalReceipt({
-            targetId: approvalTargetId,
-            targetUrl: submittedTargets[0],
-            ttlMinutes: approvalTtlMinutes,
-            riskTier: credentialUse ? 'credential' : 'active',
-            environment: scanScopeEnvironment(submittedTargets[0]),
-          })
+          if (credentialUse) {
+            // Credential use stays an explicit, bounded credential-tier receipt.
+            const createdApproval = await createTargetPolicyApprovalReceipt({
+              targetId: approvalTargetId,
+              targetUrl: submittedTargets[0],
+              ttlMinutes: approvalTtlMinutes,
+              riskTier: 'credential',
+              environment: scanScopeEnvironment(submittedTargets[0]),
+            })
+            effectiveApprovalReceipt = createdApproval.approvalReceiptId
+          } else {
+            // Authorize once per target: the standing authorization is reused by every later
+            // active scan and Hunt of this target, so this only creates something the first time.
+            const standing = (await getTargetAuthorization(approvalTargetId))
+              ?? (await authorizeTarget(approvalTargetId, 'interactive-ui'))
+            effectiveApprovalReceipt = standing.approval_receipt_id
+          }
         } catch {
           throw new Error('Active scan authorization could not be established for this target. Check the target and try again.')
         }
-        effectiveApprovalReceipt = createdApproval.approvalReceiptId
         setApprovalReceipt(effectiveApprovalReceipt)
       }
 

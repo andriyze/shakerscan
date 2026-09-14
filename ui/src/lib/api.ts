@@ -2009,6 +2009,8 @@ export interface Target {
   is_root: boolean
   discovery_source: string
   is_active: boolean
+  // Standing authorization for active testing (once per target; see authorizeTarget).
+  authorized_for_active_testing?: boolean
   last_score?: number
   last_grade?: string
   last_scanned_at?: string
@@ -5693,14 +5695,63 @@ export async function getAsmActivity(
   return res.json()
 }
 
-export async function createTarget(url: string, name?: string, cohort?: Exclude<TargetCohort, 'unclassified'>) {
+export async function createTarget(
+  url: string,
+  name?: string,
+  cohort?: Exclude<TargetCohort, 'unclassified'>,
+  authorizedBy?: string,
+) {
   const res = await fetch(`${API_URL}/targets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, name, cohort })
+    body: JSON.stringify({ url, name, cohort, ...(authorizedBy ? { authorized_by: authorizedBy } : {}) })
   })
   if (!res.ok) throw new Error('Failed to create target')
   return res.json()
+}
+
+export interface TargetAuthorization {
+  approval_receipt_id: string
+  scope_receipt_id: string
+  approved_by?: string | null
+  risk_tier?: string | null
+  created_at?: string | null
+  expires_at?: string | null
+  standing: boolean
+}
+
+// Authorize once per target: the standing authorization every active scan and Hunt reuses.
+// It ends only by revocation or when the target's scope changes.
+export async function getTargetAuthorization(targetId: string): Promise<TargetAuthorization | null> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`)
+  if (!res.ok) throw new Error('Failed to read target authorization')
+  const body = await res.json()
+  return (body.authorization as TargetAuthorization | null) ?? null
+}
+
+export async function authorizeTarget(targetId: string, approvedBy: string): Promise<TargetAuthorization> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved_by: approvedBy }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error(typeof detail?.detail === 'string' ? detail.detail : 'Failed to authorize target')
+  }
+  const body = await res.json()
+  return body.authorization as TargetAuthorization
+}
+
+export async function revokeTargetAuthorization(targetId: string, revokedBy: string, reason: string): Promise<number> {
+  const res = await fetch(`${API_URL}/targets/${targetId}/authorization`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revoked_by: revokedBy, reason }),
+  })
+  if (!res.ok) throw new Error('Failed to revoke target authorization')
+  const body = await res.json()
+  return Number(body.revoked || 0)
 }
 
 export async function scanTarget(
