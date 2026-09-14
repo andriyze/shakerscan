@@ -15,7 +15,7 @@ import json
 import re
 import urllib.parse
 from collections import Counter
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 
 MAX_COLLECTION_BYTES = 5 * 1024 * 1024
@@ -431,7 +431,52 @@ def _request_headers(
     return headers, header_items, sorted(unresolved)
 
 
-def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[bytes, str | None, list[str], str | None]:
+_MEDIA_TYPE_RE = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+
+
+def _declared_media_type(headers: Mapping[str, str]) -> str | None:
+    """The media type a request declares in its own Content-Type header, without parameters."""
+    for key, value in headers.items():
+        if key.lower() != "content-type":
+            continue
+        media_type = str(value or "").split(";", 1)[0].strip().lower()
+        if _MEDIA_TYPE_RE.fullmatch(media_type):
+            return media_type
+        return None
+    return None
+
+
+def _raw_body_content_type(
+    text: str, *, language: str, declared: str | None,
+) -> str:
+    """Classify a Postman raw body the way the server that receives it will.
+
+    A raw body arrives with whatever Content-Type the request itself declares; Postman's
+    ``options.raw.language`` is only an editor hint and is absent from most exported
+    collections. Trusting the hint alone filed every JSON login and search body as
+    ``text/plain``, so the index published no body field names, the Scan planned no
+    request-body candidate for it, and the request-mutation verifiers never ran.
+    """
+    if declared:
+        return declared
+    if language == "json":
+        return "application/json"
+    stripped = text.lstrip()
+    if stripped[:1] in {"{", "["}:
+        try:
+            json.loads(stripped)
+        except (ValueError, TypeError):
+            return "text/plain"
+        return "application/json"
+    return "text/plain"
+
+
+def _request_body(
+    request: dict[str, Any],
+    variables: dict[str, str],
+    *,
+    declared_content_type: str | None = None,
+) -> tuple[bytes, str | None, list[str], str | None]:
     body = request.get("body") if isinstance(request.get("body"), dict) else {}
     mode = str(body.get("mode") or "none")
     unresolved: set[str] = set()
@@ -444,7 +489,9 @@ def _request_body(request: dict[str, Any], variables: dict[str, str]) -> tuple[b
         rendered = text.encode("utf-8")
         raw_options = body.get("options") if isinstance(body.get("options"), dict) else {}
         language = str((raw_options.get("raw") or {}).get("language") or "") if isinstance(raw_options.get("raw"), dict) else ""
-        content_type = "application/json" if language == "json" else "text/plain"
+        content_type = _raw_body_content_type(
+            text, language=language, declared=declared_content_type,
+        )
     elif mode == "urlencoded":
         pairs = []
         for item in body.get("urlencoded") or []:
@@ -518,7 +565,9 @@ def resolve_requests(
         headers, header_items, unresolved_headers = _request_headers(
             request, auth, request_variables,
         )
-        body, content_type, unresolved_body, body_error = _request_body(request, request_variables)
+        body, content_type, unresolved_body, body_error = _request_body(
+            request, request_variables, declared_content_type=_declared_media_type(headers),
+        )
         if content_type and not any(key.lower() == "content-type" for key in headers):
             headers["Content-Type"] = content_type
             header_items.append(("Content-Type", content_type))

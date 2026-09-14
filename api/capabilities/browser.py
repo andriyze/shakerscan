@@ -969,15 +969,23 @@ async def _execute_browser_action(
                 "same_origin": True,
                 "secret_values_visible": False,
             }
+            # A pinned browser blocks every off-origin subresource by design, so a real
+            # single-page app always reports some blocked requests. That is the transport
+            # enforcing the frozen origin, not a failed proof: the attempt navigated the
+            # bound origin and ran its deterministic DOM marker check, so it is a completed
+            # (success) attempt whether or not the marker fired. proof_state records the
+            # verdict; the blocked requests stay in the observations for the receipt. A
+            # partial here would have kept every real-target proof out of the "completed"
+            # state the skill-usage and finding contracts require.
             return _browser_result(
                 prepared,
-                status="partial" if blocked else "success",
+                status="success",
                 request_count=request_count,
                 browser_actions=browser_actions,
                 started=started,
                 observations=[navigation_observation, proof_observation, *responses],
                 blocked=blocked,
-                errors=("browser_requests_blocked",) if blocked else (),
+                errors=(),
             )
         if isinstance(prepared, PreparedBrowserInteraction):
             steps = prepared.steps or ({"action": "click", "selector": prepared.selector},)

@@ -76,10 +76,10 @@ class RegisteredHuntAdapterFactory:
                 f"no Hunt adapter provider is registered for {specification.adapter}"
             )
         adapter = provider(specification, request)
+        identity = (str(adapter.adapter_name), str(adapter.adapter_version))
         if (
             adapter.capability_name != specification.name
-            or adapter.adapter_name != specification.adapter
-            or adapter.adapter_version != specification.adapter_version
+            or identity not in specification.adapter_identities()
         ):
             raise HuntDispatchError(
                 "Hunt adapter factory returned an implementation outside registry authority"

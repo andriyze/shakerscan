@@ -81,6 +81,7 @@ from capabilities.network import (
 )
 from capabilities.browser_login_worker import prepare_hunt_browser_action, browser_worker_policy, build_hunt_browser_adapter, build_scan_browser_login_adapter
 from capabilities.browser import BrowserCapabilityInputError, browser_capability_adapter
+from hunt.fragment_xss_proof import hunt_browser_xss_proof_adapter as _hunt_browser_xss_proof_adapter
 from hunt.browser_credentials import browser_session_headers
 from capabilities.http import execute_bound_http_request
 from capabilities.artifact import analyze_target_javascript, inspect_target_artifact
@@ -20654,6 +20655,13 @@ async def process_canonical_scanner_capability_job(
                 receipt_input["path"]
             ).split("?", 1)[0]
         safe_path = urllib.parse.urlsplit(execution_target).path or "/"
+        browser_proof_adapter = _hunt_browser_xss_proof_adapter(
+            capability_name=capability_name,
+            spec=spec,
+            target=target,
+            execution_target=execution_target,
+            action_id=str(action_id),
+        )
         scanner_adapter = ScannerExecutionAdapter(
             specification=spec,
             process_payload={
@@ -20675,6 +20683,13 @@ async def process_canonical_scanner_capability_job(
                 "path": safe_path,
             },
         )
+        # A hash-route DOM XSS lives in the URL fragment the server never receives, so
+        # Dalfox cannot reach it. The browser prover (the runtime the Scan uses for
+        # fragment candidates) attempts it in the pinned browser under this action's own
+        # reservation; every server-visible parameter keeps the scanner adapter.
+        active_adapter = browser_proof_adapter or scanner_adapter
+        adapter_name = str(active_adapter.adapter_name)
+        adapter_version = str(active_adapter.adapter_version)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -20682,13 +20697,14 @@ async def process_canonical_scanner_capability_job(
             target=target,
             capability_input=capability_input,
             requested_budget=persisted.record.requested,
-            adapter=scanner_adapter,
+            adapter=active_adapter,
             reservation_id=reservation_id,
             action_digest=queued_action_digest,
             heartbeat=heartbeat_reservation,
             cancelled=lambda: bool(redis_client.exists(cancel_key)),
+            adapter_managed_cancellation=browser_proof_adapter is not None,
         )
-        process_result = scanner_adapter.process_result
+        process_result = getattr(active_adapter, "process_result", {}) or {}
         typed_output = (
             dict(process_result.get("typed_output") or {})
             if isinstance(process_result.get("typed_output"), Mapping)
@@ -20726,8 +20742,8 @@ async def process_canonical_scanner_capability_job(
         receipt_id = uuid.uuid4()
         prepared_receipt = SimpleNamespace(
             capability_name=capability_name,
-            adapter_name=str(spec.adapter),
-            adapter_version=str(spec.adapter_version),
+            adapter_name=adapter_name,
+            adapter_version=adapter_version,
             redacted_execution=dict(execution.redacted_execution),
         )
         async with db_pool.acquire() as conn:
@@ -20769,8 +20785,8 @@ async def process_canonical_scanner_capability_job(
                     latest.record,
                     action_digest=queued_action_digest,
                     capability_name=capability_name,
-                    adapter_name=str(spec.adapter),
-                    adapter_version=str(spec.adapter_version),
+                    adapter_name=adapter_name,
+                    adapter_version=adapter_version,
                     parser_version=execution.parser_version,
                     target_id=target.target_id,
                     target_kind=target.target_kind,

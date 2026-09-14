@@ -81,25 +81,37 @@ def verified_xss_observations(
         return []
     accepted: list[dict[str, Any]] = []
     for raw in observations if isinstance(observations, (list, tuple)) else ():
-        if (
-            not isinstance(raw, Mapping)
-            or raw.get("kind") != "xss_alert"
-            or raw.get("proof_state") != "verified"
-            or not raw.get("url")
-            or not raw.get("payload_sha256")
-        ):
+        if not isinstance(raw, Mapping) or raw.get("proof_state") != "verified":
+            continue
+        kind = str(raw.get("kind") or "")
+        if kind == "xss_alert":
+            # Dalfox: a verified PoC with the injected URL and its payload receipt.
+            observed_url = raw.get("url")
+            parameter = str(raw.get("param") or "").strip()[:200] or None
+            raw_client_route = raw.get("client_route")
+            producer = "dalfox"
+        elif kind == "xss_browser_proof":
+            # The pinned browser prover: the marker executed in the DOM or reached the
+            # console on the payload URL it built, which it publishes with the payload
+            # already stripped (`request_url`) and names the parameter it injected.
+            observed_url = raw.get("request_url")
+            parameter = str(raw.get("parameter_name") or "").strip()[:200] or None
+            raw_client_route = urllib.parse.urlsplit(str(observed_url or "")).fragment
+            producer = "browser"
+        else:
+            continue
+        if not observed_url or not raw.get("payload_sha256"):
             continue
         try:
-            observed = urllib.parse.urlsplit(str(raw["url"]))
+            observed = urllib.parse.urlsplit(str(observed_url))
             observed_origin = _origin(observed)
         except ValueError:
             continue
         if observed_origin != target_origin:
             continue
-        parameter = str(raw.get("param") or "").strip()[:200] or None
-        # Store the vulnerable operation, never Dalfox's proof payload.
+        # Store the vulnerable operation, never the proof payload.
         query = urllib.parse.urlencode([(parameter, "")]) if parameter else ""
-        client_route = redact_client_route(raw.get("client_route"))
+        client_route = redact_client_route(raw_client_route)
         public_url = urllib.parse.urlunsplit((
             observed.scheme, observed.netloc, observed.path or "/", query,
             client_route or "",
@@ -113,6 +125,12 @@ def verified_xss_observations(
         }
         if client_route:
             proof["client_route"] = client_route
+        if producer == "browser":
+            proof["proof_producer"] = "browser"
+            proof["dom_marker_executed"] = bool(raw.get("dom_marker_executed"))
+            technique = str(raw.get("technique") or "")[:40] or None
+            if technique:
+                proof["technique"] = technique
         accepted.append(proof)
         if len(accepted) >= 20:
             break
@@ -139,13 +157,29 @@ async def materialize_verified_hunt_findings(
         method = "GET"
     for proof in verified_xss_observations(observations, target_url=target_url):
         fingerprint = _verified_xss_fingerprint(proof, method=method)
+        browser_proof = proof.get("proof_producer") == "browser"
+        proof_contract = (
+            "xss_browser_proof/v1" if browser_proof
+            else "dalfox_browser_or_alert_execution/v1"
+        )
+        tool = "playwright" if browser_proof else "dalfox"
+        description = (
+            "The pinned browser executed the injected payload on the bound target's "
+            "client route and observed the deterministic DOM marker."
+            if browser_proof else
+            "Dalfox observed deterministic browser or alert execution on the bound target."
+        )
+        verdict_reason = (
+            "Canonical browser DOM execution proof" if browser_proof
+            else "Canonical Dalfox execution proof"
+        )
         evidence = {
             "schema_version": "hunt-deterministic-finding/v1",
             "authoritative": True,
             "proof_state": "verified",
             "finding_verdict": "verified",
             "canonical_capability": capability_name,
-            "proof_contract": "dalfox_browser_or_alert_execution/v1",
+            "proof_contract": proof_contract,
             "hunt_id": str(hunt_id),
             "source_action_id": str(action_id),
             "tool_receipt_id": str(receipt_id),
@@ -155,7 +189,10 @@ async def materialize_verified_hunt_findings(
         apply_xss_execution_evidence(
             {"evidence": evidence},
             location="client_route" if proof.get("client_route") else "request_parameter",
-            parameter=proof.get("param"), signal="browser_or_alert_execution", verifier=capability_name,
+            parameter=proof.get("param"),
+            signal="dom_execution" if browser_proof else "browser_or_alert_execution",
+            verifier=capability_name,
+            dom_marker_executed=proof.get("dom_marker_executed") if browser_proof else None,
         )
         finding_id = await conn.fetchval(
             """INSERT INTO findings (
@@ -165,8 +202,8 @@ async def materialize_verified_hunt_findings(
                    last_verification_confidence, last_verified_at, verification_count
                ) VALUES (
                    $1,$2,$3,'Verified cross-site scripting',
-                   'Dalfox observed deterministic browser or alert execution on the bound target.',
-                   'high',NULL,'dalfox','CWE-79',$4,$5::jsonb,'deep_hunt','active',
+                   $6,
+                   'high',NULL,$7,'CWE-79',$4,$5::jsonb,'deep_hunt','active',
                    'still_vulnerable','exploited',1.0,NOW(),1
                ) ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL
                DO UPDATE SET
@@ -187,6 +224,8 @@ async def materialize_verified_hunt_findings(
             fingerprint,
             proof["url"],
             json.dumps(evidence),
+            description,
+            tool,
         )
         await conn.execute(
             """INSERT INTO finding_verifications (
@@ -196,8 +235,8 @@ async def materialize_verified_hunt_findings(
                    contract_version, proof_basis, started_at, completed_at, updated_at
                ) VALUES (
                    $1,$2,$3,'completed','success','exploited',
-                   'Canonical Dalfox execution proof','xss',$4,$4,$5::jsonb,1.0,
-                   'deterministic','dalfox_browser_or_alert_execution',
+                   $6,'xss',$4,$4,$5::jsonb,1.0,
+                   'deterministic',$7,
                    'v1','tool_execution',NOW(),NOW(),NOW()
                )""",
             finding_id,
@@ -205,6 +244,8 @@ async def materialize_verified_hunt_findings(
             f"hunt_v2:{hunt_id}"[:120],
             proof["url"],
             json.dumps(evidence),
+            verdict_reason,
+            proof_contract.split("/", 1)[0],
         )
         findings.append(str(finding_id))
     if findings:

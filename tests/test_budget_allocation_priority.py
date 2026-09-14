@@ -86,3 +86,19 @@ def test_required_and_mandatory_precedence_is_unchanged():
 def test_non_scan_verifiers_stay_out_of_the_scan_tier():
     for name in _NON_SCAN_VERIFIER_CAPABILITIES:
         assert name not in _ACTIVE_VERIFIER_CAPABILITIES
+
+
+def test_a_continuation_round_keeps_the_primary_verifier_ahead_of_proof_escalation():
+    """The discovery continuation names every lane `.r01`. The first request-body verifier
+    is still the family's primary verifier there, and must outrank the proof escalation
+    that would otherwise take the whole mutation ledger first."""
+    for lane in ("verify.request_sqli", "verify.request_xss", "verify.sqli", "verify.xss"):
+        family = lane.rsplit("_", 1)[-1].split(".")[-1]
+        capability = f"{family}.request_verify_batch" if "request" in lane else f"{family}.verify_batch"
+        assert _allocation_priority(_Action(f"{lane}.r01", capability)) == (
+            _allocation_priority(_Action(lane, capability))
+        ), lane
+    verifier = _Action("verify.request_sqli.r01", "sqli.request_verify_batch")
+    proof = _Action("prove.sqli.r01", "sqli.prove_batch")
+    breadth = _Action("verify.request_sqli.001.r01", "sqli.request_verify_batch")
+    assert _allocation_priority(verifier) < _allocation_priority(proof) < _allocation_priority(breadth)

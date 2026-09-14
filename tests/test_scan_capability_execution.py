@@ -498,7 +498,11 @@ def test_scan_xss_reserves_browser_budget_only_for_headless_proof():
     )
 
     assert "browser_actions" not in reflected.estimated_budget
-    assert headless.estimated_budget["browser_actions"] == 1
+    # xss.verify funds two browser actions: a deep DOM-XSS proof navigates the pinned
+    # browser and reads the DOM marker. The Scan's headless Dalfox verification uses at
+    # most that; the Hunt's browser prover (the alternate runtime for a hash-route
+    # parameter Dalfox cannot reach) needs both.
+    assert headless.estimated_budget["browser_actions"] == 2
 
 
 def test_scan_session_capability_requires_approval_but_not_active_testing():
