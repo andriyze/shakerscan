@@ -269,8 +269,9 @@ HIBP/GitHub-oriented breach and credential-leak checks; and third-party resource
 Known endpoints and exact request selections can seed discovery. Saved selections remain target-
 bound and content-addressed; `discovery_only` contributes safe route facts without replay,
 `safe_reads` executes only read-only requests, and `confirmed_active` requires active permission,
-state-changing authority, and a target-bound approval receipt. Arbitrary custom payload/shell input
-is not part of the canonical Scan contract.
+state-changing authority, and a target-bound approval receipt (the target's standing
+authorization suffices). Arbitrary custom payload/shell input is not part of the canonical Scan
+contract.
 
 ---
 
@@ -900,7 +901,10 @@ editing either input invalidates the preview and clears its confirmations.
 Hunt is the canonical AI-driven investigation workflow for web, API, network, and device targets.
 The current Codex, Claude, or OpenCode session plans through `POST /hunts`, `/query`, and the
 server-returned capability manifest; ShakerScan alone executes actions. Active or credentialed
-capabilities require a live, target-bound, expiring approval that is revalidated per call.
+capabilities require a live, target-bound approval that is revalidated per call. A target
+authorized once (`POST /targets/{id}/authorization`, standing, revocable) supplies that approval
+automatically for active, network, mutation, OOB, identity-header and direct-origin authority;
+credential use keeps an explicit credential-tier receipt.
 
 `GET /hunt/skills` publishes metadata for 31 server-shipped web-testing methodologies. Complete
 methodology bodies remain server-side. A Hunt normally starts with no selection, then
@@ -1519,8 +1523,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 413 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 347 | `api/**/*.py` |
+| Public REST operations | 416 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 348 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1927,6 +1931,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/asm/prune` | `asm_prune` |
 | `POST` | `/targets/{target_id}/asm/recon` | `asm_recon` |
 | `POST` | `/targets/{target_id}/asm/test` | `asm_test` |
+| `DELETE` | `/targets/{target_id}/authorization` | `revoke_target_authorization` |
+| `GET` | `/targets/{target_id}/authorization` | `get_target_authorization` |
+| `POST` | `/targets/{target_id}/authorization` | `authorize_target` |
 | `GET` | `/targets/{target_id}/credential-profiles` | `list_target_credential_profiles` |
 | `POST` | `/targets/{target_id}/credential-profiles` | `create_target_credential_profile` |
 | `DELETE` | `/targets/{target_id}/credential-profiles/{profile_id}` | `delete_target_credential_profile` |

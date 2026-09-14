@@ -70,7 +70,10 @@ commands; inspect `shakerscan --help` or `./scanner.sh help`.
 - Inspect before mutating. Use the API for product operations and the launcher for lifecycle work.
 - Stay within the targets, systems, and people the user placed in scope.
 - Ask for authorization before active, state-changing, network-discovery, device, or otherwise
-  intrusive testing unless explicit target-specific authorization already exists.
+  intrusive testing unless explicit target-specific authorization already exists. A target's
+  standing authorization (`POST /targets/{id}/authorization`, once per target, no expiry,
+  revocable, superseded when the target's scope changes) is that authorization; scans and Hunts
+  reuse it without asking again.
 - Never infer that a public hostname is authorized merely because it is reachable.
 - Do not turn an audit into a scan, Hunt, cleanup, or external message without authorization.
 - Use current server contracts instead of client-side copies of families or ceilings.
@@ -87,8 +90,11 @@ count was queued; `status: partial` means only some submissions succeeded.
 
 ## Authorization, authority, and secrets
 
-- Active testing requires persisted policy permission and, where required, a current target-bound
-  approval receipt. A UI checkbox or planner statement cannot replace server checks.
+- Active testing requires persisted policy permission and a target-bound approval receipt. The
+  receipt is normally the target's standing authorization, recorded once and resolved
+  automatically at submission; credential use keeps an explicit credential-tier receipt and the
+  dangerous tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
+  replace server checks.
 - State-changing HTTP, direct-origin access, OOB callbacks, network discovery, and device-fragility
   spend are independent permissions and budget dimensions.
 - Known endpoints, imported traffic, skills, methodologies, and prior evidence never expand scope.
@@ -126,8 +132,8 @@ curl -sS -X POST "$API_BASE/scans" -H 'Content-Type: application/json' \
   -d '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
 ```
 
-For active work, first establish explicit authorization and provide the policy plus any required
-target-bound approval. Never silently upgrade a passive request.
+For active work, first establish explicit authorization (authorize the target once, or provide a
+bounded approval receipt) and the policy. Never silently upgrade a passive request.
 
 ### Build freshness and repeatability
 
