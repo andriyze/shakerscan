@@ -1038,6 +1038,32 @@ async def run_schema_migrations(pool) -> None:
             await asyncio.sleep(0.2 * (attempt + 1))
 
 
+class MissingBaseSchemaError(RuntimeError):
+    """The database has no ShakerScan schema at all; startup DDL cannot fix that."""
+
+
+BASE_SCHEMA_TABLE = "scans"
+MISSING_BASE_SCHEMA_MESSAGE = (
+    "the engine database has no ShakerScan schema (table 'scans' is missing). db/init.sql runs "
+    "only when PostgreSQL initializes an empty data volume; it is skipped, with 'Permission "
+    "denied' in the postgres log, when the file is not readable by the postgres container "
+    "(for example mode 0600). Make the runtime directory world-readable (chmod -R a+rX), "
+    "remove the database volume (docker compose down -v) and start again, or apply "
+    "db/init.sql by hand."
+)
+
+
+async def assert_base_schema(conn) -> None:
+    """Fail fast, with the cause named, when the base schema never got created.
+
+    The startup migrations only add to an existing schema; without it every process
+    crash-looped on "relation \"scans\" does not exist" and the operator had to guess.
+    """
+    present = await conn.fetchval(f"SELECT to_regclass('public.{BASE_SCHEMA_TABLE}')")
+    if not present:
+        raise MissingBaseSchemaError(MISSING_BASE_SCHEMA_MESSAGE)
+
+
 async def _run_schema_migrations_once(pool) -> None:
     """Run all retest-related schema migrations with advisory lock to avoid races.
 
@@ -1045,6 +1071,7 @@ async def _run_schema_migrations_once(pool) -> None:
     process actually executes the DDL statements.
     """
     async with pool.acquire() as conn:
+        await assert_base_schema(conn)
         # Advisory lock key: arbitrary 64-bit int unique to this migration set
         await conn.execute("SELECT pg_advisory_lock(8675309)")
         try:

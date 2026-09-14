@@ -99,6 +99,40 @@ class _EvidenceIdentityMigrationConn(_FakeMigrationConn):
         return None
 
 
+class _SchemaProbeConn:
+    """Answers only the base-schema probe; records everything else that is attempted."""
+
+    def __init__(self, base_present):
+        self.base_present = base_present
+        self.executed = []
+
+    async def fetchval(self, query, *args):
+        assert "to_regclass('public.scans')" in query, query
+        return "scans" if self.base_present else None
+
+    async def execute(self, query, *args):
+        self.executed.append(query)
+        raise RuntimeError("stop after the first statement")
+
+
+def test_missing_base_schema_fails_fast_with_the_cause_named():
+    """An unreadable db/init.sql leaves an empty database; say so instead of crash-looping."""
+    conn = _SchemaProbeConn(base_present=False)
+    with pytest.raises(retest_contract.MissingBaseSchemaError) as raised:
+        asyncio.run(retest_contract.run_schema_migrations(_FakePool(conn)))
+    message = str(raised.value)
+    assert "db/init.sql" in message and "Permission denied" in message
+    assert "docker compose down -v" in message
+    assert conn.executed == [], "no DDL is attempted against a database without the schema"
+
+
+def test_present_base_schema_proceeds_to_the_migrations():
+    conn = _SchemaProbeConn(base_present=True)
+    with pytest.raises(RuntimeError, match="stop after the first statement"):
+        asyncio.run(retest_contract.run_schema_migrations(_FakePool(conn)))
+    assert conn.executed == ["SELECT pg_advisory_lock(8675309)"]
+
+
 def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
     class DeadlockDetectedError(RuntimeError):
         pass
