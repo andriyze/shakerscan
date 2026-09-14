@@ -2074,6 +2074,7 @@ def test_worker_build_report_summary_uses_only_fresh_fingerprint_authority():
 
     assert summary == {
         "available": True,
+        "inventory": "docker",
         "expected_count": 2,
         "reported_count": 2,
         "current_count": 1,
@@ -2139,7 +2140,7 @@ def test_worker_build_report_summary_uses_api_label_only_for_uniform_fleet():
     assert summary["scanner_version"] == "display-label"
 
 
-def test_worker_build_report_summary_requires_expected_denominator_and_accepts_small_clock_skew():
+def test_worker_build_report_summary_trusts_reports_without_a_denominator_and_accepts_small_clock_skew():
     now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
     future_report = json.dumps({
         "build_fingerprint": "expected",
@@ -2159,7 +2160,12 @@ def test_worker_build_report_summary_requires_expected_denominator_and_accepts_s
         expected_count=2,
         now=now,
     )
-    assert without_denominator["fleet_uniform"] is False
+    # Without a container inventory the fresh, current report is the only authority: the
+    # fleet reads as uniform and the summary says the inventory came from reports.
+    assert without_denominator["fleet_uniform"] is True
+    assert without_denominator["inventory"] == "reports"
+    assert without_denominator["reported_count"] == 1, "a 5 s future timestamp is clock skew"
+    assert missing_worker["inventory"] == "docker"
     assert missing_worker["reported_count"] == 1
     assert missing_worker["pending_count"] == 1
     assert missing_worker["fleet_uniform"] is False
