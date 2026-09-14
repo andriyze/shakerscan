@@ -512,6 +512,7 @@ import agent_loop
 import agent_provenance
 import agent_text_toolcalls
 import agent_tools
+import target_authorization
 import agent_budget
 try:
     from scan.contracts import (
@@ -10880,6 +10881,11 @@ async def _submit_scan(
     approval_receipt_id = (
         request.approval_receipt_id or execution_options.approval_receipt_id
     )
+    if not approval_receipt_id and _policy_requests_active_testing(request.policy):
+        # Authorize once per target: a standing authorization recorded for this target's scope
+        # is reused instead of asking for a new receipt on every active scan. Credential use
+        # keeps its explicit credential-tier receipt.
+        approval_receipt_id = await _standing_authorization_for_target_url(normalized_target)
     try:
         scan_contract = resolve_scan_contract(
             budget_profile=request.budget_profile or execution_options.budget_profile,
@@ -13251,6 +13257,8 @@ _hunt_run_service = HuntRunService(lambda: db_pool, get_redis)
 configure_hunt_run_router(
     lambda: _hunt_run_service,
     start_handler=_start_hunt_v2,
+    # Defined later in this module; the lambda defers the lookup to call time like its siblings.
+    standing_authorization_resolver=lambda target_id: _standing_authorization_for_target_id(target_id),
     metrics_provider=lambda: HUNT_ACTION_SERVICE.metrics.snapshot(),
 )
 app.include_router(hunt_run_router)
@@ -14963,6 +14971,38 @@ def _host_matches_receipt_scope(host: str, scope: dict[str, Any]) -> bool:
     return False
 
 
+def _policy_requests_active_testing(policy: Any) -> bool:
+    if isinstance(policy, Mapping):
+        return bool(policy.get("active_testing"))
+    return bool(getattr(policy, "active_testing", False))
+
+
+async def _standing_authorization_for_target_id(target_id: Any) -> dict[str, Any] | None:
+    """The target's standing authorization (approval and scope receipt ids), or None."""
+    if db_pool is None:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            return await target_authorization.current_target_authorization(conn, target_id)
+    except Exception:  # resolution is a convenience; the contract gate still decides
+        return None
+
+
+async def _standing_authorization_for_target_url(target_url: str) -> str | None:
+    """The approval receipt id of the target's standing authorization, if the target exists."""
+    if db_pool is None:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            target = await conn.fetchrow("SELECT id FROM targets WHERE url = $1", target_url)
+            if not target:
+                return None
+            standing = await target_authorization.current_target_authorization(conn, target["id"])
+    except Exception:  # resolution is a convenience; the gate below still decides
+        return None
+    return str(standing["approval_receipt_id"]) if standing else None
+
+
 async def _validate_approval_receipt_for_action(
     conn,
     approval_receipt_id: str | None,
@@ -15044,7 +15084,11 @@ async def _validate_approval_receipt_for_action(
     if "confirm_authorized" not in confirmations:
         await _deny("approval_receipt_missing_confirm_authorized", "Approval receipt is missing confirm_authorized", approval_ref=approval_ref)
     expires_at = approval_row["expires_at"]
-    if require_expiry and not expires_at:
+    standing = (
+        str(approval.get("action_name") or "").strip() == target_authorization.STANDING_ACTION_NAME
+        and approved_risk in target_authorization.STANDING_RISK_TIERS
+    )
+    if require_expiry and not expires_at and not standing:
         await _deny(
             "approval_receipt_expiry_required",
             "Approval receipt must have a bounded expiry for this action",
@@ -15075,6 +15119,8 @@ async def _validate_approval_receipt_for_action(
             )
 
     receipt_action_name = str(approval.get("action_name") or "").strip()
+    if standing and not required_action_name:
+        receipt_action_name = ""  # a standing target authorization covers every ordinary action
     if receipt_action_name and receipt_action_name != str(action_name or "").strip():
         await _deny(
             "approval_receipt_action_mismatch",
