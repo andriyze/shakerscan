@@ -51,12 +51,20 @@ class CliError(RuntimeError):
 
 
 class ApiClient:
-    def __init__(self, base_url: str, *, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 60.0, api_token: str | None = None) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.timeout = timeout
         parsed = urllib.parse.urlsplit(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise CliError("the configured ShakerScan API URL is invalid")
+        # A bearer token (an Enterprise gateway service token) authenticates a remote API; it is
+        # only ever sent over HTTPS and never printed.
+        if api_token and parsed.scheme != "https":
+            raise CliError("SHAKERSCAN_API_TOKEN requires an https:// API URL")
+        self.api_token = api_token or None
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer " + self.api_token} if self.api_token else {}
 
     def request(
         self,
@@ -67,7 +75,7 @@ class ApiClient:
         idempotency_key: str | None = None,
     ) -> Any:
         body = None
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **self._auth_headers()}
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
@@ -125,7 +133,8 @@ class ApiClient:
 
     def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
         request = urllib.request.Request(
-            f"{self.base_url}{path}", headers={"Accept": "application/json, application/zip"},
+            f"{self.base_url}{path}",
+            headers={"Accept": "application/json, application/zip", **self._auth_headers()},
             method="GET",
         )
         try:
@@ -1028,7 +1037,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        client = ApiClient(args.api_url)
+        token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip() or None
+        if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
+            raise CliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
+        client = ApiClient(args.api_url, api_token=token)
         if args.product == "hunt":
             result = _run_hunt(args, client)
         elif args.product == "credentials":

@@ -19,7 +19,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Mapping
 
 
 SERVER_NAME = "shakerscan"
@@ -953,15 +953,29 @@ def serve(server: MCPServer, stdin: BinaryIO, stdout: BinaryIO) -> int:
         stdout.flush()
 
 
+def api_token_from_env(environ: Mapping[str, str]) -> str | None:
+    """SHAKERSCAN_API_TOKEN: a bearer token for an authenticated remote API (an Enterprise
+    gateway service token). Printable ASCII only, never logged; ArsenalClient refuses to send it
+    over plain http."""
+    raw = environ.get("SHAKERSCAN_API_TOKEN", "")
+    token = raw.strip()
+    if not token:
+        return None
+    if len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token):
+        raise ValueError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces (at most 4096 characters)")
+    return token
+
+
 def main() -> int:
     allow_remote = os.environ.get("SHAKERSCAN_MCP_ALLOW_REMOTE_API", "").strip().lower() in {"1", "true", "yes", "on"}
     try:
         base_url = normalize_api_url(os.environ.get("SHAKERSCAN_API_URL", DEFAULT_API_URL), allow_remote=allow_remote)
         timeout = float(os.environ.get("SHAKERSCAN_MCP_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+        client = ArsenalClient(base_url, timeout_seconds=timeout, api_token=api_token_from_env(os.environ))
     except (TypeError, ValueError) as exc:
         print(f"shakerscan-mcp: {exc}", file=sys.stderr)
         return 2
-    server = MCPServer(ArsenalClient(base_url, timeout_seconds=timeout))
+    server = MCPServer(client)
     return serve(server, sys.stdin.buffer, sys.stdout.buffer)
 
 
