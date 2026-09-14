@@ -39,6 +39,8 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import published_scanner_version
 
+import deployment_policy
+from scan import coverage_rollup
 from retest_contract import (
     AI_ONLY_RETEST_TYPES,
     DEFAULT_REPLAY_PAYLOADS,
@@ -13678,6 +13680,21 @@ async def process_scan_job(job_data: dict):
             replay_budget_used = _worker_json_object(await conn.fetchval(
                 "SELECT budget_used_json FROM scans WHERE id=$1", uuid.UUID(scan_id),
             ))
+            # The canonical action receipts are the coverage authority: a required action
+            # that ended partial, timed out, failed or blocked must not leave the scan
+            # claiming complete coverage (a killed crawler did exactly that).
+            try:
+                action_rows = await conn.fetch(
+                    "SELECT capability_name, status, required, reason_code "
+                    "FROM scan_capability_actions WHERE scan_id=$1",
+                    uuid.UUID(scan_id),
+                )
+            except Exception:  # legacy schema or a scan without canonical actions
+                action_rows = []
+        result_coverage = coverage_rollup.apply_action_coverage(
+            result_coverage, [dict(row) for row in action_rows],
+        )
+        coverage_status = str(result_coverage.get("status") or ("failed" if error else "complete"))
         budget_used = merge_scan_budget_usage(
             replay_budget_used, scanner_budget_used,
         )
@@ -18943,9 +18960,12 @@ async def _execute_agent_scanner_process(
         # External tools must reach the target through the pinned transport
         # channel (argv/plan env), never an ambient worker proxy variable.
         process_environment.update(dict(process_plan.env))
+        # The static crawler runs under a data-segment bound (prlimit, Linux only) so a
+        # runaway parser ends with Go's own out-of-memory error at the bound instead of
+        # taking the whole worker container to its cgroup limit.
+        launch = deployment_policy.crawler_memory_bound_argv(name) + [binary, *argv]
         proc = await asyncio.create_subprocess_exec(
-            binary,
-            *argv,
+            *launch,
             env=process_environment,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -19013,17 +19033,24 @@ async def _execute_agent_scanner_process(
             elif returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = (
-                    redact_text((err or b"").decode("utf-8", "replace")[:300])
+                    "crawler_memory_bound_exceeded"
+                    if deployment_policy.crawler_memory_bound_exceeded(err or b"")
+                    else redact_text((err or b"").decode("utf-8", "replace")[:300])
                     or f"exit_{returncode}"
                 )
             elif returncode not in (0, None):
                 # The tool emitted output and then died (a signal such as the
-                # kernel's OOM kill arrives as a negative code) or reported an
-                # error. What it wrote before that is trustworthy, but it is not
-                # the whole run: the receipt must say partial, never complete.
+                # kernel's OOM kill arrives as a negative code, the crawler's
+                # memory bound as Go's exit 2) or reported an error. What it
+                # wrote before that is trustworthy, but it is not the whole run:
+                # the receipt must say partial, never complete.
                 status = "success"
                 abnormal_exit = True
-                error = f"exit_{returncode}"
+                error = (
+                    "crawler_memory_bound_exceeded"
+                    if deployment_policy.crawler_memory_bound_exceeded(err or b"")
+                    else f"exit_{returncode}"
+                )
             else:
                 status = "success"
     except FileNotFoundError:

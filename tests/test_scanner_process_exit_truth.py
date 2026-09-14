@@ -72,11 +72,15 @@ _CRAWL_LINE = json.dumps({
 }).encode() + b"\n"
 
 
-def _run_katana(monkeypatch, returncode: int, stdout: bytes, stderr: bytes = b"") -> dict:
+def _run_katana(
+    monkeypatch, returncode: int, stdout: bytes, stderr: bytes = b"", launched: dict | None = None
+) -> dict:
     monkeypatch.setattr(worker, "PinnedSocksProxy", _PinnedProxy)
     monkeypatch.setattr(worker, "get_redis", lambda: _Redis())
 
-    async def _exec(*_cmd, **_kwargs):
+    async def _exec(*cmd, **_kwargs):
+        if launched is not None:
+            launched["cmd"] = list(cmd)
         # Stream readers bind to the running loop, so the fake is built here.
         return _Process(returncode, stdout, stderr)
 
@@ -141,3 +145,26 @@ def test_scanner_image_lifts_katana_javascript_parser_dependency():
     katana_call = builder[builder.index("build_tool katana "):]
     katana_call = katana_call[:katana_call.index("build_tool subfinder")]
     assert "github.com/odvcencio/gotreesitter@v0.52.0" in katana_call
+
+
+def test_crawler_runs_under_the_memory_bound_when_the_platform_provides_it(monkeypatch):
+    monkeypatch.setattr(
+        worker.deployment_policy,
+        "crawler_memory_bound_argv",
+        lambda name: ["/usr/bin/prlimit", "--data=2147483648", "--"] if name == "katana" else [],
+    )
+    launched: dict = {}
+    result = _run_katana(monkeypatch, 0, _CRAWL_LINE, launched=launched)
+    assert result["status"] == "success"
+    assert launched["cmd"][:3] == ["/usr/bin/prlimit", "--data=2147483648", "--"]
+    assert launched["cmd"][3].endswith("katana")
+
+
+def test_crawler_stopped_by_its_memory_bound_is_named_as_such(monkeypatch):
+    """Go reports a refused allocation as exit 2 with a fatal runtime error on stderr."""
+    result = _run_katana(monkeypatch, 2, _CRAWL_LINE, b"fatal error: runtime: out of memory\n")
+    assert result["status"] == "success" and result["partial"] is True
+    assert result["error"] == "crawler_memory_bound_exceeded"
+    silent = _run_katana(monkeypatch, 2, b"", b"fatal error: runtime: out of memory\n")
+    assert silent["status"] == "failed"
+    assert silent["error"] == "crawler_memory_bound_exceeded"
