@@ -105,6 +105,12 @@ router = APIRouter()
 _service_provider: Callable[[], HuntRunService] | None = None
 _start_handler: Callable[[HuntStartContract], Awaitable[dict[str, Any]]] | None = None
 _metrics_provider: Callable[[], Mapping[str, Any]] | None = None
+_standing_authorization_resolver: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None = None
+
+PRIVILEGED_POLICY_FLAGS = (
+    "active_testing", "allow_state_changing_http", "network_discovery",
+    "allow_oob_interactions", "allow_identity_headers", "allow_direct_origin",
+)
 
 
 def configure_hunt_run_router(
@@ -112,11 +118,48 @@ def configure_hunt_run_router(
     *,
     start_handler: Callable[[HuntStartContract], Awaitable[dict[str, Any]]] | None = None,
     metrics_provider: Callable[[], Mapping[str, Any]] | None = None,
+    standing_authorization_resolver: (
+        Callable[[str], Awaitable[Mapping[str, Any] | None]] | None
+    ) = None,
 ) -> None:
-    global _metrics_provider, _service_provider, _start_handler
+    global _metrics_provider, _service_provider, _start_handler, _standing_authorization_resolver
     _service_provider = service_provider
     _start_handler = start_handler
     _metrics_provider = metrics_provider
+    _standing_authorization_resolver = standing_authorization_resolver
+
+
+async def apply_standing_authorization(
+    payload: dict[str, Any],
+    resolver: Callable[[str], Awaitable[Mapping[str, Any] | None]] | None,
+) -> dict[str, Any]:
+    """Fill a privileged Hunt policy from the target's standing authorization.
+
+    Authorize once per target: when the policy asks for active, network, mutation, OOB,
+    identity-header or direct-origin authority without naming a receipt, the target's standing
+    authorization (recorded through the target authorization endpoint) supplies the approval
+    and scope receipt ids and stands as the confirmed authorization. Credential use keeps its
+    explicit credential-tier receipt. A policy that names its own receipt is left untouched.
+    """
+    policy = payload.get("policy")
+    if resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id"):
+        return payload
+    if payload.get("credential_refs"):
+        return payload
+    if not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
+        return payload
+    target_id = str(payload.get("target_id") or "").strip()
+    if not target_id:
+        return payload
+    standing = await resolver(target_id)
+    if not standing or not standing.get("approval_receipt_id"):
+        return payload
+    policy = dict(policy)
+    policy["approval_receipt_id"] = str(standing["approval_receipt_id"])
+    if standing.get("scope_receipt_id"):
+        policy["scope_receipt_id"] = str(standing["scope_receipt_id"])
+    policy["authorization_confirmed"] = True
+    return {**payload, "policy": policy}
 
 
 def _service() -> HuntRunService:
@@ -191,9 +234,11 @@ async def start_hunt(request: Request, response: Response):
         raise HTTPException(status_code=503, detail="Hunt start service is not ready")
     parsed = await parse_hunt_start_body(request)
     try:
-        contract = normalize_hunt_start_payload(
-            parsed.model_dump(mode="python", exclude_none=True)
+        payload = await apply_standing_authorization(
+            parsed.model_dump(mode="python", exclude_none=True),
+            _standing_authorization_resolver,
         )
+        contract = normalize_hunt_start_payload(payload)
         result = await _start_handler(contract)
     except HuntStartContractError as exc:
         raise HTTPException(

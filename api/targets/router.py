@@ -49,6 +49,7 @@ try:
     import asm_inventory
     import check_registry
     import invariant_contracts
+    import target_authorization
     import invariant_proposals
     import parallel_scan
     from redaction import is_sensitive_key
@@ -91,6 +92,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         extract_root_domain, utc_now, utc_now_iso,
     )
     from .. import asm_inventory, check_registry, invariant_contracts, invariant_proposals, parallel_scan
+    from .. import target_authorization
     from ..runtime.credential_migration import (
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
@@ -294,7 +296,15 @@ async def list_targets(
                    t.last_scanned_at, t.last_score, t.last_grade,
                    t.total_scans, t.active_findings_count, t.created_at,
                    fs.total_active as active_findings,
-                   COALESCE(origins.items, '[]'::jsonb) AS origins
+                   COALESCE(origins.items, '[]'::jsonb) AS origins,
+                   EXISTS (
+                       SELECT 1 FROM approval_receipts a
+                       JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                       WHERE s.target_id = t.id AND a.status = 'active'
+                         AND a.approved_by IS NOT NULL
+                         AND a.action_name = 'target.authorization'
+                         AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                   ) AS authorized_for_active_testing
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             LEFT JOIN LATERAL (
@@ -712,9 +722,62 @@ async def create_target(request: TargetCreate):
                     "web targets are identified by host, so scans, scope receipts and Hunts bound "
                     "to this id address that origin, not the one requested."
                 )
+            authorized_by = getattr(request, "authorized_by", None)
+            if authorized_by:
+                try:
+                    response['authorization'] = await target_authorization.authorize_target(
+                        conn, row['id'], approved_by=authorized_by,
+                    )
+                except target_authorization.TargetAuthorizationError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
             return response
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Target already exists")
+
+
+@router.get("/targets/{target_id}/authorization")
+async def get_target_authorization(target_id: str):
+    """The target's standing authorization for active testing, or null."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Target not found")
+        authorization = await target_authorization.current_target_authorization(conn, target_uuid)
+    return {"target_id": str(target_uuid), "authorization": authorization}
+
+
+@router.post("/targets/{target_id}/authorization")
+async def authorize_target(target_id: str, request: TargetAuthorizationRequest):
+    """Authorize a target once: a standing receipt every active scan and Hunt reuses.
+
+    Ends only by explicit revocation or when the target's scope changes. The dangerous tier
+    (evidence deletion) is unaffected and keeps its bounded per-action approvals.
+    """
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        try:
+            authorization = await target_authorization.authorize_target(
+                conn, target_uuid, approved_by=request.approved_by,
+                environment=request.environment, risk_tier=request.risk_tier,
+            )
+        except target_authorization.TargetAuthorizationError as exc:
+            status = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"target_id": str(target_uuid), "authorization": authorization}
+
+
+@router.delete("/targets/{target_id}/authorization")
+async def revoke_target_authorization(target_id: str, request: TargetAuthorizationRevocation):
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        try:
+            revoked = await target_authorization.revoke_target_authorization(
+                conn, target_uuid, revoked_by=request.revoked_by, reason=request.reason,
+            )
+        except target_authorization.TargetAuthorizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"target_id": str(target_uuid), "revoked": revoked}
 
 
 @router.get("/targets/{target_id}")
@@ -752,6 +815,8 @@ async def get_target(target_id: str):
         """, target_uuid)
 
     result = _public_target_row(target)
+    async with _pool().acquire() as conn:
+        result["authorization"] = await target_authorization.current_target_authorization(conn, target_id)
     result['recent_scans'] = [dict(s) for s in scans]
     return result
 
@@ -3001,6 +3066,24 @@ class TargetCreate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=512)
     scan_options: Optional[dict] = None
     cohort: Optional[Literal["production", "staging", "lab", "demo", "calibration", "internal"]] = None
+    # "I own or am authorized to test this target": records the standing authorization for
+    # active testing at creation, so no scan of this target asks for a receipt again.
+    authorized_by: Optional[str] = Field(default=None, min_length=1, max_length=200)
+
+
+class TargetAuthorizationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_by: str = Field(min_length=1, max_length=200)
+    environment: Optional[str] = Field(default=None, max_length=40)
+    risk_tier: Literal["active", "intrusive"] = "active"
+
+
+class TargetAuthorizationRevocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revoked_by: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class TargetUpdate(BaseModel):

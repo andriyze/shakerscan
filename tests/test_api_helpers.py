@@ -114,6 +114,37 @@ def test_worker_capacity_defaults_to_five_below_sixteen_gb(monkeypatch):
     assert api_module._compute_max_allowed_workers() == 5
 
 
+def test_scan_submission_resolves_the_targets_standing_authorization(monkeypatch):
+    """No receipt in the request + active policy = the target's standing authorization."""
+    target_id = uuid.uuid4()
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            assert "FROM targets WHERE url" in query
+            return {"id": target_id} if args[0] == "https://app.example.test" else None
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    async def current(conn, resolved_target_id):
+        assert resolved_target_id == target_id
+        return {"approval_receipt_id": "standing-1", "scope_receipt_id": "scope-1"}
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+    monkeypatch.setattr(api_module.target_authorization, "current_target_authorization", current)
+    assert asyncio.run(api_module._standing_authorization_for_target_url("https://app.example.test")) == "standing-1"
+    assert asyncio.run(api_module._standing_authorization_for_target_url("https://unknown.example.test")) is None
+    assert api_module._policy_requests_active_testing({"active_testing": True}) is True
+    assert api_module._policy_requests_active_testing({"active_testing": False}) is False
+    assert api_module._policy_requests_active_testing(None) is False
 def test_worker_capacity_uses_declared_fleet_memory_without_the_docker_socket(monkeypatch):
     """Hardened deployments have no socket; the operator declares memory instead of a silent 5."""
     monkeypatch.delenv("SHAKERSCAN_MAX_WORKERS", raising=False)

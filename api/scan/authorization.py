@@ -88,6 +88,21 @@ def _host_in_scope(host: str, scope_receipt: Any) -> bool:
     )
 
 
+STANDING_AUTHORIZATION_ACTION = "target.authorization"
+
+
+def _standing_authorization(approval_receipt: Any) -> bool:
+    """A standing target authorization is the one receipt allowed to have no expiry.
+
+    It is created once per target (``target_authorization.authorize_target``), revoked
+    explicitly or superseded when the target's scope changes, and never covers the dangerous
+    tier, which keeps its bounded per-action approvals.
+    """
+    action_name = str(_value(approval_receipt, "action_name", "") or "").strip()
+    risk_tier = str(_value(approval_receipt, "risk_tier", "") or "").strip().lower()
+    return action_name == STANDING_AUTHORIZATION_ACTION and risk_tier in {"active", "intrusive"}
+
+
 def _requires_approval(action: Any) -> bool | None:
     capability_name = str(_value(action, "capability_name", "") or "").strip()
     try:
@@ -161,9 +176,9 @@ def revalidate_action_authority(
     if not bound_scope_id or approval_scope_id != bound_scope_id:
         return ActionAuthorityDecision.REJECTED_MISMATCH
     expires_at = _timestamp(_value(approval_receipt, "expires_at"))
-    if expires_at is None:
+    if expires_at is None and not _standing_authorization(approval_receipt):
         return ActionAuthorityDecision.REJECTED_MISSING
-    if expires_at <= current:
+    if expires_at is not None and expires_at <= current:
         return ActionAuthorityDecision.REJECTED_EXPIRED
     if not _value(approval_receipt, "approved_by"):
         return ActionAuthorityDecision.REJECTED_REVOKED
