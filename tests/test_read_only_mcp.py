@@ -649,3 +649,63 @@ def test_scanner_wrapper_routes_mcp_to_the_configured_runtime_bind():
     scanner = (ROOT / "scanner.sh").read_text(encoding="utf-8")
     assert 'export SHAKERSCAN_API_URL="${SHAKERSCAN_API_URL:-$(api_probe_url)}"' in scanner
     assert 'export SHAKERSCAN_MCP_ALLOW_REMOTE_API="${SHAKERSCAN_MCP_ALLOW_REMOTE_API:-true}"' in scanner
+
+
+def test_mcp_main_sends_a_service_token_to_a_remote_https_gateway_only(monkeypatch, capsys):
+    """An Enterprise gateway fronts the API with bearer service tokens: SHAKERSCAN_API_TOKEN goes
+    out as Authorization: Bearer on every call, only over HTTPS, and never in a log line."""
+    captured = {}
+
+    def fake_serve(server, _stdin, _stdout):
+        captured["client"] = server.client
+        return 0
+
+    monkeypatch.setattr(mcp, "serve", fake_serve)
+    monkeypatch.setenv("SHAKERSCAN_API_URL", "https://gateway.example")
+    monkeypatch.setenv("SHAKERSCAN_MCP_ALLOW_REMOTE_API", "true")
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "  st_0123456789abcdef  ")
+    assert mcp.main() == 0
+    client = captured["client"]
+    assert client.api_token == "st_0123456789abcdef"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+
+        @staticmethod
+        def read(_limit):
+            return b'{"ok":true}'
+
+    sent = {}
+
+    def fake_open(request, timeout):
+        sent["authorization"] = request.get_header("Authorization")
+        sent["url"] = request.full_url
+        return Response()
+
+    monkeypatch.setattr(client.opener, "open", fake_open)
+    client.request_json("GET", "/hunts")
+    assert sent["authorization"] == "Bearer st_0123456789abcdef"
+    assert sent["url"] == "https://gateway.example/hunts"
+    assert "st_0123456789abcdef" not in capsys.readouterr().err
+
+    # Plain http with a token is refused before any request is made.
+    monkeypatch.setenv("SHAKERSCAN_API_URL", "http://gateway.example")
+    assert mcp.main() == 2
+    assert "HTTPS" in capsys.readouterr().err
+    # Whitespace or control characters cannot be a token.
+    monkeypatch.setenv("SHAKERSCAN_API_URL", "https://gateway.example")
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN", "bad token\n")
+    assert mcp.main() == 2
+    assert "printable ASCII" in capsys.readouterr().err
+    # Without a token nothing changes for the local loopback case.
+    monkeypatch.delenv("SHAKERSCAN_API_TOKEN")
+    monkeypatch.delenv("SHAKERSCAN_MCP_ALLOW_REMOTE_API")
+    monkeypatch.setenv("SHAKERSCAN_API_URL", "http://127.0.0.1:8080")
+    assert mcp.main() == 0 and captured["client"].api_token is None
