@@ -70,6 +70,12 @@ class CapabilitySpec:
     redaction_contract: tuple[str, ...] = (
         "authorization headers", "cookies", "tokens", "private keys"
     )
+    # Adapter identities a placement may execute for this capability besides the
+    # primary one, as (adapter_name, adapter_version). Declared here so a receipt
+    # can name the runtime that produced it while the registry keeps authority over
+    # which runtimes a capability may run under: xss.verify proves a hash-route
+    # parameter in the pinned browser, which Dalfox cannot reach.
+    alternate_adapters: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name or "." not in self.name:
@@ -91,6 +97,10 @@ class CapabilitySpec:
         return bool(self.required_approval) or self.risk_tier in {
             "active", "credential", "mutation"
         }
+
+    def adapter_identities(self) -> tuple[tuple[str, str], ...]:
+        """Every (adapter_name, adapter_version) this capability may execute under."""
+        return ((self.adapter, self.adapter_version), *self.alternate_adapters)
 
     def scanner_template(self, builder: Any) -> dict[str, Any]:
         """Render the fixed scanner-process template from canonical metadata."""
@@ -595,7 +605,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "external_tool", "active", _HTTP_TARGETS, "dalfox", "1",
             "active_testing", {
                 "http_requests": 400, "tool_wall_seconds": 120,
-                "browser_actions": 1,
+                # Two browser actions: a deep DOM-XSS proof on a hash-route parameter
+                # runs in the pinned browser (navigation plus proof check), which is
+                # the only runtime that can reach a URL fragment.
+                "browser_actions": 2,
             },
             {"network_reachability": True, "binary": "dalfox"},
             _http_principal_schema({
@@ -616,6 +629,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 },
                 "deep_domxss": {"type": "boolean"},
             }),
+            alternate_adapters=(("playwright", "1"),),
         ),
         CapabilitySpec(
             "xss.verify_batch",

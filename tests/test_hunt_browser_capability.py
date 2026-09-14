@@ -16,6 +16,7 @@ from api.capabilities.browser import (
     BrowserCapabilityInputError,
     BrowserInteractAdapter,
     BrowserNavigateAdapter,
+    XSSBrowserProofAdapter,
     _observation_url,
     _redacted_path,
     _validate_read_only_interaction,
@@ -686,3 +687,129 @@ def test_browser_queue_and_worker_rebuild_authority_and_settle_atomically():
     assert "raw_target" not in worker
     assert "raw_policy" not in worker
     assert "elif job_type == 'canonical_browser_capability':" in worker_source
+
+
+def test_xss_browser_proof_is_successful_despite_blocked_off_origin_subresources(monkeypatch):
+    """A pinned browser blocks every off-origin subresource by design, so a real SPA proof
+    always sees some blocked requests. A verified same-origin DOM execution must still settle
+    as a completed (success) attempt: the Hunt skill-usage and finding contracts require the
+    action to reach "completed", and a partial here kept every real-target proof out of it."""
+    class FakePinnedProxy:
+        def __init__(self, **_kwargs):
+            self.socket_factory = types.SimpleNamespace(policy_receipt={
+                "schema_version": "frozen-target-address-policy/v1",
+            })
+            self.address_attempts = {"192.0.2.10": 1}
+            self.address_connections = {"192.0.2.10": 1}
+            self.proxy_url = "socks5://127.0.0.1:41000"
+
+        async def start(self): return self
+        async def close(self): return None
+
+    monkeypatch.setattr("api.capabilities.browser.PinnedSocksProxy", FakePinnedProxy)
+    blocked = []
+
+    class FakeRequest:
+        def __init__(self, method, url): self.method, self.url = method, url
+
+    class FakeRoute:
+        def __init__(self, request): self.request = request
+        async def abort(self, reason): blocked.append((self.request.method, self.request.url, reason))
+        async def continue_(self): return None
+
+    class FakeResponse:
+        def __init__(self, method, url, status=200):
+            self.url, self.status = url, status
+            self.request = FakeRequest(method, url)
+            self.headers = {"content-type": "text/html; charset=utf-8"}
+
+    class FakeConsole:
+        def __init__(self, text): self.type, self.text = "log", text
+
+    class FakePage:
+        def __init__(self, marker):
+            self.url = "about:blank"
+            self.route_handler = None
+            self.response_handler = None
+            self.console_handler = None
+            self._marker = marker
+
+        def on(self, event, handler):
+            # Playwright's console callback is synchronous; dialog is async.
+            if event == "console":
+                self.console_handler = handler
+
+        async def goto(self, url, **_kwargs):
+            attempts = [
+                FakeRequest("GET", url),
+                FakeRequest("GET", "https://cdn.evil.example/font.woff2"),
+            ]
+            for request in attempts:
+                await self.route_handler(FakeRoute(request))
+                if request.url.startswith("https://app.example.test"):
+                    await self.response_handler(FakeResponse(request.method, request.url))
+            # The injected payload executes and logs the marker to the console.
+            if self.console_handler is not None:
+                self.console_handler(FakeConsole(self._marker))
+            self.url = url
+            return FakeResponse("GET", url)
+
+        async def get_attribute(self, _selector, _name):
+            return self._marker
+
+        async def evaluate(self, _script, *_a): return None
+        async def screenshot(self, **_kwargs): return b"png-bytes"
+
+    class FakeContext:
+        def __init__(self, page): self._page = page
+        async def route(self, _pattern, handler): self._page.route_handler = handler
+        def on(self, event, handler):
+            if event == "response": self._page.response_handler = handler
+        async def add_init_script(self, _script): return None
+        async def new_page(self): return self._page
+        async def close(self): return None
+
+    class FakeBrowser:
+        def __init__(self, page): self._page = page
+        version = "fake/1"
+        async def new_context(self, **_kwargs): return FakeContext(self._page)
+        async def close(self): return None
+
+    def _install(page):
+        class FakeChromium:
+            async def launch(self, **_kwargs): return FakeBrowser(page)
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+            async def stop(self): return None
+
+        class FakeStarter:
+            async def start(self): return FakePlaywright()
+
+        async_api = types.ModuleType("playwright.async_api")
+        async_api.TimeoutError = type("FakePlaywrightTimeout", (Exception,), {})
+        async_api.async_playwright = lambda: FakeStarter()
+        package = types.ModuleType("playwright")
+        package.async_api = async_api
+        monkeypatch.setitem(sys.modules, "playwright", package)
+        monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
+
+    prepared = XSSBrowserProofAdapter.prepare(
+        target=_target(),
+        execution_url="https://app.example.test/#/search?q=seed",
+        candidate_id="c0deadbeefcafe01",
+        parameter_name="q",
+    )
+    _install(FakePage(prepared.marker))
+
+    async def heartbeat(): return None
+    result = asyncio.run(XSSBrowserProofAdapter(prepared).execute(
+        heartbeat=heartbeat, cancelled=lambda: False,
+    ))
+
+    assert result.status == "success"
+    assert result.partial is False
+    assert blocked and any(m == "GET" for m, _u, _r in blocked)
+    proof = next(o for o in result.observations if o.get("kind") == "xss_browser_proof")
+    assert proof["proof_state"] == "verified"
+    assert proof["dom_marker_executed"] is True

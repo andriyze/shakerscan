@@ -73,9 +73,16 @@ class CapabilityExecutor:
         spec = context.specification
         if adapter.capability_name != spec.name:
             raise ValueError("capability adapter name does not match the registry")
-        if adapter.adapter_name != spec.adapter:
-            raise ValueError("capability adapter implementation does not match the registry")
-        if adapter.adapter_version != spec.adapter_version:
+        # A capability may declare more than one runtime (xss.verify proves a
+        # hash-route DOM XSS in the pinned browser, which Dalfox cannot reach). The
+        # registry owns the exact (adapter, version) set; anything outside it is
+        # still refused.
+        identities = spec.adapter_identities()
+        if (str(adapter.adapter_name), str(adapter.adapter_version)) not in identities:
+            if adapter.adapter_name not in {name for name, _version in identities}:
+                raise ValueError(
+                    "capability adapter implementation does not match the registry"
+                )
             raise ValueError("capability adapter version does not match the registry")
         if context.adapter_managed_cancellation and not bool(
             getattr(adapter, "manages_cancellation", False)
