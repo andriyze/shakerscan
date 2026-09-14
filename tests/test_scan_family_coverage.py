@@ -305,3 +305,54 @@ def test_a_budget_limited_batch_is_not_reported_as_truncated_output():
         "CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value" in adapter
     ), "the external batch does not state why it is partial"
     assert CapabilityResultReason.INSUFFICIENT_PLAN_BUDGET.value == "insufficient_plan_budget"
+
+
+def test_an_inapplicable_candidate_is_not_unattempted_work_for_its_family():
+    """The XSS batch received one path-segment candidate that only sqlmap can test and recorded
+    it as inapplicable; the request-body verifier attempted the family's real candidate. The
+    family ran its work, so it is complete and not a selected-family gap. The same slice with
+    the candidate silently dropped (no inapplicable record) still reads as zero attempts."""
+    def report_for(observation_kinds):
+        dalfox = _batch_action("verify.xss", "xss.verify_batch", 0, count=1)
+        request_xss = _batch_action(
+            "verify.request_xss", "xss.request_verify_batch", 1, count=1,
+        )
+        final = _action(
+            "finalize.report", 2, dependencies=(dalfox.action_id, request_xss.action_id),
+        )
+        plan = ScanActionPlan(
+            scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+            target_binding_digest="a" * 64, actions=(dalfox, request_xss, final),
+        )
+        dalfox_observations = tuple(
+            {"kind": kind, "candidate_id": "path-1", "family": "xss",
+             "reason": "path_segment_candidate"}
+            for kind in observation_kinds
+        )
+        results = {
+            dalfox.action_id: _result_with_observation_count(dalfox, len(dalfox_observations)),
+            request_xss.action_id: _result_with_observation_count(request_xss, 1),
+        }
+        observations = {
+            dalfox.action_id: dalfox_observations,
+            request_xss.action_id: ({**_attempt("body-1"), "family": "xss"},),
+        }
+        return finalize_scan_report(
+            plan=plan, target_url="https://app.example.test",
+            action_results=results, observations=observations,
+        )
+
+    recorded = report_for(("candidate_inapplicable",))
+    row = _family(recorded, "xss")
+    assert row["batch_actions"] == 2
+    assert row["planned_candidates"] == 1
+    assert row["attempted_candidates"] == 1
+    assert row["unattempted_candidates"] == 0
+    assert row["unscheduled_candidates"] == 0
+    assert row["coverage_status"] == "complete"
+    assert row["reason"] is None
+    assert "xss" not in recorded["coverage"]["selected_family_gaps"]
+
+    dropped = report_for(())
+    assert _family(dropped, "xss")["reason"] == "candidates_unattempted"
+    assert "xss" in dropped["coverage"]["selected_family_gaps"]

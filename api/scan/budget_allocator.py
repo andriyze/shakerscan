@@ -125,6 +125,9 @@ _TEMPLATE_BREADTH_CAPABILITIES = frozenset({
 
 # A three-digit occurrence marker names an additional slice of the same lane.
 _BATCH_OCCURRENCE_SUFFIX = re.compile(r"\.\d{3}(?:\.r\d{2})?$")
+# Continuation rounds namespace every lane id with .rNN; the primary verifier of a
+# family is the same lane whichever round materialized its candidates.
+_ROUND_SUFFIX = re.compile(r"\.r\d{2}$")
 
 
 def _allocation_priority(action: ScanAction) -> int:
@@ -142,7 +145,12 @@ def _allocation_priority(action: ScanAction) -> int:
         return 1
     if action.supporting:
         return 2
-    if action.action_id in _PRIMARY_ACTIVE_VERIFIER_IDS:
+    # The discovery continuation plans every verifier as `verify.<lane>.r01`, so an
+    # exact id match ranked the first request-body verifier (two mutation units) as
+    # breadth below the family's proof escalation (eight units): on a bounded
+    # mutation ledger sqli.prove_batch took its hold first and the deterministic
+    # request verifier was skipped for insufficient_plan_budget.
+    if _ROUND_SUFFIX.sub("", action.action_id) in _PRIMARY_ACTIVE_VERIFIER_IDS:
         return 3
     # Proving one existing candidate outranks verifying another. Only deterministic
     # proof promotes a finding to verified, so it is funded before candidate breadth

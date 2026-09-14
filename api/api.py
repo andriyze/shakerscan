@@ -10320,8 +10320,14 @@ async def _generic_collection_refs(
                 "auth_type": str(item.get("auth_type") or "none"),
                 "body_mode": str(item.get("body_mode") or "none"),
                 "content_type": str(item.get("content_type") or "none"),
+                # The selected index item already decoded ``body_field_names_json`` into
+                # ``body_field_names``; reading the popped column here left every request
+                # manifest without body fields, so no Scan ever planned a request-body
+                # candidate for a collection request.
                 "body_field_names": list(
-                    _decode_json_value(item.get("body_field_names_json")) or []
+                    item.get("body_field_names")
+                    or _decode_json_value(item.get("body_field_names_json"))
+                    or []
                 ),
                 "safe_method": bool(item.get("safe_method")),
                 "allowed_origins": list(

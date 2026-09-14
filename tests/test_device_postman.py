@@ -334,3 +334,49 @@ def test_postman_preserves_urlencoded_json_graphql_and_multipart_wire_modes():
     assert graphql["body_mode"] == "application/json"
     assert multipart["body_mode"].startswith("multipart/form-data; boundary=")
     assert b'name="note"' in multipart["body"]
+
+
+def test_raw_body_content_type_follows_the_request_header_hint_or_json_shape():
+    """Exported collections rarely carry ``options.raw.language``; the body is what the
+    server receives under the request's own Content-Type, so the index must say so."""
+    collection = {
+        "info": {"name": "Raw bodies", "schema": "v2.1"},
+        "item": [
+            {"name": "JSON by header", "request": {
+                "method": "POST", "url": "https://tv.local/login",
+                "header": [{"key": "Content-Type", "value": "application/json; charset=utf-8"}],
+                "body": {"mode": "raw", "raw": '{"email":"a@b.test","password":"x"}'},
+            }},
+            {"name": "Form by header", "request": {
+                "method": "POST", "url": "https://tv.local/token",
+                "header": [{"key": "content-type", "value": "application/x-www-form-urlencoded"}],
+                "body": {"mode": "raw", "raw": "client_id=abc&client_secret=def"},
+            }},
+            {"name": "JSON by shape", "request": {
+                "method": "POST", "url": "https://tv.local/search",
+                "body": {"mode": "raw", "raw": '  {"q":"lamp"}'},
+            }},
+            {"name": "Plain text", "request": {
+                "method": "POST", "url": "https://tv.local/notes",
+                "body": {"mode": "raw", "raw": "just a note"},
+            }},
+            {"name": "Header beats hint", "request": {
+                "method": "POST", "url": "https://tv.local/xml",
+                "header": [{"key": "Content-Type", "value": "application/xml"}],
+                "body": {"mode": "raw", "raw": '{"looks":"json"}',
+                         "options": {"raw": {"language": "json"}}},
+            }},
+        ],
+    }
+
+    payload, _summary = device_postman.validate_and_summarize(collection)
+    by_header, form, by_shape, plain, header_beats_hint = device_postman.resolve_requests(payload)
+
+    assert by_header["body_mode"] == "application/json"
+    assert by_header["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    assert form["body_mode"] == "application/x-www-form-urlencoded"
+    assert form["body"] == b"client_id=abc&client_secret=def"
+    assert by_shape["body_mode"] == "application/json"
+    assert by_shape["headers"]["Content-Type"] == "application/json"
+    assert plain["body_mode"] == "text/plain"
+    assert header_beats_hint["body_mode"] == "application/xml"

@@ -64,7 +64,9 @@ def test_postman_5000_import_builds_redacted_paginated_index():
     serialized_row = repr(rows[0]).lower()
     assert "authorization" not in serialized_row
     assert "bearer" not in serialized_row
-    assert "password" not in serialized_row
+    # The raw body is JSON, so the index names its field path and nothing else of it.
+    assert rows[0]["content_type"] == "application/json"
+    assert rows[0]["body_field_names"] == ["password"]
     assert "secret-0" not in serialized_row
     assert rows[0]["redacted_url"].startswith("https://api.example.test/items/0?")
     assert rows[0]["normalized_path"] == "/items/0"
@@ -201,3 +203,44 @@ def test_legacy_device_collection_inventory_is_backfilled_into_v2_index():
     assert "drc.summary_json->'requests'" in migration
     assert "legacy-device-" in migration
     assert "ON CONFLICT (collection_id, request_id) DO UPDATE" in migration
+
+
+def test_raw_json_body_without_editor_hint_still_publishes_field_paths():
+    """A raw JSON body declared only by its Content-Type header, or by its shape, indexes
+    the same field paths as one carrying Postman's ``options.raw.language`` hint; without
+    them the Scan has no body candidate and the request-mutation verifiers never run."""
+    document = {
+        "info": {"name": "Raw JSON bodies", "schema": "v2.1"},
+        "item": [
+            {"name": "header", "request": {
+                "method": "POST", "url": "https://api.example.test/dast/sqli",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {"mode": "raw", "raw": '{"id":"1"}'},
+            }},
+            {"name": "shape", "request": {
+                "method": "POST", "url": "https://api.example.test/dast/xss",
+                "body": {"mode": "raw", "raw": '{"message":"control"}'},
+            }},
+            {"name": "form header", "request": {
+                "method": "POST", "url": "https://api.example.test/token",
+                "header": [{"key": "Content-Type", "value": "application/x-www-form-urlencoded"}],
+                "body": {"mode": "raw", "raw": "grant_type=password&username=u&password=p"},
+            }},
+            {"name": "text", "request": {
+                "method": "POST", "url": "https://api.example.test/notes",
+                "body": {"mode": "raw", "raw": "free text"},
+            }},
+        ],
+    }
+
+    _payload, _summary, rows = validate_and_index(document)
+
+    assert [row["content_type"] for row in rows] == [
+        "application/json", "application/json",
+        "application/x-www-form-urlencoded", "text/plain",
+    ]
+    assert rows[0]["body_field_names"] == ["id"]
+    assert rows[1]["body_field_names"] == ["message"]
+    assert rows[2]["body_field_names"] == ["grant_type", "username", "password"]
+    assert rows[3]["body_field_names"] == []
+    assert "control" not in repr(rows)

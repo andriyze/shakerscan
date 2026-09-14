@@ -1452,6 +1452,13 @@ def finalize_scan_report(
             and item.get("kind") == "candidate_attempt"
             and str(item.get("attempt_id") or "")
         }
+        # A slice entry the verifier recorded as inapplicable to its family (a path-segment
+        # candidate handed to Dalfox) was never attemptable, so it is not planned work that
+        # went unattempted. It stays in the scheduled count: the slice did cover it.
+        inapplicable = sum(
+            1 for item in observations.get(action.action_id, ())
+            if isinstance(item, Mapping) and item.get("kind") == "candidate_inapplicable"
+        )
         row = family_coverage.setdefault(family, {
             "family": family, "selected": True, "required": False,
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
@@ -1478,7 +1485,7 @@ def finalize_scan_report(
                 proof["_reasons"].append(result.reason_code.value)
         else:
             row["batch_actions"] += 1
-            row["planned_candidates"] += planned
+            row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
             declared = action.capability_args.get("manifest_entries")

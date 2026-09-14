@@ -2131,3 +2131,68 @@ def test_path_candidate_goes_to_sqlmap_with_a_marker_and_is_skipped_by_dalfox(mo
 
     xss_calls = run("xss.verify_batch", "dalfox-jsonl/v1")
     assert xss_calls == [], "dalfox never receives a path candidate"
+
+
+def test_a_path_segment_candidate_is_inapplicable_to_dalfox_not_unattempted(monkeypatch):
+    """A path-segment candidate (family_hints: sqli) sliced into the XSS batch is skipped
+    because only sqlmap understands its marker. Counting that skip as unattempted reported the
+    slice partial for insufficient_plan_budget over work no budget could fund, and the false
+    gap failed the family's coverage; the skip is recorded as inapplicable instead."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/api/orders/{int}", "concrete_path": "/api/orders/7",
+                 "query_keys": [], "source": "web.spec_ingest"},
+            ],
+        },
+        source_action_ids=("discover.spec",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.spec",), maximum=10,
+    )
+    assert [item.get("parameter_location") for item in candidates.entries] == ["path"]
+    action = _action(
+        "verify.xss.r01", "xss.verify_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 1},
+            "profile": "balanced",
+            "proof_policy": "deterministic",
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(action,),
+    )
+
+    async def execute(_self, _context, _adapter, **_kwargs):
+        raise AssertionError("Dalfox must not run against a path-segment candidate")
+
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(manifests={
+        endpoint_manifest.manifest_id: endpoint_manifest,
+        candidates.manifest_id: candidates,
+    })
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status == "success", result.errors
+    assert "insufficient_plan_budget" not in result.errors
+    assert result.redacted_execution["inapplicable_count"] == 1
+    assert result.redacted_execution["unattempted_count"] == 0
+    assert result.redacted_execution["attempted_count"] == 0
+    assert [item["kind"] for item in result.observations] == ["candidate_inapplicable"]
+    assert result.observations[0]["reason"] == "path_segment_candidate"
+    assert result.observations[0]["candidate_id"] == candidates.entries[0]["candidate_id"]
