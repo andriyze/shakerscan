@@ -127,6 +127,7 @@ independent of the engine release: because tool catalogues come from the live co
 client works against any engine version that serves them. A tag runs `publish-client.yml`: build
 the sdist and wheel, run the client tests, smoke the wheel (and a wheel rebuilt from the sdist) in
 a clean environment, publish to PyPI through trusted publishing (no stored token; the `pypi`
-environment), attach the files to a GitHub release, and render the Homebrew formula
+environment), attach the files to a GitHub release (never marked as the repository's "latest",
+which stays the engine's), and render the Homebrew formula
 (`client/homebrew/`), pushing it to the `andriyze/homebrew-shakerscan` tap with that repository's
 write deploy key (the `HOMEBREW_TAP_DEPLOY_KEY` secret) and attaching it as an artifact otherwise.

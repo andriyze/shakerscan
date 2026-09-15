@@ -94,7 +94,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+          # Never the repository's "latest" release: that badge belongs to the engine (vX.Y.Z),
+          # which the installer channel and humans read; client releases sit beside it.
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --latest=false \
             --title "ShakerScan client ${{ needs.build.outputs.version }}" \
             --notes "The shakerscan client: MCP adapter and Hunt CLI without the engine. Install: pipx install shakerscan==${{ needs.build.outputs.version }} (or uv tool install, or brew install andriyze/shakerscan/shakerscan). Documentation: docs/client.md."
 
