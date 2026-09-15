@@ -291,3 +291,31 @@ def test_provider_failure_sink_is_populated_on_definitive_auth_error(monkeypatch
     assert failure_meta["attempts"][0]["request_sent"] is True
     assert failure_meta["planning_units_spent"] == 0
     assert failure_meta["errors"] and failure_meta["errors"][0].startswith("HTTP 401:")
+
+
+def test_chat_completions_endpoint_normalizes_base_urls():
+    """`call_ai_provider` POSTs verbatim, so a base AI_URL (as the operator guide configures)
+    must be normalized to the full chat/completions endpoint; a base URL used raw returned a
+    404 HTML page from the provider's website and failed the autonomous research planner. Full
+    endpoints, the OpenAI Responses API and Anthropic /v1/messages are left unchanged."""
+    from scanner_tools.ai_classifier import _chat_completions_endpoint
+
+    assert (
+        _chat_completions_endpoint("https://openrouter.ai/api/v1")
+        == "https://openrouter.ai/api/v1/chat/completions"
+    )
+    assert (
+        _chat_completions_endpoint("https://openrouter.ai/api/v1/")
+        == "https://openrouter.ai/api/v1/chat/completions"
+    )
+    assert (
+        _chat_completions_endpoint("https://api.openai.com/v1")
+        == "https://api.openai.com/v1/chat/completions"
+    )
+    for already in (
+        "https://openrouter.ai/api/v1/chat/completions",
+        "https://api.openai.com/v1/responses",
+        "https://host.example/anthropic/v1/messages",
+    ):
+        assert _chat_completions_endpoint(already) == already
+    assert _chat_completions_endpoint("") == ""
