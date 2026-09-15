@@ -7034,7 +7034,7 @@ try:
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
-    from worker_pools import worker_pool_summaries
+    from worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
         configure_agent_router,
@@ -7089,7 +7089,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
-    from api.worker_pools import worker_pool_summaries
+    from api.worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
     AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
@@ -20675,6 +20675,120 @@ async def _execution_capacity_snapshot(local_summary: Mapping[str, Any]) -> dict
         )
 
 
+def _web_dast_worker_readiness():
+    """Web DAST worker presence from Redis heartbeats, for the socket-less path (the Enterprise
+    gateway does not mount the Docker socket). Returns a fleet-summary-shaped dict, or None when
+    Redis itself cannot answer -- then the caller keeps the legacy 'inventory unknown' response.
+    Every worker refreshes shakerscan:worker_build every SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS
+    (default 30s), well inside the freshness window used here."""
+    try:
+        raw_reports = get_redis().hgetall("shakerscan:worker_build") or {}
+    except Exception:
+        return None
+    expected_fp = expected_build_fingerprint()
+    expected_version = current_scanner_version()
+    reports = []
+    workers_by_name = {}
+    for raw_host, raw_payload in raw_reports.items():
+        host = raw_host.decode("utf-8", "replace") if isinstance(raw_host, bytes) else str(raw_host)
+        payload = raw_payload.decode("utf-8", "replace") if isinstance(raw_payload, bytes) else raw_payload
+        try:
+            report = json.loads(payload) if isinstance(payload, str) else dict(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        try:
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            reported_epoch = reported_at.timestamp()
+        except (TypeError, ValueError):
+            continue
+        build_current = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fp,
+            expected_version=expected_version,
+        )
+        reports.append({
+            "name": host,
+            "reported_epoch": reported_epoch,
+            "build_current": build_current,
+            "build_fingerprint": report.get("build_fingerprint"),
+        })
+        workers_by_name[host] = {
+            "name": host,
+            "status": "running",
+            "health": "heartbeat",
+            "build_fingerprint": report.get("build_fingerprint"),
+            "scanner_version": report.get("scanner_version"),
+            "build_current": build_current,
+            "reported_at": report.get("reported_at"),
+        }
+    summary = web_dast_heartbeat_summary(
+        reports,
+        now_epoch=time.time(),
+        max_age_seconds=_WORKER_BUILD_REPORT_MAX_AGE_SECONDS,
+        clock_skew_seconds=_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS,
+    )
+    fresh_names = set(summary.pop("fresh_names", []))
+    summary["workers"] = [workers_by_name[name] for name in fresh_names if name in workers_by_name]
+    return summary
+
+
+def _socket_less_workers_response(scaling_reason):
+    """The /workers answer when the Docker socket is unavailable. Worker presence still comes
+    from heartbeats when Redis can answer, so a healthy Enterprise deployment reports a real
+    worker count instead of the dashboard's 'Unknown'; container scaling is what is unavailable,
+    not the inventory."""
+    summary = _web_dast_worker_readiness()
+    common = {
+        "max_allowed": _compute_max_allowed_workers(),
+        "max_active_scans": _compute_max_active_scans(),
+        "expected_build_fingerprint": expected_build_fingerprint(),
+        "expected_scanner_version": current_scanner_version(),
+        "fleet": fleet_feature_state(),
+        "scaling_available": False,
+        "scaling_reason": scaling_reason,
+    }
+    if summary is None:
+        # Redis unreachable as well: presence is genuinely unknown, keep the legacy shape.
+        return {
+            "count": -1,
+            "error": scaling_reason,
+            "workers": [],
+            "execution_capacity": compute_execution_capacity(
+                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
+            ),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
+            **common,
+        }
+    return {
+        "count": summary["count"],
+        "current_count": summary["current_count"],
+        "stale_count": summary["stale_count"],
+        "pending_count": summary["pending_count"],
+        "fleet_uniform": summary["fleet_uniform"],
+        "distinct_fingerprints": summary["distinct_fingerprints"],
+        "stale_workers": summary["stale_workers"],
+        "workers": summary["workers"],
+        "execution_capacity": compute_execution_capacity(
+            summary, [], remote_inventory_available=False
+        ),
+        "pools": worker_pool_summaries(
+            summary,
+            agent_tool=_agent_tool_worker_readiness,
+            device=_device_worker_readiness,
+            model_intake=_model_intake_worker_readiness,
+        ),
+        **common,
+    }
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
@@ -20829,42 +20943,10 @@ async def get_workers():
             ),
         }
     except FileNotFoundError:
-        return {
-            "count": -1,
-            "error": "Docker socket not available",
-            "workers": [],
-            "max_allowed": _compute_max_allowed_workers(),
-            "max_active_scans": _compute_max_active_scans(),
-            "execution_capacity": compute_execution_capacity(
-                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
-            ),
-            "fleet": fleet_feature_state(),
-            "pools": worker_pool_summaries(
-                {},
-                agent_tool=_agent_tool_worker_readiness,
-                device=_device_worker_readiness,
-                model_intake=_model_intake_worker_readiness,
-            ),
-        }
+        return _socket_less_workers_response("Docker socket not available")
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
-        return {
-            "count": -1,
-            "error": "Failed to query Docker",
-            "workers": [],
-            "max_allowed": _compute_max_allowed_workers(),
-            "max_active_scans": _compute_max_active_scans(),
-            "execution_capacity": compute_execution_capacity(
-                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
-            ),
-            "fleet": fleet_feature_state(),
-            "pools": worker_pool_summaries(
-                {},
-                agent_tool=_agent_tool_worker_readiness,
-                device=_device_worker_readiness,
-                model_intake=_model_intake_worker_readiness,
-            ),
-        }
+        return _socket_less_workers_response("Failed to query Docker")
 
 
 @app.post("/workers")
