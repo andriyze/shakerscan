@@ -192,6 +192,14 @@ def cmd_hunt(args: argparse.Namespace) -> int:
     return int(load("_v2_cli").main(["--api-url", url, "hunt", *rest]))
 
 
+def _with_reason(exc: Exception) -> str:
+    """The adapter's error message plus the transport reason it carries (a timeout, a refused
+    connection, a certificate failure), so `doctor` says why and not only that."""
+    message = str(getattr(exc, "message", None) or exc)
+    reason = getattr(exc, "data", None)
+    return f"{message}: {reason}" if reason else message
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     mcp = load("_mcp")
@@ -215,14 +223,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         status = health.get("status") if isinstance(health, dict) else None
         lines.append(f"engine:   reachable ({status or 'ok'})")
     except mcp.MCPError as exc:
-        lines.append(f"engine:   {exc.message}")
+        lines.append(f"engine:   {_with_reason(exc)}")
     ok = True
     try:
         tools = client.list_tools()
         hunt = sum(1 for tool in tools if str(tool.get("name", "")).startswith("shakerscan_hunt"))
         lines.append(f"mcp:      {len(tools)} tools ({len(tools) - hunt} read-only Arsenal, {hunt} Hunt)")
     except mcp.MCPError as exc:
-        lines.append(f"mcp:      {exc.message}")
+        lines.append(f"mcp:      {_with_reason(exc)}")
         ok = False
     print("\n".join(lines))
     if is_loopback(url) and engine_launcher() is not None:

@@ -269,10 +269,30 @@ def test_doctor_for_a_local_engine_hands_off_to_the_launcher_host_checks(tmp_pat
         cwd=tmp_path,
     )
     assert result.returncode == 0, result.stderr
-    assert "client:   0.1.0" in result.stdout
+    assert f"client:   {__version__}" in result.stdout
     assert result.stdout.rstrip().endswith("launcher tag=2.3.4 args=doctor")
     # A remote instance is a connection check only; no launcher involved.
     remote = _run(
         ["doctor", "--url", "https://127.0.0.2:9", "--timeout", "1"], env={cli.ENV_HOME: str(tmp_path / "engine")}, cwd=tmp_path
     )
     assert "launcher" not in remote.stdout
+
+
+def test_doctor_names_the_transport_reason(monkeypatch, capsys, clean_environ):
+    mcp = load("_mcp")
+
+    class DownClient:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "<urlopen error timed out>")
+
+        def list_tools(self):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "<urlopen error timed out>")
+
+    monkeypatch.setattr(mcp, "ArsenalClient", DownClient)
+    assert cli.main(["doctor", "--url", "https://scanner.example.com"]) == 1
+    out = capsys.readouterr().out
+    assert "engine:   ShakerScan API is unavailable: <urlopen error timed out>" in out
+    assert "mcp:      ShakerScan API is unavailable: <urlopen error timed out>" in out
