@@ -1523,8 +1523,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 416 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 348 | `api/**/*.py` |
+| Public REST operations | 425 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 356 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1636,6 +1636,14 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/arsenal/tools` | `arsenal_tools` |
 | `GET` | `/artifacts/storage/health` | `get_artifact_storage_health` |
 | `GET` | `/asm/check-families` | `asm_check_families` |
+| `GET` | `/authenticated-scan-profiles` | `list_profiles` |
+| `POST` | `/authenticated-scan-profiles` | `write_profile` |
+| `GET` | `/authenticated-scan-profiles/contract` | `contract` |
+| `GET` | `/authenticated-scan-profiles/validations/{request_id}` | `get_validation` |
+| `POST` | `/authenticated-scan-profiles/validations/{request_id}/cancel` | `cancel_validation` |
+| `GET` | `/authenticated-scan-profiles/{profile_id}` | `get_profile` |
+| `GET` | `/authenticated-scan-profiles/{profile_id}/history` | `get_profile_history` |
+| `POST` | `/authenticated-scan-profiles/{profile_id}/validate` | `validate_profile` |
 | `GET` | `/credential-profiles` | `list_credential_profiles` |
 | `POST` | `/credential-profiles` | `create_credential_profile` |
 | `GET` | `/credential-profiles/capabilities` | `credential_capability_catalog` |
@@ -1879,6 +1887,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
 | `GET` | `/scans/{scan_id}/artifacts` | `list_scan_artifacts` |
 | `GET` | `/scans/{scan_id}/artifacts/{artifact_id}` | `download_scan_artifact` |
+| `GET` | `/scans/{scan_id}/authentication-assurance` | `get_scan_assurance` |
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
 | `GET` | `/scans/{scan_id}/capabilities` | `get_scan_capabilities` |
 | `GET` | `/scans/{scan_id}/coverage` | `get_scan_coverage` |
@@ -2563,7 +2572,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_UID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
-| `SHAKERSCAN_BIND_HOST` | `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_AUTHENTICATED_ASSURANCE` | `api/authenticated_assurance/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
 | `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/fleet_routes/router.py` |
 | `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/fleet_routes/router.py` |

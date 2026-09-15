@@ -7567,12 +7567,14 @@ export async function createTargetPolicyApprovalReceipt({
   ttlMinutes = 120,
   riskTier = 'active',
   environment = 'production',
+  actionName,
 }: {
   targetId?: string
   targetUrl: string
   ttlMinutes?: number
   riskTier?: 'active' | 'credential'
   environment?: 'production' | 'lab'
+  actionName?: string
 }): Promise<{ approvalReceiptId: string; scopeReceiptId: string; expiresAt: string }> {
   const normalizedTargetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
     ? targetUrl.trim()
@@ -7593,6 +7595,7 @@ export async function createTargetPolicyApprovalReceipt({
   const approval = await createApprovalReceipt({
     scope_receipt_id: scope.scope_receipt.receipt_id,
     risk_tier: riskTier,
+    ...(actionName ? { action_name: actionName } : {}),
     confirmations,
     approved_by: 'interactive-ui',
     // Keep interactive approvals bounded to the requested workflow duration and the server's

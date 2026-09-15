@@ -234,6 +234,7 @@ class ScanOrchestrator:
         if not isinstance(plan, ScanActionPlan):
             raise ScanOrchestrationError("ScanOrchestrator requires a canonical action plan")
         results = await self._load_terminal_results(plan)
+        health_actions = {action.action_id for action in plan.actions if "authentication_profile_ref" in action.capability_args}
         for action in plan.actions:
             if action.action_id in results:
                 await self._emit(action, "restored", results[action.action_id])
@@ -300,8 +301,9 @@ class ScanOrchestrator:
                 elif (
                     action.action_id != "finalize.report"
                     and any(
-                        item.status not in _DEPENDENCY_SATISFIED
-                        for item in dependencies
+                        item.status not in _DEPENDENCY_SATISFIED or (
+                            dependency_id in health_actions and item.status != CapabilityResultStatus.SUCCESS)
+                        for dependency_id, item in zip(action.dependencies, dependencies)
                         if item is not None
                     )
                 ):

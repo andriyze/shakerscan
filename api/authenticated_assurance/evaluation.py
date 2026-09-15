@@ -1,0 +1,185 @@
+"""Deterministic evaluation of bounded, worker-private health responses.
+
+This module does not dispatch network work, resolve credentials, or grant authority.
+Only a server-owned caller may supply an observation after normal runtime checks.
+Response bytes and application-provided strings never enter its output.
+"""
+
+from datetime import datetime, timedelta
+import json
+from typing import Any, Mapping
+from uuid import UUID, uuid4
+
+from .models import ProfileConfiguration, ValidationRecord, exact_origin
+
+MAX_HEALTH_RESPONSE_BYTES = 16_384
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate health response field")
+        result[key] = value
+    return result
+
+
+def _invalid_constant(_value):
+    raise ValueError("non-JSON health response constant")
+
+
+def evaluate_health_response(
+    configuration: ProfileConfiguration, *, revision: int, credential_version: int,
+    credential_record_version: int,
+    checked_at: datetime, process_generation: UUID, status_code: int | None = None,
+    body: bytes = b"", content_type: str = "", response_url: str | None = None,
+    location: str | None = None, timed_out: bool = False, credential_expired: bool = False,
+) -> ValidationRecord:
+    """A 200 page or a 403 must never imply accepted or expired identity."""
+    state, reason = "unknown", "validation_unavailable"
+    identity_matched, role_matched = False, None
+    if credential_expired:
+        state, reason = "expired", "credential_expired"
+    elif timed_out:
+        reason = "validation_timeout"
+    elif response_url is not None:
+        expected_url = configuration.credential_destinations[0] + configuration.validation_policy.path
+        try:
+            destination_ok = exact_origin(response_url) in configuration.credential_destinations
+        except ValueError:
+            destination_ok = False
+        if not destination_ok or response_url != expected_url:
+            reason = "destination_rejected"
+        elif status_code is not None and 300 <= status_code < 400:
+            reason = "login_redirect"
+            if location and not location.startswith("/"):
+                try:
+                    if exact_origin(location) not in configuration.credential_destinations:
+                        reason = "destination_rejected"
+                except ValueError:
+                    reason = "destination_rejected"
+            elif location and location.startswith("//"):
+                reason = "destination_rejected"
+        elif status_code == 401:
+            state, reason = "invalid", "expected_identity_missing"
+        elif status_code == 403:
+            reason = "access_denied"
+        elif status_code is not None and status_code >= 500:
+            reason = "application_error"
+        elif status_code == 200:
+            reason = "invalid_response"
+            if content_type.split(";", 1)[0].strip().lower() == "application/json" and len(body) <= MAX_HEALTH_RESPONSE_BYTES:
+                try:
+                    document = json.loads(body, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+                except (ValueError, UnicodeError, RecursionError):
+                    document = None
+                if isinstance(document, dict):
+                    policy = configuration.validation_policy
+                    actual = document.get(policy.identity_field)
+                    if actual is None or actual == "":
+                        state, reason = "invalid", "expected_identity_missing"
+                    elif not isinstance(actual, str) or actual != policy.expected_identity:
+                        state, reason = "invalid", "unexpected_identity"
+                    elif policy.role_field and document.get(policy.role_field) != policy.expected_role:
+                        state, reason = "invalid", "unexpected_role"
+                    else:
+                        state, reason = "valid", "identity_confirmed"
+                        identity_matched = True
+                        role_matched = True if policy.role_field else None
+    return ValidationRecord(
+        validation_id=uuid4(), profile_id=configuration.credential_reference,
+        revision=revision, credential_version=credential_version,
+        credential_record_version=credential_record_version,
+        configuration_digest=configuration.digest(credential_version, credential_record_version), state=state,
+        reason_code=reason, checked_at=checked_at,
+        valid_until=checked_at + timedelta(seconds=configuration.validation_policy.freshness_seconds) if state == "valid" else None,
+        identity_matched=identity_matched, role_matched=role_matched,
+        process_generation=process_generation,
+    )
+
+
+def current_assurance(
+    record: ValidationRecord | None, *, revision: int, credential_version: int,
+    credential_record_version: int,
+    configuration_digest: str, now: datetime, process_generation: UUID,
+    credential_active: bool = True, credential_expires_at: datetime | None = None,
+    lifecycle_state: str = "draft", destination_active: bool = True,
+) -> dict[str, Any]:
+    """Live metadata overrides stale validity, including after a process restart."""
+    state, reason = "unknown", "not_validated"
+    if not credential_active:
+        state, reason = "revoked", "credential_revoked"
+    elif credential_expires_at and credential_expires_at <= now:
+        state, reason = "expired", "credential_expired"
+    elif lifecycle_state in {"disabled", "archived"}:
+        state, reason = "revoked", "profile_disabled"
+    elif not destination_active:
+        reason = "destination_rejected"
+    elif record:
+        if record.revision != revision or record.configuration_digest != configuration_digest:
+            reason = "profile_changed"
+        elif (record.credential_version != credential_version or
+              record.credential_record_version != credential_record_version):
+            reason = "credential_changed"
+        elif record.process_generation != process_generation:
+            reason = "process_restarted"
+        elif record.checked_at > now:
+            reason = "invalid_response"
+        elif record.state == "valid" and (not record.valid_until or record.valid_until <= now):
+            reason = "validation_stale"
+        else:
+            state, reason = record.state, record.reason_code
+    return {
+        "state": state, "reason_code": reason,
+        "last_checked_at": record.checked_at.isoformat() if record else None,
+        "last_validated_at": record.checked_at.isoformat() if record and record.state == "valid" else None,
+        "continuous_authentication_proven": False,
+        "secret_values_visible": False,
+    }
+
+
+def scan_authentication_summary(options: Mapping[str, Any], *, interrupted_action_count: int = 0) -> dict[str, Any]:
+    """Conservative projection for consumers without recorded health events.
+
+    Credential-use flags and findings do not supply an identity health timeline.
+    This intentionally leaves existing risk/verification evidence untouched.
+    """
+    references = options.get("credential_profile_refs") or []
+    profiles = []
+    for item in references if isinstance(references, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        # Never echo arbitrary options, auth headers, or untrusted response text.
+        try:
+            profile_id = str(UUID(str(item.get("profile_id") or item.get("id"))))
+        except (TypeError, ValueError):
+            continue
+        version = item.get("profile_version", item.get("version"))
+        public = {"credential_reference": profile_id,
+                  "credential_version": version if type(version) is int and version > 0 else None}
+        if "authenticated_profile_snapshot" in item:
+            # Import lazily: snapshot admission itself uses current_assurance.
+            from .snapshots import bound_snapshot
+            try:
+                public["assessment_snapshot"] = bound_snapshot(dict(item)).model_dump(mode="json")
+            except (ValueError, TypeError):
+                pass  # Malformed historical metadata is never positive evidence.
+        profiles.append(public)
+    interrupted = max(0, interrupted_action_count) if type(interrupted_action_count) is int else 0
+    requested = bool(interrupted or references or options.get("managed_credential_profiles") or
+                     any(options.get(key) for key in ("auth_header", "auth_cookies", "auth_token", "auth_user")))
+    return {
+        "schema_version": "authentication-assurance/v1",
+        "authentication_requested": requested,
+        "state": "unknown",
+        "reason_code": "authentication_gap" if interrupted else "not_validated" if any(
+            "assessment_snapshot" in profile for profile in profiles) else "legacy_unverified" if requested else "not_validated",
+        "profiles": profiles,
+        "coverage": "unverified",
+        "interrupted_action_count": interrupted,
+        "continuous_authentication_proven": False,
+        "finding_evidence_preserved": True,
+        "limitations": (["Credential authority became unavailable; affected actions were interrupted or blocked."] if interrupted else []) +
+            ["No recorded identity health timeline; credential use does not establish accepted identity."],
+        "secret_values_visible": False,
+    }

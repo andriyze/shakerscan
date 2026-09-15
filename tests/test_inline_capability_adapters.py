@@ -37,6 +37,30 @@ DEVICE_TARGET = TargetBinding(
 )
 
 
+def test_http_adapter_cancels_inflight_operation_and_settles_uncertain_use():
+    async def run():
+        stopped = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def operation():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        requested = {"http_requests": 1, "tool_wall_seconds": 5}
+        adapter = HttpRequestExecutionAdapter(specification=CAPABILITY_REGISTRY.require("http.request"),
+            operation=operation, requested_budget=requested, redacted_execution={})
+        result = await adapter.execute(heartbeat=lambda: asyncio.sleep(0), cancelled=entered.is_set)
+        assert stopped.is_set()
+        assert result.status == "cancelled" and not result.partial
+        assert result.actual_budget["http_requests"] == 1
+        assert result.redacted_execution["usage_uncertain"] is True
+
+    asyncio.run(run())
+
+
 def _execute(specification, adapter, requested):
     return asyncio.run(CapabilityExecutor().execute(
         CapabilityExecutionContext(

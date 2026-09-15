@@ -121,6 +121,10 @@ def key_is_sensitive(value: Any, *, item: Any = _UNSET) -> bool:
     if not parts:
         return False
     joined = "_".join(parts)
+    # Canonical credential revisions are bounded integers, never secret material.
+    # Strings, booleans, and arbitrary numbers under these names remain masked.
+    if joined in {"credential_version", "credential_record_version"} and type(item) is int and 0 < item <= 2_147_483_647:
+        return False
     allowed_header_values = _NON_SECRET_HEADER_VALUES.get(joined)
     if allowed_header_values is not None:
         if item is _UNSET:
@@ -242,6 +246,7 @@ class CapabilityReceipt:
     receipt_id: str = field(default_factory=lambda: str(uuid4()))
     scan_id: str | None = None
     hunt_id: str | None = None
+    validation_id: str | None = None
     worker_id: str | None = None
     scope_receipt_id: str | None = None
     approval_receipt_id: str | None = None
@@ -262,8 +267,11 @@ class CapabilityReceipt:
     def __post_init__(self) -> None:
         owner_scan = str(self.scan_id or "").strip() or None
         owner_hunt = str(self.hunt_id or "").strip() or None
-        if not owner_scan and not owner_hunt:
-            raise ValueError("capability receipt must belong to a scan or hunt")
+        owner_validation = str(self.validation_id or "").strip() or None
+        if not owner_scan and not owner_hunt and not owner_validation:
+            raise ValueError("capability receipt must belong to a scan, hunt, or validation")
+        if owner_validation and (owner_scan or owner_hunt):
+            raise ValueError("validation receipts cannot claim scan or hunt ownership")
         status = str(self.status or "").strip().lower()
         if not _STATUS_RE.fullmatch(status):
             raise ValueError("status must be a bounded machine-readable code")
@@ -338,6 +346,7 @@ class CapabilityReceipt:
 
         object.__setattr__(self, "scan_id", owner_scan)
         object.__setattr__(self, "hunt_id", owner_hunt)
+        object.__setattr__(self, "validation_id", owner_validation)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "input_digest", digest)
         object.__setattr__(self, "budget_reservation_id", reservation_id)
@@ -356,6 +365,8 @@ class CapabilityReceipt:
     def canonical_dict(self) -> dict[str, Any]:
         """Stable JSON-safe receipt material used for persistence and hashing."""
         return {
+            # Omit absent additive ownership so historical receipt hashes stay stable.
+            **({"validation_id": self.validation_id} if self.validation_id else {}),
             "receipt_id": self.receipt_id,
             "capability_name": self.capability_name,
             "adapter_name": self.adapter_name,
@@ -410,7 +421,7 @@ class CapabilityReceipt:
             "budget_reservation_state", "budget_reserved", "budget_consumed",
             "output_artifact_id", "artifact_refs", "observations", "errors",
         }
-        if set(payload) != expected_fields:
+        if set(payload) - {"validation_id"} != expected_fields:
             raise ValueError("capability receipt fields are invalid")
         receipt = cls(**payload)
         if supplied_hash is not None and str(supplied_hash).lower() != receipt.receipt_hash:

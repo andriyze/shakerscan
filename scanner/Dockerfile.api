@@ -38,6 +38,7 @@ COPY --from=scanner-runtime /app/operations /app/operations
 COPY --from=scanner-runtime /app/interactive /app/interactive
 COPY --from=scanner-runtime /app/policy_profiles /app/policy_profiles
 COPY --from=scanner-runtime /app/runtime /app/runtime
+COPY --from=scanner-runtime /app/authenticated_assurance /app/authenticated_assurance
 COPY --from=scanner-runtime /app/schedules /app/schedules
 COPY --from=scanner-runtime /app/settings_routes /app/settings_routes
 COPY --from=scanner-runtime /app/targets /app/targets

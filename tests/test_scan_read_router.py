@@ -67,3 +67,23 @@ def test_scan_detail_reuses_router_owned_public_projection():
         "public_scan_execution_explanation as "
         "_public_scan_execution_explanation"
     ) in source
+
+
+def test_live_scan_projection_explains_credential_interruption_from_action_records():
+    from tests.test_scan_explanation import _plan, _rows, SCAN_ID
+
+    rows = _rows()
+    rows[0].update(status="blocked", reason_code="authentication_uncertain", result_json={})
+    explanation = read_router.public_scan_execution_explanation(
+        {"id": SCAN_ID, "status": "running", "scan_action_plan_json": _plan(), "options": {}}, rows)
+    assurance = explanation["authentication_assurance"]
+    assert assurance["state"] == "unknown"
+    assert assurance["authentication_requested"] is True
+    assert assurance["reason_code"] == "authentication_gap"
+    assert assurance["interrupted_action_count"] == 1
+    assert "review the identity and approval" in explanation["actions"][0]["reason"]
+    rows[0].update(reason_code="timed_out", receipt_json={"redacted_execution": {
+        "identity_interruption": {"reason_code": "authentication_uncertain"}}})
+    explanation = read_router.public_scan_execution_explanation(
+        {"id": SCAN_ID, "status": "completed", "scan_action_plan_json": _plan(), "options": {}}, rows)
+    assert explanation["authentication_assurance"]["interrupted_action_count"] == 1

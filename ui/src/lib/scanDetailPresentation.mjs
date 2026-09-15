@@ -145,6 +145,7 @@ const COVERAGE_REASON_LABELS = {
   dependency_failed: 'A planned step was skipped because the step it depended on did not complete',
   policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
+  authentication_uncertain: 'Credential authority could not be confirmed',
 }
 
 export function scanResultPresentation(scan, assurance) {
@@ -190,6 +191,15 @@ export function scanResultPresentation(scan, assurance) {
   const smartCoverage = record(report.smart_coverage)
   const authStates = Array.isArray(smartCoverage.auth_states_tested) ? smartCoverage.auth_states_tested : []
   const authenticated = authStates.some((state) => String(state).toLowerCase() !== 'anonymous')
+  // This historical flag records a credential lane, not an accepted identity or
+  // a continuous session-health observation.
+  const identityAssurance = record(report.authentication_assurance)
+  const authenticationGap = identityAssurance.reason_code === 'authentication_gap'
+  const interruptedActions = Math.max(0, Math.trunc(finiteNumber(identityAssurance.interrupted_action_count, 0)))
+  const authenticationRequested = authenticationGap || identityAssurance.authentication_requested === true || authenticated
+    || (Array.isArray(options.credential_profile_refs) && options.credential_profile_refs.length > 0)
+    || (Array.isArray(options.managed_credential_profiles) && options.managed_credential_profiles.length > 0)
+  const authenticationAssurance = authenticationGap ? 'Credential authority unavailable' : authenticationRequested ? 'Identity unverified' : 'Anonymous only'
   const budgetUsed = record(record(report.scan_metadata).budget_used)
   const missingHeaders = Array.isArray(record(report.http).missing_security_headers)
     ? record(report.http).missing_security_headers
@@ -215,8 +225,13 @@ export function scanResultPresentation(scan, assurance) {
     || incompleteFamilies.length > 0
     || assuranceGaps.length > 0
     || result.grade_reliable === false
+    || authenticationRequested
   const confidenceTone = weakExamination ? 'weak' : coverageIncomplete ? 'qualified' : 'supporting'
-  const confidence = weakExamination
+  const confidence = authenticationGap
+    ? `${assuranceLabel}. Credential authority could not be confirmed; ${interruptedActions || 'some'} planned action${interruptedActions === 1 ? ' was' : 's were'} interrupted or blocked. Review the identity and approval before starting new work. Independently verified findings remain supported.`
+    : authenticationRequested
+    ? `${assuranceLabel}. Credentials do not establish accepted identity; no session-health timeline proves authenticated coverage. Independently verified findings remain supported.`
+    : weakExamination
     ? `${assuranceLabel} — this is not a clean bill of health.`
     : coverageIncomplete
       ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
@@ -238,6 +253,8 @@ export function scanResultPresentation(scan, assurance) {
     budgetProfile,
     activeTesting,
     authenticated,
+    authenticationRequested,
+    authenticationAssurance,
     resolvedFamilies,
     requestCount: finiteNumber(budgetUsed.http_requests, null),
     missingHeaders,

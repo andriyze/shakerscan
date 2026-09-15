@@ -544,6 +544,18 @@ async def execute_bound_http_request(
                         "stopped": "cross_origin",
                     })
                     break
+                if _origin_key(next_url) != _origin_key(current_url) and (
+                    trusted_headers or cookies or (allow_identity_headers and headers)
+                    or getattr(client, "cookies", None)
+                ):
+                    # Target scope may include several services on one host. It
+                    # never authorizes disclosing this request's identity to a
+                    # different scheme or port, including cookies just received.
+                    redirect_chain.append({
+                        "status": response.status_code, "location": location[:500],
+                        "followed": False, "stopped": "credential_destination",
+                    })
+                    break
                 redirect_chain.append({
                     "status": response.status_code,
                     "location": location[:500],

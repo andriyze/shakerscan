@@ -45,6 +45,7 @@ class CapabilityResultReason(str, Enum):
     PLACEMENT_UNAVAILABLE = "placement_unavailable"
     AUTHORIZATION_EXPIRED = "authorization_expired"
     AUTHORIZATION_REVOKED = "authorization_revoked"
+    AUTHENTICATION_UNCERTAIN = "authentication_uncertain"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"

@@ -10,12 +10,16 @@ from typing import Any, Mapping, Sequence
 
 from . import scoring
 from .action_plan import ScanActionPlan
-from .capability_result import CapabilityResultReference, CapabilityResultStatus
+from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     root_scan_plan_revision,
 )
+try:
+    from authenticated_assurance.evaluation import scan_authentication_summary
+except ModuleNotFoundError:
+    from api.authenticated_assurance.evaluation import scan_authentication_summary
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
@@ -1864,6 +1868,11 @@ def finalize_scan_report(
     })
     report = {
         "schema_version": SCAN_REPORT_SCHEMA,
+        "authentication_assurance": scan_authentication_summary({
+            "managed_credential_profiles": principal_contexts,
+        }, interrupted_action_count=sum(result.reason_code is CapabilityResultReason.AUTHENTICATION_UNCERTAIN or any(
+            item.get("kind") == "identity_authority_interruption" for item in observations.get(action_id, ()))
+            for action_id, result in action_results.items())),
         "target": str(target_url),
         "runtime_destinations": runtime_destinations,
         "findings": findings,

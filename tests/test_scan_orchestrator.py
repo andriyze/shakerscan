@@ -367,6 +367,27 @@ def test_failed_dependency_is_blocked_but_receipt_driven_finalizer_still_runs():
     assert ("baseline.security_txt", "blocked", False) in executor.synthetic
 
 
+@pytest.mark.parametrize("status", [CapabilityResultStatus.PARTIAL, CapabilityResultStatus.TIMED_OUT])
+@pytest.mark.parametrize("health", [True, False])
+def test_uncertain_health_never_satisfies_dependency_but_partial_evidence_still_does(status, health):
+    original = _plan()
+    first = replace(original.actions[0], capability_args={"authentication_profile_ref": {}} if health else {"method": "GET"}, action_digest=None)
+    plan = replace(original, actions=(first, *original.actions[1:]), plan_digest=None)
+
+    class Executor(FakeExecutor):
+        async def execute(self, action, lease, heartbeat):
+            if action.action_id == first.action_id:
+                self.executed.append(action.action_id)
+                return _result(action, status=status, reason=CapabilityResultReason.TIMED_OUT if status == CapabilityResultStatus.TIMED_OUT else CapabilityResultReason.OUTPUT_TRUNCATED)
+            return await super().execute(action, lease, heartbeat)
+
+    executor = Executor()
+    report = _run(ScanOrchestrator(backend=FakeBackend(plan, "local"), executor=executor), plan)
+    assert report.status_matrix[first.action_id] == status.value
+    assert report.status_matrix["baseline.security_txt"] == ("blocked" if health else "success")
+    assert report.status_matrix["finalize.report"] == "success"
+
+
 def test_precomputed_admission_skip_is_settled_with_a_terminal_receipt():
     base = _plan()
     skipped = replace(

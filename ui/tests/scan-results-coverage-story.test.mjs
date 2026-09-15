@@ -10,6 +10,32 @@ import { scanResultPresentation } from '../src/lib/scanDetailPresentation.mjs'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf8')
 
+test('credential lanes never endorse an unqualified authenticated result', () => {
+  const scan = scanWith({})
+  scan.result.smart_coverage = { auth_states_tested: ['anonymous', 'primary'] }
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.authenticationAssurance, 'Identity unverified')
+  assert.equal(presentation.coverageIncomplete, true)
+  assert.match(presentation.confidence, /no session-health timeline/)
+  assert.match(presentation.confidence, /Independently verified findings remain supported/)
+  assert.equal(presentation.confirmedCount, 1)
+})
+
+test('recorded credential interruption explains blocked work without hiding supported findings', () => {
+  const scan = scanWith({})
+  scan.result.authentication_assurance = {
+    reason_code: 'authentication_gap', state: 'unknown', interrupted_action_count: 2,
+  }
+  const presentation = scanResultPresentation(scan, scanAssurance(scan))
+  assert.equal(presentation.authenticationAssurance, 'Credential authority unavailable')
+  assert.equal(presentation.coverageIncomplete, true)
+  assert.match(presentation.confidence, /2 planned actions were interrupted or blocked/)
+  assert.match(presentation.confidence, /Review the identity and approval/)
+  assert.match(presentation.confidence, /Independently verified findings remain supported/)
+  assert.equal(presentation.confirmedCount, 1)
+  assert.match(presentation.headline, /confirmed material issue/)
+})
+
 function scanWith({ reasons = [], gaps = [], families = [], gradeReliable = true, score = 93 }) {
   return {
     id: 'scan-1',

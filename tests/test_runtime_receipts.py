@@ -93,7 +93,7 @@ def test_successful_pure_finalizer_can_link_a_zero_cost_reservation():
 
 
 def test_receipt_requires_an_owner_and_honest_timeout_state():
-    with pytest.raises(ValueError, match="belong to a scan or hunt"):
+    with pytest.raises(ValueError, match="belong to a scan, hunt, or validation"):
         _receipt(hunt_id=None)
     linked = _receipt(scan_id="scan-1")
     assert linked.scan_id == "scan-1" and linked.hunt_id == "hunt-1"
@@ -101,6 +101,21 @@ def test_receipt_requires_an_owner_and_honest_timeout_state():
         _receipt(status="timed_out", timed_out=True)
     with pytest.raises(ValueError, match="successful terminal"):
         _receipt(partial=True)
+
+
+def test_validation_owner_is_bound_without_changing_old_receipt_serialization():
+    historical = _receipt()
+    assert "validation_id" not in historical.public_dict()
+    assert CapabilityReceipt.from_dict(historical.public_dict()) == historical
+    validation = _receipt(hunt_id=None, validation_id="validation-1")
+    assert validation.public_dict()["validation_id"] == "validation-1"
+    assert CapabilityReceipt.from_dict(validation.public_dict()) == validation
+    with pytest.raises(ValueError):
+        _receipt(validation_id="validation-1")
+    changed = validation.public_dict()
+    changed["validation_id"] = "validation-2"
+    with pytest.raises(ValueError, match="hash"):
+        CapabilityReceipt.from_dict(changed)
 
 
 def test_reservation_state_requires_id_terminal_state_and_reserved_amounts():
@@ -194,3 +209,10 @@ def test_binary_observation_material_is_replaced_by_hash_and_size():
     assert value["body"]["size"] == len(b"binary-secret")
     assert len(value["body"]["bytes_sha256"]) == 64
     assert "binary-secret" not in repr(value)
+def test_credential_revision_metadata_survives_without_opening_secret_values():
+    from api.runtime.receipts import redact_receipt_value
+
+    for key in ("credential_version", "credential_record_version"):
+        assert redact_receipt_value({key: 3}) == {key: 3}
+        for value in ("seeded-secret", True, -1, 0, 2_147_483_648, 1.5):
+            assert redact_receipt_value({key: value}) == {key: "***"}

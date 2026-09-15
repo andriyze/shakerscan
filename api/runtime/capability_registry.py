@@ -76,12 +76,25 @@ class CapabilitySpec:
     # which runtimes a capability may run under: xss.verify proves a hash-route
     # parameter in the pinned browser, which Dalfox cannot reach.
     alternate_adapters: tuple[tuple[str, str], ...] = ()
+    credential_transport: Literal["unverified", "not_used", "exact_origin"] = "unverified"
+    credential_interruption: Literal["unverified", "not_needed", "cooperative"] = "unverified"
 
     def __post_init__(self) -> None:
         if not self.name or "." not in self.name:
             raise ValueError("capability names must be non-empty dotted identifiers")
         if self.default_timeout_ms <= 0:
             raise ValueError("default_timeout_ms must be positive")
+        if self.credential_transport not in {"unverified", "not_used", "exact_origin"}:
+            raise ValueError("invalid credential transport contract")
+        if self.credential_interruption not in {"unverified", "not_needed", "cooperative"}:
+            raise ValueError("invalid credential interruption contract")
+        if (self.credential_transport == "not_used") != (self.credential_interruption == "not_needed"):
+            raise ValueError("credential-free capabilities must declare interruption not needed")
+        if self.credential_transport == "not_used" and (
+            self.placement_requirements.get("credentials_resolved_server_side") or
+            "as_principal" in self.input_schema.get("properties", {})
+        ):
+            raise ValueError("a credential consumer cannot declare credentials unused")
         if not self.target_kinds:
             raise ValueError("target_kinds must not be empty")
         if self.planner_visible and self.hunt_executor is None:
@@ -101,6 +114,14 @@ class CapabilitySpec:
     def adapter_identities(self) -> tuple[tuple[str, str], ...]:
         """Every (adapter_name, adapter_version) this capability may execute under."""
         return ((self.adapter, self.adapter_version), *self.alternate_adapters)
+
+    def identity_contract(self) -> dict[str, Any]:
+        """Verified transport facts, never permission or proof of accepted identity."""
+        return {"schema_version": "capability-identity/v1",
+            "credential_transport": self.credential_transport,
+            "credential_interruption": self.credential_interruption,
+            "proves_application_identity": False,
+            "proves_continuous_authentication": False}
 
     def scanner_template(self, builder: Any) -> dict[str, Any]:
         """Render the fixed scanner-process template from canonical metadata."""
@@ -150,6 +171,7 @@ class CapabilitySpec:
                 if key in placement_keys
             },
             "evidence_contract": list(self.evidence_contract),
+            "identity_contract": self.identity_contract(),
         }
 
 
@@ -408,6 +430,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "scan-report/v2",
             ("scan_report", "coverage_summary", "tool_receipts"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "scan.execute",
@@ -1033,8 +1056,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 # name an address the operator confirmed at hunt start.
                 "via_address": {"type": "string", "maxLength": 45},
             }, required=("method", "path")),
-            "http-observation/v1", ("http_observation", "tool_receipt"),
+            "http-observation/v1", ("http_observation", "authentication_health", "tool_receipt"),
             hunt_executor="worker_http",
+            credential_transport="exact_origin", credential_interruption="cooperative",
         ),
         CapabilitySpec(
             "artifact.inspect",
@@ -1236,6 +1260,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             )),
             "tls-observation/v2", ("tls_posture_observation",),
             hunt_executor="inline",
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
@@ -1250,6 +1275,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "dns-posture-observation/v1",
             ("dns_posture_observation", "tool_receipt"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "infrastructure.inspect",
@@ -1267,6 +1293,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "infrastructure-intelligence/v1",
             ("infrastructure_observation", "tool_receipt"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "browser.login_check",

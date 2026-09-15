@@ -399,13 +399,32 @@ def credential_profile_action_refs(
             "target_kind": str(raw.get("target_kind") or "").strip().lower(),
             "auth_kind": auth_kind,
         }
-        result.append({
+        record_version = raw.get("credential_record_version")
+        if record_version is not None:
+            if type(record_version) is not int or record_version < 1:
+                raise ScanActionPlanError("credential metadata version is invalid")
+            material["credential_record_version"] = record_version
+        if "authenticated_profile_snapshot" in raw:
+            try:
+                from authenticated_assurance.snapshots import bound_snapshot
+            except ModuleNotFoundError:
+                from ..authenticated_assurance.snapshots import bound_snapshot
+            try:
+                material["authenticated_profile_snapshot"] = bound_snapshot(dict(raw)).model_dump(mode="json")
+            except (ValueError, TypeError) as exc:
+                raise ScanActionPlanError("authenticated profile snapshot is invalid") from exc
+        reduced = {
             "profile_id": profile_id,
             "version": version,
             "digest": digest_input_bindings(material),
             "lane": lane,
             "auth_kind": material["auth_kind"],
-        })
+        }
+        if "authenticated_profile_snapshot" in material:
+            pinned = material["authenticated_profile_snapshot"]
+            reduced["authentication_profile_ref"] = {key: pinned[key] for key in (
+                "profile_id", "revision", "configuration_digest")}
+        result.append(reduced)
     return tuple(result)
 
 
@@ -835,7 +854,7 @@ class ScanActionPlanCompiler:
             name="credential profile",
             allowed_keys=frozenset({
                 "profile_id", "version", "digest", "lane", "auth_kind",
-                "principal_ref",
+                "principal_ref", "authentication_profile_ref",
             }),
             required_keys=frozenset({
                 "profile_id", "version", "digest", "lane", "auth_kind",
@@ -1900,6 +1919,12 @@ class ScanActionPlanCompiler:
             ))
         }
         blueprints.sort(key=lambda row: stage_order[row.stage])
+        from .health_plan import with_authentication_health
+        blueprints = with_authentication_health(blueprints, credentials, self._registry)
+        if any("authentication_profile_ref" in ref for ref in credentials):
+            if "local" not in backends:
+                raise ScanActionPlacementError("authenticated profile health requires a local worker")
+            backends = ("local",)
 
         override_budgets = dict(action_budgets or {})
         known_action_ids = {row.action_id for row in blueprints}

@@ -70,11 +70,17 @@ required_files=(
   api/model_intake_runner_service.py
   api/scan/__init__.py
   api/scan/action_plan.py
+  api/scan/health_plan.py
   api/scan/capability_result.py
   api/scan/continuation.py
   api/scan/execution.py
   api/scan/external_process.py
   api/scan/finalizer.py
+  api/authenticated_assurance/__init__.py
+  api/authenticated_assurance/models.py
+  api/authenticated_assurance/evaluation.py
+  api/authenticated_assurance/snapshots.py
+  api/authenticated_assurance/store.py
   api/scan/scoring.py
   api/scan/report_rebuild.py
   api/scan/surface_manifest.py

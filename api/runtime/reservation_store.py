@@ -27,7 +27,7 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 BUDGET_RESERVATION_SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS budget_reservations (
     id TEXT PRIMARY KEY,
-    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt','validation')),
     owner_id TEXT NOT NULL,
     action_id TEXT NOT NULL,
     action_digest TEXT NOT NULL CHECK (action_digest ~ '^[0-9a-f]{64}$'),
@@ -82,6 +82,16 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     )
 );
 ALTER TABLE budget_reservations ADD COLUMN IF NOT EXISTS action_digest TEXT;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conrelid='budget_reservations'::regclass
+                 AND conname='budget_reservations_owner_kind_check'
+                 AND pg_get_constraintdef(oid) NOT LIKE '%validation%') THEN
+        ALTER TABLE budget_reservations DROP CONSTRAINT budget_reservations_owner_kind_check;
+        ALTER TABLE budget_reservations ADD CONSTRAINT budget_reservations_owner_kind_check
+            CHECK (owner_kind IN ('scan','hunt','validation'));
+    END IF;
+END $$;
 UPDATE budget_reservations
 SET action_digest = repeat('0', 64)
 WHERE action_digest IS NULL;
@@ -118,7 +128,7 @@ CREATE TABLE IF NOT EXISTS app_schema_migrations (
 );
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_budget_reservations_v1'), ('v2_budget_reservations_v2'),
-       ('v2_budget_reservation_identity_v1')
+       ('v2_budget_reservation_identity_v1'), ('v2_budget_validation_owner_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 

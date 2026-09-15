@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
@@ -491,6 +492,7 @@ export default function CredentialsPage() {
         </div>
       </Card>
 
+      {(targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
       {error && <div className="mb-4 rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
       {profilesLoading ? (
         <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
