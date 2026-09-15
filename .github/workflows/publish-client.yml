@@ -46,7 +46,7 @@ jobs:
       - name: Build the sdist and wheel
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check "build==1.2.2.post1"
+          python -m pip install --disable-pip-version-check "build==1.2.2.post1" "pytest==9.1.1"
           python -m build --outdir dist client
           ls -l dist
       - name: Client tests
