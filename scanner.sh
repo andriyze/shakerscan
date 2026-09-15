@@ -2096,8 +2096,10 @@ print_help() {
     echo "  model-intake-runner status   Report microVM (Firecracker/KVM) host capability"
     echo "  model-intake-runner install  Opt-in install of the Model Intake microVM tier (root)"
     echo "  build              Build Docker images"
-    echo "  rebuild [opts]     Rebuild Docker images (cached by default)"
+    echo "  rebuild [opts]     Rebuild Docker images (cached; scope chosen from what changed)"
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
+    echo "                       --no-smoke  Skip the post-rebuild execution smoke"
+    echo "                       auto        Smallest scope covering changes since the last build (default)"
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
@@ -2553,9 +2555,17 @@ write_build_receipt() {
         --arg finished_at "$finished_at" \
         --arg source_revision "${GIT_COMMIT:-unknown}" \
         --arg detail "$detail" \
+        --arg steps "${BUILD_STEP_TIMINGS:-}" \
+        --arg images "${BUILD_IMAGE_RESULTS:-}" \
+        --arg dirty "$(dirty_paths 2>/dev/null | head -n 20 | tr '\n' '\t')" \
+        --arg smoke "${BUILD_SMOKE_RESULT:-}" \
         --argjson exit_code "$exit_code" \
         --argjson free_kb "${free_kb:-null}" \
-        '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,scope:$scope,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end)}' \
+        '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,scope:$scope,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end),
+          steps:($steps | split(" ") | map(select(length > 0) | split("=") | {phase: .[0], seconds: (.[1] | tonumber)})),
+          images:($images | split("\n") | map(select(length > 0) | split(" ") | {tag: .[0], before: (if .[1] == "-" then null else .[1] end), after: (if .[2] == "-" then null else .[2] end), result: .[3]})),
+          dirty_paths:($dirty | split("\t") | map(select(length > 0))),
+          smoke:(if $smoke == "" then null else $smoke end)}' \
         > "$tmp" 2>/dev/null; then
         mv "$tmp" "$BUILD_RECEIPT_FILE"
     else
@@ -2663,18 +2673,97 @@ check_build_storage() {
 run_build_step() {
     local phase="$1"
     shift
-    local exit_code
+    local exit_code started
 
     BUILD_RECEIPT_PHASE="$phase"
+    started="$SECONDS"
     write_build_receipt running 0
     if "$@"; then
+        BUILD_STEP_TIMINGS="${BUILD_STEP_TIMINGS:-}${phase}=$((SECONDS - started)) "
         write_build_receipt running 0
         return 0
     else
         exit_code=$?
+        BUILD_STEP_TIMINGS="${BUILD_STEP_TIMINGS:-}${phase}=$((SECONDS - started)) "
         fail_build "$exit_code" "command failed in ${phase}"
         return "$exit_code"
     fi
+}
+
+# The local image tags a rebuild can produce, in build order. Their IDs before and after a
+# rebuild tell the operator which images were actually rebuilt and which came from cache.
+rebuild_image_tags() {
+    printf '%s\n' \
+        "${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" \
+        "${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}" \
+        "shakerscan-api" \
+        "shakerscan-ui" \
+        "shakerscan-model-intake-signer"
+}
+
+# One line per tag: "tag=<12 hex of the layer digests>". Layers, not the image ID: BuildKit
+# writes a fresh manifest (provenance, timestamps) on every build, so the ID changes even when
+# every layer came from cache, while the layer list is the content an operator cares about.
+snapshot_image_ids() {
+    local tag layers
+    while IFS= read -r tag; do
+        [ -n "$tag" ] || continue
+        layers="$(docker image inspect --format '{{join .RootFS.Layers ","}}' "$tag" 2>/dev/null || true)"
+        if [ -n "$layers" ]; then
+            printf '%s=%s\n' "$tag" "$(printf '%s' "$layers" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
+        else
+            printf '%s=\n' "$tag"
+        fi
+    done < <(rebuild_image_tags)
+}
+
+# Prints "tag before after rebuilt|unchanged|new|missing" lines from two snapshots.
+diff_image_snapshots() {
+    local before="$1" after="$2" tag id_before id_after state
+    while IFS='=' read -r tag id_after; do
+        [ -n "$tag" ] || continue
+        id_before="$(printf '%s\n' "$before" | awk -F= -v t="$tag" '$1==t {print $2}')"
+        if [ -z "$id_after" ]; then state="missing"
+        elif [ -z "$id_before" ]; then state="new"
+        elif [ "$id_before" = "$id_after" ]; then state="unchanged"
+        else state="rebuilt"; fi
+        printf '%s %s %s %s\n' "$tag" "${id_before:--}" "${id_after:--}" "$state"
+    done <<< "$after"
+}
+
+print_build_summary() {
+    local before="$1" after="$2" tag id_before id_after state entry phase seconds
+    echo -e "${BLUE}Build summary (source ${GIT_COMMIT:-unknown}):${NC}"
+    printf '  %-42s %-10s %s\n' "image" "result" "content"
+    while read -r tag id_before id_after state; do
+        [ -n "$tag" ] || continue
+        printf '  %-42s %-10s %s\n' "$tag" "$state" "$id_after"
+    done < <(diff_image_snapshots "$before" "$after")
+    if [ -n "${BUILD_STEP_TIMINGS:-}" ]; then
+        printf '  steps:'
+        for entry in ${BUILD_STEP_TIMINGS}; do
+            phase="${entry%%=*}"; seconds="${entry#*=}"
+            printf ' %s %ss' "$phase" "$seconds"
+        done
+        printf '\n'
+    fi
+}
+
+# Untracked and modified files make the build identity "-dirty". Say which, so an operator can
+# tell stray assets from real edits instead of guessing why a clean checkout reads as dirty.
+dirty_paths() {
+    git status --porcelain --untracked-files=all 2>/dev/null | cut -c4- | sed 's/^.* -> //'
+}
+
+print_dirty_summary() {
+    local paths count
+    paths="$(dirty_paths)"
+    [ -n "$paths" ] || return 0
+    count="$(printf '%s\n' "$paths" | grep -c .)"
+    echo -e "${YELLOW}Source tree is dirty (${count} modified or untracked path(s)); the build identity carries -dirty.${NC}"
+    printf '%s\n' "$paths" | head -n 5 | sed 's/^/    /'
+    [ "$count" -gt 5 ] && echo "    ... and $((count - 5)) more"
+    return 0
 }
 
 build_local_scanner_family() {
@@ -2722,14 +2811,96 @@ build_images() {
     echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
 }
 
+# Map changed repository paths to the smallest rebuild scope that covers them.
+# stdin: one path per line. stdout: none | ui | scanner | all.
+#   ui       only ui/ changed
+#   scanner  the scanner family (worker, Model Intake overlay, API) covers the change
+#   all      the UI or signer image is involved as well, or the input is outside any image
+#            (launcher, Compose files, installer) and every image must be rebuilt
+#   none     nothing that reaches an image changed (docs, tests, CI, receipts)
+rebuild_scope_for_paths() {
+    local path scope="none"
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+            docs/*|tests/*|.github/*|.local-gate/*|*.md|LICENSE|.gitignore|artifacts/*|audit-results/*|results/*|benchmarks/*)
+                continue ;;
+            api/model_intake_signer.Dockerfile|api/model_intake_signer.requirements.lock|api/model_intake_signer_service.py|api/model_intake_control_plane.py)
+                scope="all" ;;
+            ui/*)
+                case "$scope" in none) scope="ui" ;; scanner) scope="all" ;; esac ;;
+            api/*|scanner/*|runner/*|db/*|requirements*.txt|requirements*.lock|pyproject.toml)
+                case "$scope" in none) scope="scanner" ;; ui) scope="all" ;; esac ;;
+            *)
+                scope="all" ;;
+        esac
+    done
+    echo "$scope"
+}
+
+# Paths changed since the last completed build receipt: commits after its revision plus every
+# modified or untracked file now. Fails when the receipt is missing, failed, or names a
+# revision this checkout cannot resolve, in which case the caller rebuilds everything.
+rebuild_changed_paths() {
+    local base
+    base="$(jq -r 'select(.status == "completed") | .source_revision // empty' "$BUILD_RECEIPT_FILE" 2>/dev/null)"
+    base="${base%-dirty}"
+    case "$base" in ""|unknown|dev|image:*) return 1 ;; esac
+    git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || return 1
+    git diff --name-only "$base" HEAD 2>/dev/null
+    dirty_paths
+    return 0
+}
+
+# A worker can report the right build fingerprint and still be unable to execute: a tool binary
+# missing from the image, a runtime module that no longer imports. Prove both on one rebuilt
+# worker and the API contract route before calling the rebuild done. No target traffic.
+post_rebuild_smoke() {
+    local worker tool failures=0 api_url
+    api_url="$(api_probe_url)"
+    echo -e "${BLUE}Post-rebuild smoke (no target traffic)...${NC}"
+    if curl -fsS "${api_url}/scan/contracts" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}ok${NC} API serves the scan contract"
+    else
+        echo -e "  ${RED}fail${NC} API does not serve /scan/contracts"; failures=$((failures + 1))
+    fi
+    worker="$(running_scan_worker_containers | head -n1)"
+    if [ -z "$worker" ]; then
+        echo -e "  ${YELLOW}skip${NC} no running scan worker to probe"
+    else
+        if docker exec "$worker" python3 -c 'import agent_tools, action_scope' >/dev/null 2>&1; then
+            echo -e "  ${GREEN}ok${NC} worker runtime modules import"
+        else
+            echo -e "  ${RED}fail${NC} worker runtime modules do not import"; failures=$((failures + 1))
+        fi
+        # ffuf answers -V; the ProjectDiscovery tools answer -version.
+        for tool in katana httpx nuclei naabu ffuf; do
+            if docker exec "$worker" sh -c "timeout 30 /opt/tools/$tool -version >/dev/null 2>&1 || timeout 30 /opt/tools/$tool -V >/dev/null 2>&1"; then
+                echo -e "  ${GREEN}ok${NC} $tool runs"
+            else
+                echo -e "  ${RED}fail${NC} $tool does not run in the rebuilt worker"; failures=$((failures + 1))
+            fi
+        done
+    fi
+    if [ "$failures" -eq 0 ]; then
+        BUILD_SMOKE_RESULT="passed"
+        return 0
+    fi
+    BUILD_SMOKE_RESULT="failed:${failures}"
+    echo -e "${RED}Post-rebuild smoke failed (${failures} check(s)); the stack runs the new images but is not proven to execute.${NC}" >&2
+    return 1
+}
+
 rebuild_images() {
     prepare_runtime_files
     set_build_env
     local NO_CACHE=""
     local SERVICES=""
     local SERVICE_DESC="all services"
-    local BUILD_SCOPE="all"
+    local BUILD_SCOPE="auto"
     local REFRESH_WORKERS=1
+    local RUN_SMOKE=1
+    local changed inferred changed_count images_before images_after
     local existing_workers
     local existing_agent_tool_worker
     local existing_device_workers
@@ -2744,6 +2915,14 @@ rebuild_images() {
         case $1 in
             --no-cache)
                 NO_CACHE="--no-cache"
+                shift
+                ;;
+            --no-smoke)
+                RUN_SMOKE=0
+                shift
+                ;;
+            auto)
+                BUILD_SCOPE="auto"
                 shift
                 ;;
             scanner)
@@ -2768,11 +2947,41 @@ rebuild_images() {
                 ;;
             *)
                 echo -e "${RED}Unknown rebuild option: $1${NC}"
-                echo "Usage: ./scanner.sh rebuild [--no-cache] [scanner|ui|all]"
+                echo "Usage: ./scanner.sh rebuild [--no-cache] [--no-smoke] [auto|scanner|ui|all]"
                 exit 1
                 ;;
         esac
     done
+    if [ "$BUILD_SCOPE" = "auto" ]; then
+        # Choose the smallest scope that covers what changed since the last completed build.
+        if changed="$(rebuild_changed_paths)"; then
+            changed="$(printf '%s\n' "$changed" | grep . | sort -u || true)"
+            inferred="$(printf '%s\n' "$changed" | rebuild_scope_for_paths)"
+            changed_count="$(printf '%s\n' "$changed" | grep -c . || true)"
+            case "$inferred" in
+                ui)
+                    SERVICES="ui"; SERVICE_DESC="UI (auto: only ui/ changed)"; BUILD_SCOPE="ui"; REFRESH_WORKERS=0 ;;
+                scanner)
+                    SERVICES="api worker"; SERVICE_DESC="scanner services (auto: api, worker)"; BUILD_SCOPE="scanner"; REFRESH_WORKERS=1 ;;
+                none)
+                    if [ -z "$NO_CACHE" ] && [ "$(snapshot_image_ids | grep -c '=.')" -ge 5 ]; then
+                        echo -e "${GREEN}Nothing to rebuild: no image input changed since the last completed build.${NC}"
+                        echo "Use './scanner.sh rebuild all' to rebuild anyway, or './scanner.sh restart' to recreate containers."
+                        return 0
+                    fi
+                    SERVICES=""; SERVICE_DESC="all services"; BUILD_SCOPE="all"; REFRESH_WORKERS=1 ;;
+                *)
+                    SERVICES=""; SERVICE_DESC="all services (auto)"; BUILD_SCOPE="all"; REFRESH_WORKERS=1 ;;
+            esac
+            echo -e "${BLUE}Auto scope: ${BUILD_SCOPE} (${changed_count:-0} changed path(s) since the last completed build)${NC}"
+            printf '%s\n' "$changed" | head -n 8 | sed 's/^/    /'
+            [ "${changed_count:-0}" -gt 8 ] && echo "    ... and $((changed_count - 8)) more"
+        else
+            SERVICES=""; SERVICE_DESC="all services"; BUILD_SCOPE="all"; REFRESH_WORKERS=1
+            echo -e "${BLUE}Auto scope: all (no completed build receipt for a revision this checkout knows)${NC}"
+        fi
+    fi
+    print_dirty_summary
 
     if [ -n "$NO_CACHE" ]; then
         echo -e "${YELLOW}Rebuilding $SERVICE_DESC (no cache - full rebuild)...${NC}"
@@ -2797,6 +3006,7 @@ rebuild_images() {
     existing_model_intake_signer="$(running_compose_service_count model-intake-signer)"
     existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
     existing_model_intake_worker="$(running_compose_service_count model-intake-worker)"
+    images_before="$(snapshot_image_ids)"
 
     if [ "$SERVICES" = "ui" ]; then
         run_build_step ui compose build $NO_CACHE ui
@@ -2807,6 +3017,9 @@ rebuild_images() {
         run_build_step ui_and_signer compose build $NO_CACHE ui model-intake-signer
     fi
 
+    images_after="$(snapshot_image_ids)"
+    BUILD_IMAGE_RESULTS="$(diff_image_snapshots "$images_before" "$images_after")"
+    print_build_summary "$images_before" "$images_after"
     record_runtime_mode local
 
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
@@ -2843,6 +3056,10 @@ rebuild_images() {
         wait_for_url "UI" "$(ui_probe_url)" 120
         verify_running_build_identity
         verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers" "$existing_model_intake_worker"
+        if [ "$RUN_SMOKE" -eq 1 ]; then
+            BUILD_RECEIPT_PHASE="smoke"
+            post_rebuild_smoke || { fail_build 1 "post-rebuild smoke failed"; return 1; }
+        fi
     fi
 
     finish_build_receipt
