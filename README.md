@@ -357,7 +357,8 @@ shakerscan mcp    --url https://scanner.example.com --token-file ./token
 ```
 
 It is the same `mcp` and `hunt` code the installed runtime runs, and it hands engine commands to
-a local install when one exists. Details: [docs/client.md](docs/client.md).
+a local install when one exists. Details:
+[docs/client.md](https://github.com/andriyze/shakerscan/blob/main/docs/client.md).
 
 ### Remote VPS over Tailscale
 

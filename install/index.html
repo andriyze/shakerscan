@@ -294,6 +294,12 @@ install_command() {
     esac
     mkdir -p "$BIN_DIR"
     launcher="$BIN_DIR/shakerscan"
+    if [ -f "$launcher" ] && ! grep -q 'scanner.sh" "\$@"' "$launcher" 2>/dev/null; then
+        # A client build of the shakerscan command (pipx, uv, or Homebrew) already owns this
+        # path. It hands engine subcommands to this install (SHAKERSCAN_HOME, default
+        # ~/.shakerscan), so keep it rather than replace it with the launcher shim.
+        say "Kept the existing shakerscan client at $launcher; it runs engine commands from $INSTALL_DIR"
+    else
     cat > "$launcher" <<EOF
 #!/bin/sh
 : "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
@@ -321,6 +327,7 @@ fi
 exec "$INSTALL_DIR/scanner.sh" "\$@"
 EOF
     chmod +x "$launcher"
+    fi
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
