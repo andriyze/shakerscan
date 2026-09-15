@@ -12,6 +12,14 @@ Start it from the source/runtime directory:
 ./scanner.sh mcp
 ```
 
+The same adapter runs without the engine from the `shakerscan` client
+(`pipx install shakerscan`, `uv tool install shakerscan`, or the Homebrew tap; see
+[client.md](client.md)):
+
+```bash
+shakerscan mcp --url https://scanner.example.com --token-file ./token
+```
+
 The scanner API must already be available at `http://127.0.0.1:8080`. Override
 the origin with `SHAKERSCAN_API_URL`. Non-loopback origins are rejected unless
 `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true` is explicitly set.

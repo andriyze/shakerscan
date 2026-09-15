@@ -1,0 +1,134 @@
+name: Publish client
+
+# The `shakerscan` client (client/): build, test, publish to PyPI, attach the files to a GitHub
+# release, and render the Homebrew formula. Runs on `client-v*` tags; a manual run builds and
+# tests only unless `publish` is set. PyPI uses trusted publishing through the `pypi`
+# environment, so no API token is stored. See docs/client.md.
+
+on:
+  push:
+    tags: ["client-v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI and create the GitHub release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Client version (must match a client-v* tag)
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python - <<'PY'
+          import pathlib, re
+          text = pathlib.Path("client/src/shakerscan/__init__.py").read_text(encoding="utf-8")
+          print(re.search(r'^__version__ = "([^"]+)"', text, re.M).group(1))
+          PY
+          )"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "$GITHUB_REF_NAME" != "client-v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the client version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build the sdist and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "build==1.2.2.post1"
+          python -m build --outdir dist client
+          ls -l dist
+      - name: Client tests
+        run: python -m pytest -q -p no:cacheprovider tests/test_shakerscan_client.py
+      - name: Smoke the built wheel in a clean environment
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/client-venv
+          /tmp/client-venv/bin/python -m pip install --disable-pip-version-check dist/*.whl
+          /tmp/client-venv/bin/shakerscan version | grep -F "shakerscan client ${{ steps.version.outputs.version }}"
+          /tmp/client-venv/bin/shakerscan mcp --help >/dev/null
+          /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli"
+          # A wheel built from the sdist must carry the same vendored runtime modules.
+          rm -rf /tmp/from-sdist && mkdir -p /tmp/from-sdist && tar -xzf dist/*.tar.gz -C /tmp/from-sdist
+          python -m build --wheel --outdir /tmp/from-sdist/dist /tmp/from-sdist/shakerscan-*
+          /tmp/client-venv/bin/python -m pip install --disable-pip-version-check --force-reinstall /tmp/from-sdist/dist/*.whl
+          /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli"
+          /tmp/client-venv/bin/shakerscan version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: client-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: client-dist
+          path: dist/
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+      - name: GitHub release with the built files
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "ShakerScan client ${{ needs.build.outputs.version }}" \
+            --notes "The shakerscan client: MCP adapter and Hunt CLI without the engine. Install: pipx install shakerscan==${{ needs.build.outputs.version }} (or uv tool install, or brew install andriyze/shakerscan/shakerscan). Documentation: docs/client.md."
+
+  homebrew:
+    needs: [build, publish]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Render the formula from the published sdist
+        run: python client/homebrew/render_formula.py "${{ needs.build.outputs.version }}" rendered/Formula/shakerscan.rb
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: homebrew-formula
+          path: rendered/Formula/shakerscan.rb
+      - name: Push to the tap (andriyze/homebrew-shakerscan) when a token is configured
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured; the rendered formula is attached as an artifact instead." >&2
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/andriyze/homebrew-shakerscan.git" tap
+          mkdir -p tap/Formula
+          cp rendered/Formula/shakerscan.rb tap/Formula/shakerscan.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/shakerscan.rb
+          git commit -m "shakerscan $VERSION" || { echo "formula unchanged"; exit 0; }
+          git push origin HEAD
