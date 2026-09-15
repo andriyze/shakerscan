@@ -8,4 +8,6 @@ references.
   active, and state-changing Scan authorities.
 - [`0002-bounded-scan-continuation-amendments.md`](0002-bounded-scan-continuation-amendments.md) — one
   immutable root plan plus bounded discovery-derived continuation.
+- [`0003-one-shakerscan-command-two-channels.md`](0003-one-shakerscan-command-two-channels.md) — the
+  engine launcher and the engine-less client share the `shakerscan` command name.
 

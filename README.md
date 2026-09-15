@@ -344,6 +344,22 @@ The exhaustive route and capability catalog is in the
 
 ## Installation options
 
+### Client only (MCP adapter and Hunt CLI)
+
+The `shakerscan` command is also available without the engine, for a laptop or CI runner that
+talks to a ShakerScan instance elsewhere (a VPS, or a self-hosted Enterprise gateway with a
+service token):
+
+```bash
+pipx install shakerscan            # or: uv tool install shakerscan
+shakerscan doctor --url https://scanner.example.com --token-file ./token
+shakerscan mcp    --url https://scanner.example.com --token-file ./token
+```
+
+It is the same `mcp` and `hunt` code the installed runtime runs, and it hands engine commands to
+a local install when one exists. Details:
+[docs/client.md](https://github.com/andriyze/shakerscan/blob/main/docs/client.md).
+
 ### Remote VPS over Tailscale
 
 ```bash
