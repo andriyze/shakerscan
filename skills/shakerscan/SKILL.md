@@ -20,7 +20,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 4. Check health before an operation:
 
    ```bash
-   curl -s "$API_BASE/health"
+   shakerscan api GET /health
    ```
 
 5. If the scanner is stopped, offer `./scanner.sh start`; use `./scanner.sh start --remote` only when
@@ -90,9 +90,7 @@ origin. Model Intake artifacts remain exact-subject targets.
 For a normal scan:
 
 ```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{"target":"https://app.example.test","budget_profile":"balanced","policy":{"active_testing":false}}'
+shakerscan api POST /scans '{"target":"https://app.example.test","budget_profile":"balanced","policy":{"active_testing":false}}'
 ```
 
 After any action queues a scan, ASM job, AI Gate run, Model Intake run, or finding retest:
@@ -141,7 +139,7 @@ Fleet is optional and Linux-hosted. Before offering remote placement or calling 
 routes, inspect the non-secret capability state:
 
 ```bash
-curl -s "$API_BASE/workers" | jq '.fleet, .execution_capacity'
+shakerscan api GET /workers | jq '.fleet, .execution_capacity'
 ```
 
 - `fleet.status=unsupported`: do not attempt initialization or join on this host. macOS can run
@@ -183,10 +181,10 @@ project on the same host.
 Use:
 
 ```bash
-curl "$API_BASE/scans/{scan_id}"
-curl "$API_BASE/scans/{scan_id}/result"
-curl "$API_BASE/scans/{scan_id}/logs?limit=200"
-curl "$API_BASE/findings?status=active&limit=50"
+shakerscan api GET /scans/{scan_id}
+shakerscan api GET /scans/{scan_id}/result
+shakerscan api GET "/scans/{scan_id}/logs?limit=200"
+shakerscan api GET "/findings?status=active&limit=50"
 ```
 
 Keep these distinctions visible:

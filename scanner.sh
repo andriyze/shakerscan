@@ -3449,6 +3449,13 @@ case $COMMAND in
     hunt)
         run_v2_product_cli "hunt" "${ARGS[@]}"
         ;;
+    api)
+        if [ ! -f "$SCRIPT_DIR/scripts/api_cli.py" ]; then
+            echo -e "${RED}Error: the API helper is missing from this runtime.${NC}" >&2
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/api_cli.py" --api-url "$(api_base_url)" "${ARGS[@]}"
+        ;;
     credentials)
         run_v2_product_cli "credentials" "${ARGS[@]}"
         ;;

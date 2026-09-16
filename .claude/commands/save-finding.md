@@ -4,7 +4,7 @@ Save an evidence-backed finding from authorized manual or interactive testing.
 
 **Usage**: `/save-finding [session_id]`
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls and
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address) and
 `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote VPS, use the URLs
 printed by `./scanner.sh status`; the supported agent launcher exports them automatically.
 
@@ -27,9 +27,7 @@ model judgment alone. If evidence is incomplete, keep it as a lead or hypothesis
 The target is derived from the active session:
 
 ```bash
-curl -X POST "$API_BASE/session/{session_id}/findings" \
-  -H "Content-Type: application/json" \
-  -d '{
+shakerscan api POST /session/{session_id}/findings '{
     "title": "BOLA on order detail API",
     "severity": "high",
     "description": "A distinct second principal can read the first principal order.",
@@ -46,9 +44,7 @@ curl -X POST "$API_BASE/session/{session_id}/findings" \
 ## Save a standalone manual finding
 
 ```bash
-curl -X POST "$API_BASE/findings/manual" \
-  -H "Content-Type: application/json" \
-  -d '{
+shakerscan api POST /findings/manual '{
     "target": "https://app.example.test",
     "title": "Evidence-backed finding title",
     "severity": "medium",
@@ -70,6 +66,6 @@ Use `source_type=ai_session` to list interactive-session findings and `source_ty
 standalone manual findings:
 
 ```bash
-curl "$API_BASE/findings?source_type=ai_session&status=active"
-curl "$API_BASE/findings?source_type=manual&status=active"
+shakerscan api GET "/findings?source_type=ai_session&status=active"
+shakerscan api GET "/findings?source_type=manual&status=active"
 ```

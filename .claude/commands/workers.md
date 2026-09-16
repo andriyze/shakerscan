@@ -6,21 +6,21 @@ View and scale scanner workers.
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. On a remote VPS, set it
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address). On a remote VPS, set it
 to the API URL printed by `./scanner.sh status`.
 
 1. Check if scanner is running:
    ```bash
-   curl -s "$API_BASE/health"
+   shakerscan api GET /health
    ```
 
 2. If no count argument provided, show current worker status:
    ```bash
    # Get worker count via API
-   curl -s "$API_BASE/workers"
+   shakerscan api GET /workers
 
    # Get queue stats
-   curl -s "$API_BASE/queue/stats"
+   shakerscan api GET /queue/stats
    ```
 
 3. Report current status:
@@ -34,9 +34,7 @@ to the API URL printed by `./scanner.sh status`.
    - Validate it's between 1-20
    - Scale workers:
      ```bash
-     curl -X POST "$API_BASE/workers" \
-       -H "Content-Type: application/json" \
-       -d '{"count": N}'
+     shakerscan api POST /workers '{"count": N}'
      ```
    - If API scaling fails, suggest CLI:
      ```
@@ -45,7 +43,7 @@ to the API URL printed by `./scanner.sh status`.
 
 5. After scaling, verify new count:
    ```bash
-   curl -s "$API_BASE/workers"
+   shakerscan api GET /workers
    ```
 
 6. Report result:
