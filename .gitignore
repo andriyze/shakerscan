@@ -86,3 +86,6 @@ client/dist/
 client/build/
 client/src/shakerscan/_mcp.py
 client/src/shakerscan/_v2_cli.py
+client/src/shakerscan/_api_cli.py
+client/src/shakerscan/_scan_cli.py
+client/src/shakerscan/_kit/
