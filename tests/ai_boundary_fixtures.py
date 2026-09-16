@@ -87,7 +87,7 @@ class BoundaryFixture:
         prefix = "v2/" if self.nested else ""
         contract = {
             "version": 1, "name": "customer-isolation",
-            **{role: {"role": role, "subject": role + "-subject", "tenant": role + "-tenant",
+            **{role: {"role": "victim" if role == "owner" else role, "subject": role + "-subject", "tenant": role + "-tenant",
                        "resource_id": role + "-record"} for role in ("owner", "attacker")},
             "identity": {"path": f"/{prefix}identity", "subject_field": "identity.subject" if self.nested else "subject",
                          "tenant_field": "identity.tenant" if self.nested else "tenant"},
@@ -105,7 +105,7 @@ class BoundaryFixture:
                     "endpoint_url": self.base + f"/{prefix}chat", "request_template": template,
                     "response_path": contract["response_path"], "request_budget": 64, "token_budget": 32000,
                     "rate_limit_rps": 20, "metadata_json": {"boundary_contract": contract},
-                    "principals": [{"role": role, "credential": {"auth_kind": "bearer", "secret": value}}
+                    "principals": [{"role": "victim" if role == "owner" else role, "credential": {"auth_kind": "bearer", "secret": value}}
                                    for role, value in self.credentials.items()],
                 }}
 

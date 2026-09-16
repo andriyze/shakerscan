@@ -14,6 +14,7 @@ from . import PACK
 from .contract import BoundaryContract, ContractError, relative_path
 from .execution import BoundaryScenario
 from .report import result_for
+from .scope import BoundaryScope
 from .transport import BoundaryTransport, BoundaryTransportError, budget_limit, origin_of
 
 
@@ -24,7 +25,7 @@ def prepare(target_url: str, options: dict[str, Any], header_builder: Callable) 
     if options.get("ai_probe_pack") != PACK:
         raise ContractError("explicit_boundary_probe_pack_required")
     environment = str(options.get("ai_environment") or "preview").strip().lower()
-    if target.get("production_mode") is True or environment not in {"preview", "staging", "lab", "test"}:
+    if target.get("production_mode") is True or environment not in {"preview", "staging", "development"}:
         raise ContractError("boundary_alpha_does_not_support_production")
     if target.get("target_type", "api_chat") not in {"api_chat", "rag", "ai_rag", "agent_trace"}:
         raise ContractError("boundary_alpha_requires_a_json_chat_api")
@@ -82,21 +83,28 @@ def redact_fixture_markers(value: Any) -> Any:
 
 
 async def execute_boundary(target_url: str, options: dict[str, Any], *, header_builder: Callable,
-                           aiohttp_module: Any = None) -> dict[str, Any]:
+                           aiohttp_module: Any = None,
+                           cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Execute the scenario; the caller attaches the shared AI Gate manifest."""
     if aiohttp_module is None:
         import aiohttp as aiohttp_module
     target, contract, origin, chat_path, template, headers = prepare(target_url, options, header_builder)
     requests = RequestBudget(budget_limit(target.get("request_budget"), 64, 1000))
     tokens = TokenBudget(budget_limit(target.get("token_budget"), 32000, 1000000))
-    rate = target.get("rate_limit_rps", 2)
+    rate = target.get("rate_limit_rps")
+    if rate is None:
+        rate = 2
     if type(rate) not in {int, float}:
         raise ContractError("invalid_rate_limit")
+    scope = BoundaryScope(origin, options.get("runtime_scope_guard"))
+    resolver = scope.resolver(aiohttp_module)
+    connector = aiohttp_module.TCPConnector(resolver=resolver, use_dns_cache=False)
     timeout = aiohttp_module.ClientTimeout(total=15, connect=5)
     async with aiohttp_module.ClientSession(timeout=timeout, cookie_jar=aiohttp_module.DummyCookieJar(),
-                                           trust_env=False) as session:
+                                           trust_env=False, connector=connector) as session:
         transport = BoundaryTransport(session, origin=origin, headers=headers, requests=requests,
-                                      tokens=tokens, rate_limit_rps=float(rate))
+                                      tokens=tokens, rate_limit_rps=float(rate),
+                                      scope=scope, cancelled=cancelled)
         scenario = BoundaryScenario(contract, transport, chat_path=chat_path, request_template=template)
         try:
             async with asyncio.timeout(180):
@@ -111,12 +119,15 @@ async def execute_boundary(target_url: str, options: dict[str, Any], *, header_b
             scenario.errors.append("boundary_request_budget_or_runtime_failure")
         except Exception as exc:
             scenario.errors.append(type(exc).__name__)
+        finally:
+            await resolver.close()
         return result_for(scenario.summary(), target=target,
             environment=str(options.get("ai_environment") or "preview").strip().lower(),
             request_usage=requests.to_dict(), token_usage=tokens.to_dict(), records=transport.records)
 
 
-async def run_boundary_scan(target_url: str, options: dict[str, Any]) -> dict[str, Any]:
+async def run_boundary_scan(target_url: str, options: dict[str, Any], *,
+                            cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
     """AI Gate worker integration, reusing the existing scoring and manifest."""
     try:
         from ai_gate.targets.rest_json import build_headers
@@ -126,7 +137,7 @@ async def run_boundary_scan(target_url: str, options: dict[str, Any]) -> dict[st
         from ... import ai_gate_scan as shared
     from .catalog import boundary_probe
 
-    result = await execute_boundary(target_url, options, header_builder=build_headers)
+    result = await execute_boundary(target_url, options, header_builder=build_headers, cancelled=cancelled)
     gate = result["ai_gate"]
     gate["scan_profile"] = str(options.get("ai_scan_profile") or "standard")
     probe = boundary_probe()

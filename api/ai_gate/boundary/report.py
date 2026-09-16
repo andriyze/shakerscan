@@ -32,10 +32,24 @@ def result_for(summary: dict[str, Any], *, target: dict[str, Any], environment: 
             "severity": "high", "confidence": 1.0, "confidence_tier": "high",
             "verified": True, "proof_state": "exploited", "proof_type": "cross_principal_replay",
             "owasp": "LLM02:2025", "cwe": "CWE-639",
+            "url": violations[0]["request_url"], "method": "GET" if backend else "POST",
+            "family": "cross_tenant_retrieval",
+            "validation": {"verifier_build": "ai-boundary-read/v1"},
             "description": "A distinct authenticated customer received the other customer's private synthetic marker. Ownership and identity were checked through non-chat API reads.",
             "remediation": "Enforce tenant/ownership authorization in retrieval and tool backends using the requesting user's identity; retest with freshly provisioned synthetic fixtures.",
             "evidence": evidence,
         })
+    try:
+        from ai_verdict_policy import build_dast_proof_contract_v2
+    except ModuleNotFoundError:
+        from scanner.ai_verdict_policy import build_dast_proof_contract_v2
+    for finding in findings:
+        proof = build_dast_proof_contract_v2(finding)
+        if proof is None:
+            raise ValueError("boundary_proof_normalization_failed")
+        proof["controls"].extend(summary["controls"])
+        proof["observations"].extend(finding["evidence"]["violations"])
+        finding["proof_contract_v2"] = proof
     state = summary["state"]
     decision = "block" if findings else "allow" if state == "passed" else "needs_approval"
     rationale = {
@@ -56,13 +70,16 @@ def result_for(summary: dict[str, Any], *, target: dict[str, Any], environment: 
         "finding_count": len(findings), "error_count": len(summary["errors"])}
     complete = summary.get("coverage_complete") is True
     destinations = [{"label": "ai_boundary_request", "url": item["request_url"],
-                     "final_url": item["request_url"], **({"remote_ip": item["remote_ip"]} if item.get("remote_ip") else {})}
+                     "final_url": item["request_url"], **({"remote_ip": item["remote_ip"]} if item.get("remote_ip") else {}),
+                     "resolved_host": item.get("resolved_host"), "resolved_ips": item.get("resolved_ips", [])}
                     for item in records]
     return {
         "result": {"score_policy": "ai_gate/risk_v1", "score": None,
                    "grade": None,
                    "grade_reliable": complete, "risk_assessment_state": state},
         "findings": findings,
+        "coverage": {"status": "complete" if complete else "partial",
+                     "reasons": [] if complete else ["boundary_controls_or_attacks_incomplete", *summary["errors"]]},
         "ai_gate": {
             "probe_pack": PACK, "scan_profile": "standard", "target_type": target.get("target_type", "api_chat"),
             "target_name": target.get("name"), "boundary": summary,

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "name": "customer-isolation",
+  "owner": {
+    "role": "victim",
+    "subject": "owner-subject",
+    "tenant": "owner-tenant",
+    "resource_id": "owner-record"
+  },
+  "attacker": {
+    "role": "attacker",
+    "subject": "attacker-subject",
+    "tenant": "attacker-tenant",
+    "resource_id": "attacker-record"
+  },
+  "identity": {
+    "path": "/identity",
+    "subject_field": "subject",
+    "tenant_field": "tenant"
+  },
+  "resource": {
+    "path": "/records/{{resource_id}}",
+    "id_field": "id",
+    "owner_field": "owner",
+    "tenant_field": "tenant",
+    "marker_field": "marker"
+  },
+  "response_path": "answer",
+  "repetitions": 2
+}

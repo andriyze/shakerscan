@@ -8,6 +8,8 @@ on:
       - 'api/ai_gate/**'
       - 'api/ai_gate_scan.py'
       - 'api/worker_handlers/ai_gate.py'
+      - 'api/ai_targets/**'
+      - 'examples/ai-boundary/**'
       - 'tests/*ai_boundary*'
       - 'scripts/ai_boundary_alpha.py'
       - '.github/workflows/ai-boundary-alpha.yml'
@@ -48,9 +50,18 @@ jobs:
       - name: Install locked Python dependencies
         run: python -m pip install --require-hashes -r scanner/requirements.lock
       - name: Boundary fixtures and worker integration
-        run: python -m pytest -q tests/test_ai_boundary.py tests/test_ai_boundary_integration.py --junitxml=artifacts/boundary-tests.xml
+        run: python -m pytest -q tests/test_ai_boundary.py tests/test_ai_boundary_integration.py tests/test_ai_boundary_admission.py --junitxml=artifacts/boundary-tests.xml
       - name: Existing AI Gate and worker regressions
         run: python -m pytest -q tests/test_ai_gate_judging.py tests/test_ai_redteam_artifacts.py tests/test_worker_handler_decomposition.py tests/test_v2_module_boundaries.py
+      - name: Synthetic alpha CLI smoke test
+        run: |
+          python scripts/ai_boundary_alpha.py validate examples/ai-boundary/customer-read-contract.json
+          python scripts/ai_boundary_alpha.py demo --mode secure --output artifacts/boundary-secure.json
+          set +e
+          python scripts/ai_boundary_alpha.py demo --mode vulnerable --nested --output artifacts/boundary-vulnerable.json
+          status=$?
+          set -e
+          test "$status" = "1"
       - name: Module size ratchet
         run: python scripts/check_module_size.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

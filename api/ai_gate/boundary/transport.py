@@ -9,7 +9,7 @@ import json
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..budget import RequestBudget, TokenBudget
@@ -63,9 +63,12 @@ def budget_limit(raw: Any, default: int, ceiling: int) -> int:
 class BoundaryTransport:
     def __init__(self, session: Any, *, origin: str, headers: dict[str, dict[str, str]],
                  requests: RequestBudget, tokens: TokenBudget, rate_limit_rps: float,
-                 max_response_bytes: int = 65536) -> None:
+                 max_response_bytes: int = 65536, scope: Any = None,
+                 cancelled: Callable[[], bool] | None = None) -> None:
         if not math.isfinite(rate_limit_rps) or not 0 < rate_limit_rps <= 20:
             raise ContractError("boundary_rate_limit_must_be_positive_and_at_most_20")
+        self.scope = scope
+        self.cancelled = cancelled
         self.session = session
         self.origin = origin
         self.headers = headers
@@ -78,6 +81,8 @@ class BoundaryTransport:
 
     async def request(self, *, role: str, method: str, path: str, phase: str,
                       body: dict[str, Any] | None = None) -> Observation:
+        if self.cancelled and self.cancelled():
+            raise asyncio.CancelledError
         path = relative_path(path)
         if "{" in path or "}" in path or role not in self.headers:
             raise ContractError("unresolved_path_or_principal")
@@ -86,6 +91,10 @@ class BoundaryTransport:
         if self.tokens.exceeded:
             raise BoundaryTransportError("token_budget_exhausted")
         await asyncio.sleep(max(0.0, self.next_request_at - time.monotonic()))
+        if self.cancelled and self.cancelled():
+            raise asyncio.CancelledError
+        if self.scope:
+            self.scope.validate(self.origin + path)
         # One shared AI Gate counter, consumed before every outbound attempt.
         self.requests.consume(phase=phase)
         self.next_request_at = time.monotonic() + self.delay
@@ -106,9 +115,14 @@ class BoundaryTransport:
                 remote_ip = str(peer[0]) if peer else None
                 if remote_ip:
                     record["remote_ip"] = remote_ip
+                if self.scope:
+                    record["resolved_host"] = self.scope.host
+                    record["resolved_ips"] = list(self.scope.addresses.get(self.scope.host, []))
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.content.iter_chunked(8192):
+                    if self.cancelled and self.cancelled():
+                        raise asyncio.CancelledError
                     size += len(chunk)
                     if size > self.max_response_bytes:
                         raise BoundaryTransportError("response_truncated")

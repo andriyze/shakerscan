@@ -13,7 +13,7 @@ from ai_gate.boundary import PACK, PROBE_ID
 from ai_gate.boundary.runner import run_boundary_scan
 from ai_gate.probe_registry import get_probe_pack_definitions, get_probe_definition
 from worker_handlers.ai_gate import AIGateWorkerHandler
-from ai_boundary_fixtures import boundary_fixture
+from tests.ai_boundary_fixtures import boundary_fixture
 
 
 def test_boundary_is_registered_in_the_existing_catalog():
@@ -69,7 +69,8 @@ async def test_worker_dispatch_occurs_inside_existing_hydration():
             yield options
             events.append("release")
 
-        services = SimpleNamespace(update_scan_progress=AsyncMock(), hydrate_ai_gate_options=hydrate)
+        services = SimpleNamespace(update_scan_progress=AsyncMock(), hydrate_ai_gate_options=hydrate,
+                                   scan_cancel_requested=lambda _: False)
         result = await AIGateWorkerHandler(services).run(
             options["ai_target"]["endpoint_url"], {"ai_probe_pack": PACK},
             scan_id="scan-fixture", job_id="job-fixture")
@@ -88,9 +89,36 @@ async def test_worker_preserves_legacy_pack_dispatch(monkeypatch):
     async def hydrate(options, scan_id):
         yield dict(options)
 
-    services = SimpleNamespace(update_scan_progress=AsyncMock(), hydrate_ai_gate_options=hydrate)
+    services = SimpleNamespace(update_scan_progress=AsyncMock(), hydrate_ai_gate_options=hydrate,
+                                   scan_cancel_requested=lambda _: False)
     options = {"ai_probe_pack": "shaker-ai-smoke"}
     result = await AIGateWorkerHandler(services).run(
         "https://example.test/chat", options, scan_id="scan-fixture", job_id=None)
     assert result == {"legacy": True}
     legacy.assert_awaited_once_with("https://example.test/chat", options)
+
+
+@pytest.mark.asyncio
+async def test_verified_disclosure_uses_the_shared_typed_proof_contract():
+    from ai_verdict_policy import has_deterministic_exploit_proof
+    async with boundary_fixture("vulnerable") as fixture:
+        options = fixture.options()
+        result = await run_boundary_scan(options["ai_target"]["endpoint_url"], options)
+        finding = result["findings"][0]
+        assert has_deterministic_exploit_proof(finding)
+        proof = finding["proof_contract_v2"]
+        assert proof["schema_version"] == "proof-contract/v2"
+        assert proof["subject"]["method"] == "POST"
+        assert proof["subject"]["url"] == options["ai_target"]["endpoint_url"]
+        assert proof["reexecution"]["verifier_build"] == "ai-boundary-read/v1"
+        assert result["coverage"]["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_existing_worker_cancellation_prevents_network():
+    import asyncio
+    async with boundary_fixture() as fixture:
+        options = fixture.options()
+        with pytest.raises(asyncio.CancelledError):
+            await run_boundary_scan(options["ai_target"]["endpoint_url"], options, cancelled=lambda: True)
+        assert not fixture.calls

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 from ai_gate.boundary.contract import BoundaryContract, ContractError, pick, relative_path
 from ai_gate.boundary.runner import execute_boundary
 from ai_gate.targets.rest_json import build_headers
-from ai_boundary_fixtures import BoundaryFixture, boundary_fixture
+from tests.ai_boundary_fixtures import BoundaryFixture, boundary_fixture
 
 
 async def run(fixture, options=None):
@@ -207,3 +207,42 @@ async def test_production_refused_before_network():
         with pytest.raises(ContractError, match="production"):
             await run(fixture, options)
         assert not fixture.calls
+
+
+@pytest.mark.asyncio
+async def test_shared_runtime_scope_guard_blocks_before_network():
+    async with boundary_fixture() as fixture:
+        options = fixture.options()
+        options["runtime_scope_guard"] = {"allowed_hosts": ["another.example.test"],
+            "environment": "preview", "requires_runtime_destination_check": True}
+        with pytest.raises(ContractError, match="scope"):
+            await run(fixture, options)
+        assert not fixture.calls
+
+
+@pytest.mark.asyncio
+async def test_runtime_resolution_observations_are_preserved():
+    async with boundary_fixture() as fixture:
+        options = fixture.options()
+        options["runtime_scope_guard"] = {"allowed_hosts": ["127.0.0.1"],
+            "allowed_addresses": ["127.0.0.1"], "environment": "preview",
+            "requires_runtime_destination_check": True, "requires_runtime_dns_check": True}
+        result = await run(fixture, options)
+        assert result["ai_gate"]["boundary"]["state"] == "passed"
+        assert all(row["resolved_ips"] == ["127.0.0.1"] for row in result["ai_gate"]["runtime_destinations"])
+
+
+def test_dns_address_drift_is_rejected_by_shared_guard():
+    from ai_gate.boundary.scope import BoundaryScope
+    scope = BoundaryScope("https://app.example.test", {
+        "allowed_hosts": ["app.example.test"], "allowed_addresses": ["203.0.113.1"],
+        "environment": "preview", "requires_runtime_dns_check": True})
+    scope.addresses["app.example.test"] = ["203.0.113.2"]
+    with pytest.raises(ContractError, match="scope"):
+        scope.validate(scope.origin, resolving=True)
+
+
+def test_external_target_cannot_omit_persisted_worker_scope():
+    from ai_gate.boundary.scope import BoundaryScope
+    with pytest.raises(ContractError, match="scope_guard"):
+        BoundaryScope("https://app.example.test", None)
