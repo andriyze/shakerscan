@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from authenticated_assurance.evaluation import scan_authentication_summary
-from authenticated_assurance.router import _health_observations
+from authenticated_assurance.router import _MAX_ASSURANCE_HEALTH_SAMPLES, _health_observations
 
 
 class Row(dict):
@@ -57,3 +57,15 @@ def test_malformed_and_non_health_receipts_are_ignored():
         Row(receipt_json={}),
     ])
     assert observations == ()
+
+
+def test_health_projection_is_bounded_even_for_oversized_receipts():
+    receipt = {"observations": []}
+    for _ in range(_MAX_ASSURANCE_HEALTH_SAMPLES + 50):
+        receipt["observations"].extend(_receipt()["observations"])
+    receipt["observations"].append({"kind": "http_response", "body": "must-not-project"})
+    observations = _health_observations([Row(receipt_json=receipt)])
+    assert len(observations) == _MAX_ASSURANCE_HEALTH_SAMPLES
+    summary = scan_authentication_summary({}, health_observations=observations)
+    assert summary["health_sample_count"] == _MAX_ASSURANCE_HEALTH_SAMPLES
+    assert "must-not-project" not in str(summary)
