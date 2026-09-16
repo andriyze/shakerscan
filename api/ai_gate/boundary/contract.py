@@ -29,6 +29,13 @@ class ContractError(ValueError):
     """Invalid/unsupported configuration, containing no credential values."""
 
 
+def valid_marker(value: Any) -> bool:
+    # The harness must generate with secrets.token_hex(24). We cannot prove
+    # randomness from a sample, but must at least reject obvious static examples.
+    return (isinstance(value, str) and bool(MARKER_RE.fullmatch(value))
+            and len(set(value[4:])) >= 8)
+
+
 def canonical_hash(value: Any) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()

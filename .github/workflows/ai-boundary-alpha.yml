@@ -1,0 +1,62 @@
+name: AI boundary alpha
+
+on:
+  push:
+    branches: ['feat/ai-boundary-verification-alpha']
+  pull_request:
+    paths:
+      - 'api/ai_gate/**'
+      - 'api/ai_gate_scan.py'
+      - 'api/worker_handlers/ai_gate.py'
+      - 'tests/*ai_boundary*'
+      - 'scripts/ai_boundary_alpha.py'
+      - '.github/workflows/ai-boundary-alpha.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/api:${{ github.workspace }}/scanner
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Preserve exact tracked source for reproducible validation
+        run: |
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-revision.txt
+          git archive --format=tar.gz HEAD > artifacts/boundary-source.tar.gz
+          sha256sum artifacts/boundary-source.tar.gz > artifacts/source-sha256.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: boundary-source-${{ github.sha }}
+          path: artifacts
+          retention-days: 3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install locked Python dependencies
+        run: python -m pip install --require-hashes -r scanner/requirements.lock
+      - name: Boundary fixtures and worker integration
+        run: python -m pytest -q tests/test_ai_boundary.py tests/test_ai_boundary_integration.py --junitxml=artifacts/boundary-tests.xml
+      - name: Existing AI Gate and worker regressions
+        run: python -m pytest -q tests/test_ai_gate_judging.py tests/test_ai_redteam_artifacts.py tests/test_worker_handler_decomposition.py tests/test_v2_module_boundaries.py
+      - name: Module size ratchet
+        run: python scripts/check_module_size.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: boundary-results-${{ github.sha }}
+          path: artifacts/*.xml
+          if-no-files-found: warn
+          retention-days: 7

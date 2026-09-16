@@ -71,6 +71,16 @@ def prepare(target_url: str, options: dict[str, Any], header_builder: Callable) 
     return target, contract, origin, chat_path, template, headers
 
 
+def redact_fixture_markers(value: Any) -> Any:
+    if isinstance(value, str):
+        return re.sub(r"ssb_[0-9a-f]{48}", "[REDACTED_SYNTHETIC_MARKER]", value)
+    if isinstance(value, dict):
+        return {key: redact_fixture_markers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_fixture_markers(item) for item in value]
+    return value
+
+
 async def execute_boundary(target_url: str, options: dict[str, Any], *, header_builder: Callable,
                            aiohttp_module: Any = None) -> dict[str, Any]:
     """Execute the scenario; the caller attaches the shared AI Gate manifest."""
@@ -133,7 +143,7 @@ async def run_boundary_scan(target_url: str, options: dict[str, Any]) -> dict[st
     budget.input_tokens = gate["usage"]["input_tokens_estimated"]
     budget.output_tokens = gate["usage"]["output_tokens_estimated"]
     gate["evidence_manifest"] = shared._build_evidence_manifest(
-        target=options["ai_target"], options=options, planned_probes=(probe,),
+        target=redact_fixture_markers(options["ai_target"]), options=options, planned_probes=(probe,),
         executed_probes=[probe], transcripts=gate["transcripts"], findings=result["findings"],
         control_evidence={}, execution_plan=gate["execution_plan"], coverage_matrix=gate["coverage_matrix"],
         token_budget=budget, judge_config=None, semantic_judge_config=None,
