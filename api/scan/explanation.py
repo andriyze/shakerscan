@@ -46,6 +46,8 @@ _REASON_LABELS = {
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",
     "dependency_failed": "A required earlier action did not complete",
+    "dependency_incomplete": "The action producing this work did not complete, so nothing was published for this batch",
+    "dependency_private_state_unavailable": "Private state from an earlier action was not available to this worker",
     "placement_unavailable": "No eligible worker placement was available",
     "authorization_expired": "Testing approval expired before execution",
     "authorization_revoked": "Testing approval was revoked",
