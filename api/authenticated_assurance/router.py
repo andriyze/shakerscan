@@ -53,6 +53,25 @@ def pool(request: Request):
     return value
 
 
+def _health_observations(rows) -> tuple[dict, ...]:
+    """Read only bounded identity-health observations from durable action receipts."""
+    observations = []
+    for row in rows:
+        receipt = decode(row["receipt_json"] or {})
+        if not isinstance(receipt, dict):
+            continue
+        for item in receipt.get("observations") or ():
+            if not isinstance(item, dict) or item.get("kind") != "authentication_health":
+                continue
+            record = item.get("record")
+            if not isinstance(record, dict):
+                continue
+            # The evaluator performs the final allowlist projection. Do not copy
+            # arbitrary receipt fields or response material into this read model.
+            observations.append({"kind": "authentication_health", "record": record})
+    return tuple(observations)
+
+
 def public_profile(profile: dict) -> dict:
     record = ValidationRecord.model_validate(profile["validation"]) if profile["validation"] else None
     try:
@@ -187,9 +206,15 @@ async def get_scan_assurance(request: Request, scan_id: UUID):
     # when management is disabled; historical uncertainty must not disappear.
     async with pool(request).acquire() as conn:
         row = await conn.fetchrow("SELECT options FROM scans WHERE id=$1", scan_id)
-        interrupted = await conn.fetchval("""SELECT COUNT(*) FROM scan_capability_actions WHERE scan_id=$1 AND
-            (reason_code='authentication_uncertain' OR receipt_json->'redacted_execution'->'identity_interruption'->>'reason_code'='authentication_uncertain')""", scan_id) if row else 0
+        action_rows = await conn.fetch("""SELECT reason_code, receipt_json FROM scan_capability_actions
+            WHERE scan_id=$1 AND (capability_name='http.request' OR reason_code='authentication_uncertain')
+            ORDER BY ordinal""", scan_id) if row else []
     if not row:
         raise HTTPException(404, "scan_not_found")
-    return {**scan_authentication_summary(decode(row["options"] or {}), interrupted_action_count=interrupted),
+    interrupted = sum(1 for action in action_rows if action["reason_code"] == "authentication_uncertain" or
+        (isinstance(decode(action["receipt_json"] or {}), dict) and
+         ((decode(action["receipt_json"] or {}).get("redacted_execution") or {}).get("identity_interruption") or {}).get("reason_code") == "authentication_uncertain"))
+    return {**scan_authentication_summary(decode(row["options"] or {}),
+                interrupted_action_count=interrupted,
+                health_observations=_health_observations(action_rows)),
             "scan_id": str(scan_id), "evidence_url": f"/scans/{scan_id}"}
