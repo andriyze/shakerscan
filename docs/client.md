@@ -61,6 +61,23 @@ Python 3.10 or newer; no third-party dependencies.
 
 ## Connect
 
+The quickest way is the one-time link an administrator gets when creating a service token in
+ShakerScan Enterprise's console. Paste the command it shows:
+
+```bash
+shakerscan connect https://scanner.example.com/_enterprise/connect/<code> --claude
+```
+
+The link works once and expires after ten minutes; the command carries no secret. `connect`
+fetches the token through it, writes it to `~/.config/shakerscan/token` (owner-only) and the
+instance address to `~/.config/shakerscan/config.json`, runs `doctor`, and with `--claude`
+registers `shakerscan mcp` in Claude Code (user scope). From then on `mcp`, `hunt` and `doctor`
+need no options. `shakerscan connect https://scanner.example.com` prompts for a token instead
+(never on the command line); `shakerscan disconnect` forgets the instance and deletes the token
+file; `SHAKERSCAN_CONFIG_DIR` relocates the files.
+
+Explicit options and the environment still win over the saved profile:
+
 - `--url` (or `SHAKERSCAN_API_URL`): the API origin. The default is `http://127.0.0.1:8080`, a
   local engine. An explicit `--url` authorizes a remote origin; a URL taken from the environment
   keeps the adapter's own rule and needs `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true`.
@@ -85,7 +102,13 @@ so both commands mean the same thing whichever channel put `shakerscan` on the P
 
 ## Hunt from an agent (MCP)
 
-Claude Code:
+Claude Code, after `shakerscan connect` (or `connect --claude` does this for you):
+
+```bash
+claude mcp add --scope user shakerscan -- shakerscan mcp
+```
+
+Without a saved profile (a CI runner, say), pass the connection explicitly:
 
 ```bash
 claude mcp add shakerscan \

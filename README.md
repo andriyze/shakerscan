@@ -352,8 +352,8 @@ token):
 
 ```bash
 pipx install shakerscan            # or: uv tool install shakerscan
-shakerscan doctor --url https://scanner.example.com --token-file ./token
-shakerscan mcp    --url https://scanner.example.com --token-file ./token
+shakerscan connect https://scanner.example.com/_enterprise/connect/<code> --claude   # the link the instance shows
+shakerscan mcp                                                                       # or any MCP client
 ```
 
 It is the same `mcp` and `hunt` code the installed runtime runs, and it hands engine commands to
