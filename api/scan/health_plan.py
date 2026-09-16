@@ -3,10 +3,10 @@ from dataclasses import replace
 import re
 from uuid import UUID
 
+from .plan_errors import ScanActionPlanError
+
 
 def with_authentication_health(blueprints, credentials, registry):
-    from .action_plan import ScanActionPlanError
-
     selected = [ref for ref in credentials if "authentication_profile_ref" in ref]
     if not selected:
         return blueprints

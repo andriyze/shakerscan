@@ -253,12 +253,10 @@ _FORBIDDEN_ACTION_KEYS = frozenset({
 })
 
 
-class ScanActionPlanError(ValueError):
-    """Action authority is malformed, ambiguous, or not content-addressed."""
-
-
-class ScanActionPlacementError(ScanActionPlanError):
-    """No selected backend can execute the complete deterministic action plan."""
+# Defined in a leaf module so health_plan can raise them without importing this one;
+# re-exported here because this is where every caller imports them from.
+from .plan_errors import ScanActionPlacementError, ScanActionPlanError  # noqa: E402
+from .health_plan import with_authentication_health  # noqa: E402
 
 
 def _digest(value: Any) -> str:
@@ -1919,7 +1917,6 @@ class ScanActionPlanCompiler:
             ))
         }
         blueprints.sort(key=lambda row: stage_order[row.stage])
-        from .health_plan import with_authentication_health
         blueprints = with_authentication_health(blueprints, credentials, self._registry)
         if any("authentication_profile_ref" in ref for ref in credentials):
             if "local" not in backends:
