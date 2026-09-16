@@ -158,8 +158,7 @@ def scan_authentication_summary(options: Mapping[str, Any], *, interrupted_actio
         public = {"credential_reference": profile_id,
                   "credential_version": version if type(version) is int and version > 0 else None}
         if "authenticated_profile_snapshot" in item:
-            # Import lazily: snapshot admission itself uses current_assurance.
-            from .snapshots import bound_snapshot
+            from .snapshot_binding import bound_snapshot
             try:
                 public["assessment_snapshot"] = bound_snapshot(dict(item)).model_dump(mode="json")
             except (ValueError, TypeError):

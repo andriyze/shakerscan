@@ -1,4 +1,8 @@
-"""Immutable, reviewed assessment metadata; never a credential or permission grant."""
+"""Immutable, reviewed assessment metadata; never a credential or permission grant.
+
+``ScanProfileSnapshot`` and ``bound_snapshot`` live in ``snapshot_binding`` and are
+re-exported here: they are part of this module's public surface for every caller.
+"""
 
 from datetime import datetime, timezone
 from copy import deepcopy
@@ -8,6 +12,7 @@ from uuid import UUID
 from pydantic import Field
 
 from .evaluation import current_assurance
+from .snapshot_binding import ScanProfileSnapshot, bound_snapshot
 from .models import MetadataModel, ProfileConfiguration, ValidationRecord, exact_origin
 from .store import AssuranceStore, ProfileConflict
 
@@ -16,43 +21,6 @@ class ScanProfileSelection(MetadataModel):
     profile_id: UUID
     revision: int = Field(gt=0, strict=True)
     reviewed: Literal[True]
-
-
-class ScanProfileSnapshot(MetadataModel):
-    schema_version: Literal["authenticated-scan-snapshot/v1"] = "authenticated-scan-snapshot/v1"
-    profile_id: UUID
-    revision: int = Field(gt=0, strict=True)
-    target_id: UUID
-    credential_version: int = Field(gt=0, strict=True)
-    credential_record_version: int = Field(gt=0, strict=True)
-    configuration_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    display_name: str
-    environment_label: str
-    declared_role: str | None
-    credential_destinations: tuple[str, ...]
-    setup_validation_id: UUID
-    setup_evidence_reference: UUID
-    setup_validated_at: datetime
-    setup_valid_until: datetime
-    process_generation: UUID
-    # Setup evidence cannot assert the state of work that has not happened yet.
-    assessment_authentication_state: Literal["unknown"] = "unknown"
-    continuous_authentication_proven: Literal[False] = False
-    secret_values_visible: Literal[False] = False
-
-
-def bound_snapshot(credential_ref: dict) -> ScanProfileSnapshot | None:
-    """Validate the optional reviewed metadata carried by the canonical credential ref."""
-    if "authenticated_profile_snapshot" not in credential_ref:
-        return None
-    pinned = ScanProfileSnapshot.model_validate(credential_ref["authenticated_profile_snapshot"])
-    if (str(pinned.profile_id) != str(credential_ref.get("profile_id")) or
-            type(credential_ref.get("profile_version")) is not int or
-            type(credential_ref.get("credential_record_version")) is not int or
-            pinned.credential_version != credential_ref.get("profile_version") or
-            pinned.credential_record_version != credential_ref.get("credential_record_version")):
-        raise ProfileConflict("credential_changed")
-    return pinned
 
 
 def attach_scan_snapshots(credential_refs: list[dict], snapshots: list[dict]) -> list[dict]:

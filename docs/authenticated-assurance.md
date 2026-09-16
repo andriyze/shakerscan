@@ -1,5 +1,10 @@
 # Authenticated Scan Profile and Assurance preview
 
+**Status:** Preview design and implementation record for the authenticated-scan profile and
+assurance surface, gated off by default behind `SHAKERSCAN_AUTHENTICATED_ASSURANCE`. Not a
+user guide and not a release claim: the remaining release gates are listed under Rollout and
+remaining work.
+
 ## Inventory and reuse decision
 
 Inspected OSS `0895585ce9915ec668901035b1489324863773f3` and Enterprise

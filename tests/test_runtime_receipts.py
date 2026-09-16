@@ -209,9 +209,9 @@ def test_binary_observation_material_is_replaced_by_hash_and_size():
     assert value["body"]["size"] == len(b"binary-secret")
     assert len(value["body"]["bytes_sha256"]) == 64
     assert "binary-secret" not in repr(value)
-def test_credential_revision_metadata_survives_without_opening_secret_values():
-    from api.runtime.receipts import redact_receipt_value
 
+
+def test_credential_revision_metadata_survives_without_opening_secret_values():
     for key in ("credential_version", "credential_record_version"):
         assert redact_receipt_value({key: 3}) == {key: 3}
         for value in ("seeded-secret", True, -1, 0, 2_147_483_648, 1.5):
