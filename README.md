@@ -347,8 +347,8 @@ The exhaustive route and capability catalog is in the
 ### Client only (MCP adapter and Hunt CLI)
 
 The `shakerscan` command is also available without the engine, for a laptop or CI runner that
-talks to a ShakerScan instance elsewhere (a VPS, or a self-hosted Enterprise gateway with a
-service token):
+talks to a ShakerScan instance elsewhere (a VPS, or an authenticating deployment with a service
+token):
 
 ```bash
 pipx install shakerscan            # or: uv tool install shakerscan
