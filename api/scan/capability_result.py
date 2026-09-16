@@ -54,6 +54,7 @@ class CapabilityResultReason(str, Enum):
     MANIFEST_UNAVAILABLE = "manifest_unavailable"
     UNSUPPORTED_OUTPUT_SCHEMA = "unsupported_output_schema"
     NOT_APPLICABLE = "not_applicable"
+    DEPENDENCY_INCOMPLETE = "dependency_incomplete"
 
 
 class CapabilityResultError(ValueError):

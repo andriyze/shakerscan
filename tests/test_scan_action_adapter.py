@@ -2196,3 +2196,87 @@ def test_a_path_segment_candidate_is_inapplicable_to_dalfox_not_unattempted(monk
     assert [item["kind"] for item in result.observations] == ["candidate_inapplicable"]
     assert result.observations[0]["reason"] == "path_segment_candidate"
     assert result.observations[0]["candidate_id"] == candidates.entries[0]["candidate_id"]
+
+
+def _search_endpoint_manifest(scan_id):
+    return build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/search", "concrete_path": "/search",
+                "query_keys": ["q", "page", "sort"], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+
+
+def _prove_xss_receipt(endpoint_manifest, candidates, *, start):
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": start, "count": 9},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=endpoint_manifest.scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        }),
+        policy=ScanPolicy(active_testing=True),
+    )
+    return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+
+def test_proof_slice_beyond_a_partial_manifest_is_incomplete_dependency_work():
+    """A truncated (partial) producer never published the candidates this slice was
+    scheduled for. Reporting that as not_applicable would let the finalizer count the
+    escalation as cleanly complete; it is unavailable dependency work instead."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=1,
+    )
+    assert candidates.status == "partial" and len(candidates.entries) == 1
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=1)
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("dependency_incomplete",)
+
+
+def test_proof_slice_beyond_a_complete_manifest_stays_not_applicable():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=50,
+    )
+    assert candidates.status == "complete"
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=len(candidates.entries))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+
+
+def test_every_capability_result_reason_has_an_operator_label():
+    import importlib
+    root = DatabaseNeutralScanActionDispatcher.__module__.rsplit(".", 1)[0]
+    reasons = importlib.import_module(root + ".capability_result").CapabilityResultReason
+    labels = importlib.import_module(root + ".explanation")._REASON_LABELS
+    assert sorted(item.value for item in reasons if item.value not in labels) == []
