@@ -652,7 +652,7 @@ function TargetsContent() {
                           Revoke
                         </button>
                       </>
-                    ) : (
+                    ) : featureEnabled('target_authorization') ? (
                       <button
                         type="button"
                         className="text-emerald-300 underline-offset-2 hover:underline disabled:opacity-50"
@@ -661,6 +661,10 @@ function TargetsContent() {
                       >
                         Authorize for active testing (once)
                       </button>
+                    ) : (
+                      // A managed deployment records the authorization itself when active
+                      // testing starts; nothing for the person to click.
+                      <span className="text-gray-500">Active testing is authorized automatically when it starts</span>
                     )}
                   </p>
                 )}
