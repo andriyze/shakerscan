@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -127,7 +129,12 @@ def test_an_explicit_url_authorizes_the_origin_and_the_token_stays_out_of_argv(t
         cli.ENV_TIMEOUT: "7.5",
     }
     # A URL taken from the environment keeps the adapter's own remote-origin rule.
-    assert cli.connection_environment(None, None, None, environ={cli.ENV_URL: "https://scanner.example.com"}) == {}
+    assert (
+        cli.connection_environment(
+            None, None, None, environ={cli.ENV_URL: "https://scanner.example.com", cli.ENV_CONFIG_DIR: str(tmp_path)}
+        )
+        == {}
+    )
     (tmp_path / "empty").write_text("\n", encoding="utf-8")
     with pytest.raises(cli.ClientError, match="empty"):
         cli.connection_environment(None, str(tmp_path / "empty"), None, environ={})
@@ -296,3 +303,92 @@ def test_doctor_names_the_transport_reason(monkeypatch, capsys, clean_environ):
     out = capsys.readouterr().out
     assert "engine:   ShakerScan API is unavailable: <urlopen error timed out>" in out
     assert "mcp:      ShakerScan API is unavailable: <urlopen error timed out>" in out
+
+
+def _connected(monkeypatch, tmp_path, *, role="operator"):
+    """A connect link claim answered without the network, and a fake instance behind doctor."""
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        cli,
+        "fetch_connect_link",
+        lambda link, **kw: {"url": "https://scanner.example.com", "token": SECRET, "role": role, "label": "Laptop"},
+    )
+    mcp = load("_mcp")
+
+    class FakeClient:
+        seen: dict[str, object] = {}
+
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            FakeClient.seen = {"base_url": base_url, "api_token": api_token}
+
+        def request_json(self, method, path, payload=None):
+            return {"status": "ok"}
+
+        def list_tools(self):
+            return [{"name": "shakerscan_targets"}, {"name": "shakerscan_hunt_start"}]
+
+    monkeypatch.setattr(mcp, "ArsenalClient", FakeClient)
+    return FakeClient
+
+
+def test_connect_with_a_link_saves_the_profile_owner_only_and_checks_it(monkeypatch, tmp_path, capsys, clean_environ):
+    fake = _connected(monkeypatch, tmp_path)
+    code = cli.main(["connect", "https://scanner.example.com/_enterprise/connect/" + "c" * 43])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    cfg = tmp_path / "cfg"
+    assert (cfg / "token").read_text(encoding="utf-8").strip() == SECRET
+    assert stat.S_IMODE((cfg / "token").stat().st_mode) == 0o600
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o700
+    assert json.loads((cfg / "config.json").read_text(encoding="utf-8")) == {
+        "url": "https://scanner.example.com",
+        "token_file": str(cfg / "token"),
+    }
+    assert fake.seen == {"base_url": "https://scanner.example.com", "api_token": SECRET}
+    assert "2 tools (1 read-only Arsenal, 1 Hunt)" in out and SECRET not in out
+    assert "claude mcp add --scope user shakerscan -- shakerscan mcp" in out
+    # From now on every command uses the saved instance and token without options. (connect ran
+    # doctor in this process, which exported the connection; a fresh process starts clean.)
+    for key in (cli.ENV_URL, cli.ENV_TOKEN, cli.ENV_TOKEN_FILE, cli.ENV_ALLOW_REMOTE):
+        os.environ.pop(key, None)
+    assert cli.connection_environment(None, None, None) == {
+        cli.ENV_URL: "https://scanner.example.com",
+        cli.ENV_ALLOW_REMOTE: "true",
+        cli.ENV_TOKEN: SECRET,
+    }
+    assert cli.main(["doctor"]) == 0
+    assert "saved profile" in capsys.readouterr().out
+    # An explicit --url still wins over the profile.
+    assert cli.connection_environment("https://other.example", None, None)[cli.ENV_URL] == "https://other.example"
+    assert cli.main(["disconnect"]) == 0
+    assert not (cfg / "token").exists() and not (cfg / "config.json").exists()
+
+
+def test_connect_registers_claude_code_when_asked(monkeypatch, tmp_path, capsys, clean_environ):
+    _connected(monkeypatch, tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "claude-argv"
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{record}"\n', encoding="utf-8")
+    fake_claude.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    assert cli.main(["connect", "https://scanner.example.com/_enterprise/connect/" + "d" * 43, "--claude"]) == 0
+    argv = record.read_text(encoding="utf-8").split("\n")
+    assert argv[:6] == ["mcp", "add", "--scope", "user", "shakerscan", "--"]
+    assert argv[6].endswith("shakerscan") and argv[7] == "mcp"
+    assert "registered as MCP server" in capsys.readouterr().out
+
+
+def test_connect_refuses_plain_http_and_explains_a_used_link(monkeypatch, tmp_path, capsys, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    assert cli.main(["connect", "http://scanner.example.com/_enterprise/connect/" + "e" * 43]) == 2
+    assert "https only" in capsys.readouterr().err
+    assert not (tmp_path / "cfg" / "token").exists()
+
+    class UsedLink:
+        def open(self, request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 404, "gone", {}, None)
+
+    with pytest.raises(cli.ClientError, match="expired or was already used"):
+        cli.fetch_connect_link("https://scanner.example.com/_enterprise/connect/" + "f" * 43, opener=UsedLink())
