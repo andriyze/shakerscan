@@ -3614,6 +3614,37 @@ async def schedule_runner(pool: asyncpg.Pool):
             print(f"[scheduler] Error running schedules: {e}", flush=True)
 
 
+def _asm_dispatch_as_utc(value: datetime) -> datetime:
+    """The dispatcher clock is naive UTC; stored backoffs are aware. Compare in one frame."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _asm_dispatch_backoff_until(metadata_json) -> datetime | None:
+    """When the target's last dispatcher decision was a failed dispatch whose
+    ``next_eligible_at`` is still ahead, return that instant; otherwise ``None``."""
+    metadata = metadata_json
+    if isinstance(metadata, (str, bytes)):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    last = metadata.get("asm_last_decision")
+    if not isinstance(last, dict) or last.get("blocked_by") != "dispatch_failed":
+        return None
+    raw = last.get("next_eligible_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 async def run_asm_dispatch(pool: asyncpg.Pool):
     """One tick of the Continuous ASM dispatcher (docs §16 Phase 3/4): for each
     ASM-enabled target, pick at most ONE action (recon or exploit batch) within
@@ -3625,7 +3656,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         targets = await conn.fetch("""
             SELECT id, url, root_domain, scan_options, asm_config,
-                   asm_last_test_at, asm_last_recon_at
+                   asm_last_test_at, asm_last_recon_at, metadata_json
             FROM targets
             WHERE asm_enabled = true AND is_active = true
         """)
@@ -3636,6 +3667,12 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
         root_domain = t['root_domain']
         raw_config = _decode_asm_config(t['asm_config'])
         cfg = asm_inventory.merge_asm_config(raw_config)
+        backoff_until = _asm_dispatch_backoff_until(t['metadata_json'])
+        if backoff_until is not None and backoff_until > _asm_dispatch_as_utc(now):
+            # The previous dispatch of this target failed (typically a host that no
+            # longer resolves) and was recorded with a backoff; until it elapses the
+            # target is parked rather than retried -- and logged -- on every tick.
+            continue
         try:
             async with pool.acquire() as conn:
                 active = await conn.fetchval("""
@@ -3756,6 +3793,26 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                           f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
             print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
+            # A failed dispatch is still an attempt. Record it where every other
+            # dispatcher decision is recorded, with a next_eligible_at backoff (the
+            # target's own min test interval), so an unreachable host is parked for a
+            # while instead of being retried on every single tick.
+            try:
+                eligible_at = _asm_dispatch_as_utc(now) + timedelta(minutes=cfg['min_interval_minutes'])
+                async with pool.acquire() as conn:
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {
+                            "action": "none",
+                            "reason": f"dispatch failed: {e}",
+                            "blocked_by": "dispatch_failed",
+                            "next_eligible_at": eligible_at.isoformat(),
+                        },
+                        source="dispatcher",
+                    )
+            except Exception as record_exc:
+                print(f"[asm] could not record dispatch failure for {target_url}: {record_exc}", flush=True)
 
 
 async def asm_dispatcher(pool: asyncpg.Pool):
