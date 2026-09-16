@@ -6,7 +6,7 @@ Drive an authorized Interactive Testing browser workflow with the compatibility-
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address). Use
 `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, use the URL
 printed by `./scanner.sh status`.
 
@@ -15,15 +15,15 @@ printed by `./scanner.sh status`.
 3. Check health:
 
    ```bash
-   curl -s "$API_BASE/health"
+   shakerscan api GET /health
    ```
 
 4. Bootstrap from the latest completed scan when one exists:
 
    ```bash
-   curl -s "$API_BASE/scans?target=TARGET&status=completed&limit=5"
-   curl -s "$API_BASE/scans/{scan_id}/result"
-   curl -s "$API_BASE/findings?target_id={target_id}&status=active"
+   shakerscan api GET "/scans?target=TARGET&status=completed&limit=5"
+   shakerscan api GET /scans/{scan_id}/result
+   shakerscan api GET "/findings?target_id={target_id}&status=active"
    ```
 
    If new scan context would help, ask before submitting it. `full`, `aggressive`, and `smart`
@@ -33,9 +33,7 @@ printed by `./scanner.sh status`.
 5. Start the browser session:
 
    ```bash
-   curl -X POST "$API_BASE/session/start" \
-     -H "Content-Type: application/json" \
-     -d '{"target":"TARGET_URL"}'
+   shakerscan api POST /session/start '{"target":"TARGET_URL"}'
    ```
 
 6. Use `POST /session/{id}/action` for same-origin navigation, clicks, fills, submits, waits,
@@ -50,7 +48,7 @@ printed by `./scanner.sh status`.
 10. End the session with:
 
     ```bash
-    curl -X DELETE "$API_BASE/session/{session_id}"
+    shakerscan api DELETE /session/{session_id}
     ```
 
 Maintain the checklist from the skill. If no issue is validated, say so and report coverage,

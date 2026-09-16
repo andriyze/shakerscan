@@ -48,7 +48,7 @@ workers. Check the launcher before assuming those URLs:
 
 ```bash
 ./scanner.sh status
-curl -sS http://localhost:8080/health
+shakerscan api GET /health
 ```
 
 If stopped, use `./scanner.sh start`. Use `./scanner.sh start --remote` for a VPS reached over
@@ -61,6 +61,14 @@ After a curl install, run agents from the installed runtime so this guide and sh
 shakerscan agent codex       # or claude, or opencode
 # equivalent: cd ~/.shakerscan && codex
 ```
+
+**Connected remote instance.** `shakerscan agent …` can also run against a remote, authenticating
+ShakerScan instance (ShakerScan Enterprise) after `shakerscan connect`; it then sets
+`SHAKERSCAN_MANAGED_INSTANCE=1`. There is no local engine in that session: `./scanner.sh start`,
+`stop`, `scale` and Docker do not apply. Everything in this guide that talks to the API still works
+through `shakerscan api`, `shakerscan scan`, `shakerscan hunt` and the MCP tools, under the
+connected person's identity and role; a route the instance keeps closed answers with a refusal
+that names what is missing, so report it and choose another path rather than retrying.
 
 If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. Never invent removed wrapper
 commands; inspect `shakerscan --help` or `./scanner.sh help`.
@@ -128,8 +136,7 @@ Known endpoints seed discovery without expanding scope. Preserve body-spec synta
 collections are immutable selections supplied by opaque ID.
 
 ```bash
-curl -sS -X POST "$API_BASE/scans" -H 'Content-Type: application/json' \
-  -d '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
+shakerscan api POST /scans '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
 ```
 
 For active work, first establish explicit authorization (authorize the target once, or provide a
@@ -366,12 +373,12 @@ Set `API_BASE` and `UI_BASE` from `./scanner.sh status`. Use OpenAPI for bodies 
 ./scanner.sh restart
 ./scanner.sh scan https://example.com --budget-profile balanced
 
-curl -sS "$API_BASE/openapi.json"
-curl -sS "$API_BASE/scan/contracts"
-curl -sS "$API_BASE/hunts/contract"
-curl -sS "$API_BASE/workers"
-curl -sS "$API_BASE/scans?limit=10"
-curl -sS "$API_BASE/findings?status=active&limit=50"
+shakerscan api GET /openapi.json
+shakerscan api GET /scan/contracts
+shakerscan api GET /hunts/contract
+shakerscan api GET /workers
+shakerscan api GET "/scans?limit=10"
+shakerscan api GET "/findings?status=active&limit=50"
 ```
 
 The normal scan list hides shards, internal ASM rows, and Model Intake evidence scans. Include them

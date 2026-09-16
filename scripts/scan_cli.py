@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Iterable
 import urllib.error
@@ -123,6 +124,24 @@ def _split_names(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _bearer_token() -> str | None:
+    """A bearer token (an Enterprise gateway service token) authenticates a remote API; it is
+    read from SHAKERSCAN_API_TOKEN_FILE by preference, else SHAKERSCAN_API_TOKEN, and only ever
+    sent over HTTPS, never printed."""
+    path = os.environ.get("SHAKERSCAN_API_TOKEN_FILE", "").strip()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError as exc:
+            raise ScanCliError(f"cannot read SHAKERSCAN_API_TOKEN_FILE: {exc.strerror or exc}") from exc
+    else:
+        token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip()
+    if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
+        raise ScanCliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
+    return token or None
+
+
 def _request_json(
     url: str,
     *,
@@ -133,6 +152,11 @@ def _request_json(
         "Accept": "application/json",
         "User-Agent": "shakerscan-cli/scan-start-v2",
     }
+    token = _bearer_token()
+    if token:
+        if not url.startswith("https://"):
+            raise ScanCliError("SHAKERSCAN_API_TOKEN requires an https:// API URL")
+        headers["Authorization"] = "Bearer " + token
     data = None
     method = "GET"
     if payload is not None:

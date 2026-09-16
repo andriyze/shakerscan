@@ -6,11 +6,11 @@ Check the status of ShakerScan.
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote VPS, prefer the URLs printed by `./scanner.sh status` after `./scanner.sh start --remote`.
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address). Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote VPS, prefer the URLs printed by `./scanner.sh status` after `./scanner.sh start --remote`.
 
 1. Check if scanner is running:
    ```bash
-   curl -s "$API_BASE/health" 2>/dev/null
+   shakerscan api GET /health 2>/dev/null
    ```
 
 2. If not running, report:
@@ -22,8 +22,8 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 3. If running, fetch stats:
    ```bash
-   curl -s "$API_BASE/queue/stats"
-   curl -s "$API_BASE/dashboard"
+   shakerscan api GET /queue/stats
+   shakerscan api GET /dashboard
    ```
 
 4. Report:

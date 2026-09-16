@@ -558,6 +558,7 @@ doctor | install-deps         Diagnose or install local prerequisites
 env                           Show runtime, PATH, and agent-launch guidance
 agent [codex|claude|opencode] Launch an agent in the runtime
 mcp                           Start the ShakerScan MCP adapter (Hunt plus read-only Arsenal)
+api METHOD PATH [JSON]        Call the API (the agent kit's one way in; adds the token when connected)
 research <episode-id> [N]     Drive bounded local Codex decisions
 fleet init|join-token|revoke-join-token|accept  Provision a fleet or run physical acceptance
 gungnir <command>             Manage certificate-transparency monitoring

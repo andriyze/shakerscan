@@ -126,6 +126,7 @@ def test_hosted_installer_packages_advertised_host_side_adapters():
         "docker-compose.worker.yml",
         "docker-compose.broker-worker.yml",
         "scripts/shakerscan_mcp.py",
+        "scripts/api_cli.py",
         "scripts/local_planner_adapter.py",
         "scripts/planner_evals.py",
         "scripts/fleet_cli.py",

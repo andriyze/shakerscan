@@ -6,13 +6,13 @@ Set `API_BASE` to the API URL printed by `./scanner.sh status`; it is normally
 ## Pull Existing Discovery First
 
 ```bash
-curl -s "$API_BASE/scans/{scan_id}/result"
+shakerscan api GET /scans/{scan_id}/result
 ```
 
 Useful jq snippets:
 
 ```bash
-curl -s "$API_BASE/scans/{scan_id}/result" | jq '{
+shakerscan api GET /scans/{scan_id}/result | jq '{
   endpoints: .discovery.browser_api_endpoints[:25],
   tech: .discovery.tech.items,
   browser_crawl: .discovery.browser_crawl,
@@ -82,9 +82,7 @@ ffuf -u https://example.com/FUZZ -w custom_list.txt -mc all -fc 404
 ShakerScan:
 
 ```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
+shakerscan api POST /scans '{
     "target": "https://example.com",
     "budget_profile": "balanced",
     "policy": {"active_testing": false},

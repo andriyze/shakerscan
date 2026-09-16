@@ -6,17 +6,17 @@ Discover subdomains for a domain using CT logs and passive sources.
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. On a remote VPS, set it
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address). On a remote VPS, set it
 to the API URL printed by `./scanner.sh status`.
 
 1. Check if scanner is running:
    ```bash
-   curl -s "$API_BASE/health"
+   shakerscan api GET /health
    ```
 
 2. Start subdomain discovery:
    ```bash
-   curl -X POST "$API_BASE/discovery?root_domain=$ARGUMENTS"
+   shakerscan api POST "/discovery?root_domain=$ARGUMENTS"
    ```
 
 3. Extract discovery_id from the response
@@ -26,7 +26,7 @@ to the API URL printed by `./scanner.sh status`.
    Discovery can take a while; the user can check results later:
    ```bash
    # later, on request only:
-   curl "$API_BASE/discovery/{discovery_id}"
+   shakerscan api GET /discovery/{discovery_id}
    ```
 
 5. When the user later asks for results, report:

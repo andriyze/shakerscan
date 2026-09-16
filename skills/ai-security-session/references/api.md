@@ -113,7 +113,5 @@ Provide `title` and `severity` plus evidence-backed fields such as `description`
 
 Example:
 ```bash
-curl -X POST "$API_BASE/session/{id}/test-endpoint" \
-  -H "Content-Type: application/json" \
-  -d '{"endpoint":"/api/items/42","method":"GET","as_user":"user2"}'
+shakerscan api POST /session/{id}/test-endpoint '{"endpoint":"/api/items/42","method":"GET","as_user":"user2"}'
 ```

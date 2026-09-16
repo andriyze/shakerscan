@@ -6,16 +6,16 @@ Create/list AI Gate targets and queue AI safety scans.
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address). Use `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links; on a remote VPS, set this to the URL printed by `./scanner.sh start --remote` or `./scanner.sh status`.
 
 1. Check if scanner is running:
    ```bash
-   curl -s "$API_BASE/health"
+   shakerscan api GET /health
    ```
 
 2. If the user asks to list targets:
    ```bash
-   curl "$API_BASE/ai/targets"
+   shakerscan api GET /ai/targets
    ```
 
 3. If the user asks to create a target, gather or infer:
@@ -28,9 +28,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
    Example:
    ```bash
-   curl -X POST "$API_BASE/ai/targets" \
-     -H "Content-Type: application/json" \
-     -d '{
+   shakerscan api POST /ai/targets '{
        "name": "Support bot",
        "target_type": "api_chat",
        "endpoint_url": "https://example.com/api/chat",
@@ -45,9 +43,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 4. If the user asks to scan an AI target:
    ```bash
-   curl -X POST "$API_BASE/ai/targets/{target_id}/scan" \
-     -H "Content-Type: application/json" \
-     -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
+   shakerscan api POST /ai/targets/{target_id}/scan '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"staging"}'
    ```
 
    Probe packs: `shaker-ai-smoke`, `shaker-owasp-llm`, `shaker-agent-abuse`, `shaker-mcp-security`, `shaker-rag-lite`.
@@ -56,7 +52,7 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
    `"confirm_production":true`, and only after the user has authorized testing that production target.
    The server enforces this (a production scan without it returns HTTP 409):
    ```bash
-   -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
+   shakerscan api POST /ai/targets/{target_id}/scan '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
    ```
 
 5. After submitting, report:
@@ -68,6 +64,6 @@ Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls. Use 
 
 6. To review results later:
    ```bash
-   curl "$API_BASE/findings?source_type=ai_gate&status=active"
-   curl "$API_BASE/ai/scans/{scan_id}/transcript"
+   shakerscan api GET "/findings?source_type=ai_gate&status=active"
+   shakerscan api GET /ai/scans/{scan_id}/transcript
    ```
