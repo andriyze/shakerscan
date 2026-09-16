@@ -5,7 +5,10 @@ Homebrew tap are published by `.github/workflows/publish-client.yml` on `client-
 
 The ShakerScan client is the `shakerscan` command without the engine: the MCP adapter and the
 scripted Hunt CLI, installed on a laptop or a CI runner with no Docker, pointed at any ShakerScan
-instance (a local engine, a VPS, or a self-hosted Enterprise gateway with a service token).
+instance (a local engine, a VPS, or an authenticating deployment such as ShakerScan Enterprise,
+with a service token). This page documents the client itself; how an Enterprise deployment
+issues tokens, assigns roles and enables Hunt is documented at
+[shakerscan.com/docs/enterprise](https://shakerscan.com/docs/enterprise), not in this repository.
 
 It is the same code the engine runtime already exposes as `scanner.sh mcp` and `scanner.sh hunt`:
 the package vendors `scripts/shakerscan_mcp.py` and `scripts/v2_cli.py` at build time
