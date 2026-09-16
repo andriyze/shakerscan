@@ -21,6 +21,8 @@ router = APIRouter(tags=["authentication assurance"])
 store = AssuranceStore()
 PROCESS_GENERATION = uuid4()
 _engine = {}
+_MAX_ASSURANCE_ACTION_RECEIPTS = 4096
+_MAX_ASSURANCE_HEALTH_SAMPLES = 2048
 
 
 def configure_assurance_engine(*, approve, freeze, enqueue, build):
@@ -69,6 +71,8 @@ def _health_observations(rows) -> tuple[dict, ...]:
             # The evaluator performs the final allowlist projection. Do not copy
             # arbitrary receipt fields or response material into this read model.
             observations.append({"kind": "authentication_health", "record": record})
+            if len(observations) >= _MAX_ASSURANCE_HEALTH_SAMPLES:
+                return tuple(observations)
     return tuple(observations)
 
 
@@ -208,12 +212,15 @@ async def get_scan_assurance(request: Request, scan_id: UUID):
         row = await conn.fetchrow("SELECT options FROM scans WHERE id=$1", scan_id)
         action_rows = await conn.fetch("""SELECT reason_code, receipt_json FROM scan_capability_actions
             WHERE scan_id=$1 AND (capability_name='http.request' OR reason_code='authentication_uncertain')
-            ORDER BY ordinal""", scan_id) if row else []
+            ORDER BY ordinal LIMIT $2""", scan_id, _MAX_ASSURANCE_ACTION_RECEIPTS) if row else []
     if not row:
         raise HTTPException(404, "scan_not_found")
-    interrupted = sum(1 for action in action_rows if action["reason_code"] == "authentication_uncertain" or
-        (isinstance(decode(action["receipt_json"] or {}), dict) and
-         ((decode(action["receipt_json"] or {}).get("redacted_execution") or {}).get("identity_interruption") or {}).get("reason_code") == "authentication_uncertain"))
+    interrupted = 0
+    for action in action_rows:
+        receipt = decode(action["receipt_json"] or {})
+        interruption = ((receipt.get("redacted_execution") or {}).get("identity_interruption") or {}) if isinstance(receipt, dict) else {}
+        if action["reason_code"] == "authentication_uncertain" or interruption.get("reason_code") == "authentication_uncertain":
+            interrupted += 1
     return {**scan_authentication_summary(decode(row["options"] or {}),
                 interrupted_action_count=interrupted,
                 health_observations=_health_observations(action_rows)),
