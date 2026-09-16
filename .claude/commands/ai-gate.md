@@ -52,7 +52,7 @@ Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance add
    `"confirm_production":true`, and only after the user has authorized testing that production target.
    The server enforces this (a production scan without it returns HTTP 409):
    ```bash
-   -d '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
+   shakerscan api POST /ai/targets/{target_id}/scan '{"probe_pack":"shaker-ai-smoke","scan_profile":"smoke","environment":"production","confirm_production":true}'
    ```
 
 5. After submitting, report:
