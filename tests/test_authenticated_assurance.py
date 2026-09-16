@@ -130,3 +130,43 @@ def test_legacy_credentials_are_not_identity_evidence():
     assert summary["coverage"] == "unverified"
     assert summary["profiles"] == [{"credential_reference": profile_id, "credential_version": 4}]
     assert "seeded" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("auth_headers_json", '{"X-API-Key":"secret"}'),
+    ("login_username", "member"),
+    ("oauth_client_id", "client"),
+    ("user2_header", "Bearer secret"),
+])
+def test_historical_authentication_fields_remain_unverified(key, value):
+    summary = scan_authentication_summary({key: value})
+    assert summary["authentication_requested"] is True
+    assert summary["reason_code"] == "legacy_unverified"
+    assert summary["coverage"] == "unverified"
+    assert value not in json.dumps(summary)
+
+
+def test_scan_health_timeline_is_sampled_not_continuous(configuration):
+    record = valid(configuration).model_dump(mode="json")
+    summary = scan_authentication_summary({}, health_observations=(
+        {"kind": "authentication_health", "record": record},
+    ))
+    assert summary["authentication_requested"] is True
+    assert summary["state"] == "valid"
+    assert summary["reason_code"] == "sampled_identity_confirmed"
+    assert summary["coverage"] == "sampled"
+    assert summary["health_sample_count"] == 1
+    assert summary["valid_health_sample_count"] == 1
+    assert summary["continuous_authentication_proven"] is False
+    assert "fixture-user" not in json.dumps(summary)
+
+
+def test_uncertain_health_sample_creates_authentication_gap(configuration):
+    record = evaluate(configuration, status_code=403, content_type="application/json", body=b'{}').model_dump(mode="json")
+    summary = scan_authentication_summary({}, health_observations=(
+        {"kind": "authentication_health", "record": record},
+    ))
+    assert summary["state"] == "unknown"
+    assert summary["reason_code"] == "authentication_gap"
+    assert summary["coverage"] == "partial"
+    assert summary["uncertain_health_sample_count"] == 1
