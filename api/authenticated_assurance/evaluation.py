@@ -7,7 +7,7 @@ Response bytes and application-provided strings never enter its output.
 
 from datetime import datetime, timedelta
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from .models import ProfileConfiguration, ValidationRecord, exact_origin
@@ -138,18 +138,36 @@ def current_assurance(
     }
 
 
-def scan_authentication_summary(options: Mapping[str, Any], *, interrupted_action_count: int = 0) -> dict[str, Any]:
-    """Conservative projection for consumers without recorded health events.
+def _authentication_requested(options: Mapping[str, Any]) -> bool:
+    references = options.get("credential_profile_refs")
+    if isinstance(references, list) and references:
+        return True
+    if options.get("managed_credential_profiles"):
+        return True
+    # Historical Scan rows predate canonical credential references. Keep this list
+    # metadata-only and intentionally broad: presence means identity was requested,
+    # never that the value was accepted or used successfully.
+    legacy_keys = (
+        "auth_header", "auth_headers_json", "auth_cookies", "auth_token", "auth_user",
+        "auth_scenario_json", "login_url", "login_username", "login_password",
+        "login_extra_fields", "auto_auth", "disposable_login_credentials",
+        "oauth_client_id", "oauth_client_secret", "oauth_token_url", "oauth_scope",
+        "oauth_username", "oauth_password", "user2_cookies", "user2_header",
+        "user2_login_url", "user2_login_username", "user2_login_password",
+    )
+    return any(options.get(key) not in (None, "", [], {}, False) for key in legacy_keys)
 
-    Credential-use flags and findings do not supply an identity health timeline.
-    This intentionally leaves existing risk/verification evidence untouched.
-    """
+
+def scan_authentication_summary(
+    options: Mapping[str, Any], *, interrupted_action_count: int = 0,
+    health_observations: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Project frozen profile metadata and bounded Scan health samples conservatively."""
     references = options.get("credential_profile_refs") or []
     profiles = []
     for item in references if isinstance(references, list) else []:
         if not isinstance(item, Mapping):
             continue
-        # Never echo arbitrary options, auth headers, or untrusted response text.
         try:
             profile_id = str(UUID(str(item.get("profile_id") or item.get("id"))))
         except (TypeError, ValueError):
@@ -161,24 +179,76 @@ def scan_authentication_summary(options: Mapping[str, Any], *, interrupted_actio
             from .snapshot_binding import bound_snapshot
             try:
                 public["assessment_snapshot"] = bound_snapshot(dict(item)).model_dump(mode="json")
-            except (ValueError, TypeError):
-                pass  # Malformed historical metadata is never positive evidence.
+            except (ValueError, TypeError, AttributeError):
+                pass
         profiles.append(public)
+
+    timeline = []
+    valid_count = 0
+    uncertain_count = 0
+    for raw in health_observations:
+        if not isinstance(raw, Mapping) or raw.get("kind") != "authentication_health":
+            continue
+        record = raw.get("record")
+        if not isinstance(record, Mapping):
+            continue
+        try:
+            profile_id = str(UUID(str(record.get("profile_id"))))
+        except (TypeError, ValueError):
+            continue
+        state = str(record.get("state") or "unknown")
+        reason = str(record.get("reason_code") or "validation_unavailable")
+        if state == "valid":
+            valid_count += 1
+        else:
+            uncertain_count += 1
+        timeline.append({
+            "credential_reference": profile_id,
+            "state": state,
+            "reason_code": reason,
+            "checked_at": record.get("checked_at"),
+            "valid_until": record.get("valid_until"),
+            "identity_matched": record.get("identity_matched") is True,
+            "role_matched": record.get("role_matched") if type(record.get("role_matched")) is bool else None,
+        })
+    timeline.sort(key=lambda row: str(row.get("checked_at") or ""))
+
     interrupted = max(0, interrupted_action_count) if type(interrupted_action_count) is int else 0
-    requested = bool(interrupted or references or options.get("managed_credential_profiles") or
-                     any(options.get(key) for key in ("auth_header", "auth_cookies", "auth_token", "auth_user")))
+    requested = bool(interrupted or _authentication_requested(options) or profiles or timeline)
+    sampled = bool(timeline)
+    gap = bool(interrupted or uncertain_count)
+    if gap:
+        state, reason, coverage = "unknown", "authentication_gap", "partial"
+    elif sampled and valid_count:
+        state, reason, coverage = "valid", "sampled_identity_confirmed", "sampled"
+    elif any("assessment_snapshot" in profile for profile in profiles):
+        state, reason, coverage = "unknown", "not_validated", "unverified"
+    elif requested:
+        state, reason, coverage = "unknown", "legacy_unverified", "unverified"
+    else:
+        state, reason, coverage = "unknown", "not_validated", "not_requested"
+
+    limitations = []
+    if interrupted:
+        limitations.append("Credential authority became unavailable; affected actions were interrupted or blocked.")
+    if sampled:
+        limitations.append("Identity health was sampled at bounded points; continuous authentication is not proven.")
+    elif requested:
+        limitations.append("No recorded identity health timeline; credential use does not establish accepted identity.")
     return {
         "schema_version": "authentication-assurance/v1",
         "authentication_requested": requested,
-        "state": "unknown",
-        "reason_code": "authentication_gap" if interrupted else "not_validated" if any(
-            "assessment_snapshot" in profile for profile in profiles) else "legacy_unverified" if requested else "not_validated",
+        "state": state,
+        "reason_code": reason,
         "profiles": profiles,
-        "coverage": "unverified",
+        "coverage": coverage,
+        "health_sample_count": len(timeline),
+        "valid_health_sample_count": valid_count,
+        "uncertain_health_sample_count": uncertain_count,
+        "health_timeline": timeline,
         "interrupted_action_count": interrupted,
         "continuous_authentication_proven": False,
         "finding_evidence_preserved": True,
-        "limitations": (["Credential authority became unavailable; affected actions were interrupted or blocked."] if interrupted else []) +
-            ["No recorded identity health timeline; credential use does not establish accepted identity."],
+        "limitations": limitations,
         "secret_values_visible": False,
     }
