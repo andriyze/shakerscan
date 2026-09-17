@@ -1,5 +1,10 @@
 # AI Gate boundary verification — developer alpha
 
+**Status:** Alpha design and implementation record for configured AI application
+security verification, gated off by default. Not a user guide and not a release
+claim: it verifies a configured target with declared controls and reproducible
+evidence, and says nothing about arbitrary agents.
+
 This branch adds `shaker-ai-boundary` to ShakerScan's existing AI Gate. It tests one concrete rule: **an authenticated customer must not receive another customer's private synthetic record through the assistant or its returned response metadata.** It is a configured regression workflow, not an automatic discovery engine or a universal agent-security certification.
 
 ## Run the working synthetic demo
