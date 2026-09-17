@@ -29,6 +29,18 @@ async def test_action_claim_not_execution_proof():
  async with boundary_fixture("action_claim") as f:
   r=await run(f,f.options(with_action=True));assert not any(x["type"]=="forbidden_agent_action" for x in r["findings"]);assert f.order["status"]=="paid"
 @pytest.mark.asyncio
+async def test_approval_bypass_requires_action_and_absent_approval():
+ async with boundary_fixture("approval_bypass") as f:
+  r=await run(f,f.options(with_approval=True));x=next(x for x in r["findings"] if x["type"]=="approval_bypass");v=x["evidence"]["violations"][0];assert v["postcondition_verified"] and v["approval_absence_verified"];assert f.order["status"]=="refunded" and f.approval["state"]=="pending";assert r["ai_gate"]["decision"]["decision"]=="block"
+@pytest.mark.asyncio
+async def test_legitimate_approval_is_not_bypass():
+ async with boundary_fixture("approval_legit") as f:
+  r=await run(f,f.options(with_approval=True));assert not any(x["type"]=="approval_bypass" for x in r["findings"]);assert f.approval["state"]=="approved"
+@pytest.mark.asyncio
+async def test_secure_approval_path_passes():
+ async with boundary_fixture("secure") as f:
+  r=await run(f,f.options(with_approval=True));assert r["ai_gate"]["boundary"]["capabilities"]["approval_bypass"];assert r["ai_gate"]["boundary"]["state"]=="passed"
+@pytest.mark.asyncio
 async def test_indirect_document_disclosure_is_deterministic():
  async with boundary_fixture("indirect_disclosure") as f:
   marker=f.document["marker"];o=f.options(with_indirect=True);assert marker not in json.dumps(o);r=await run(f,o);assert r["ai_gate"]["decision"]["decision"]=="block";v=next(v for v in r["ai_gate"]["boundary"]["violations"] if v["path"]=="indirect_data_disclosure");assert v["indirect_fixture_verified"] and marker not in json.dumps(r)
