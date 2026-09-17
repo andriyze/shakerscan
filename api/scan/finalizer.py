@@ -60,6 +60,7 @@ _INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
 _PROOF_UNAVAILABLE_REASONS = frozenset({
     "insufficient_plan_budget",
     "placement_unavailable",
+    "dependency_incomplete",
 })
 _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
