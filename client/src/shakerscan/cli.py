@@ -29,10 +29,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from . import __version__
-from ._vendored import load
+from ._vendored import kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
-CLIENT_COMMANDS = ("connect", "disconnect", "mcp", "hunt", "doctor", "version")
+CLIENT_COMMANDS = ("connect", "disconnect", "agent", "api", "scan", "mcp", "hunt", "doctor", "version")
+AGENTS = ("claude", "codex", "opencode")
 CONNECT_PATH = "/_enterprise/connect/"
 ENV_CONFIG_DIR = "SHAKERSCAN_CONFIG_DIR"
 DEFAULT_API_URL = "http://127.0.0.1:8080"
@@ -334,7 +335,10 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if args.claude:
         code = max(code, register_claude_code())
     if not args.claude:
-        print("next:      claude mcp add --scope user shakerscan -- shakerscan mcp   (or any MCP client: `shakerscan mcp`)")
+        print("next:      shakerscan agent claude   (or codex, opencode: the ShakerScan agent workspace against this instance)")
+        print("           claude mcp add --scope user shakerscan -- shakerscan mcp   (MCP only, any client)")
+    else:
+        print("next:      shakerscan agent claude   (the ShakerScan agent workspace against this instance)")
     return code
 
 
@@ -348,6 +352,140 @@ def cmd_disconnect(args: argparse.Namespace) -> int:  # noqa: ARG001
             removed.append(str(path))
     print("removed:   " + (", ".join(removed) if removed else "nothing saved under " + str(directory)))
     return 0
+
+
+# --- the agent workspace ---------------------------------------------------------------------
+
+
+INSTANCE_NOTE = """# Connected ShakerScan instance
+
+This workspace was prepared by `shakerscan agent` for **{url}** ({who}). There is no local engine
+here: `./scanner.sh start`, `stop`, `scale`, `docker compose` and `/queue` do not apply. Talk to
+the instance with `shakerscan api METHOD PATH [JSON]`, `shakerscan scan …`, `shakerscan hunt …`
+and the MCP tools (server `shakerscan`); the credential is in a file those commands read, never
+in the environment. Every action runs under that person's identity and role and is audited. A
+route the instance keeps closed answers with a refusal that names what is missing: report it and
+choose another path. Kit version: ShakerScan {kit_version}.
+
+"""
+
+
+def _copy_tree(source: Path, target: Path) -> None:
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(source, target)
+
+
+def prepare_workspace(workspace: Path, url: str, who: str, executable: str) -> list[str]:
+    """Materialize the agent kit against the connected instance; return what was written."""
+    sources = kit_sources()
+    workspace.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    _copy_tree(sources["skills"], workspace / "skills")
+    written.append("skills/")
+    _copy_tree(sources[".claude"], workspace / ".claude")
+    for hook in (workspace / ".claude" / "hooks").glob("*.sh"):
+        hook.chmod(hook.stat().st_mode | 0o111)
+    written.append(".claude/")
+    kit_version = "unknown"
+    version_file = sources["AGENTS.md"].parent / "VERSION"
+    if version_file.is_file():
+        kit_version = version_file.read_text(encoding="utf-8").strip() or kit_version
+    note = INSTANCE_NOTE.format(url=url, who=who, kit_version=kit_version)
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        (workspace / name).write_text(note + sources[name].read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(name)
+    (workspace / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"shakerscan": {"command": executable, "args": ["mcp"]}}}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    written.append(".mcp.json")
+    (workspace / "opencode.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {"shakerscan": {"type": "local", "command": [executable, "mcp"], "enabled": True}},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    written.append("opencode.json")
+    return written
+
+
+def agent_environment(url: str, token_file: str, agent: str, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """What the launcher exports, plus the connection: the token stays in its file."""
+    env = dict(os.environ if environ is None else environ)
+    env.pop(ENV_TOKEN, None)
+    env.update(
+        {
+            "SHAKERSCAN_API_BASE": url,
+            "SHAKERSCAN_API_URL": url,
+            "SHAKERSCAN_UI_BASE": url,
+            ENV_TOKEN_FILE: token_file,
+            ENV_ALLOW_REMOTE: "true",
+            "SHAKERSCAN_MANAGED_INSTANCE": "1",
+            "SHAKERSCAN_AGENT_NAME": agent,
+            "SHAKERSCAN_RESEARCH_PLANNER_MODE": "agent",
+        }
+    )
+    return env
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    saved = profile()
+    if not saved.get("url") or not saved.get("token_file"):
+        raise ClientError("no connected instance; run `shakerscan connect <link>` first (the console shows the link)")
+    agents = [args.agent] if args.agent else [a for a in AGENTS if shutil.which(a)]
+    if args.agent and args.agent not in AGENTS:
+        raise ClientError(f"unsupported agent '{args.agent}'; use one of {', '.join(AGENTS)}")
+    if not agents and not args.no_launch:
+        raise ClientError("no supported agent on this PATH; install Claude Code, Codex or OpenCode, or pass --no-launch")
+    agent = agents[0] if agents else "claude"
+    workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
+    executable = client_executable()
+    written = prepare_workspace(workspace, saved["url"], "the connected person's identity and role", executable)
+    print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {saved['url']}")
+    if agent == "codex" and shutil.which("codex"):
+        # Codex keeps MCP servers in its own configuration, not in the workspace.
+        result = subprocess.run(
+            ["codex", "mcp", "add", "shakerscan", "--", executable, "mcp"],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if result.returncode == 0:
+            print("codex:     MCP server 'shakerscan' registered")
+        else:
+            detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no output"]
+            print(f"codex:     MCP registration skipped ({detail[0]})")
+    if args.no_launch:
+        print(f"launch:    cd {workspace} && {agent}")
+        return 0
+    if not shutil.which(agent):
+        raise ClientError(f"{agent} is not on this PATH")
+    env = agent_environment(saved["url"], saved["token_file"], agent)
+    print(f"starting:  {agent} in {workspace}")
+    sys.stdout.flush()
+    os.chdir(workspace)
+    os.execvpe(agent, [agent], env)
+    return 0  # unreachable
+
+
+def cmd_api(args: argparse.Namespace) -> int:
+    url = apply_connection(args)
+    rest = list(args.args) or ["--help"]
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return int(load("_api_cli").main(["--api-url", url, *rest]))
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    url = apply_connection(args)
+    rest = list(args.args) or ["--help"]
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return int(load("_scan_cli").main(["--api-url", url, "--ui-url", url, *rest]))
 
 
 # --- client commands ------------------------------------------------------------------------
@@ -439,6 +577,9 @@ COMMANDS = {
     "doctor": cmd_doctor,
     "connect": cmd_connect,
     "disconnect": cmd_disconnect,
+    "agent": cmd_agent,
+    "api": cmd_api,
+    "scan": cmd_scan,
 }
 
 
@@ -484,6 +625,20 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--token-stdin", action="store_true", help="read the token from standard input instead of a prompt")
     connect.add_argument("--timeout", type=float, help="seconds per request (default 20)")
     commands.add_parser("disconnect", help="forget the saved instance and delete its token file")
+    agent = commands.add_parser(
+        "agent",
+        help="start Claude Code, Codex or OpenCode in the ShakerScan agent workspace, against the connected instance",
+    )
+    agent.add_argument("agent", nargs="?", choices=AGENTS, help="which agent (default: the first one installed)")
+    agent.add_argument("--workspace", help="workspace directory (default: ~/.config/shakerscan/agent)")
+    agent.add_argument("--here", action="store_true", help="use the current directory as the workspace")
+    agent.add_argument("--no-launch", action="store_true", help="prepare the workspace and print how to start")
+    api = commands.add_parser("api", help="call the instance's API: METHOD PATH [JSON] (the agent kit's one way in)")
+    connection(api)
+    api.add_argument("args", nargs=argparse.REMAINDER, help="METHOD PATH [JSON]")
+    scan = commands.add_parser("scan", help="submit and follow scans on the connected instance (the runtime's scan CLI)")
+    connection(scan)
+    scan.add_argument("args", nargs=argparse.REMAINDER, help="the scan CLI's arguments; nothing prints its help")
     mcp = commands.add_parser("mcp", help="run the MCP stdio adapter (read-only Arsenal plus target-bound Hunt) for an agent")
     connection(mcp)
     hunt = commands.add_parser(
@@ -513,6 +668,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if argv and argv[0] == "help":
         argv = ["--help"]
     if argv and argv[0] not in CLIENT_COMMANDS and not argv[0].startswith("-"):
+        if argv[0] == "status" and engine_launcher() is None and profile().get("url"):
+            # No engine on this machine but a connected instance: status means the instance.
+            return main(["doctor", *argv[1:]])
         return run_engine(argv)
     parser = build_parser()
     args = parser.parse_args(argv)

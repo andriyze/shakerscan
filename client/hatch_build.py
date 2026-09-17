@@ -22,7 +22,16 @@ try:
 except ImportError:  # the pure helpers are importable (and tested) without a build backend
     BuildHookInterface = object  # type: ignore[assignment,misc]
 
-VENDORED = {"shakerscan_mcp.py": "_mcp.py", "v2_cli.py": "_v2_cli.py"}
+VENDORED = {
+    "shakerscan_mcp.py": "_mcp.py",
+    "v2_cli.py": "_v2_cli.py",
+    "api_cli.py": "_api_cli.py",
+    "scan_cli.py": "_scan_cli.py",
+}
+# The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
+# workspace by the client's `agent` command against the connected instance. `.claude` is
+# carried as `claude` so no hidden directory has to survive packaging.
+KIT = {"skills": "_kit/skills", ".claude": "_kit/claude", "AGENTS.md": "_kit/AGENTS.md", "CLAUDE.md": "_kit/CLAUDE.md"}
 REPOSITORY_MARKERS = ("VERSION", "scanner.sh")
 
 
@@ -40,16 +49,22 @@ def plan_force_include(target_name: str, root: Path) -> dict[str, str]:
     prefix = "src/shakerscan/" if target_name == "sdist" else "shakerscan/"
     scripts = repository_scripts(root)
     if scripts is not None:
+        repo = scripts.parent
         missing = [name for name in VENDORED if not (scripts / name).is_file()]
+        missing += [name for name in KIT if not (repo / name).exists()]
         if missing:
             raise RuntimeError(f"vendored runtime sources are missing from the repository: {missing}")
-        return {str(scripts / name): prefix + module for name, module in VENDORED.items()}
-    copies = [module for module in VENDORED.values() if (root / "src" / "shakerscan" / module).is_file()]
-    if len(copies) == len(VENDORED):
+        mapping = {str(scripts / name): prefix + module for name, module in VENDORED.items()}
+        mapping.update({str(repo / name): prefix + target for name, target in KIT.items()})
+        return mapping
+    package = root / "src" / "shakerscan"
+    copies = [module for module in VENDORED.values() if (package / module).is_file()]
+    copies += [target for target in KIT.values() if (package / target).exists()]
+    if len(copies) == len(VENDORED) + len(KIT):
         return {}
     raise RuntimeError(
-        "vendored runtime sources not found: build from the repository checkout (../scripts) or "
-        "from an sdist that carries src/shakerscan/_mcp.py and src/shakerscan/_v2_cli.py"
+        "vendored runtime sources not found: build from the repository checkout (../scripts, "
+        "../skills, ../.claude) or from an sdist that carries them under src/shakerscan/"
     )
 
 
