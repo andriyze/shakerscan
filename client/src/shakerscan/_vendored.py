@@ -14,13 +14,31 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-RUNTIME_SCRIPTS = {"_mcp": "shakerscan_mcp.py", "_v2_cli": "v2_cli.py"}
+RUNTIME_SCRIPTS = {
+    "_mcp": "shakerscan_mcp.py",
+    "_v2_cli": "v2_cli.py",
+    "_api_cli": "api_cli.py",
+    "_scan_cli": "scan_cli.py",
+}
+# The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
+KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md", "CLAUDE.md": "CLAUDE.md"}
 
 
 def repository_scripts() -> Path | None:
     """``<repo>/scripts`` when this file lives in a checkout (``client/src/shakerscan``)."""
     candidate = Path(__file__).resolve().parents[3] / "scripts"
     return candidate if candidate.is_dir() else None
+
+
+def kit_sources() -> dict[str, Path]:
+    """Repository-relative kit name -> where it is on disk: the packaged copy, else the checkout."""
+    packaged = Path(__file__).resolve().parent / "_kit"
+    if packaged.is_dir():
+        return {name: packaged / part for name, part in KIT_PARTS.items()}
+    repo = Path(__file__).resolve().parents[3]
+    if (repo / "AGENTS.md").is_file() and (repo / "skills").is_dir():
+        return {name: repo / name for name in KIT_PARTS}
+    raise RuntimeError("the agent kit is not part of this installation; reinstall the shakerscan client")
 
 
 def load(name: str) -> ModuleType:

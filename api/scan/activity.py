@@ -115,7 +115,7 @@ def scan_action_diagnostic_line(
     if (
         result.status.value == "skipped"
         and execution_started is False
-        and reason in {"insufficient_plan_budget", "not_applicable"}
+        and reason in {"insufficient_plan_budget", "not_applicable", "dependency_incomplete"}
     ):
         # Allocation/policy skips never launched an adapter. A retained internal
         # diagnostic may explain the scheduler decision, but it is not an adapter

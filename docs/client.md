@@ -100,6 +100,31 @@ host checks a curl-installed user expects from this command. Likewise `shakersca
 prints the client version and, when an engine install is present, the engine release beside it,
 so both commands mean the same thing whichever channel put `shakerscan` on the PATH.
 
+## Work with an agent: `shakerscan agent`
+
+The open-source launcher's `shakerscan agent claude` starts the agent inside the runtime
+directory, where `AGENTS.md`, `CLAUDE.md`, the skills and the `.claude` commands (`/scan`,
+`/findings`, `/status`, `/deep-hunt`, …) tell it how to work. The client does the same against
+the connected instance:
+
+```bash
+shakerscan agent claude        # or codex, opencode; the first one installed when omitted
+```
+
+It materializes that kit (vendored into the package at build time) into a workspace
+(`~/.config/shakerscan/agent`, or `--here` for the current directory, or `--workspace DIR`),
+prepends a note naming the connected instance and the rules of a remote session (no local
+engine, use `shakerscan api`/`scan`/`hunt` and the MCP tools, refusals name what is missing),
+registers the MCP server for that workspace (`.mcp.json` for Claude Code, `opencode.json` for
+OpenCode, `codex mcp add` for Codex), exports the connection with the token left in its file,
+and starts the agent there. `--no-launch` prepares the workspace and prints how to start. The
+kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
+
+`shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET
+"/findings?limit=20"`, `shakerscan api POST /scans '{…}'`); `shakerscan scan …` is the runtime's
+scan CLI against the instance; `shakerscan status` reports the instance when no engine is
+installed on this machine.
+
 ## Hunt from an agent (MCP)
 
 Claude Code, after `shakerscan connect` (or `connect --claude` does this for you):

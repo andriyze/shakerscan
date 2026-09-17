@@ -44,6 +44,16 @@ export function featureEnabled(feature: string): boolean {
     && policy.mode === 'managed' && policy.features?.[feature]?.state === 'enabled'
 }
 
+export function managedTargetAuthorizationIsAutomatic(): boolean {
+  // A managed deployment can record the target's standing authorization itself when active
+  // work is submitted; it then reports target_authorization as unavailable because the
+  // operator has nothing to click. Manual mode keeps the capability enabled. A standalone
+  // deployment has no policy and is never automatic: its own authorization flow applies.
+  const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__
+  if (!policy || policy.schema !== 'shakerscan.workspace-capabilities/v1' || policy.mode !== 'managed') return false
+  return policy.features?.target_authorization?.state === 'unavailable'
+}
+
 export function navigationAllowed(href: string): boolean {
   // Server render has no policy and must match the standalone client's full surface (see featureEnabled).
   const policy = typeof window === 'undefined' ? undefined : window.__SHAKERSCAN_CAPABILITIES__

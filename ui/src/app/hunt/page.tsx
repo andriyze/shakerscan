@@ -40,6 +40,7 @@ import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/c
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { usableWebTargets } from '@/lib/targetChoices'
 
@@ -379,6 +380,11 @@ function HuntContent() {
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
+  // Where the deployment authorizes the target itself, an operator has no way to produce a
+  // receipt: the routes that mint one are administrator-only. Credential use is different --
+  // it carries its own credential-tier approval, which nothing here stands in for.
+  const receiptRequired = privileged
+    && !(selectedCredentialCount === 0 && managedTargetAuthorizationIsAutomatic())
   const configuredDuration = positiveInteger(maxDurationSeconds)
   const approvalTtlMinutes = Math.ceil((configuredDuration ?? HUNT_BUDGET_PROFILES[budget].max_duration_seconds) / 60) + 15
   const startBlockedReason = !targetId
@@ -387,7 +393,7 @@ function HuntContent() {
       ? 'Describe what the Hunt should investigate.'
       : privileged && !authorizationConfirmed
         ? 'Confirm that you are authorized to use the selected capabilities.'
-        : privileged && !approvalReceipt.trim()
+        : receiptRequired && !approvalReceipt.trim()
           ? 'Create or paste a target-bound approval receipt.'
           : null
   const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
@@ -417,7 +423,7 @@ function HuntContent() {
       if (privileged && !authorizationConfirmed) {
         throw new Error('Confirm that you own or are authorized to test this target.')
       }
-      if (privileged && !approvalReceipt.trim()) {
+      if (receiptRequired && !approvalReceipt.trim()) {
         throw new Error('Privileged Hunt capabilities require a target-bound approval receipt.')
       }
 
@@ -716,7 +722,7 @@ function HuntContent() {
                   onScopeReceiptIdChange={setScopeReceipt}
                   ttlMinutes={approvalTtlMinutes}
                   riskTier={selectedCredentialCount > 0 ? 'credential' : 'active'}
-                  required={privileged}
+                  required={receiptRequired}
                 />
               )}
 

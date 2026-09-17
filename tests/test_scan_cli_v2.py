@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import types
+
 import pytest
 
 from scripts import scan_cli
@@ -197,7 +199,7 @@ def test_scan_cli_sends_the_bearer_token_from_a_file_over_https_only(tmp_path, m
         seen["auth"] = request.get_header("Authorization")
         return Response()
 
-    monkeypatch.setattr(scan_cli.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(scan_cli, "_opener", lambda: types.SimpleNamespace(open=fake_urlopen))
     assert scan_cli._request_json("https://scanner.example.com/scan/contracts") == {"ok": True}
     assert seen["auth"] == "Bearer sse_secret"
     with pytest.raises(scan_cli.ScanCliError, match="https"):
