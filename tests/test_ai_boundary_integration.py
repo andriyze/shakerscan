@@ -50,7 +50,7 @@ async def test_verified_disclosure_uses_shared_proof_contract():
 async def test_indirect_findings_are_deterministic_typed_proofs(mode,expected_type,proof_basis):
  from ai_verdict_policy import has_deterministic_exploit_proof
  async with boundary_fixture(mode) as f:
-  o=f.options(with_indirect=True);r=await run_boundary_scan(o["ai_target"]["endpoint_url"],o);finding=next(x for x in r["findings"] if x["type"]==expected_type);assert has_deterministic_exploit_proof(finding);p=finding["proof_contract_v2"];assert p["proof_basis"]==proof_basis;assert p["reexecution"]["verifier_build"]=="ai-boundary-indirect/v1";serialized=json.dumps(r);assert f.document["marker"] not in serialized;assert all(v not in serialized for v in f.credentials.values())
+  o=f.options(with_indirect=True,indirect_action=(mode=="indirect_action"));r=await run_boundary_scan(o["ai_target"]["endpoint_url"],o);finding=next(x for x in r["findings"] if x["type"]==expected_type);assert has_deterministic_exploit_proof(finding);p=finding["proof_contract_v2"];assert p["proof_basis"]==proof_basis;assert p["reexecution"]["verifier_build"]=="ai-boundary-indirect/v1";serialized=json.dumps(r);assert f.document["marker"] not in serialized;assert all(v not in serialized for v in f.credentials.values())
 @pytest.mark.asyncio
 async def test_existing_worker_cancellation_prevents_network():
  async with boundary_fixture() as f:
