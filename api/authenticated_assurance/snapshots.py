@@ -94,7 +94,12 @@ def snapshot_for_scan(profile: dict, selection: ScanProfileSelection, credential
 
 async def pin_scan_profiles(conn, selections: list[ScanProfileSelection], credential_refs: list[dict], *,
                             target_id: UUID, target_url: str, now: datetime, generation: UUID) -> list[dict]:
-    """Caller holds admission transaction and separately validates execution authority."""
+    """Pin assurance and credential metadata under the caller's admission transaction.
+
+    The credential row lock is mandatory: without it, a concurrent credential rotation
+    can commit between reading the canonical credential reference and creating the
+    assessment snapshot. A missing credential row is therefore an admission failure.
+    """
     ids = [selection.profile_id for selection in selections]
     if not 1 <= len(ids) <= 2 or len(set(ids)) != len(ids):
         raise ProfileConflict("invalid_profile_selection")
@@ -102,7 +107,9 @@ async def pin_scan_profiles(conn, selections: list[ScanProfileSelection], creden
         raise ProfileConflict("credential_target_mismatch")
     snapshots = []
     for selection in sorted(selections, key=lambda value: str(value.profile_id)):
-        await conn.fetchrow("SELECT id FROM credential_profiles WHERE id=$1 FOR UPDATE", selection.profile_id)
+        locked = await conn.fetchrow("SELECT id FROM credential_profiles WHERE id=$1 FOR UPDATE", selection.profile_id)
+        if not locked:
+            raise ProfileConflict("credential_changed")
         profile = await AssuranceStore().get(conn, selection.profile_id, revision=selection.revision)
         if not profile:
             raise ProfileConflict("authenticated_profile_not_found")
