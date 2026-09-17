@@ -21,6 +21,7 @@ jobs:
           python-version: "3.12"
       - name: Restore corrected-main ASM semantics while retaining assurance wiring
         run: |
+          git fetch origin main
           git show origin/main:api/api.py > /tmp/api-main.py
           python - <<'PY'
           from pathlib import Path
@@ -47,6 +48,8 @@ jobs:
               if marker not in text: raise SystemExit('action adapter insertion marker missing')
               text = text.replace(marker, helper + marker, 1)
           empty = '        if not rows:\n            return self._skip(action, "not_applicable")\n'
+          count = text.count(empty)
+          if count < 5: raise SystemExit(f'expected at least five empty-slice sites, found {count}')
           text = text.replace(empty, '        if not rows:\n            return self._skip(action, self._empty_slice_reason(manifest))\n')
           adapter.write_text(text, encoding='utf-8')
 
@@ -82,5 +85,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add api/api.py api/scan/action_adapter.py api/scan/explanation.py api/scan/finalizer.py install/MANIFEST.sha256
+          git diff --cached --check
           git commit -m "fix(auth): complete corrected-main reconciliation [auth-reconcile]"
           git push origin HEAD:auth-assurance/pr
