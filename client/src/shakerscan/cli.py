@@ -88,6 +88,31 @@ def save_profile(url: str, token: str, environ: Mapping[str, str] | None = None)
 # --- connection ------------------------------------------------------------------------------
 
 
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, effective port)``, or ``None`` when the URL is not an http(s) origin."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return parts.scheme, parts.hostname.lower().rstrip("."), port or (443 if parts.scheme == "https" else 80)
+
+
+def same_origin(left: str, right: str) -> bool:
+    """Whether two URLs name the same scheme, host and effective port.
+
+    ``https://host`` and ``https://host:443`` are one origin; a different port, a
+    different host, or a downgrade to http is a different one.
+    """
+    resolved = _origin(left)
+    return resolved is not None and resolved == _origin(right)
+
+
 def read_token(
     token_file: str | None,
     environ: Mapping[str, str] | None = None,
@@ -134,7 +159,13 @@ def connection_environment(
         # The saved instance: the operator connected to it deliberately.
         overrides[ENV_URL] = saved["url"]
         overrides[ENV_ALLOW_REMOTE] = "true"
-    token = read_token(token_file, environ, saved)
+    # The saved profile is one connection: its token belongs to its URL. Inherit it only
+    # when the origin actually being addressed is the one that was connected to, so a
+    # mistyped or agent-supplied URL cannot carry an existing credential elsewhere. An
+    # explicit --token-file or SHAKERSCAN_API_TOKEN remains a deliberate override.
+    effective_url = url or environ.get(ENV_URL) or saved.get("url") or ""
+    bound = saved if saved.get("url") and same_origin(effective_url, saved["url"]) else None
+    token = read_token(token_file, environ, bound)
     if token:
         overrides[ENV_TOKEN] = token
     if timeout is not None:
@@ -375,13 +406,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if token
         else "token:    none (fine for a local engine; an Enterprise gateway needs a service token)"
     )
+    # Health and catalogue are separate facts: a reachable tool catalogue does not
+    # establish that the engine is healthy, so each failure stands on its own.
+    ok = True
     try:
         health = client.request_json("GET", "/health")
         status = health.get("status") if isinstance(health, dict) else None
         lines.append(f"engine:   reachable ({status or 'ok'})")
     except mcp.MCPError as exc:
         lines.append(f"engine:   {_with_reason(exc)}")
-    ok = True
+        ok = False
     try:
         tools = client.list_tools()
         hunt = sum(1 for tool in tools if str(tool.get("name", "")).startswith("shakerscan_hunt"))

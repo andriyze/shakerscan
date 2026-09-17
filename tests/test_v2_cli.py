@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 
+import types
+
 import pytest
 
 
@@ -162,7 +164,7 @@ def test_hunt_skill_unbind_uses_real_api_client_delete(monkeypatch):
         captured.update(request=request, timeout=timeout)
         return Response()
 
-    monkeypatch.setattr(v2_cli.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(v2_cli, "_opener", lambda: types.SimpleNamespace(open=urlopen))
     result = v2_cli._run_hunt(
         _parse(
             "hunt", "skill-unbind", "hunt/1", "skill.web/graphql-testing",
@@ -529,7 +531,7 @@ def test_cli_sends_a_service_token_over_https_only(monkeypatch, capsys):
         captured["url"] = request.full_url
         return Response()
 
-    monkeypatch.setattr(v2_cli.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(v2_cli, "_opener", lambda: types.SimpleNamespace(open=urlopen))
     client = v2_cli.ApiClient("https://gateway.example", api_token="st_secret_token")
     assert client.request("GET", "/hunts") == {"hunts": []}
     assert captured["authorization"] == "Bearer st_secret_token"
