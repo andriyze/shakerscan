@@ -74,10 +74,10 @@ jobs:
           PY
       - name: Regenerate installer manifest
         run: python scripts/generate_install_manifest.py
-      - name: Run merge-blocker regressions
+      - name: Validate reconciled tree with repository canonical runner
         run: |
           python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
-          python -m pytest -q -p no:cacheprovider tests/test_auth_assurance_main_reconciliation.py tests/test_asm_dispatch_backoff.py tests/test_scan_action_adapter.py tests/test_scan_family_coverage.py tests/test_install_manifest.py
+          python scripts/run_complete_python_suite.py
       - name: Commit reconciled tree and remove one-shot workflow
         run: |
           set -euo pipefail
