@@ -36,7 +36,17 @@ class AIGateWorkerHandler(ProductWorkerHandler):
         async with self.services.hydrate_ai_gate_options(
             options, scan_id,
         ) as hydrated_options:
-            result = await run_ai_target_scan(target, hydrated_options)
+            if hydrated_options.get("ai_probe_pack") == "shaker-ai-boundary":
+                try:
+                    from ai_gate.boundary.runner import run_boundary_scan
+                except ModuleNotFoundError:
+                    from api.ai_gate.boundary.runner import run_boundary_scan
+                result = await run_boundary_scan(
+                    target, hydrated_options,
+                    cancelled=lambda: self.services.scan_cancel_requested(scan_id),
+                )
+            else:
+                result = await run_ai_target_scan(target, hydrated_options)
         await self.progress(scan_id, "ai_gate_finalize", 95, job_id=job_id)
         return result
 
