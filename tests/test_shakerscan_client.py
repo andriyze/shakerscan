@@ -22,7 +22,7 @@ sys.path.insert(0, str(CLIENT / "homebrew"))
 import hatch_build  # noqa: E402
 import render_formula  # noqa: E402
 from shakerscan import __version__, cli  # noqa: E402
-from shakerscan._vendored import load  # noqa: E402
+from shakerscan._vendored import kit_sources, load  # noqa: E402
 
 ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 SECRET = "secret-token-value"
@@ -56,21 +56,30 @@ def test_a_checkout_runs_the_runtime_scripts_themselves():
     assert callable(mcp.main) and callable(v2.main)
 
 
-def test_the_build_vendors_the_runtime_scripts_for_wheel_and_sdist(tmp_path):
+def test_the_build_vendors_the_runtime_scripts_and_the_agent_kit(tmp_path):
     scripts = ROOT / "scripts"
-    assert hatch_build.plan_force_include("wheel", CLIENT) == {
-        str(scripts / "shakerscan_mcp.py"): "shakerscan/_mcp.py",
-        str(scripts / "v2_cli.py"): "shakerscan/_v2_cli.py",
-    }
-    assert hatch_build.plan_force_include("sdist", CLIENT) == {
-        str(scripts / "shakerscan_mcp.py"): "src/shakerscan/_mcp.py",
-        str(scripts / "v2_cli.py"): "src/shakerscan/_v2_cli.py",
-    }
+    wheel = hatch_build.plan_force_include("wheel", CLIENT)
+    assert wheel[str(scripts / "shakerscan_mcp.py")] == "shakerscan/_mcp.py"
+    assert wheel[str(scripts / "api_cli.py")] == "shakerscan/_api_cli.py"
+    assert wheel[str(scripts / "scan_cli.py")] == "shakerscan/_scan_cli.py"
+    assert wheel[str(ROOT / "skills")] == "shakerscan/_kit/skills"
+    assert wheel[str(ROOT / ".claude")] == "shakerscan/_kit/claude"
+    assert wheel[str(ROOT / "AGENTS.md")] == "shakerscan/_kit/AGENTS.md"
+    sdist = hatch_build.plan_force_include("sdist", CLIENT)
+    assert sdist[str(scripts / "v2_cli.py")] == "src/shakerscan/_v2_cli.py"
+    assert sdist[str(ROOT / "CLAUDE.md")] == "src/shakerscan/_kit/CLAUDE.md"
     # An unpacked sdist has no repository beside it but carries the copies: nothing to map.
     unpacked = tmp_path / "shakerscan-0.0.0" / "src" / "shakerscan"
     unpacked.mkdir(parents=True)
-    for module in ("_mcp.py", "_v2_cli.py"):
+    for module in hatch_build.VENDORED.values():
         (unpacked / module).write_text("# vendored\n", encoding="utf-8")
+    for target in hatch_build.KIT.values():
+        path = unpacked / target
+        if target.endswith(".md"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# kit\n", encoding="utf-8")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
     assert hatch_build.plan_force_include("wheel", tmp_path / "shakerscan-0.0.0") == {}
     # Neither source: fail loudly rather than ship a client without its adapter.
     (tmp_path / "bare" / "src" / "shakerscan").mkdir(parents=True)
@@ -392,3 +401,159 @@ def test_connect_refuses_plain_http_and_explains_a_used_link(monkeypatch, tmp_pa
 
     with pytest.raises(cli.ClientError, match="expired or was already used"):
         cli.fetch_connect_link("https://scanner.example.com/_enterprise/connect/" + "f" * 43, opener=UsedLink())
+
+
+
+def test_a_checkout_offers_the_kit_and_the_other_runtime_clis():
+    sources = kit_sources()
+    assert sources["skills"] == ROOT / "skills" and sources[".claude"] == ROOT / ".claude"
+    assert callable(load("_api_cli").main) and callable(load("_scan_cli").main)
+
+
+def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch, tmp_path, capsys, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    assert cli.main(["agent", "--no-launch"]) == 2, "no connected instance yet"
+    assert "shakerscan connect" in capsys.readouterr().err
+    cli.save_profile("https://scanner.example.com", SECRET)
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "claude", "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert f"cd {workspace} && claude" in out
+    assert (workspace / "skills" / "shakerscan" / "SKILL.md").is_file()
+    assert (workspace / ".claude" / "commands" / "scan.md").is_file()
+    hook = workspace / ".claude" / "hooks" / "session-start.sh"
+    assert hook.is_file() and os.access(hook, os.X_OK)
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        text = (workspace / name).read_text(encoding="utf-8")
+        assert text.startswith("# Connected ShakerScan instance") and "https://scanner.example.com" in text
+        assert "shakerscan api METHOD PATH" in text and "@AGENTS.md" in text if name == "CLAUDE.md" else True
+    mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+    assert mcp["mcpServers"]["shakerscan"]["args"] == ["mcp"]
+    assert mcp["mcpServers"]["shakerscan"]["command"].endswith("shakerscan")
+    opencode = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    assert opencode["mcp"]["shakerscan"]["command"][-1] == "mcp"
+    # Re-running refreshes the kit and keeps the workspace usable.
+    assert cli.main(["agent", "claude", "--workspace", str(workspace), "--no-launch"]) == 0
+    env = cli.agent_environment("https://scanner.example.com", str(tmp_path / "cfg" / "token"), "claude", environ={"HOME": "/h", cli.ENV_TOKEN: "leak"})
+    assert env["SHAKERSCAN_API_BASE"] == "https://scanner.example.com"
+    assert env["SHAKERSCAN_MANAGED_INSTANCE"] == "1" and env[cli.ENV_TOKEN_FILE].endswith("token")
+    assert cli.ENV_TOKEN not in env, "the token stays in its file, never in the agent's environment"
+
+
+def test_api_and_scan_forward_to_the_runtime_clis_with_the_connection(monkeypatch, tmp_path, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    cli.save_profile("https://scanner.example.com", SECRET)
+    seen: dict[str, list[str]] = {}
+
+    class FakeApi:
+        @staticmethod
+        def main(argv):
+            seen["api"] = list(argv)
+            return 0
+
+    class FakeScan:
+        @staticmethod
+        def main(argv):
+            seen["scan"] = list(argv)
+            return 0
+
+    monkeypatch.setattr(cli, "load", lambda name: {"_api_cli": FakeApi, "_scan_cli": FakeScan}[name])
+    assert cli.main(["api", "GET", "/findings?limit=2"]) == 0
+    assert seen["api"] == ["--api-url", "https://scanner.example.com", "GET", "/findings?limit=2"]
+    assert cli.main(["scan", "start", "https://t.example"]) == 0
+    assert seen["scan"] == ["--api-url", "https://scanner.example.com", "--ui-url", "https://scanner.example.com", "start", "https://t.example"]
+    assert os.environ.get(cli.ENV_TOKEN) == SECRET, "the CLIs read the token from the environment the client set"
+
+
+def test_status_means_the_connected_instance_when_there_is_no_local_engine(monkeypatch, tmp_path, capsys, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    monkeypatch.setenv(cli.ENV_HOME, str(tmp_path / "no-engine"))
+    cli.save_profile("https://scanner.example.com", SECRET)
+    mcp = load("_mcp")
+
+    class Down:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "refused")
+
+        def list_tools(self):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "refused")
+
+    monkeypatch.setattr(mcp, "ArsenalClient", Down)
+    assert cli.main(["status"]) == 1
+    assert "saved profile" in capsys.readouterr().out
+
+
+def test_a_saved_token_is_never_reused_for_a_different_origin(tmp_path):
+    """The saved profile is one connection: its token belongs to its URL.
+
+    Resolving the URL and the credential independently meant a `--url` (or an
+    environment URL) pointing somewhere else still inherited the saved instance's
+    token, so a hostname mistake or an agent-directed URL change sent an existing
+    credential to an unintended service.
+    """
+    environ = {cli.ENV_CONFIG_DIR: str(tmp_path)}
+    cli.save_profile("https://saved.example.com", SECRET, environ=environ)
+
+    # Same origin: the operator connected to it deliberately, so it is inherited.
+    assert cli.connection_environment(None, None, None, environ=environ)[cli.ENV_TOKEN] == SECRET
+    assert cli.connection_environment(
+        "https://saved.example.com", None, None, environ=environ,
+    )[cli.ENV_TOKEN] == SECRET
+    # The same origin spelled with its default port is the same origin.
+    assert cli.connection_environment(
+        "https://saved.example.com:443", None, None, environ=environ,
+    )[cli.ENV_TOKEN] == SECRET
+
+    # Another origin never inherits it -- by argument, or through the environment.
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "https://other.example.com", None, None, environ=environ,
+    )
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        None, None, None, environ={**environ, cli.ENV_URL: "https://other.example.com"},
+    )
+    # A different port, and a downgrade to http, are different origins too.
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "https://saved.example.com:8443", None, None, environ=environ,
+    )
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "http://saved.example.com", None, None, environ=environ,
+    )
+
+    # An explicitly supplied credential is a deliberate override, and still works.
+    other = tmp_path / "other-token"
+    other.write_text("a-different-token\n", encoding="utf-8")
+    assert cli.connection_environment(
+        "https://other.example.com", str(other), None, environ=environ,
+    )[cli.ENV_TOKEN] == "a-different-token"
+
+
+def test_doctor_fails_when_the_health_probe_fails_even_if_the_catalogue_answers(
+    monkeypatch, capsys, clean_environ,
+):
+    """A reachable tool catalogue does not establish engine health.
+
+    `ok` was initialised after the health probe's own except block, so a failed
+    health check was printed and then thrown away, and onboarding automation relying
+    on the exit status accepted a broken connection.
+    """
+    mcp = load("_mcp")
+
+    class HealthDown:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "<health probe failed>")
+
+        def list_tools(self):
+            return [{"name": "shakerscan_targets"}]
+
+    monkeypatch.setattr(mcp, "ArsenalClient", HealthDown)
+    code = cli.main(["doctor", "--url", "https://scanner.example.com"])
+    out = capsys.readouterr().out
+    assert "engine:   ShakerScan API is unavailable: <health probe failed>" in out
+    assert "mcp:      1 tools" in out
+    assert code != 0, "a failed health probe must not exit zero"

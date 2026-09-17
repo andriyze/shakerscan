@@ -25,6 +25,23 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: The tag must sit on the supported release line
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          # client-v0.3.0 was cut from a feature branch whose parent PR had merged
+          # elsewhere, so the published client carried work main did not have and a later
+          # release built from main would have silently dropped it. A release tag must be
+          # an ancestor of the supported line.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "tag $GITHUB_REF_NAME ($GITHUB_SHA) is not an ancestor of main;" >&2
+            echo "publish only from a commit on the supported release line." >&2
+            exit 1
+          fi
+          echo "tag is on the main release line"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
@@ -58,7 +75,12 @@ jobs:
           /tmp/client-venv/bin/python -m pip install --disable-pip-version-check dist/*.whl
           /tmp/client-venv/bin/shakerscan version | grep -F "shakerscan client ${{ steps.version.outputs.version }}"
           /tmp/client-venv/bin/shakerscan mcp --help >/dev/null
-          /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli"
+          /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli, shakerscan._api_cli, shakerscan._scan_cli"
+          # Every documented command must be reachable with no engine installed.
+          for command in connect disconnect agent api scan mcp hunt doctor version; do
+            /tmp/client-venv/bin/shakerscan "$command" --help >/dev/null 2>&1 \
+              || { echo "shakerscan $command is not available in the built wheel" >&2; exit 1; }
+          done
           # A wheel built from the sdist must carry the same vendored runtime modules.
           rm -rf /tmp/from-sdist && mkdir -p /tmp/from-sdist && tar -xzf dist/*.tar.gz -C /tmp/from-sdist
           python -m build --wheel --outdir /tmp/from-sdist/dist /tmp/from-sdist/shakerscan-*

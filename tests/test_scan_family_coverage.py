@@ -356,3 +356,40 @@ def test_an_inapplicable_candidate_is_not_unattempted_work_for_its_family():
     dropped = report_for(())
     assert _family(dropped, "xss")["reason"] == "candidates_unattempted"
     assert "xss" in dropped["coverage"]["selected_family_gaps"]
+
+
+def test_a_proof_whose_producer_did_not_complete_is_unavailable_not_failed():
+    """A verifier that timed out or truncated published fewer candidates than the plan
+    scheduled. The proof slices past that point had nothing to prove: that is a stated
+    limit on the escalation, not a proof failure and not a clean not_applicable."""
+    from tests.test_scan_orchestrator import _result
+    from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
+
+    xss = _batch_action("verify.xss", "xss.verify_batch", 0, count=2)
+    prove = _batch_action(
+        "prove.xss", "xss.browser_prove_batch", 1, count=2, required=False,
+    )
+    final = _action("finalize.report", 2, dependencies=(xss.action_id, prove.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(xss, prove, final),
+    )
+    results = {
+        xss.action_id: _result_with_observation_count(xss, 2),
+        prove.action_id: _result(
+            prove,
+            status=CapabilityResultStatus.SKIPPED,
+            reason=CapabilityResultReason.DEPENDENCY_INCOMPLETE,
+        ),
+    }
+    observations = {xss.action_id: (_attempt("c1"), _attempt("c2")), prove.action_id: ()}
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations,
+    )
+
+    row = _family(report, "xss")
+    assert row["coverage_status"] == "complete"
+    assert report["coverage"]["selected_family_gaps"] == []
+    assert row["proof_escalation"]["status"] == "unavailable"
+    assert row["proof_escalation"]["reason"] == "dependency_incomplete"

@@ -50,6 +50,23 @@ class CliError(RuntimeError):
         return result
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never replay an authenticated request against another origin.
+
+    The https:// guard above only covers the URL the operator supplied. Following a
+    redirect with urllib's default handler re-sends the Authorization header to
+    whatever Location names -- another host, or plain HTTP. Refuse instead, and let
+    the caller surface the 3xx.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 class ApiClient:
     def __init__(self, base_url: str, *, timeout: float = 60.0, api_token: str | None = None) -> None:
         self.base_url = str(base_url or "").rstrip("/")
@@ -87,9 +104,16 @@ class ApiClient:
             f"{self.base_url}{path}", data=body, headers=headers, method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _opener().open(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_JSON_BYTES + 1)
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise CliError(
+                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                    "request is never followed to another location",
+                    error_type="api_error",
+                    http_status=exc.code,
+                ) from exc
             raw = exc.read(MAX_JSON_BYTES + 1)
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"
@@ -138,10 +162,17 @@ class ApiClient:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _opener().open(request, timeout=self.timeout) as response:
                 raw = response.read(max_bytes + 1)
                 content_type = str(response.headers.get("Content-Type") or "")
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise CliError(
+                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                    "request is never followed to another location",
+                    error_type="api_error",
+                    http_status=exc.code,
+                ) from exc
             raw = exc.read(MAX_JSON_BYTES + 1)
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"

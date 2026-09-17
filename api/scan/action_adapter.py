@@ -606,6 +606,18 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    def _empty_slice_reason(self, manifest: ScanWorkManifest) -> str:
+        """An empty batch slice is a clean "nothing to do" only when its producer finished.
+
+        When the manifest is partial or cancelled, the work this slice was scheduled for was
+        never published. Calling that "not applicable" lets the finalizer count the escalation
+        as cleanly complete and launders an upstream timeout into good-looking coverage, so it
+        is reported as incomplete dependency work instead.
+        """
+        if str(getattr(manifest, "status", "complete")) != "complete":
+            return "dependency_incomplete"
+        return "not_applicable"
+
     async def _observations(self, action_id: str) -> tuple[Mapping[str, Any], ...]:
         return await self.backend.load_observations(action_id)
 
@@ -1233,7 +1245,7 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError("request batch slice is invalid")
         rows = tuple(manifest.entries[start:min(len(manifest.entries), start + count)])
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -1439,7 +1451,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
         for dependency in action.dependencies:
             for item in await self._observations(dependency):
@@ -1627,7 +1639,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
         for dependency in action.dependencies:
             for item in await self._observations(dependency):
@@ -2130,7 +2142,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -2648,7 +2660,7 @@ class DatabaseNeutralScanActionDispatcher:
             enumerate(manifest.entries[start:stop], start=start)
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         template_options: dict[str, Any] = {}
         if tool == "nuclei":
             template_manifest = await self._work_manifest(
