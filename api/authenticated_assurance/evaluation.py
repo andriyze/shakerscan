@@ -13,6 +13,14 @@ from uuid import UUID, uuid4
 from .models import ProfileConfiguration, ValidationRecord, exact_origin
 
 MAX_HEALTH_RESPONSE_BYTES = 16_384
+_HEALTH_STATES = frozenset({"valid", "invalid", "unknown", "expired", "revoked"})
+_HEALTH_REASON_CODES = frozenset({
+    "identity_confirmed", "validation_unavailable", "validation_timeout",
+    "destination_rejected", "login_redirect", "expected_identity_missing",
+    "unexpected_identity", "unexpected_role", "access_denied", "application_error",
+    "invalid_response", "credential_expired", "credential_revoked", "profile_disabled",
+    "profile_changed", "credential_changed", "process_restarted", "validation_stale",
+})
 
 
 def _unique_object(pairs):
@@ -144,9 +152,6 @@ def _authentication_requested(options: Mapping[str, Any]) -> bool:
         return True
     if options.get("managed_credential_profiles"):
         return True
-    # Historical Scan rows predate canonical credential references. Keep this list
-    # metadata-only and intentionally broad: presence means identity was requested,
-    # never that the value was accepted or used successfully.
     legacy_keys = (
         "auth_header", "auth_headers_json", "auth_cookies", "auth_token", "auth_user",
         "auth_scenario_json", "login_url", "login_username", "login_password",
@@ -178,7 +183,9 @@ def scan_authentication_summary(
         if "authenticated_profile_snapshot" in item:
             from .snapshot_binding import bound_snapshot
             try:
-                public["assessment_snapshot"] = bound_snapshot(dict(item)).model_dump(mode="json")
+                snapshot = bound_snapshot(dict(item))
+                if snapshot is not None:
+                    public["assessment_snapshot"] = snapshot.model_dump(mode="json")
             except (ValueError, TypeError, AttributeError):
                 pass
         profiles.append(public)
@@ -196,8 +203,15 @@ def scan_authentication_summary(
             profile_id = str(UUID(str(record.get("profile_id"))))
         except (TypeError, ValueError):
             continue
-        state = str(record.get("state") or "unknown")
-        reason = str(record.get("reason_code") or "validation_unavailable")
+        raw_state = record.get("state")
+        raw_reason = record.get("reason_code")
+        state = raw_state if isinstance(raw_state, str) and raw_state in _HEALTH_STATES else "unknown"
+        reason = raw_reason if isinstance(raw_reason, str) and raw_reason in _HEALTH_REASON_CODES else "invalid_response"
+        identity_matched = record.get("identity_matched") is True
+        # Positive evidence is accepted only when all positive fields agree. A malformed
+        # or forged historical receipt can therefore degrade assurance but never improve it.
+        if state == "valid" and (reason != "identity_confirmed" or not identity_matched):
+            state, reason, identity_matched = "unknown", "invalid_response", False
         if state == "valid":
             valid_count += 1
         else:
@@ -206,9 +220,9 @@ def scan_authentication_summary(
             "credential_reference": profile_id,
             "state": state,
             "reason_code": reason,
-            "checked_at": record.get("checked_at"),
-            "valid_until": record.get("valid_until"),
-            "identity_matched": record.get("identity_matched") is True,
+            "checked_at": record.get("checked_at") if isinstance(record.get("checked_at"), str) else None,
+            "valid_until": record.get("valid_until") if isinstance(record.get("valid_until"), str) else None,
+            "identity_matched": identity_matched,
             "role_matched": record.get("role_matched") if type(record.get("role_matched")) is bool else None,
         })
     timeline.sort(key=lambda row: str(row.get("checked_at") or ""))
