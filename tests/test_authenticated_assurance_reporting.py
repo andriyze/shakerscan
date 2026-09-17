@@ -69,3 +69,40 @@ def test_health_projection_is_bounded_even_for_oversized_receipts():
     summary = scan_authentication_summary({}, health_observations=observations)
     assert summary["health_sample_count"] == _MAX_ASSURANCE_HEALTH_SAMPLES
     assert "must-not-project" not in str(summary)
+
+
+def test_forged_positive_health_state_can_only_degrade_assurance():
+    profile_id = str(uuid4())
+    forged = {"kind": "authentication_health", "record": {
+        "profile_id": profile_id,
+        "state": "valid",
+        "reason_code": "access_denied",
+        "identity_matched": True,
+        "checked_at": "2026-09-16T18:00:00+00:00",
+        "valid_until": "2026-09-16T18:05:00+00:00",
+    }}
+    summary = scan_authentication_summary({}, health_observations=(forged,))
+    assert summary["state"] == "unknown"
+    assert summary["coverage"] == "partial"
+    assert summary["valid_health_sample_count"] == 0
+    assert summary["uncertain_health_sample_count"] == 1
+    assert summary["health_timeline"][0]["reason_code"] == "invalid_response"
+
+
+def test_unknown_health_enums_and_nonmatching_identity_never_become_positive():
+    profile_id = str(uuid4())
+    samples = (
+        {"kind": "authentication_health", "record": {
+            "profile_id": profile_id, "state": "super-valid", "reason_code": "identity_confirmed",
+            "identity_matched": True,
+        }},
+        {"kind": "authentication_health", "record": {
+            "profile_id": profile_id, "state": "valid", "reason_code": "identity_confirmed",
+            "identity_matched": False,
+        }},
+    )
+    summary = scan_authentication_summary({}, health_observations=samples)
+    assert summary["state"] == "unknown"
+    assert summary["coverage"] == "partial"
+    assert summary["valid_health_sample_count"] == 0
+    assert summary["uncertain_health_sample_count"] == 2
