@@ -142,6 +142,23 @@ def _bearer_token() -> str | None:
     return token or None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never replay an authenticated request against another origin.
+
+    The https:// guard above only covers the URL the operator supplied. Following a
+    redirect with urllib's default handler re-sends the Authorization header to
+    whatever Location names -- another host, or plain HTTP. Refuse instead, and let
+    the caller surface the 3xx.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 def _request_json(
     url: str,
     *,
@@ -167,9 +184,14 @@ def _request_json(
         headers["Idempotency-Key"] = idempotency_key
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _opener().open(request, timeout=30) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ScanCliError(
+                f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                "request is never followed to another location"
+            ) from exc
         body = exc.read()
         try:
             error = json.loads(body)

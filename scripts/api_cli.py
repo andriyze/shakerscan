@@ -89,12 +89,36 @@ def build_request(
     return urllib.request.Request(api_url + path, data=data, headers=headers, method=method)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never replay an authenticated request against another origin.
+
+    The https:// guard above only covers the URL the operator supplied. Following a
+    redirect with urllib's default handler re-sends the Authorization header to
+    whatever Location names -- another host, or plain HTTP. Refuse instead, and let
+    the caller surface the 3xx.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 def call(request: urllib.request.Request, *, opener=None, timeout: float = 60.0) -> tuple[int, str]:
-    opener = opener or urllib.request.build_opener()
+    opener = opener or _opener()
     try:
         with opener.open(request, timeout=timeout) as response:
             return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ApiCliError(
+                f"the instance answered HTTP {exc.code} with a redirect to "
+                f"{exc.headers.get('Location') or 'an unnamed location'}; an authenticated "
+                "request is never followed to another location. Point --api-url at the "
+                "instance's own origin."
+            ) from exc
         return exc.code, exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ApiCliError(f"cannot reach {request.full_url}: {getattr(exc, 'reason', exc)}") from exc
@@ -106,7 +130,7 @@ def render(status: int, text: str) -> tuple[str, int]:
         parsed = json.loads(text) if text.strip() else None
     except ValueError:
         parsed = None
-    if status < 400:
+    if status < 300:
         return (json.dumps(parsed, indent=2, sort_keys=False) if parsed is not None else text), 0
     detail = parsed.get("detail") if isinstance(parsed, dict) else None
     if isinstance(detail, dict):
