@@ -392,3 +392,76 @@ def test_connect_refuses_plain_http_and_explains_a_used_link(monkeypatch, tmp_pa
 
     with pytest.raises(cli.ClientError, match="expired or was already used"):
         cli.fetch_connect_link("https://scanner.example.com/_enterprise/connect/" + "f" * 43, opener=UsedLink())
+
+
+def test_a_saved_token_is_never_reused_for_a_different_origin(tmp_path):
+    """The saved profile is one connection: its token belongs to its URL.
+
+    Resolving the URL and the credential independently meant a `--url` (or an
+    environment URL) pointing somewhere else still inherited the saved instance's
+    token, so a hostname mistake or an agent-directed URL change sent an existing
+    credential to an unintended service.
+    """
+    environ = {cli.ENV_CONFIG_DIR: str(tmp_path)}
+    cli.save_profile("https://saved.example.com", SECRET, environ=environ)
+
+    # Same origin: the operator connected to it deliberately, so it is inherited.
+    assert cli.connection_environment(None, None, None, environ=environ)[cli.ENV_TOKEN] == SECRET
+    assert cli.connection_environment(
+        "https://saved.example.com", None, None, environ=environ,
+    )[cli.ENV_TOKEN] == SECRET
+    # The same origin spelled with its default port is the same origin.
+    assert cli.connection_environment(
+        "https://saved.example.com:443", None, None, environ=environ,
+    )[cli.ENV_TOKEN] == SECRET
+
+    # Another origin never inherits it -- by argument, or through the environment.
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "https://other.example.com", None, None, environ=environ,
+    )
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        None, None, None, environ={**environ, cli.ENV_URL: "https://other.example.com"},
+    )
+    # A different port, and a downgrade to http, are different origins too.
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "https://saved.example.com:8443", None, None, environ=environ,
+    )
+    assert cli.ENV_TOKEN not in cli.connection_environment(
+        "http://saved.example.com", None, None, environ=environ,
+    )
+
+    # An explicitly supplied credential is a deliberate override, and still works.
+    other = tmp_path / "other-token"
+    other.write_text("a-different-token\n", encoding="utf-8")
+    assert cli.connection_environment(
+        "https://other.example.com", str(other), None, environ=environ,
+    )[cli.ENV_TOKEN] == "a-different-token"
+
+
+def test_doctor_fails_when_the_health_probe_fails_even_if_the_catalogue_answers(
+    monkeypatch, capsys, clean_environ,
+):
+    """A reachable tool catalogue does not establish engine health.
+
+    `ok` was initialised after the health probe's own except block, so a failed
+    health check was printed and then thrown away, and onboarding automation relying
+    on the exit status accepted a broken connection.
+    """
+    mcp = load("_mcp")
+
+    class HealthDown:
+        def __init__(self, base_url, *, timeout_seconds, api_token):
+            pass
+
+        def request_json(self, method, path, payload=None):
+            raise mcp.MCPError(-32001, "ShakerScan API is unavailable", "<health probe failed>")
+
+        def list_tools(self):
+            return [{"name": "shakerscan_targets"}]
+
+    monkeypatch.setattr(mcp, "ArsenalClient", HealthDown)
+    code = cli.main(["doctor", "--url", "https://scanner.example.com"])
+    out = capsys.readouterr().out
+    assert "engine:   ShakerScan API is unavailable: <health probe failed>" in out
+    assert "mcp:      1 tools" in out
+    assert code != 0, "a failed health probe must not exit zero"
