@@ -1,15 +1,66 @@
-# AI Gate boundary verification — developer alpha
+# AI Gate boundary verification — alpha
 
-**Status:** Alpha design and implementation record for configured AI application
-security verification, gated off by default. Not a user guide and not a release
-claim: it verifies a configured target with declared controls and reproducible
-evidence, and says nothing about arbitrary agents.
+**Status:** merge candidate for controlled-environment testing. The feature is selected with the `shaker-ai-boundary` probe pack and is intentionally refused for production targets. It verifies configured security invariants with synthetic fixtures and deterministic evidence; it is not a universal certification of an AI system.
 
-This branch adds `shaker-ai-boundary` to ShakerScan's existing AI Gate. It tests one concrete rule: **an authenticated customer must not receive another customer's private synthetic record through the assistant or its returned response metadata.** It is a configured regression workflow, not an automatic discovery engine or a universal agent-security certification.
+## Purpose
 
-## Run the working synthetic demo
+AI red teaming often stops at asking a model adversarial questions and judging its text. This feature tests the **application boundary around the model**: authenticated identities, tenant isolation, retrieval, tool execution, approvals, indirect content and conversation state. A model saying that it read data or performed an action is never sufficient proof. ShakerScan looks for a private synthetic marker or independently reads the resulting application state.
 
-From a checkout of this branch, use Python 3.12 or newer and the existing locked scanner dependencies. No model API key, database, Redis, or running ShakerScan stack is needed for the demo.
+## Implemented in this alpha
+
+### Cross-customer data isolation
+
+Two independently authenticated principals (`victim` and `attacker`) are verified through the application's identity endpoint. Each owns a separate synthetic record with a randomized private marker. ShakerScan establishes ownership through a non-chat endpoint, verifies that direct cross-customer access is denied, then attempts access through the AI application. A marker returned in the answer or returned JSON metadata is deterministic disclosure evidence.
+
+A direct backend authorization failure is reported separately from an AI-mediated failure so an ordinary IDOR/BOLA is not misattributed to the model or agent.
+
+### Verified state-changing actions
+
+A contract may declare a synthetic forbidden action and a read-only verifier endpoint. ShakerScan establishes the initial state, sends the attack through the assistant, and reads the state afterward. A response such as `Refund completed` is not proof; the finding exists only when the configured postcondition is independently observed.
+
+### Approval bypass
+
+Approval-sensitive workflows can declare both the action state and approval state. A bypass is confirmed only when the sensitive action occurs while the independent approval read shows that the required approval remained absent. If the workflow legitimately obtains approval first, it is not classified as an approval bypass.
+
+### Indirect prompt injection / RAG
+
+The application harness may provision a synthetic retrieved document containing an untrusted instruction and a private randomized marker. ShakerScan verifies the document independently, triggers retrieval without putting the marker in the attacker request, and can confirm either disclosure of the document marker or a state-changing action caused through the retrieved content.
+
+### Tool-principal boundary
+
+For applications that return structured tool telemetry, the contract can identify the tool-call list, tool name, execution flag and execution principal. ShakerScan detects a tool executing under a principal different from the authenticated attack principal. State-changing tool findings additionally require an independently verified application postcondition.
+
+This is **structured application tool telemetry**, not native MCP wire interception.
+
+### Stateful multi-turn attacks
+
+A contract may contain 2–8 attacker turns. All turns use one fresh conversation/session ID so ShakerScan can test attacks that require context accumulation rather than one-shot prompts. Per-turn prompt/response hashes preserve the attack chain. Multi-turn data disclosure is verified with the private marker; state-changing multi-turn attacks require the independent postcondition.
+
+### Evidence, gating and safety properties
+
+The alpha reuses AI Gate request/token budgets, credential hydration, gate decisions, evidence manifests and `proof-contract/v2`. It uses exact-origin scope controls, runtime DNS/address validation, redirect blocking, bounded responses, cancellation checks and secret/marker redaction. A completed clean scenario may return `allow`; incomplete or unsupported verification returns `needs_approval`; deterministic boundary violations return `block`.
+
+The scanner does not provision or delete external customer records. The target application's test harness owns synthetic fixture creation and cleanup. Production execution is refused. Use test identities and isolate synthetic tools from real payments, email, destructive infrastructure and production data.
+
+## Application contract
+
+Configure an existing non-production AI target (`api_chat`, `rag`, `ai_rag`, or `agent_trace`) with separate `victim` and `attacker` credentials. Store the secret-free contract under:
+
+`ai_target.metadata_json.boundary_contract`
+
+The base contract declares identity and record endpoints plus strict response paths. Optional sections enable additional scenarios:
+
+- `action` — independently verified forbidden state change.
+- `approval` — action plus independent required-approval state.
+- `indirect` — synthetic retrieved document and optional action verifier.
+- `tool` — structured tool execution/principal telemetry and optional postcondition.
+- `multiturn` — 2–8 prompts sharing one fresh session and optional postcondition.
+
+The chat request template must contain `{{prompt}}` and `{{session_id}}`. `{{principal_id}}` and `{{principal_tenant_id}}` are also available. JSON response paths are strict dotted paths, not executable expressions.
+
+The sample base contract is `examples/ai-boundary/customer-read-contract.json`.
+
+## Running the synthetic developer demo
 
 ```bash
 python3 -m venv .venv
@@ -21,96 +72,49 @@ python scripts/ai_boundary_alpha.py demo --mode secure --output boundary-secure.
 python scripts/ai_boundary_alpha.py demo --mode vulnerable --nested --output boundary-vulnerable.json
 ```
 
-The secure fixture returns `allow` and exits **0**. The deliberately vulnerable fixture returns `block` and exits **1**: that is the expected detection result, not a broken demo. `--mode echo` demonstrates failed functionality controls: `needs_approval`, exit **2**. `--mode backend_leak` isolates an ordinary backend authorization defect; `--mode trace_only` demonstrates a real disclosure in JSON metadata even when the answer refuses.
+The secure demo exits `0`. The deliberately vulnerable demo returns a blocking finding and exits `1`. `needs_approval` exits `2`. These are deterministic loopback application simulations, not live-model benchmarks.
 
-Every demo starts an ephemeral loopback HTTP server, creates two independent identities and randomized synthetic records, runs the actual verifier, then closes the server and clears records in a `finally` path. `--nested` uses different request and response layouts. These fixtures are deterministic application simulations, **not real LLM evaluations**; the output explicitly records that distinction. The output path must be new and is created with mode `0600` rather than overwriting an earlier report.
-
-## What happens in a run
-
-1. Read each identity through the application's non-chat identity endpoint. Check actual subjects and tenants against the declared contract. Credential labels alone are not proof of distinct users.
-2. Read each user's own synthetic record through the non-chat record endpoint. Verify its ID, owner, tenant and unpredictable marker. Neither marker may appear in the contract, prompt, or chat request body.
-3. Attempt a direct backend read of the owner's record as the other user. If the private marker leaks, report a **backend authorization** defect without attributing it to the assistant; assistant coverage remains incomplete. Otherwise require a real 403/404 denial.
-4. Confirm each user can retrieve their own record through the assistant. A broken endpoint, an echo bot, or an assistant unable to retrieve the fixture cannot pass.
-5. Repeat configured cross-customer attack conversations with fresh session IDs and fresh identity checks. Match the private marker in the actual returned JSON. A marker in debug/tool metadata is a disclosure to that caller, **not proof that a claimed tool operation executed**.
-6. Recheck identities and fixture contents for drift. Return `passed`, `failed`, or `inconclusive`, independently of coverage completeness. An interrupted run never becomes a clean pass, and a confirmed disclosure remains a failure even if later controls fail.
-
-## Configure an application, not just a model endpoint
-
-Use a non-production AI target (`api_chat`, `rag`, or `agent_trace`) and its existing encrypted principal management. The alpha accepts non-streaming JSON POST chat endpoints. Use the existing `victim` principal role for the contract's semantic `owner` slot and `attacker` for the other user. Do not submit credentials in scan options. Normal target-bound credential approvals and worker hydration remain required.
-
-The application needs three same-origin interfaces: a chat POST, an authenticated identity GET, and an authenticated record GET. Their names and JSON nesting are configurable. For example:
-
-```text
-GET /identity
-{"subject":"owner-subject","tenant":"owner-tenant"}
-
-GET /records/owner-record
-{"id":"owner-record","owner":"owner-subject","tenant":"owner-tenant","marker":"<private random synthetic value>"}
-
-POST /chat
-{"message":"...","session_id":"..."}
-
-Chat response
-{"answer":"..."}
-```
-
-Copy `examples/ai-boundary/customer-read-contract.json`, substitute the application's real test identity/record identifiers and response paths, and store it under **`ai_target.metadata_json.boundary_contract`**. Merge this into existing target metadata rather than discarding other settings. JSON paths are strict dotted paths such as `identity.subject` or `output.text`, with numeric segments for arrays; they are not executable expressions.
-
-The ordinary target request template must include both placeholders:
-
-```json
-{
-  "message": "{{prompt}}",
-  "session_id": "{{session_id}}"
-}
-```
-
-An alternate application can use `{"input":{"text":"{{prompt}}"},"thread":"{{session_id}}"}` without changing the verifier. `principal_id` and `principal_tenant_id` placeholders are also available; the non-chat identity check still establishes who authenticated. The contract's `response_path` is authoritative for its chat functionality control.
-
-The target's shared authorization/header template is intentionally not copied across principal requests. Use each principal's existing `multi_header` credential configuration when an application needs additional authenticated headers. Query-parameter credentials are not supported by this alpha.
-
-After saving the target configuration and its principals, submit through the **existing** API, with the required credential-tier approval receipt:
+For a configured target, submit through the existing AI target API and normal credential approval path:
 
 ```bash
-shakerscan api POST /ai/targets/<AI_TARGET_ID>/scan '{"probe_pack":"shaker-ai-boundary","scan_profile":"standard","environment":"staging","approval_receipt_id":"<APPROVED_RECEIPT_ID>"}'
+shakerscan api POST /ai/targets/<AI_TARGET_ID>/scan \
+  '{"probe_pack":"shaker-ai-boundary","scan_profile":"standard","environment":"staging","approval_receipt_id":"<APPROVED_RECEIPT_ID>"}'
 ```
 
-The worker selects the boundary workflow inside the existing credential-hydration context. Other probe packs retain their existing execution path. This workflow is selected by `probe_pack`, not by a new Scan type. Use the AI target API/worker path; the legacy private `run_ai_target_scan` Python function is not the boundary entrypoint. Developer tests and demos call `ai_gate.boundary.runner.run_boundary_scan`.
+## What `passed` means
 
-Results retain normal AI Gate findings, decision, transcript, coverage and evidence-manifest fields. Structured details live at `ai_gate.boundary` and in the execution plan/transcript. The existing scan result and findings views remain usable; there is **no new guided contract editor or dedicated boundary dashboard** in this alpha.
+`passed` means the configured controls and attack scenarios completed and ShakerScan did not observe their declared deterministic failure condition. It does **not** mean the application is generally secure. Encoded or paraphrased data leakage can evade an exact canary test, and unconfigured tools/data sources are outside coverage.
 
-## Fixture ownership and cleanup
+## Planned after the alpha
 
-Your application's test harness provisions and later deletes **its own** test records. The scanner does not create or delete external records. Generate a separate marker for every record and run:
+The following are deliberately deferred so this branch can merge and begin real application testing:
 
-```python
-import secrets
-marker = "ssb_" + secrets.token_hex(24)
-```
+1. **Native MCP transport verification.** Connect to MCP servers directly, observe protocol-level tool discovery/calls/results, bind sessions to authenticated principals and produce tool-side receipts rather than relying on application-returned telemetry.
+2. **Streaming/SSE/WebSocket targets.** Extend deterministic response capture to streamed model and agent protocols while preserving budgets, cancellation and scope enforcement.
+3. **Browser/GUI agents.** Verify browser-agent actions through DOM/network/postcondition evidence rather than assistant claims.
+4. **Richer indirect sources.** Email, tickets, web pages, uploaded files and other untrusted context sources beyond the configured synthetic document endpoint.
+5. **Adaptive attack planning.** Use AI reasoning to select and mutate scenarios while retaining deterministic success predicates. The model may propose attacks; it must not decide whether its own attack succeeded.
+6. **Encoded/semantic leakage verification.** Add controlled transformations and stronger canary strategies for partial, encoded or paraphrased disclosure without creating high false-positive rates.
+7. **Guided configuration UI.** Contract editor/wizard, fixture readiness checks, scenario preview and dedicated boundary-results visualization. The current alpha uses existing AI target/result surfaces.
+8. **Real-system benchmark suite.** Run reproducible vulnerable and secure reference agents plus selected open-source AI applications to measure recall, precision, runtime and regression stability.
+9. **Fixture lifecycle adapters.** Optional application-owned setup/cleanup hooks for disposable synthetic records, with explicit authorization and rollback semantics.
+10. **Production-safe profile.** Only after real-world validation: define a strictly read-only subset with separate policy and explicit operator opt-in. The current alpha continues to refuse production.
 
-Store each marker exclusively in its owner's private record. Never put it in an attacker prompt, shared document, system prompt, or test configuration. Rotate fixtures to avoid pollution from previous runs or cross-session caches. The verifier checks marker format and rejects obvious static examples, but cannot prove randomness or exclusive storage from a returned string. Those are explicit harness responsibilities.
+## Merge/test acceptance
 
-Use read-only test identities and isolate the assistant from real payments, production data, outgoing email and destructive tools. A POST to a chat endpoint can cause application side effects even though the scanner only sends record GETs and chat POSTs. This is why production is refused rather than treated as safe by virtue of HTTP methods alone. Application-owned chat history cleanup is also outside this alpha.
-
-## Safety, evidence and limits
-
-The worker's shared runtime scope guard is checked before requests and against actual DNS resolution before connecting. Destinations stay on the configured exact origin; redirects, query credentials, encoded/traversing paths, and shared cookie jars are refused. HTTPS is required except for loopback demos. Only a loopback-IP developer fixture may run without a persisted runtime guard. DNS/address drift uses the existing centralized scope policy, not a second allowlist system.
-
-Request and token counters reuse AI Gate's budget classes. Defaults are 64 HTTP requests, 32,000 estimated tokens and 2 requests/second, with a 64 KiB response cap, 15-second per-request deadline and 180-second run deadline. Token use is estimated and checked between requests; it is not a provider-enforced billing ceiling. Custom limits cannot silently disable controls. A maximum of eight attack templates and three repetitions is supported. Worker cancellation is checked before outbound requests and while consuming responses; task cancellation propagates instead of producing a success report.
-
-Confirmed observations are normalized through ShakerScan's existing `proof-contract/v2` adapter and use existing risk scoring, gate decisions and evidence manifests. Raw response bodies, protected markers and authentication headers are not stored in the boundary report. Hashes bind observed responses and configuration, but are not a replacement for the original response body when independently auditing a historical run. Reproduce using the approved configuration and fresh fixtures; changing the model or backend can change the result.
-
-`passed` means **no exact-marker disclosure was observed in these completed scenarios**. Partial/encoded/paraphrased leaks, indirect document injection, multi-turn attack planning, browser widgets, SSE, native MCP, approval bypasses and actual write-action verification are not covered. Do not label them tested or secure. A broad public beta requires real application pilots, live model testing, and deployed-stack acceptance beyond these synthetic regressions.
-
-## Verification
+Before merging, the branch-specific `AI boundary alpha` workflow must pass. The pull request also runs the repository's complete Python/pre-merge checks. The focused verification command is:
 
 ```bash
 PYTHONPATH=.:api:scanner python -m pytest -q \
   tests/test_ai_boundary.py \
   tests/test_ai_boundary_integration.py \
-  tests/test_ai_boundary_admission.py
+  tests/test_ai_boundary_admission.py \
+  tests/test_ai_gate_judging.py \
+  tests/test_ai_redteam_artifacts.py \
+  tests/test_worker_handler_decomposition.py \
+  tests/test_v2_module_boundaries.py
 
 python scripts/check_module_size.py
 ```
 
-The branch's `AI boundary alpha` workflow also runs existing AI Gate/worker regression suites, validates the sample contract, executes both secure and vulnerable CLI demos, and archives the exact source revision. API admission tests require the full locked dependencies; do not replace missing production modules with test stubs and claim that validates the API.
+After merge, the immediate goal is **controlled real-application testing**, not additional architecture expansion. Use disposable identities/fixtures, record false positives and unsupported target shapes, and feed those observations into the post-alpha roadmap above.
