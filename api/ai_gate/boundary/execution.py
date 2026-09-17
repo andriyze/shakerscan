@@ -1,9 +1,7 @@
 """Deterministic cross-customer scenarios, independent of any LLM judge."""
 from __future__ import annotations
 import copy,json,uuid
-from typing import Any
-from .contract import BoundaryContract,ContractError,canonical_hash,pick,valid_marker
-from .transport import BoundaryTransport
+from .contract import ContractError,canonical_hash,pick,valid_marker
 
 def render(value,replacements):
  if isinstance(value,str):
@@ -14,7 +12,7 @@ def render(value,replacements):
  if isinstance(value,list):return [render(v,replacements) for v in value]
  return value
 class BoundaryScenario:
- def __init__(self,contract,transport,*,chat_path,request_template):self.contract=contract;self.transport=transport;self.chat_path=chat_path;self.template=copy.deepcopy(request_template);self.controls=[];self.attempts=[];self.violations=[];self.errors=[];self.markers={};self.completed=False;self.action=None;self.indirect=None
+ def __init__(self,contract,transport,*,chat_path,request_template):self.contract=contract;self.transport=transport;self.chat_path=chat_path;self.template=copy.deepcopy(request_template);self.controls=[];self.attempts=[];self.violations=[];self.errors=[];self.markers={};self.completed=False;self.action=None;self.indirect=None;self.approval=None
  def check(self,name,condition,o):
   self.controls.append({"name":name,"passed":bool(condition),"response_sha256":o.digest})
   if not condition:raise ContractError(name)
@@ -45,7 +43,8 @@ class BoundaryScenario:
   c=self.contract
   from .action_contract import ActionContract
   from .indirect_contract import IndirectContract
-  self.action=ActionContract.parse(c.action_raw);self.indirect=IndirectContract.parse(c.indirect_raw)
+  from .approval_contract import ApprovalContract
+  self.action=ActionContract.parse(c.action_raw);self.indirect=IndirectContract.parse(c.indirect_raw);self.approval=ApprovalContract.parse(c.approval_raw)
   for p in (c.owner,c.attacker):await self.identity(p);await self.resource(p)
   if len(set(self.markers.values()))!=2:raise ContractError("fixture_markers_must_differ")
   if any(m in json.dumps({"contract":c.source,"request_template":self.template}) for m in self.markers.values()):raise ContractError("fixture_marker_present_in_test_configuration")
@@ -63,8 +62,11 @@ class BoundaryScenario:
   if self.indirect:
    from .indirect_execution import execute_indirect_contract
    await execute_indirect_contract(self,self.indirect)
+  if self.approval:
+   from .approval_execution import execute_approval_contract
+   await execute_approval_contract(self,self.approval)
   for p in (c.owner,c.attacker):await self.identity(p);await self.resource(p,recheck=True)
   self.completed=True
  def summary(self):
-  state="failed" if self.violations else "passed" if self.completed and not self.errors else "inconclusive";planned=len(self.contract.attacks)*self.contract.repetitions+(self.action.repetitions if self.action else 0)+(self.indirect.repetitions if self.indirect else 0)
-  return {"schema_version":"ai-boundary/v3","contract_name":self.contract.name,"contract_sha256":self.contract.digest,"state":state,"coverage_complete":self.completed and not self.errors,"controls":self.controls,"attempts":self.attempts,"violations":self.violations,"errors":self.errors,"planned_attempts":planned,"attempted_attacks":len(self.attempts),"capabilities":{"cross_customer_read":True,"verified_forbidden_action":self.action is not None,"indirect_injection":self.indirect is not None},"limitations":["Only configured synthetic fixtures are assessed.","Action success requires independent postcondition verification.","Browser, SSE and native MCP workflows remain future work."]}
+  state="failed" if self.violations else "passed" if self.completed and not self.errors else "inconclusive";planned=len(self.contract.attacks)*self.contract.repetitions+(self.action.repetitions if self.action else 0)+(self.indirect.repetitions if self.indirect else 0)+(self.approval.repetitions if self.approval else 0)
+  return {"schema_version":"ai-boundary/v4","contract_name":self.contract.name,"contract_sha256":self.contract.digest,"state":state,"coverage_complete":self.completed and not self.errors,"controls":self.controls,"attempts":self.attempts,"violations":self.violations,"errors":self.errors,"planned_attempts":planned,"attempted_attacks":len(self.attempts),"capabilities":{"cross_customer_read":True,"verified_forbidden_action":self.action is not None,"indirect_injection":self.indirect is not None,"approval_bypass":self.approval is not None},"limitations":["Only configured synthetic fixtures are assessed.","Action and approval findings require independent postcondition verification.","Browser, SSE and native MCP workflows remain future work."]}
