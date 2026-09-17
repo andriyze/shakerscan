@@ -43,3 +43,8 @@ __all__ = [
     "get_probe_pack_definitions",
     "get_probe_pack",
 ]
+
+# Register the configured workflow in the canonical catalog, not a second registry.
+from .boundary.catalog import register_boundary_pack as _register_boundary_pack
+
+_register_boundary_pack()

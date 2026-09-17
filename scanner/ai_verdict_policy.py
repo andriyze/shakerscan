@@ -27,6 +27,11 @@ _DETERMINISTIC_PROOF_TYPES = {
     "data_extraction",
     "oob_callback",
     "repeated_semantic_response_diff",
+    # AI-boundary verification proves these deterministically, the same way the DAST
+    # verifiers do: a postcondition observed after an agent action, and a planted canary
+    # disclosed through an indirect channel.
+    "postcondition_verification",
+    "indirect_canary_disclosure",
 }
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -121,7 +126,13 @@ def _legacy_reexecution_evidence(finding: dict[str, Any]) -> tuple[bool, str | N
         proof = _as_dict(finding.get("browser_proof")) or _as_dict(evidence.get("browser_proof"))
         return True, str(proof.get("verifier_build") or proof.get("technique") or "headless-xss-verifier")[:200]
     proof_type = _proof_type(finding)
-    if proof_type in {"repeated_semantic_response_diff", "cross_principal_replay", "write_cross_principal_replay"}:
+    if proof_type in {
+        "repeated_semantic_response_diff",
+        "cross_principal_replay",
+        "write_cross_principal_replay",
+        "postcondition_verification",
+        "indirect_canary_disclosure",
+    }:
         return True, str(validation.get("verifier_build") or finding.get("tool") or proof_type)[:200]
     if poe.get("proven") is True and str(poe.get("evidence_type") or "").strip().lower() in _DETERMINISTIC_PROOF_TYPES:
         return True, str(poe.get("verifier_build") or finding.get("tool") or "proof-of-exploit")[:200]
