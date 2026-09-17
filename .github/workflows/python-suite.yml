@@ -8,7 +8,12 @@ name: Python suite
 on:
   pull_request:
   push:
-    branches: [main]
+    # Long-lived feature branches belong here too. This branch ran only its own narrow
+    # "AI boundary alpha" workflow, which does not include the precision suite or the
+    # partitioned suite, so deleting is_trusted_ai_false_positive and the ASM dispatch
+    # backoff stayed invisible while the branch looked green -- an audit found them, not
+    # CI. A branch that lives longer than a day runs the complete suite.
+    branches: [main, feat/ai-boundary-verification-alpha]
 
 permissions:
   contents: read
