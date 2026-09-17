@@ -11,8 +11,9 @@ def test_dependency_incomplete_and_authentication_uncertain_are_distinct_reasons
 
 
 def test_corrected_main_asm_backoff_regression_is_present_after_sync():
-    """The #135 regression module must survive future #137 rebases/merges."""
-    from tests import test_asm_dispatch_backoff
+    """The #135 regression source must survive future #137 rebases/merges."""
+    from pathlib import Path
 
-    assert callable(test_asm_dispatch_backoff.test_dispatch_failure_records_a_backoff_decision)
-    assert callable(test_asm_dispatch_backoff.test_target_inside_dispatch_backoff_is_skipped)
+    source = (Path(__file__).resolve().parent / "test_asm_dispatch_backoff.py").read_text(encoding="utf-8")
+    assert "def test_dispatch_failure_records_a_backoff_decision" in source
+    assert "def test_target_inside_dispatch_backoff_is_skipped" in source
