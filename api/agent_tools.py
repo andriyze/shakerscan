@@ -1188,12 +1188,34 @@ def build_enforced_scanner_plan(
                 "public_oob": False,
             }
         elif batch_attempt and http >= 1:
-            hard = {"http_requests": http, "tool_wall_seconds": wall}
-            timeout_seconds, timeout_ms = wall, wall * 1_000
+            # Re-pace to the reservation, as every other batched tool already is. nuclei was
+            # the exception: its argv fixes `-rate-limit 10`, so a 45-second attempt holding
+            # 120 requests planned ~450 -- about 3.75x. It tripped the wire ceiling
+            # ("external_process_contract:wire limiter reported traffic above the hard
+            # ceiling"), was charged its whole reservation anyway, and surfaced as the
+            # catch-all `adapter_failed`, repeatedly and expensively.
+            #
+            # nuclei's knob is a rate, not a per-request delay, and the tool may run for the
+            # whole wall, so the bound is rate x wall <= hold across the entire wall. The
+            # delay-based _batch_attempt_pacing used by sqlmap/dalfox paces against a
+            # fraction of the wall, which would overshoot here.
+            rate_per_second = max(1, http // max(1, wall))
+            paced_wall = wall
+            if rate_per_second * paced_wall > http:
+                # One request per second is nuclei's floor: a hold thinner than the wall has
+                # to shorten the wall rather than let the rate outrun the hold.
+                paced_wall = max(1, http // rate_per_second)
+            burst = max(1, min(10, rate_per_second))
+            _replace_argv_value(argv, "-rate-limit", rate_per_second)
+            _replace_argv_value(argv, "-bulk-size", burst)
+            _replace_argv_value(argv, "-concurrency", burst)
+            hard = {"http_requests": http, "tool_wall_seconds": paced_wall}
+            timeout_seconds, timeout_ms = paced_wall, paced_wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
             proof_inputs = {
                 "profile": "batch_attempt", "targets": 1,
-                "connection_ceiling": http, "wall_seconds": wall,
+                "connection_ceiling": http, "wall_seconds": paced_wall,
+                "rate_per_second": rate_per_second, "burst": burst,
                 "retries": 0, "redirects": 0, "public_oob": False,
             }
         elif http >= 4_000 and wall >= 300:
