@@ -417,7 +417,19 @@ async def list_targets_grouped(
                 t.discovery_source, t.is_active, t.metadata_json,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
-                t.created_at
+                t.created_at,
+                -- The targets page reads this grouped shape, not the flat list. Without the flag
+                -- every row rendered "Authorize for active testing (once)" forever: the click
+                -- recorded a real authorization and said so, then the row was unchanged on the
+                -- next load, so an operator had no way to tell it had worked.
+                EXISTS (
+                    SELECT 1 FROM approval_receipts a
+                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                    WHERE s.target_id = t.id AND a.status = 'active'
+                      AND a.approved_by IS NOT NULL
+                      AND a.action_name = 'target.authorization'
+                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                ) AS authorized_for_active_testing
             FROM targets t
             WHERE 1=1
         """
