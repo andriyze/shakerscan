@@ -5,6 +5,9 @@ name: Python suite
 # belong in their own workflow so the repository-wide CI contract remains stable.
 on:
   pull_request:
+  # The merge queue tests the combined result once, so a sibling merge no longer forces every
+  # open branch to rebase and re-run. Required checks must therefore also run on merge_group.
+  merge_group:
   push:
     branches: [main]
 
@@ -12,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: python-suite-${{ github.event.pull_request.number || github.sha }}
+  group: python-suite-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -28,8 +31,8 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: |
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -82,7 +85,7 @@ jobs:
         if: always() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: python-suite-${{ github.event.pull_request.head.sha || github.sha }}
+          name: python-suite-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           path: artifacts/v2-full-python.xml
           if-no-files-found: error
           retention-days: 14
