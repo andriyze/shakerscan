@@ -16,10 +16,51 @@ from .continuation import (
     ScanPlanRevision,
     root_scan_plan_revision,
 )
+def _assurance_unavailable_summary(
+    options: Mapping[str, Any], *, interrupted_action_count: int = 0,
+    health_observations: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Stand in for the assurance preview when it cannot be imported.
+
+    `report-rebuild` runs from an installed tree that carries no third-party packages, and the
+    preview's models need pydantic, so importing it must never be required to rebuild a report.
+    This claims nothing: no profile is projected, no health sample is counted, nothing is
+    proven, and the absence is stated in `limitations` rather than left to be inferred from a
+    clean-looking block.
+    """
+    references = options.get("credential_profile_refs") if isinstance(options, Mapping) else None
+    interrupted = max(0, int(interrupted_action_count or 0))
+    return {
+        "schema_version": "authentication-assurance/v1",
+        "authentication_requested": bool(references) or bool(interrupted),
+        "state": "unknown",
+        "reason_code": "authentication_gap" if interrupted else "not_validated",
+        "profiles": [],
+        "coverage": "unverified",
+        "health_sample_count": 0,
+        "valid_health_sample_count": 0,
+        "uncertain_health_sample_count": 0,
+        "health_timeline": [],
+        "interrupted_action_count": interrupted,
+        "continuous_authentication_proven": False,
+        "finding_evidence_preserved": True,
+        "limitations": [
+            "authentication assurance was not available in this runtime;"
+            " no identity state is established by this report"
+        ],
+        "secret_values_visible": False,
+    }
+
+
 try:
     from authenticated_assurance.evaluation import scan_authentication_summary
-except ModuleNotFoundError:
-    from api.authenticated_assurance.evaluation import scan_authentication_summary
+except ImportError:
+    try:
+        from api.authenticated_assurance.evaluation import scan_authentication_summary
+    except ImportError:
+        # Both spellings resolve to the same module; reaching here means a dependency of the
+        # preview is absent, not that the path was wrong.
+        scan_authentication_summary = _assurance_unavailable_summary
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
