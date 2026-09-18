@@ -1417,20 +1417,54 @@ def test_nuclei_progress_counter_is_not_wire_evidence():
     assert settlement["source"] == "progress_counter_is_not_wire_evidence"
 
 
-def test_request_lines_are_counted_across_chunk_boundaries():
-    """The proxy counts HTTP request lines toward the target: exact for plaintext, a lower
-    bound under TLS. Chunks split anywhere, so a request line straddling two reads counts once."""
-    from pinned_socks_proxy import count_request_lines
-    carry = b""
-    total = 0
-    for chunk in (b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HT", b"TP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok",
-                  b"GET /c HTTP/1.1\r\n\r\n"):
-        n, carry = count_request_lines(chunk, carry)
-        total += n
-    assert total == 3
-    # A body that happens to contain a method word is not a request line.
-    n, carry = count_request_lines(b"POST /d HTTP/1.1\r\nContent-Length: 20\r\n\r\nGET /not-a-request!!", b"")
-    assert n == 1
+def _feed(counter, *chunks):
+    return sum(counter.feed(c) for c in chunks)
+
+
+def _post(body: bytes, extra: bytes = b"") -> bytes:
+    return b"POST /submit HTTP/1.1\r\nHost: t\r\n" + extra + b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+
+def test_request_lookalikes_inside_a_body_or_header_are_not_requests():
+    """Audit counterexample (2026-09-18): the first counter matched a request-shaped string
+    anywhere in the stream, so one POST whose body carried 120 such strings counted as 121
+    requests, the settlement called that a lower bound, and the hard-ceiling contract failed a
+    120-request hold on one real message -- the original failure class for a new reason. nuclei's
+    smuggling templates send exactly such payloads. A counter that can exceed the real message
+    count is not a lower bound; requests are counted at HTTP/1 message boundaries only."""
+    from pinned_socks_proxy import RequestCounter
+    assert _feed(RequestCounter(), _post(b"GET /embedded-not-a-request HTTP/1.1\r\n")) == 1
+    assert _feed(RequestCounter(), _post(b"".join(b"GET /embedded-%d HTTP/1.1\r\n" % i for i in range(120)))) == 1
+    assert _feed(RequestCounter(), b"GET /x HTTP/1.1\r\nHost: t\r\nX-Debug: GET /inner HTTP/1.1\r\n\r\n") == 1
+
+
+def test_keep_alive_requests_are_counted_across_bodies_and_chunk_boundaries():
+    """Under keep-alive the next request follows the previous body with no newline between them,
+    and chunks split anywhere; each real message counts exactly once."""
+    from pinned_socks_proxy import RequestCounter
+    stream = (b"GET /a HTTP/1.1\r\nHost: t\r\n\r\n"
+              + _post(b"ok")
+              + b"GET /c HTTP/1.1\r\nHost: t\r\n\r\n")
+    for cut in (1, 7, 29, 40, len(stream) - 3):
+        c = RequestCounter()
+        assert _feed(c, stream[:cut], stream[cut:]) == 3, cut
+    # chunked transfer encoding: the body is framed by chunk sizes, then a zero chunk
+    chunked = (b"POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+               b"5\r\nGET /\r\n" b"c\r\n HTTP/1.1\r\nx\r\n" b"0\r\n\r\n"
+               b"GET /after HTTP/1.1\r\n\r\n")
+    assert _feed(RequestCounter(), chunked) == 2
+
+
+def test_opaque_or_malformed_traffic_stops_counting_instead_of_guessing():
+    """TLS and anything that is not well-formed HTTP/1 are unmeasurable: the counter keeps what it
+    has already counted (still a true lower bound) and never adds to it."""
+    from pinned_socks_proxy import RequestCounter
+    c = RequestCounter()
+    assert c.feed(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03") == 0 and c.measurable is False
+    c = RequestCounter()
+    assert c.feed(b"GET /a HTTP/1.1\r\nHost: t\r\n\r\n") == 1
+    assert c.feed(b"NOT AN HTTP MESSAGE\r\n\r\nGET /b HTTP/1.1\r\n\r\n") == 0 and c.measurable is False
+
 
 
 def test_worker_prefers_proxy_wire_evidence_over_an_unavailable_settlement():

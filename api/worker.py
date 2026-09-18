@@ -19141,6 +19141,7 @@ async def _execute_agent_scanner_process(
             if pinned_proxy is not None else 0
         ),
         "http_requests_observed": int(getattr(pinned_proxy, "http_requests_observed", 0) or 0),
+        "wire_requests_measurable": bool(getattr(pinned_proxy, "wire_requests_measurable", True)),
         "connections_opened": (
             int(getattr(pinned_proxy, "connections_opened", 0))
             if pinned_proxy is not None else 0
