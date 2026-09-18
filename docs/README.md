@@ -15,6 +15,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`../AGENTS.md`](../AGENTS.md) | Compact, always-loaded coding-agent policy and operating decisions |
 | [`product-model.md`](product-model.md) | Canonical product names, natural-language routing, source labels, and compatibility terms |
 | [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
+| [`service-intelligence.md`](service-intelligence.md) | Exposure service inventory, vulnerability intelligence, service-specific activities, evidence, and Hunt handoff |
 
 ## Product And Operations
 

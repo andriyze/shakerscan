@@ -44,7 +44,11 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 
 
+from .services_router import router as services_router
+from .service_inventory import origin as _service_origin
+
 router = APIRouter()
+router.include_router(services_router)
 
 _pool_provider: Callable[[], Any] | None = None
 
@@ -102,7 +106,7 @@ def _build_exposure_graph(
     ai_node_by_id: dict[str, str] = {}
     ai_target_by_id: dict[str, dict[str, Any]] = {}
     scan_subject_by_id: dict[str, str] = {}
-    endpoint_node_by_path: dict[tuple[str | None, str | None], list[str]] = {}
+    endpoint_node_by_path: dict[tuple[str | None, str | None, str | None], list[str]] = {}
     findings_by_ai_target: dict[str, list[dict[str, Any]]] = {}
     for finding in findings:
         ai_target_id = str(finding.get("ai_target_id") or "")
@@ -228,8 +232,8 @@ def _build_exposure_graph(
                 method = str(endpoint.get("method") or "GET").upper()
                 path = str(endpoint.get("path") or endpoint.get("url") or "/")
                 endpoint_url = _normalize_graph_endpoint_url(scan.get("target_url"), endpoint.get("url") or path)
-                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _endpoint_path_key(endpoint_url) or path)}"
-                endpoint_node_by_path.setdefault((subject_root_domain, _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
+                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _service_origin(endpoint_url), _endpoint_path_key(endpoint_url) or path)}"
+                endpoint_node_by_path.setdefault((subject_id, _service_origin(endpoint_url), _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
                 add_node(_graph_node(
                     endpoint_node_id,
                     "endpoint",
@@ -266,8 +270,8 @@ def _build_exposure_graph(
                 if not endpoint_url:
                     continue
                 method = str(endpoint.get("method") or "GET").upper()
-                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _endpoint_path_key(endpoint_url))}"
-                endpoint_node_by_path.setdefault((subject_root_domain, _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
+                endpoint_node_id = f"endpoint:{_graph_hash(subject_id, method, _service_origin(endpoint_url), _endpoint_path_key(endpoint_url))}"
+                endpoint_node_by_path.setdefault((subject_id, _service_origin(endpoint_url), _endpoint_path_key(endpoint_url)), []).append(endpoint_node_id)
                 add_node(_graph_node(
                     endpoint_node_id,
                     "endpoint",
@@ -450,7 +454,16 @@ def _build_exposure_graph(
         if subject_id:
             edges.append(_graph_edge(subject_id, finding_node_id, "has_finding", label="has finding", severity=severity))
         finding_path = _endpoint_path_key(finding.get("url"))
-        for endpoint_node_id in endpoint_node_by_path.get((root_domain, finding_path), [])[:5]:
+        related_endpoints = list(dict.fromkeys(endpoint_node_by_path.get(
+            (subject_id, _service_origin(finding.get("url")), finding_path), []
+        )))
+        # A path-only finding cannot choose between GET and POST (or other
+        # operations) at the same origin. Keep it target-scoped when ambiguous.
+        if len(related_endpoints) > 1:
+            finding_method = str(finding.get("http_method") or finding.get("method") or "").upper()
+            related_endpoints = [node_id for node_id in related_endpoints
+                                 if finding_method and nodes[node_id].get("meta", {}).get("method") == finding_method]
+        for endpoint_node_id in related_endpoints[:5]:
             edges.append(_graph_edge(endpoint_node_id, finding_node_id, "affected_by", label="affected by", severity=severity))
             # Risk-bearing endpoints inherit their worst finding's severity so
             # they rank into fan-out budgets and render with severity rings.
