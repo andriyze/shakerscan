@@ -14,7 +14,32 @@ function when(value: string | null) {
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Unknown time'
 }
 function listener(service: ServiceRecord) {
-  return `${service.address || 'Address not retained'} · ${service.transport.toUpperCase()}/${service.port}`
+  // The listener is what identifies the row. The address is extra: only literal IPs are
+  // retained, so a hostname-based observation has none, and leading every row with
+  // "Address not retained" made an absence the loudest text on the page.
+  return `${service.transport.toUpperCase()}/${service.port}`
+}
+function listenerWithAddress(service: ServiceRecord) {
+  return service.address ? `${service.address} · ${listener(service)}` : listener(service)
+}
+function ago(value: string | null) {
+  if (!value) return null
+  const at = new Date(value).getTime()
+  if (!Number.isFinite(at)) return null
+  const minutes = Math.round((Date.now() - at) / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours}h ago`
+  return `${Math.round(hours / 24)}d ago`
+}
+// Rows an operator should look at first: linked findings, then candidate weaknesses, then
+// a stable listener order. Sorting by consequence is what makes the table worth scanning.
+function byConsequence(a: ServiceRecord, b: ServiceRecord) {
+  return b.findings.length - a.findings.length
+    || b.cve_candidates.length - a.cve_candidates.length
+    || a.transport.localeCompare(b.transport)
+    || a.port - b.port
 }
 const STATUS: Record<string, string> = {
   review_in_hunt: 'Review in Hunt', manual_review: 'Manual review', unsupported: 'Not implemented',
@@ -33,7 +58,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
     <Card className="mt-4 p-5" data-testid="service-details">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="break-all text-xs text-gray-400">{target.root_domain || 'Device inventory'} → {target.locator || target.label} → {listener(service)}</p>
+          <p className="break-all text-xs text-gray-400">{target.root_domain || 'Device inventory'} → {target.locator || target.label} → {listenerWithAddress(service)}</p>
           <h3 className="mt-2 text-lg font-semibold text-white">{service.product || service.service} {service.version || '· version unknown'}</h3>
           <p className="mt-1 text-sm text-gray-400">Observation relationship—not a proven attack path.</p>
         </div>
@@ -151,8 +176,28 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         {data.intelligence.status !== 'available' && <p role="status" className="text-sm text-amber-200">Intelligence is unavailable or failed integrity checks. Empty candidate lists must not be read as a clean result.</p>}
         {data.targets.length === 0 && <EmptyState message="No targets on this page" hint="Clear a filter or return to the first page. Missing service evidence is not a clean scan." />}
         {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
-          <div className="border-b border-gray-800 p-4"><h3 className="break-words font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p className="mt-2 text-xs text-gray-400">{target.unlinked_findings_count} active findings remain target-scoped; no unambiguous service association.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
-          {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan with the relevant discovery policy to collect evidence.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-sm"><thead className="border-b border-gray-800 text-xs text-gray-500"><tr>{['Listener / service', 'Identity', 'Candidate issues', 'Evidence', ''].map((label, index) => <th key={index} scope="col" className="px-4 py-3">{label || 'Details'}</th>)}</tr></thead><tbody className="divide-y divide-gray-800">{target.services.map((service) => <tr key={service.id} className={service.id === selectedId ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'}><td className="px-4 py-3"><p className="text-gray-200">{listener(service)}</p><p className="mt-1 text-xs text-gray-400">{service.service} · {readable(service.presence)}</p></td><td className="px-4 py-3 text-gray-300">{service.product || 'Product unknown'}<p className="mt-1 text-xs text-gray-500">{service.version || 'Version unknown'} · {readable(service.identity_basis)}</p></td><td className="px-4 py-3 text-gray-300">{service.cve_candidates.length} CVE candidates<p className="mt-1 text-xs text-gray-500">{service.findings.length} linked active findings</p></td><td className="px-4 py-3 text-gray-400">{readable(service.freshness)}<p className="mt-1 text-xs text-gray-500">{readable(service.observation_status)}</p></td><td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline focus-visible:outline-2">Inspect</button></td></tr>)}</tbody></table></div>}
+          <div className="border-b border-gray-800 p-4"><h3 className="break-words font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
+          {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan with the relevant discovery policy to collect evidence.</p> : (() => {
+            const services = [...target.services].sort(byConsequence)
+            const notable = services.filter((service) => service.findings.length > 0 || service.cve_candidates.length > 0).length
+            const addressed = services.filter((service) => service.address).length
+            return <>
+              <p className="border-b border-gray-800 px-4 py-2 text-xs text-gray-400">{services.length} listeners{notable > 0 ? <> · <span className="text-amber-200">{notable} with linked findings or candidates</span></> : ' · nothing linked to any of them'}{addressed === 0 && ' · no network address retained for this target'}</p>
+              <div className="overflow-x-auto"><table className="w-full min-w-[740px] text-left text-sm"><thead className="border-b border-gray-800 text-xs text-gray-500"><tr>{['Listener', 'Identity', 'Linked', 'Last seen', ''].map((label, index) => <th key={index} scope="col" className="px-4 py-3">{label || 'Details'}</th>)}</tr></thead><tbody className="divide-y divide-gray-800">{services.map((service) => {
+                const linked = service.findings.length
+                const candidates = service.cve_candidates.length
+                const quiet = linked === 0 && candidates === 0
+                const seen = ago(service.last_seen_at)
+                return <tr key={service.id} className={service.id === selectedId ? 'bg-teal-500/10' : 'hover:bg-gray-800/40'}>
+                  <td className="px-4 py-3"><p className={quiet ? 'text-gray-400' : 'font-medium text-gray-100'}>{listener(service)} · {service.service}</p><p className="mt-1 text-xs text-gray-500">{readable(service.presence)}{service.address && <> · {service.address}</>}</p></td>
+                  <td className="px-4 py-3 text-gray-300">{service.product ? <>{service.product}{service.version && <> {service.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{readable(service.identity_basis)}{service.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
+                  <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}</p></td>
+                  <td className="px-4 py-3 text-gray-400">{seen || readable(service.freshness)}<p className="mt-1 text-xs text-gray-500">{readable(service.observation_status)}</p></td>
+                  <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline focus-visible:outline-2">Inspect</button></td>
+                </tr>
+              })}</tbody></table></div>
+            </>
+          })()}
         </Card>)}
         {selected && selectedTarget && <ServiceDetails key={selected.id} service={selected} target={selectedTarget} onClose={() => setFilters({ service_id: undefined })} />}
         {selectedId && !selected && <p role="status" className="text-sm text-amber-200">The selected service is not in this evidence window. Refresh or inspect its owning target; no stale details are displayed.</p>}
