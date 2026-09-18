@@ -105,14 +105,14 @@
     "operation_id": "list_ai_surfaces_ai_surfaces_get"
   },
   {
-    "path": "/ai/surfaces/sync",
-    "method": "post",
-    "operation_id": "sync_ai_surfaces_ai_surfaces_sync_post"
-  },
-  {
     "path": "/ai/surfaces/{surface_id}/attempts",
     "method": "get",
     "operation_id": "list_ai_surface_attempts_ai_surfaces__surface_id__attempts_get"
+  },
+  {
+    "path": "/ai/surfaces/sync",
+    "method": "post",
+    "operation_id": "sync_ai_surfaces_ai_surfaces_sync_post"
   },
   {
     "path": "/ai/targets",
@@ -325,31 +325,6 @@
     "operation_id": "arsenal_record_hypothesis_arsenal_hypotheses_post"
   },
   {
-    "path": "/arsenal/hypotheses/from-benchmark",
-    "method": "post",
-    "operation_id": "arsenal_generate_hypotheses_from_benchmark_arsenal_hypotheses_from_benchmark_post"
-  },
-  {
-    "path": "/arsenal/hypotheses/from-plan",
-    "method": "post",
-    "operation_id": "arsenal_generate_hypotheses_from_plan_arsenal_hypotheses_from_plan_post"
-  },
-  {
-    "path": "/arsenal/hypotheses/schedule",
-    "method": "get",
-    "operation_id": "arsenal_schedule_hypotheses_arsenal_hypotheses_schedule_get"
-  },
-  {
-    "path": "/arsenal/hypotheses/situation-report",
-    "method": "get",
-    "operation_id": "arsenal_hypothesis_situation_report_arsenal_hypotheses_situation_report_get"
-  },
-  {
-    "path": "/arsenal/hypotheses/source-ingest",
-    "method": "post",
-    "operation_id": "arsenal_generate_hypotheses_from_source_arsenal_hypotheses_source_ingest_post"
-  },
-  {
     "path": "/arsenal/hypotheses/{hypothesis_id}/claim",
     "method": "post",
     "operation_id": "arsenal_claim_hypothesis_arsenal_hypotheses__hypothesis_id__claim_post"
@@ -375,6 +350,31 @@
     "operation_id": "arsenal_transition_hypothesis_arsenal_hypotheses__hypothesis_id__transition_post"
   },
   {
+    "path": "/arsenal/hypotheses/from-benchmark",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_benchmark_arsenal_hypotheses_from_benchmark_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/from-plan",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_plan_arsenal_hypotheses_from_plan_post"
+  },
+  {
+    "path": "/arsenal/hypotheses/schedule",
+    "method": "get",
+    "operation_id": "arsenal_schedule_hypotheses_arsenal_hypotheses_schedule_get"
+  },
+  {
+    "path": "/arsenal/hypotheses/situation-report",
+    "method": "get",
+    "operation_id": "arsenal_hypothesis_situation_report_arsenal_hypotheses_situation_report_get"
+  },
+  {
+    "path": "/arsenal/hypotheses/source-ingest",
+    "method": "post",
+    "operation_id": "arsenal_generate_hypotheses_from_source_arsenal_hypotheses_source_ingest_post"
+  },
+  {
     "path": "/arsenal/plans",
     "method": "get",
     "operation_id": "arsenal_operation_plans_arsenal_plans_get"
@@ -395,16 +395,6 @@
     "operation_id": "arsenal_record_refuter_review_arsenal_refuter_reviews_post"
   },
   {
-    "path": "/arsenal/refuter-reviews/queue-from-summary",
-    "method": "post",
-    "operation_id": "arsenal_queue_refuter_reviews_from_summary_arsenal_refuter_reviews_queue_from_summary_post"
-  },
-  {
-    "path": "/arsenal/refuter-reviews/summary",
-    "method": "get",
-    "operation_id": "arsenal_refuter_review_summary_arsenal_refuter_reviews_summary_get"
-  },
-  {
     "path": "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict",
     "method": "post",
     "operation_id": "arsenal_derive_refuter_review_verdict_arsenal_refuter_reviews__refuter_review_id__derive_verdict_post"
@@ -413,6 +403,16 @@
     "path": "/arsenal/refuter-reviews/{refuter_review_id}/execute",
     "method": "post",
     "operation_id": "arsenal_execute_refuter_review_plan_arsenal_refuter_reviews__refuter_review_id__execute_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/queue-from-summary",
+    "method": "post",
+    "operation_id": "arsenal_queue_refuter_reviews_from_summary_arsenal_refuter_reviews_queue_from_summary_post"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/summary",
+    "method": "get",
+    "operation_id": "arsenal_refuter_review_summary_arsenal_refuter_reviews_summary_get"
   },
   {
     "path": "/arsenal/scope/preview",
@@ -445,6 +445,46 @@
     "operation_id": "asm_check_families_asm_check_families_get"
   },
   {
+    "path": "/authenticated-scan-profiles",
+    "method": "get",
+    "operation_id": "list_profiles_authenticated_scan_profiles_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles",
+    "method": "post",
+    "operation_id": "write_profile_authenticated_scan_profiles_post"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}",
+    "method": "get",
+    "operation_id": "get_profile_authenticated_scan_profiles__profile_id__get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/history",
+    "method": "get",
+    "operation_id": "get_profile_history_authenticated_scan_profiles__profile_id__history_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/validate",
+    "method": "post",
+    "operation_id": "validate_profile_authenticated_scan_profiles__profile_id__validate_post"
+  },
+  {
+    "path": "/authenticated-scan-profiles/contract",
+    "method": "get",
+    "operation_id": "contract_authenticated_scan_profiles_contract_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}",
+    "method": "get",
+    "operation_id": "get_validation_authenticated_scan_profiles_validations__request_id__get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_validation_authenticated_scan_profiles_validations__request_id__cancel_post"
+  },
+  {
     "path": "/credential-profiles",
     "method": "get",
     "operation_id": "list_credential_profiles_credential_profiles_get"
@@ -453,11 +493,6 @@
     "path": "/credential-profiles",
     "method": "post",
     "operation_id": "create_credential_profile_credential_profiles_post"
-  },
-  {
-    "path": "/credential-profiles/capabilities",
-    "method": "get",
-    "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get"
   },
   {
     "path": "/credential-profiles/{profile_id}",
@@ -478,6 +513,11 @@
     "path": "/credential-profiles/{profile_id}/rotate",
     "method": "post",
     "operation_id": "rotate_credential_profile_credential_profiles__profile_id__rotate_post"
+  },
+  {
+    "path": "/credential-profiles/capabilities",
+    "method": "get",
+    "operation_id": "credential_capability_catalog_credential_profiles_capabilities_get"
   },
   {
     "path": "/dashboard",
@@ -538,11 +578,6 @@
     "path": "/devices",
     "method": "post",
     "operation_id": "create_device_devices_post"
-  },
-  {
-    "path": "/devices/readiness",
-    "method": "get",
-    "operation_id": "get_device_readiness_devices_readiness_get"
   },
   {
     "path": "/devices/{device_id}",
@@ -630,6 +665,11 @@
     "operation_id": "verify_device_service_devices__device_id__verify_service_post"
   },
   {
+    "path": "/devices/readiness",
+    "method": "get",
+    "operation_id": "get_device_readiness_devices_readiness_get"
+  },
+  {
     "path": "/discovery",
     "method": "get",
     "operation_id": "list_discovery_runs_discovery_get"
@@ -648,6 +688,11 @@
     "path": "/domains",
     "method": "get",
     "operation_id": "list_domains_domains_get"
+  },
+  {
+    "path": "/evidence/{evidence_id}",
+    "method": "get",
+    "operation_id": "get_evidence_object_evidence__evidence_id__get"
   },
   {
     "path": "/evidence/export-bundle",
@@ -683,11 +728,6 @@
     "path": "/evidence/retention/sweep",
     "method": "post",
     "operation_id": "evidence_retention_sweep_evidence_retention_sweep_post"
-  },
-  {
-    "path": "/evidence/{evidence_id}",
-    "method": "get",
-    "operation_id": "get_evidence_object_evidence__evidence_id__get"
   },
   {
     "path": "/experiments/workflows/{workflow_id}/cancel",
@@ -735,11 +775,6 @@
     "operation_id": "create_finding_exception_finding_exceptions_post"
   },
   {
-    "path": "/finding-exceptions/lifecycle/sweep",
-    "method": "post",
-    "operation_id": "finding_exception_lifecycle_sweep_finding_exceptions_lifecycle_sweep_post"
-  },
-  {
     "path": "/finding-exceptions/{exception_id}",
     "method": "delete",
     "operation_id": "delete_finding_exception_finding_exceptions__exception_id__delete"
@@ -750,29 +785,14 @@
     "operation_id": "update_finding_exception_finding_exceptions__exception_id__patch"
   },
   {
+    "path": "/finding-exceptions/lifecycle/sweep",
+    "method": "post",
+    "operation_id": "finding_exception_lifecycle_sweep_finding_exceptions_lifecycle_sweep_post"
+  },
+  {
     "path": "/findings",
     "method": "get",
     "operation_id": "list_findings_findings_get"
-  },
-  {
-    "path": "/findings/bulk",
-    "method": "post",
-    "operation_id": "bulk_update_findings_findings_bulk_post"
-  },
-  {
-    "path": "/findings/cleanup",
-    "method": "post",
-    "operation_id": "cleanup_findings_findings_cleanup_post"
-  },
-  {
-    "path": "/findings/manual",
-    "method": "post",
-    "operation_id": "create_manual_finding_findings_manual_post"
-  },
-  {
-    "path": "/findings/retest",
-    "method": "post",
-    "operation_id": "bulk_retest_findings_findings_retest_post"
   },
   {
     "path": "/findings/{finding_id}",
@@ -798,6 +818,26 @@
     "path": "/findings/{finding_id}/retest",
     "method": "post",
     "operation_id": "retest_finding_findings__finding_id__retest_post"
+  },
+  {
+    "path": "/findings/bulk",
+    "method": "post",
+    "operation_id": "bulk_update_findings_findings_bulk_post"
+  },
+  {
+    "path": "/findings/cleanup",
+    "method": "post",
+    "operation_id": "cleanup_findings_findings_cleanup_post"
+  },
+  {
+    "path": "/findings/manual",
+    "method": "post",
+    "operation_id": "create_manual_finding_findings_manual_post"
+  },
+  {
+    "path": "/findings/retest",
+    "method": "post",
+    "operation_id": "bulk_retest_findings_findings_retest_post"
   },
   {
     "path": "/fleet/acceptance/lease-probe",
@@ -885,11 +925,6 @@
     "operation_id": "list_fleet_nodes_fleet_nodes_get"
   },
   {
-    "path": "/fleet/nodes/join",
-    "method": "post",
-    "operation_id": "join_fleet_node_fleet_nodes_join_post"
-  },
-  {
     "path": "/fleet/nodes/{node_id}/activity",
     "method": "get",
     "operation_id": "get_fleet_node_activity_fleet_nodes__node_id__activity_get"
@@ -928,6 +963,11 @@
     "path": "/fleet/nodes/{node_id}/state",
     "method": "patch",
     "operation_id": "update_fleet_node_state_fleet_nodes__node_id__state_patch"
+  },
+  {
+    "path": "/fleet/nodes/join",
+    "method": "post",
+    "operation_id": "join_fleet_node_fleet_nodes_join_post"
   },
   {
     "path": "/fleet/scale",
@@ -973,16 +1013,6 @@
     "path": "/hunts",
     "method": "post",
     "operation_id": "start_hunt_hunts_post"
-  },
-  {
-    "path": "/hunts/contract",
-    "method": "get",
-    "operation_id": "get_hunt_contract_hunts_contract_get"
-  },
-  {
-    "path": "/hunts/lifecycle-metrics",
-    "method": "get",
-    "operation_id": "get_hunt_lifecycle_metrics_hunts_lifecycle_metrics_get"
   },
   {
     "path": "/hunts/{hunt_id}",
@@ -1080,11 +1110,6 @@
     "operation_id": "confirm_hunt_shell_plan_hunts__hunt_id__shell_plans__plan_id__confirm_post"
   },
   {
-    "path": "/hunts/{hunt_id}/skills/suggestions",
-    "method": "post",
-    "operation_id": "suggest_hunt_skills_hunts__hunt_id__skills_suggestions_post"
-  },
-  {
     "path": "/hunts/{hunt_id}/skills/{skill_id}",
     "method": "delete",
     "operation_id": "unbind_hunt_skill_hunts__hunt_id__skills__skill_id__delete"
@@ -1103,6 +1128,21 @@
     "path": "/hunts/{hunt_id}/skills/{skill_id}/usage",
     "method": "post",
     "operation_id": "record_hunt_skill_usage_hunts__hunt_id__skills__skill_id__usage_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "method": "post",
+    "operation_id": "suggest_hunt_skills_hunts__hunt_id__skills_suggestions_post"
+  },
+  {
+    "path": "/hunts/contract",
+    "method": "get",
+    "operation_id": "get_hunt_contract_hunts_contract_get"
+  },
+  {
+    "path": "/hunts/lifecycle-metrics",
+    "method": "get",
+    "operation_id": "get_hunt_lifecycle_metrics_hunts_lifecycle_metrics_get"
   },
   {
     "path": "/investigation/candidates",
@@ -1130,16 +1170,6 @@
     "operation_id": "list_model_intake_admissions_model_intake_admissions_get"
   },
   {
-    "path": "/model-intake/admissions/v2/observe",
-    "method": "post",
-    "operation_id": "observe_model_intake_deployment_v2_model_intake_admissions_v2_observe_post"
-  },
-  {
-    "path": "/model-intake/admissions/v2/verify",
-    "method": "post",
-    "operation_id": "verify_model_intake_admission_v2_model_intake_admissions_v2_verify_post"
-  },
-  {
     "path": "/model-intake/admissions/{admission_id}",
     "method": "get",
     "operation_id": "get_model_intake_admission_model_intake_admissions__admission_id__get"
@@ -1148,6 +1178,16 @@
     "path": "/model-intake/admissions/{admission_id}/revoke",
     "method": "post",
     "operation_id": "revoke_model_intake_admission_model_intake_admissions__admission_id__revoke_post"
+  },
+  {
+    "path": "/model-intake/admissions/v2/observe",
+    "method": "post",
+    "operation_id": "observe_model_intake_deployment_v2_model_intake_admissions_v2_observe_post"
+  },
+  {
+    "path": "/model-intake/admissions/v2/verify",
+    "method": "post",
+    "operation_id": "verify_model_intake_admission_v2_model_intake_admissions_v2_verify_post"
   },
   {
     "path": "/model-intake/agent/session/{session_id}",
@@ -1485,14 +1525,14 @@
     "operation_id": "deactivate_request_collection_selection_request_collections__collection_id__selections__selection_id__delete"
   },
   {
-    "path": "/research/campaigns/launch",
-    "method": "post",
-    "operation_id": "launch_research_campaign_research_campaigns_launch_post"
-  },
-  {
     "path": "/research/campaigns/{campaign_id}/control",
     "method": "post",
     "operation_id": "control_research_campaign_research_campaigns__campaign_id__control_post"
+  },
+  {
+    "path": "/research/campaigns/launch",
+    "method": "post",
+    "operation_id": "launch_research_campaign_research_campaigns_launch_post"
   },
   {
     "path": "/research/episodes",
@@ -1555,14 +1595,14 @@
     "operation_id": "get_latest_result_results__target_folder__latest_get"
   },
   {
-    "path": "/retests/finding/{finding_id}",
-    "method": "get",
-    "operation_id": "list_finding_retests_retests_finding__finding_id__get"
-  },
-  {
     "path": "/retests/{retest_id}",
     "method": "get",
     "operation_id": "get_retest_retests__retest_id__get"
+  },
+  {
+    "path": "/retests/finding/{finding_id}",
+    "method": "get",
+    "operation_id": "list_finding_retests_retests_finding__finding_id__get"
   },
   {
     "path": "/scan/contracts",
@@ -1583,16 +1623,6 @@
     "path": "/scans",
     "method": "post",
     "operation_id": "submit_scan_scans_post"
-  },
-  {
-    "path": "/scans/batch",
-    "method": "post",
-    "operation_id": "submit_batch_scans_batch_post"
-  },
-  {
-    "path": "/scans/dispatch-receipts/lookup",
-    "method": "get",
-    "operation_id": "scan_dispatch_receipt_scans_dispatch_receipts_lookup_get"
   },
   {
     "path": "/scans/{scan_id}",
@@ -1618,6 +1648,11 @@
     "path": "/scans/{scan_id}/artifacts/{artifact_id}",
     "method": "get",
     "operation_id": "download_scan_artifact_scans__scan_id__artifacts__artifact_id__get"
+  },
+  {
+    "path": "/scans/{scan_id}/authentication-assurance",
+    "method": "get",
+    "operation_id": "get_scan_assurance_scans__scan_id__authentication_assurance_get"
   },
   {
     "path": "/scans/{scan_id}/cancel",
@@ -1675,6 +1710,16 @@
     "operation_id": "get_scan_result_scans__scan_id__result_get"
   },
   {
+    "path": "/scans/batch",
+    "method": "post",
+    "operation_id": "submit_batch_scans_batch_post"
+  },
+  {
+    "path": "/scans/dispatch-receipts/lookup",
+    "method": "get",
+    "operation_id": "scan_dispatch_receipt_scans_dispatch_receipts_lookup_get"
+  },
+  {
     "path": "/schedules",
     "method": "get",
     "operation_id": "list_schedules_schedules_get"
@@ -1698,11 +1743,6 @@
     "path": "/schedules/{schedule_id}",
     "method": "patch",
     "operation_id": "update_schedule_schedules__schedule_id__patch"
-  },
-  {
-    "path": "/session/start",
-    "method": "post",
-    "operation_id": "start_session_session_start_post"
   },
   {
     "path": "/session/{session_id}",
@@ -1738,6 +1778,11 @@
     "path": "/session/{session_id}/test-endpoint",
     "method": "post",
     "operation_id": "session_test_endpoint_session__session_id__test_endpoint_post"
+  },
+  {
+    "path": "/session/start",
+    "method": "post",
+    "operation_id": "start_session_session_start_post"
   },
   {
     "path": "/sessions",
@@ -1793,16 +1838,6 @@
     "path": "/targets",
     "method": "post",
     "operation_id": "create_target_targets_post"
-  },
-  {
-    "path": "/targets/dedupe",
-    "method": "post",
-    "operation_id": "dedupe_targets_targets_dedupe_post"
-  },
-  {
-    "path": "/targets/grouped",
-    "method": "get",
-    "operation_id": "list_targets_grouped_targets_grouped_get"
   },
   {
     "path": "/targets/{target_id}",
@@ -1940,16 +1975,6 @@
     "operation_id": "create_target_invariant_contract_targets__target_id__invariants_post"
   },
   {
-    "path": "/targets/{target_id}/invariants/compile",
-    "method": "post",
-    "operation_id": "compile_target_invariant_rule_targets__target_id__invariants_compile_post"
-  },
-  {
-    "path": "/targets/{target_id}/invariants/hypotheses",
-    "method": "post",
-    "operation_id": "generate_target_invariant_hypotheses_targets__target_id__invariants_hypotheses_post"
-  },
-  {
     "path": "/targets/{target_id}/invariants/{contract_id}/approve",
     "method": "post",
     "operation_id": "approve_target_invariant_contract_targets__target_id__invariants__contract_id__approve_post"
@@ -1963,6 +1988,16 @@
     "path": "/targets/{target_id}/invariants/{contract_id}/verification-plan",
     "method": "get",
     "operation_id": "get_target_invariant_verification_plan_targets__target_id__invariants__contract_id__verification_plan_get"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/compile",
+    "method": "post",
+    "operation_id": "compile_target_invariant_rule_targets__target_id__invariants_compile_post"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/hypotheses",
+    "method": "post",
+    "operation_id": "generate_target_invariant_hypotheses_targets__target_id__invariants_hypotheses_post"
   },
   {
     "path": "/targets/{target_id}/inventory/hypotheses",
@@ -2000,11 +2035,6 @@
     "operation_id": "create_target_principal_targets__target_id__principals_post"
   },
   {
-    "path": "/targets/{target_id}/principals/auto-provision",
-    "method": "post",
-    "operation_id": "auto_provision_target_principals_targets__target_id__principals_auto_provision_post"
-  },
-  {
     "path": "/targets/{target_id}/principals/{principal_id}",
     "method": "delete",
     "operation_id": "delete_target_principal_targets__target_id__principals__principal_id__delete"
@@ -2015,9 +2045,24 @@
     "operation_id": "update_target_principal_targets__target_id__principals__principal_id__patch"
   },
   {
+    "path": "/targets/{target_id}/principals/auto-provision",
+    "method": "post",
+    "operation_id": "auto_provision_target_principals_targets__target_id__principals_auto_provision_post"
+  },
+  {
     "path": "/targets/{target_id}/scan",
     "method": "post",
     "operation_id": "scan_target_targets__target_id__scan_post"
+  },
+  {
+    "path": "/targets/dedupe",
+    "method": "post",
+    "operation_id": "dedupe_targets_targets_dedupe_post"
+  },
+  {
+    "path": "/targets/grouped",
+    "method": "get",
+    "operation_id": "list_targets_grouped_targets_grouped_get"
   },
   {
     "path": "/timeline",
