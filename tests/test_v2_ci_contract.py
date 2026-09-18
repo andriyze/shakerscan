@@ -29,6 +29,7 @@ def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
     suite = _yaml("python-suite.yml")
     triggers = suite.get("on", suite.get(True))
     assert "pull_request" in triggers
+    assert "merge_group" in triggers, "a required check must also run in the merge queue"
     assert triggers["push"]["branches"] == ["main"]
     text = _text("python-suite.yml")
     assert "scripts/run_complete_python_suite.py --artifacts-dir artifacts" in text
@@ -46,7 +47,7 @@ def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
         "scripts/check_scan_target_transport.py",
     ):
         assert static_gate in text, static_gate
-    assert "name: python-suite-${{ github.event.pull_request.head.sha || github.sha }}" in text
+    assert "name: python-suite-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}" in text
 
 
 def test_v2_contracts_workflow_is_manual_stack_acceptance_only():
