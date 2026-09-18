@@ -491,3 +491,55 @@ def test_parallel_duplicate_action_ids_keep_distinct_occurrences():
     assert sorted(row["status"] for row in rows) == ["failed", "success"]
     assert sum(row["budget"]["consumed"]["http_requests"] for row in rows) == 7
     assert sorted((row["observation"] or {})["count"] for row in rows) == [0, 1]
+
+
+def test_the_public_receipt_names_the_failure_class_without_publishing_tool_text():
+    """The public projection emitted only ids, timestamps, parser version and provenance.
+
+    An operator looking at a failed action therefore saw "The capability adapter failed" and
+    nothing else, while the cause sat in receipt_json->errors in the database. The class is
+    published; the tool's own words are not, because they can carry target data.
+    """
+    rows = json.loads(json.dumps(_rows()))
+    rows[0]["status"] = "partial"
+    rows[0]["reason_code"] = "adapter_failed"
+    rows[0]["receipt_json"]["errors"] = [
+        "adapter_failed",
+        "external_process_contract:wire limiter reported traffic above the hard ceiling"
+        " for https://secret.example/path?token=never",
+    ]
+    rows[0]["receipt_json"]["redacted_execution"]["attempted_count"] = 4
+    rows[0]["receipt_json"]["redacted_execution"]["unattempted_count"] = 0
+    rows[0]["receipt_json"]["redacted_execution"]["execution_started"] = True
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="running",
+        plan_payload=_plan(),
+        action_rows=rows,
+        plan_budget_limits={"max_http_requests": 20, "max_tool_wall_seconds": 60},
+    )
+    receipt = explanation["actions"][0]["receipt"]
+    diagnostic = receipt["diagnostic"]
+    assert diagnostic["error_class"] == "external_process_contract"
+    assert diagnostic["error_count"] == 2
+    assert diagnostic["execution_started"] is True
+    assert diagnostic["attempted_count"] == 4
+    assert diagnostic["unattempted_count"] == 0
+
+    serialized = json.dumps(explanation)
+    # The class travels; the tool's sentence, the target and the token never do.
+    assert "wire limiter reported traffic" not in serialized
+    assert "secret.example" not in serialized
+    assert "token=never" not in serialized
+
+
+def test_a_clean_receipt_carries_no_diagnostic_noise():
+    """A successful action has nothing to diagnose, so it says nothing."""
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="running",
+        plan_payload=_plan(),
+        action_rows=_rows(),
+        plan_budget_limits={"max_http_requests": 20, "max_tool_wall_seconds": 60},
+    )
+    assert "diagnostic" not in explanation["actions"][0]["receipt"]

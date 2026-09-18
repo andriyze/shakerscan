@@ -68,20 +68,43 @@ def scan_action_activity_event(
     }
 
 
-def _diagnostic_error_class(value: Any) -> str:
+# A specific cause, safe to publish: every member is a fixed token this code produces, never
+# free text from a tool, so no target data can travel in it.
+_DIAGNOSTIC_ERROR_CLASSES = frozenset({
+    "timed_out", "timeout", "connection_limit_exceeded",
+    "external_process_contract", "scanner_not_available",
+    "cancelled_before_execution", "output_limit_exceeded",
+})
+# Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
+# only when nothing more specific follows, so the scan must look past them.
+_DIAGNOSTIC_GENERIC_LABELS = frozenset({"adapter_failed", "parser_failed"})
+
+
+def diagnostic_error_class(value: Any) -> str:
+    """The most specific safe class in a receipt's errors.
+
+    A batch prepends `adapter_failed` and appends the real per-attempt errors, so returning
+    on the first unrecognised token classified every batch failure as
+    `unclassified_adapter_error` and hid the cause: a deep scan whose `active.templates`
+    actions died on the wire limiter reported nothing but that. The scan now keeps going
+    past a generic label, and falls back to it only when nothing more specific is present.
+    """
     errors = value if isinstance(value, (list, tuple)) else ()
+    fallback: str | None = None
     for raw in errors:
         token = str(raw or "").strip().lower().split(":", 1)[0]
         token = re.sub(r"[^a-z0-9_-]+", "_", token)[:80]
-        if token in {
-            "timed_out", "timeout", "connection_limit_exceeded",
-            "external_process_contract", "scanner_not_available",
-            "cancelled_before_execution",
-        } or re.fullmatch(r"exit_-?[0-9]+", token):
+        if not token:
+            continue
+        if token in _DIAGNOSTIC_ERROR_CLASSES or re.fullmatch(r"exit_-?[0-9]+", token):
             return token
-        if token:
-            return "unclassified_adapter_error"
-    return "none"
+        if fallback is None:
+            fallback = token if token in _DIAGNOSTIC_GENERIC_LABELS else "unclassified_adapter_error"
+    return fallback or "none"
+
+
+def _diagnostic_error_class(value: Any) -> str:
+    return diagnostic_error_class(value)
 
 
 def scan_action_diagnostic_line(
