@@ -5181,6 +5181,8 @@ export async function getDeviceReadiness(): Promise<{
   enabled: boolean
   status: string
   reason?: string | null
+  /** The one command that resolves `reason`, so a not-ready page is not a dead end. */
+  remedy?: string | null
   worker_count: number
   capable_worker_count: number
   profiles: string[]

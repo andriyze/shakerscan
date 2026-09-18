@@ -42,6 +42,7 @@ export default function DevicesPage() {
   const [enabled, setEnabled] = useState(true)
   const [workerReady, setWorkerReady] = useState(false)
   const [readinessReason, setReadinessReason] = useState<string | null>(null)
+  const [readinessRemedy, setReadinessRemedy] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [scanTarget, setScanTarget] = useState<DeviceTarget | null>(null)
@@ -65,6 +66,7 @@ export default function DevicesPage() {
       setEnabled(readiness.enabled)
       setWorkerReady(readiness.status === 'ready')
       setReadinessReason(readiness.reason || null)
+      setReadinessRemedy(readiness.remedy || null)
       setFailed(false)
     } catch {
       if (sequence === loadSequence.current) setFailed(true)
@@ -135,7 +137,7 @@ export default function DevicesPage() {
       />
 
       {!enabled && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Connected-device scanning is disabled by the operator.</Card>}
-      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.</Card>}
+      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.{readinessRemedy && <span className="mt-2 block text-amber-100">{readinessRemedy}</span>}</Card>}
 
       <div className="mb-4 max-w-md"><Input value={search} onChange={(event) => { setPage(0); setSearch(event.target.value) }} placeholder="Search name, address, or manufacturer" aria-label="Search connected devices" /></div>
 
