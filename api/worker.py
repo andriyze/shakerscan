@@ -18733,23 +18733,8 @@ async def _read_agent_tool_streams(
     return tuple(await asyncio.gather(stdout_task, stderr_task))  # type: ignore[return-value]
 
 
-def _agent_scanner_request_settlement(
-    scanner_name: str, stdout: str, stderr: bytes | str | None,
-    *, file_counter: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Settle scanner traffic without exposing diagnostic stderr to the planner."""
-    normalized = str(scanner_name or "").strip().lower()
-    settlement_input = str(stdout or "")
-    if normalized == "nuclei" and stderr:
-        diagnostics = (
-            stderr.decode("utf-8", "replace")
-            if isinstance(stderr, bytes)
-            else str(stderr)
-        )
-        settlement_input = f"{settlement_input}\n{diagnostics}"
-    return agent_tools.scanner_request_settlement(
-        normalized, settlement_input, file_counter=file_counter,
-    )
+# Settlement helpers live in agent_tools (module-size ratchet: the monolith is frozen).
+_agent_scanner_request_settlement = agent_tools.agent_scanner_request_settlement
 
 
 def _materialize_bounded_ffuf_wordlist(
@@ -19131,8 +19116,9 @@ async def _execute_agent_scanner_process(
     if identity_values:
         typed_output = redact_sensitive(typed_output, redact_strings=True, scrub_text=True, known_values=identity_values)
         error = redact_text(error, known_values=identity_values)
-    settlement = _agent_scanner_request_settlement(
-        name, stdout, err, file_counter=wire_log_counter,
+    settlement = agent_tools.wire_evidence_settlement(
+        _agent_scanner_request_settlement(name, stdout, err, file_counter=wire_log_counter),
+        pinned_proxy,
     )
     if status in {"failed", "cancelled"} and not stdout.strip():
         if error == "scanner_not_available" or str(error or "").startswith("contract:"):
@@ -19154,6 +19140,7 @@ async def _execute_agent_scanner_process(
             int(getattr(pinned_proxy, "connection_attempts", 0))
             if pinned_proxy is not None else 0
         ),
+        "http_requests_observed": int(getattr(pinned_proxy, "http_requests_observed", 0) or 0),
         "connections_opened": (
             int(getattr(pinned_proxy, "connections_opened", 0))
             if pinned_proxy is not None else 0

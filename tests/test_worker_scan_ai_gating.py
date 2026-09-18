@@ -4447,11 +4447,15 @@ def test_ffuf_worker_materializes_exact_owner_only_wordlist(tmp_path, monkeypatc
 def test_nuclei_request_accounting_uses_stderr_stats_without_exposing_them():
     stats = b'noise\n{"duration":"0:01:35","requests":"1369","templates":"1183"}\n'
     settlement = worker._agent_scanner_request_settlement("nuclei", "", stats)
+    # The stderr stats are read without being exposed, but nuclei's `requests` counter is
+    # progress through its request plan, not traffic sent -- measured at about eight times the
+    # wire -- so it is not exact and refunds nothing. The proxy's relayed request lines supply
+    # the wire lower bound instead (agent_tools.wire_evidence_settlement).
     assert settlement == {
-        "mode": "exact",
-        "actual": 1369,
-        "observed_minimum": 1369,
-        "source": "scanner_counter",
+        "mode": "unavailable",
+        "actual": None,
+        "observed_minimum": 0,
+        "source": "progress_counter_is_not_wire_evidence",
     }
     assert worker._agent_scanner_request_settlement("katana", "", stats)["mode"] == "unavailable"
 
