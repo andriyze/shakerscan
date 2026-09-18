@@ -10,7 +10,7 @@ on:
       - 'install/**'
       - '.github/workflows/authenticated-assurance.yml'
   push:
-    branches: [main, 'auth-assurance/pr']
+    branches: [main]
 
 permissions:
   contents: read

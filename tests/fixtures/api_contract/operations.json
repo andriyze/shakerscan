@@ -760,6 +760,11 @@
     "operation_id": "exposure_nodes_exposure_nodes_get"
   },
   {
+    "path": "/exposure/services",
+    "method": "get",
+    "operation_id": "exposure_services_exposure_services_get"
+  },
+  {
     "path": "/finding-exceptions",
     "method": "get",
     "operation_id": "list_finding_exceptions_finding_exceptions_get"

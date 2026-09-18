@@ -382,6 +382,11 @@ class ServiceFingerprintAdapter:
                 for port_node in host.findall("./ports/port"):
                     state_node = port_node.find("state")
                     service_node = port_node.find("service")
+                    attributes = service_node.attrib if service_node is not None else {}
+                    raw_confidence = attributes.get("conf", "")
+                    confidence = int(raw_confidence) if re.fullmatch(r"[0-9]{1,2}", raw_confidence) else None
+                    if confidence is not None and not 0 <= confidence <= 10:
+                        confidence = None
                     state = (state_node.attrib if state_node is not None else {}).get("state")
                     port = int(port_node.attrib["portid"])
                     transport = port_node.attrib.get("protocol", "tcp")
@@ -392,6 +397,11 @@ class ServiceFingerprintAdapter:
                         })
                     observations.append({
                         "kind": "service",
+                        **{key: value for key, value in {
+                            "method": attributes.get("method"),
+                            "confidence": confidence,
+                            "tunnel": attributes.get("tunnel"),
+                        }.items() if value is not None},
                         "address": address,
                         "port": port,
                         "transport": transport,

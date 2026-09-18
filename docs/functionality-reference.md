@@ -1523,8 +1523,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 425 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 356 | `api/**/*.py` |
+| Public REST operations | 426 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 357 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1699,6 +1699,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/exposure/changes` | `exposure_changes` |
 | `GET` | `/exposure/graph` | `exposure_graph` |
 | `GET` | `/exposure/nodes` | `exposure_nodes` |
+| `GET` | `/exposure/services` | `exposure_services` |
 | `GET` | `/finding-exceptions` | `list_finding_exceptions` |
 | `POST` | `/finding-exceptions` | `create_finding_exception` |
 | `POST` | `/finding-exceptions/lifecycle/sweep` | `finding_exception_lifecycle_sweep` |
@@ -2364,8 +2365,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
 | `DEVICE_POSTURE_ENABLED` | `api/devices/router.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/devices/router.py`, `api/operations/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |

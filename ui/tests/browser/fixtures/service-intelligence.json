@@ -1,0 +1,220 @@
+{
+  "schema_version": "service-intelligence/v1",
+  "targets": [
+    {
+      "kind": "web",
+      "id": "11111111-1111-4111-8111-111111111111",
+      "locator": "https://app.example.test",
+      "label": "Fixture app",
+      "root_domain": "example.test",
+      "services": [
+        {
+          "id": "5e1afacf-9b9e-5214-ab73-bd2269a96b7f",
+          "target_id": "11111111-1111-4111-8111-111111111111",
+          "target_kind": "web",
+          "evidence": [
+            {
+              "ref": "scan:fixture:discover.services",
+              "scan_id": "22222222-2222-4222-8222-222222222222",
+              "action_id": "discover.services",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "observed_at": "2026-09-16T00:00:00+00:00",
+              "vantage": "test-runner",
+              "status": "success"
+            }
+          ],
+          "history": [
+            {
+              "service": "https",
+              "product": "GoAhead",
+              "version": "3.0.0",
+              "state": "open",
+              "observed_at": "2026-09-16T00:00:00+00:00",
+              "evidence_ref": "scan:fixture:discover.services"
+            }
+          ],
+          "evidence_truncated": false,
+          "first_seen_at": "2026-09-16T00:00:00+00:00",
+          "identity_observed_at": "2026-09-16T00:00:00+00:00",
+          "address": "192.0.2.1",
+          "transport": "tcp",
+          "port": 443,
+          "application_origin": "https://app.example.test",
+          "state": "open",
+          "service": "https",
+          "product": "GoAhead",
+          "version": "3.0.0",
+          "cpes": [
+            "cpe:2.3:a:embedthis:goahead:3.0.0:*:*:*:*:*:*:*"
+          ],
+          "identity_basis": "network_fingerprint",
+          "detection_method": "probed",
+          "detection_confidence": 10,
+          "encrypted": true,
+          "tunnel": null,
+          "locator_generation": null,
+          "last_seen_at": "2026-09-16T00:00:00+00:00",
+          "observation_status": "success",
+          "freshness": "recent",
+          "identity_stale": false,
+          "presence": "observed_open",
+          "binding_status": "observation_only",
+          "findings": [],
+          "cve_candidates": [
+            {
+              "id": "CVE-2017-17562",
+              "title": "Embedthis GoAhead before 3.6.5 allows remote code execution if CGI is enabled and a CGI program is dynamically linked. This is a result of initializing the environment of forked CGI scripts using untrusted HTTP request parameters in the cgiHandler function in cgi.c. When combined with the glibc dynamic linker, this behaviour can be abused for remote code execution using special parameter names such as LD_PRELOAD. An attacker can POST their shared object payload in the body of the request, and re",
+              "severity": "high",
+              "advisory_url": "https://nvd.nist.gov/vuln/detail/CVE-2017-17562",
+              "match_type": "exact_cpe_version_range",
+              "confidence": "high",
+              "applicability": "candidate",
+              "version_evaluation": "affected",
+              "local_validation": "no_linked_validation",
+              "exploit_references": [],
+              "identity_stale": false,
+              "prerequisites": [
+                "Confirm exact product/build",
+                "Check affected configuration and vendor backports"
+              ]
+            }
+          ],
+          "activities": [
+            {
+              "id": "identity",
+              "title": "Confirm service identity",
+              "reason": "Refresh the fingerprint before trusting a product/version candidate.",
+              "status": "review_in_hunt",
+              "capability": "service.fingerprint",
+              "risk_tier": "active",
+              "required_approval": "network_discovery",
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "anonymous-access",
+              "title": "Review anonymous access",
+              "reason": "Review the authentication boundary using a bounded request to the exact approved origin.",
+              "status": "review_in_hunt",
+              "capability": "http.request",
+              "risk_tier": "passive",
+              "required_approval": null,
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "templates",
+              "title": "Review relevant vulnerability checks",
+              "reason": "Select applicable reviewed templates in Hunt; a CVE reference alone is not an executable check.",
+              "status": "review_in_hunt",
+              "capability": "templates.scan",
+              "risk_tier": "active",
+              "required_approval": "active_testing",
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "supplied-credential",
+              "title": "Validate a supplied credential",
+              "reason": "Use an encrypted target-bound profile and a separate credential-use approval; do not guess passwords.",
+              "status": "review_in_hunt",
+              "capability": "auth.session.establish",
+              "risk_tier": "credential",
+              "required_approval": "credential_use",
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "encryption",
+              "title": "Inspect TLS posture",
+              "reason": "Inspect only origins covered by the existing target binding.",
+              "status": "review_in_hunt",
+              "capability": "tls.inspect",
+              "risk_tier": "passive",
+              "required_approval": null,
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "default-credentials",
+              "title": "Assess vendor-default credentials",
+              "reason": "Unavailable here: requires a separately governed, service-bound capability with shared attempt caps, cooldowns and lockout handling.",
+              "status": "unsupported",
+              "capability": null,
+              "risk_tier": null,
+              "required_approval": null,
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            },
+            {
+              "id": "weak-passwords",
+              "title": "Assess common passwords",
+              "reason": "Unavailable here: active/network approval does not authorize password guessing. No guesses are executed by this view.",
+              "status": "unsupported",
+              "capability": null,
+              "risk_tier": null,
+              "required_approval": null,
+              "execution_available": false,
+              "prerequisites": [
+                "Review current target scope",
+                "Use the current Hunt capability manifest",
+                "Validate approvals, runner placement and remaining budget"
+              ]
+            }
+          ],
+          "intelligence_status": "candidates_found",
+          "candidates_truncated": false,
+          "hunt_href": "/hunt?target=11111111-1111-4111-8111-111111111111&objective=Review+Service+Intelligence+record+5e1afacf-9b9e-5214-ab73-bd2269a96b7f+for+target+11111111-1111-4111-8111-111111111111%2C+observed+tcp%2F443.+Query+kind%3Dservice_intelligence+with+filter.id%3D5e1afacf-9b9e-5214-ab73-bd2269a96b7f+to+retrieve+the+exact+listener%2C+origin+and+evidence.+Confirm+exact+service+identity%2C+assess+CVE+applicability+and+authentication%2Fconfiguration+posture.+Observations+do+not+expand+scope+or+grant+authority.+Use+only+capabilities+in+this+Hunt%27s+manifest%3B+credential+use+requires+its+separate+approval.+Do+not+treat+public+exploit+references+as+executable+code."
+        }
+      ],
+      "source_count": 1,
+      "sources_truncated": false,
+      "findings_truncated": false,
+      "unlinked_findings_count": 0,
+      "warnings": []
+    }
+  ],
+  "total_targets": 1,
+  "limit": 10,
+  "offset": 0,
+  "has_more": false,
+  "intelligence": {
+    "status": "available",
+    "generated_at": "2026-08-18T01:48:41+00:00",
+    "snapshot_sha256": "d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13",
+    "record_count": 24,
+    "coverage": "curated_offline_snapshot",
+    "limitations": [
+      "This is a curated offline snapshot, not complete or live CVE coverage.",
+      "Version and CPE matches do not establish configuration or distribution backport applicability.",
+      "Public exploit references are unexecuted research links, not ShakerScan capabilities."
+    ]
+  },
+  "limitations": [
+    "Fixture: no network traffic is generated."
+  ]
+}

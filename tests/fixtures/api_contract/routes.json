@@ -1080,6 +1080,13 @@
     "name": "exposure_nodes"
   },
   {
+    "path": "/exposure/services",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_services"
+  },
+  {
     "path": "/finding-exceptions",
     "methods": [
       "GET"
