@@ -1,9 +1,13 @@
 import { expect, test } from '@playwright/test'
+import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
 
 test('completed execution keeps credential interruption visible beside supported findings', async ({ page }, testInfo) => {
   const scanId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-  await page.route('**:8080/**', route => route.fulfill({ status: 503, json: { detail: 'fixture_unavailable' } }))
-  await page.route(`**:8080/scans/${scanId}`, route => route.fulfill({ json: {
+  await pinMockApiOrigin(page)
+  // The installed-stack certification publishes the API on a free high port, never 8080, so
+  // a port-literal pattern matches nothing there and the real API answers 404 for this fixture.
+  await page.route(`${MOCK_API_ORIGIN}/**`, route => route.fulfill({ status: 503, json: { detail: 'fixture_unavailable' } }))
+  await page.route(`${MOCK_API_ORIGIN}/scans/${scanId}`, route => route.fulfill({ json: {
     id: scanId, target_url: 'https://fixture.example.test', status: 'completed',
     created_at: '2026-09-15T00:00:00Z', completed_at: '2026-09-15T00:01:00Z',
     options: {}, result: {
