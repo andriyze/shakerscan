@@ -5708,7 +5708,10 @@ export async function createTarget(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, name, cohort, ...(authorizedBy ? { authorized_by: authorizedBy } : {}) })
   })
-  if (!res.ok) throw new Error('Failed to create target')
+  // Carry the server's reason. A fixed string here meant the page, which shows err.message,
+  // still only ever said "Failed to create target" -- the scope refusal, the duplicate and the
+  // invalid URL all looked identical to the operator.
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create target'))
   return res.json()
 }
 

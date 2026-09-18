@@ -118,10 +118,19 @@ def _ip_scope_block_reason(
         ip_obj = ipaddress.ip_address(lowered)
     except ValueError:
         return None
+    # Restricted classes first, so no label can admit them. A lab environment used to return
+    # here before this check, which let "Lab" admit link-local, multicast and unspecified
+    # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
+    # reachable from the add-target dialog once the chosen cohort started reaching authorization.
+    if (
+        ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or str(ip_obj) == "255.255.255.255"
+    ):
+        return "loopback_or_private_range"
     if environment in SAFE_LAB_ENVIRONMENTS:
         return None
-    if ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
-        return "loopback_or_private_range"
     if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_reserved:
         return None if deployment_allows else "loopback_or_private_range"
     return None

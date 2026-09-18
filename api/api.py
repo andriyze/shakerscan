@@ -20988,11 +20988,15 @@ async def get_workers():
 
         summary = compute_fleet_summary(worker_list)
         execution_capacity = await _execution_capacity_snapshot(summary)
-        # Never report a maximum below the fleet that is actually running; see
-        # _reported_max_allowed_workers.
+        # Two different numbers. What is displayed accommodates the fleet that is actually
+        # running, so the dashboard cannot read "9 running, max 5". What governs execution is
+        # what the deployment configured: publishing the displayed figure let a GET of this
+        # endpoint raise real concurrency, and the worker list includes exited containers, so
+        # stopped workers inflated it past an explicit SHAKERSCAN_MAX_WORKERS.
+        configured_max_workers = _compute_max_allowed_workers()
         max_allowed_workers = _reported_max_allowed_workers(len(worker_list))
         # Refresh the per-scan active-scan concurrency cap for workers.
-        max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
+        max_active_scans = _publish_max_active_scans(max_allowed=configured_max_workers)
         # Refresh the real build label so workers stamp/report the deployed commit.
         _publish_scanner_version()
 

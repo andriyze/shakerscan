@@ -71,16 +71,29 @@ def max_allowed_workers_for_memory_gb(
 
 
 def reported_max_allowed_workers(computed: int, running_count: int = 0) -> int:
-    """The capacity to report, never below the fleet that is actually running.
+    """The capacity to *display*, never below the fleet that is actually running.
 
-    When the computed cap and the running fleet disagree, a maximum smaller than the running
-    count is simply wrong -- the running fleet is evidence the capacity exists.
+    A dashboard reading "9 running, max 5" is nonsense, so what is shown accommodates what is
+    there. This number is for presentation only: it must never become the cap that governs
+    execution. Use `operational_max_allowed_workers` for that.
     """
     try:
         running = max(0, int(running_count))
     except (TypeError, ValueError):
         running = 0
     return max(int(computed), running)
+
+
+def operational_max_allowed_workers(computed: int, running_count: int = 0) -> int:
+    """The cap that governs execution: what the deployment configured, and nothing else.
+
+    The displayed maximum was briefly fed into the published active-scan concurrency, so reading
+    the worker list could raise the limit workers obey -- and that list includes exited
+    containers, so stopped workers inflated it above an explicitly configured
+    SHAKERSCAN_MAX_WORKERS. A monitoring read must not change policy. `running_count` is accepted
+    so callers can pass the same inputs to both functions; it deliberately has no effect.
+    """
+    return int(computed)
 
 
 def fleet_memory_declaration_gb(environ: dict[str, str] | None = None) -> float | None:
