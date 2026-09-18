@@ -1,8 +1,6 @@
 name: AI boundary alpha
 
 on:
-  push:
-    branches: ['feat/ai-boundary-verification-alpha']
   pull_request:
     paths:
       - 'api/ai_gate/**'
