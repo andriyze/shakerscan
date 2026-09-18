@@ -146,6 +146,7 @@ from runtime.request_collection_store import (
     RequestCollectionSelection,
     request_collection_selection_digest,
 )
+from runtime.scan_credential_guard import build_scan_credential_check
 from runtime.scan_credentials import (
     SCAN_CREDENTIAL_CAPABILITY,
     ScanCredentialError,
@@ -388,9 +389,9 @@ from artifact_storage import (
 )
 from secret_store import decrypt_secret
 try:
-    from redaction import redact_text
+    from redaction import redact_text, redact_sensitive
 except ModuleNotFoundError:
-    from scanner.redaction import redact_text
+    from scanner.redaction import redact_text, redact_sensitive
 try:
     from action_scope import evaluate_runtime_destination_scope
 except ImportError:
@@ -1965,6 +1966,9 @@ async def _hydrate_generic_scan_credentials(
                 target=target,
                 capability=resolution_capability,
                 authority=authority,
+                expected_version=expected_version,
+                expected_record_version=ref.get("credential_record_version"),
+                expected_principal_slot=str(ref.get("principal_slot") or ""),
             ) as resolved:
                 profile = resolved.profile
                 if (
@@ -11702,6 +11706,7 @@ async def _execute_reserved_deterministic_scan(
             return None
         return loaded.get(action.action_id)
 
+    from authenticated_assurance.scan_health import build_scan_health_adapter
     dispatcher = DatabaseNeutralScanActionDispatcher(
         target_url=target,
         options=normalized,
@@ -11717,6 +11722,7 @@ async def _execute_reserved_deterministic_scan(
         cancelled=lambda: _scan_cancel_requested(scan_id),
         private_replay_plan_loader=load_private_replay_plan,
         browser_login_adapter_factory=lambda action, dispatcher: build_scan_browser_login_adapter(db_pool, action=action, dispatcher=dispatcher),
+        authentication_health_adapter_factory=lambda action, dispatcher: build_scan_health_adapter(db_pool, action=action, dispatcher=dispatcher),
     )
     executor = ReceiptScanActionExecutor(
         scan_id=scan_id,
@@ -11725,6 +11731,9 @@ async def _execute_reserved_deterministic_scan(
         dispatcher=dispatcher,
         scope_receipt_id=execution.target_binding.scope_receipt_id,
         approval_receipt_id=admission.plan.policy.approval_receipt_id,
+        credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding, scan_id=scan_id,
+            session_check=dispatcher.authentication_health_status),
+        user_cancelled=lambda: _scan_cancel_requested(scan_id),
     )
     initial_has_finalizer = any(
         action.action_id == "finalize.report" for action in plan.actions
@@ -11785,6 +11794,9 @@ async def _execute_reserved_deterministic_scan(
                 dispatcher=dispatcher,
                 scope_receipt_id=execution.target_binding.scope_receipt_id,
                 approval_receipt_id=admission.plan.policy.approval_receipt_id,
+                credential_check=build_scan_credential_check(db_pool, options=normalized, target=execution.target_binding, scan_id=scan_id,
+                    session_check=dispatcher.authentication_health_status),
+                user_cancelled=lambda: _scan_cancel_requested(scan_id),
             )
             return await ScanOrchestrator(
                 backend=backend,
@@ -18806,6 +18818,7 @@ async def _execute_agent_scanner_process(
     returncode: int | None = None
     scratch_dir: str | None = None
     pinned_proxy: PinnedSocksProxy | None = None
+    httpx_configuration = None
     read_streams: asyncio.Task[tuple[bytes, bytes]] | None = None
     process_started = False
     execution_uncertain = False
@@ -18919,6 +18932,11 @@ async def _execute_agent_scanner_process(
                     "authenticated browser profile could not be seeded"
                 ) from exc
             runtime_paths["chrome_data_dir"] = browser_profile_dir
+        if name == "httpx" and job_data.get("trusted_headers"):
+            from runtime.httpx_credentials import HttpxCredentialConfiguration
+            httpx_configuration = HttpxCredentialConfiguration(
+                agent_tools.httpx_credential_config_bytes(job_data["trusted_headers"]))
+            runtime_paths["httpx_config_fd"] = httpx_configuration.descriptor
         process_plan = agent_tools.build_enforced_scanner_plan(
             name,
             execution_target,
@@ -18972,6 +18990,7 @@ async def _execute_agent_scanner_process(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            pass_fds=(httpx_configuration.descriptor,) if httpx_configuration is not None else (),
         )
         process_started = True
         overflow = asyncio.Event()
@@ -19081,6 +19100,8 @@ async def _execute_agent_scanner_process(
         error = f"worker_fault:{type(exc).__name__}"
         execution_uncertain = process_started
     finally:
+        if httpx_configuration is not None:
+            httpx_configuration.close()
         if pinned_proxy is not None:
             await pinned_proxy.close()
         if scratch_dir:
@@ -19105,6 +19126,11 @@ async def _execute_agent_scanner_process(
             else None
         ),
     )
+    # Apply known identity values before any parsed output or error can be persisted.
+    identity_values = agent_tools.scanner_credential_redaction_values(job_data.get("trusted_headers"))
+    if identity_values:
+        typed_output = redact_sensitive(typed_output, redact_strings=True, scrub_text=True, known_values=identity_values)
+        error = redact_text(error, known_values=identity_values)
     settlement = _agent_scanner_request_settlement(
         name, stdout, err, file_counter=wire_log_counter,
     )
@@ -22975,6 +23001,9 @@ async def process_job(job_data: dict):
             await process_discovery_job(job_data)
         elif job_type == 'agent_scanner_tool':
             await process_agent_scanner_tool_job(job_data)
+        elif job_type == 'authentication_validation':
+            from authenticated_assurance.worker import process_validation_job
+            await process_validation_job(job_data, pool=db_pool, worker_id=_worker_runtime_identity(), build_fingerprint=_worker_build_fingerprint())
         elif job_type == 'canonical_scanner_capability':
             await process_canonical_scanner_capability_job(job_data)
         elif job_type == 'request_collection_replay':

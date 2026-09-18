@@ -70,6 +70,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`connected-device-security.md`](connected-device-security.md) | Connected-device inventory, safe service assessment, policy evaluation, isolated execution, and web-origin handoff |
 | [`multi-node-architecture.md`](multi-node-architecture.md) | Implemented multi-node trust, transport, scheduling, lifecycle, evidence, and acceptance design authority |
 | [`ai-boundary-alpha.md`](ai-boundary-alpha.md) | Configured AI application security verification: controls, deterministic proof, and alpha boundaries |
+| [`authenticated-assurance.md`](authenticated-assurance.md) | Authenticated-scan profile and assurance preview: reuse decisions, trust boundaries, and remaining release gates |
 | [`decisions/README.md`](decisions/README.md) | Normative architecture-decision index |
 
 ## Historical Archive

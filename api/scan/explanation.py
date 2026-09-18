@@ -51,6 +51,7 @@ _REASON_LABELS = {
     "placement_unavailable": "No eligible worker placement was available",
     "authorization_expired": "Testing approval expired before execution",
     "authorization_revoked": "Testing approval was revoked",
+    "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
     "timed_out": "The action reached its fixed time limit",
@@ -845,4 +846,5 @@ def coverage_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "budget": dict(explanation.get("budget") or {}),
         **dict(explanation.get("coverage") or {}),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
+        "authentication_assurance": dict(explanation.get("authentication_assurance") or {}),
     }

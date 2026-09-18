@@ -79,6 +79,7 @@ def test_scan_admission_freezes_distinct_target_bound_principals_without_secrets
     )
     assert [row["scan_lane"] for row in rows] == ["primary", "secondary"]
     assert [row["profile_version"] for row in rows] == [3, 3]
+    assert [row["credential_record_version"] for row in rows] == [4, 4]
     assert all(row["secret_values_visible"] is False for row in rows)
     assert "primary-secret" not in repr(rows)
 
@@ -478,3 +479,35 @@ def test_browser_crawl_is_a_selectable_scan_credential_capability():
     # Its static sibling has always been here; both are read-only recon crawlers over the same
     # bound target and either may carry the credential.
     assert "web.crawl" in SCAN_SEMANTIC_CREDENTIAL_CAPABILITIES
+
+
+def test_scan_action_identity_binds_credential_metadata_revision():
+    from api.scan.action_plan import credential_profile_action_refs, ScanActionPlanError
+
+    profile = _profile("primary", slot="primary")
+    ref = admit_scan_credential_profiles([profile.profile_id], [profile],
+        target_id=TARGET_ID, target_kind="web", now=NOW)[0]
+    first = credential_profile_action_refs([ref])[0]
+    changed = credential_profile_action_refs([{**ref, "credential_record_version": 5}])[0]
+    assert first["digest"] != changed["digest"]
+    legacy = {key: value for key, value in ref.items() if key != "credential_record_version"}
+    assert credential_profile_action_refs([legacy])[0]["version"] == 3
+    with pytest.raises(ScanActionPlanError, match="metadata version"):
+        credential_profile_action_refs([{**ref, "credential_record_version": True}])
+@pytest.mark.parametrize("change", ["missing", "denied", "wrong", "empty"])
+def test_reviewed_profile_never_falls_back_to_anonymous(change):
+    ref = {"profile_id": "profile-1", "profile_version": 3, "principal_slot": "primary",
+        "scan_lane": "primary", "auth_kind": "bearer_token", "allowed_capabilities": ["http.request"]}
+    options = {"auth_header": "Bearer seeded-secret", "resolved_credential_profiles": [dict(ref)],
+        "credential_profile_refs": [{**ref, "authenticated_profile_snapshot": {}}]}
+    assert resolve_scan_http_principal(options, capability_name="http.request").authenticated
+    if change == "missing":
+        options["resolved_credential_profiles"] = []
+    elif change == "denied":
+        options["resolved_credential_profiles"][0]["allowed_capabilities"] = []
+    elif change == "wrong":
+        options["resolved_credential_profiles"][0]["profile_id"] = "another-profile"
+    else:
+        options.pop("auth_header")
+    with pytest.raises(ScanCredentialError, match="authenticated_profile_identity_unavailable"):
+        resolve_scan_http_principal(options, capability_name="http.request")

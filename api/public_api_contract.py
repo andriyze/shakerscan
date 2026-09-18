@@ -18,7 +18,7 @@ from typing import Any
 PUBLIC_V2_SURFACE_PREFIXES: dict[str, tuple[str, ...]] = {
     "scan": ("/scan/contracts", "/scans"),
     "hunt": ("/hunts",),
-    "credentials": ("/credential-profiles",),
+    "credentials": ("/credential-profiles", "/authenticated-scan-profiles"),
     "collections": ("/request-collections",),
     "evidence": ("/evidence",),
     "model_intake": ("/model-intake",),

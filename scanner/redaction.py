@@ -236,10 +236,12 @@ def redact_url_credentials(value: str) -> str:
     )
 
 
-def redact_text(text: Any) -> Any:
+def redact_text(text: Any, *, known_values=()) -> Any:
     """Scrub bearer/api-key/token/secret patterns out of free text."""
     if not isinstance(text, str):
         return text
+    for value in sorted({value for value in known_values if isinstance(value, str) and value}, key=len, reverse=True):
+        text = text.replace(value, MASK)
     for pattern, replacement in _TEXT_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
@@ -251,6 +253,7 @@ def redact_sensitive(
     redact_strings: bool = False,
     scrub_text: bool = False,
     mask: str = MASK,
+    known_values=(),
 ) -> Any:
     """Recursively mask values stored under sensitive keys.
 
@@ -263,7 +266,7 @@ def redact_sensitive(
       transcript/evidence bodies).
     """
     def _recurse(item: Any) -> Any:
-        return redact_sensitive(item, redact_strings=redact_strings, scrub_text=scrub_text, mask=mask)
+        return redact_sensitive(item, redact_strings=redact_strings, scrub_text=scrub_text, mask=mask, known_values=known_values)
 
     if isinstance(value, dict):
         out: dict[Any, Any] = {}
@@ -280,6 +283,6 @@ def redact_sensitive(
     if isinstance(value, str) and redact_strings:
         out_str = redact_url_credentials(value)
         if scrub_text:
-            out_str = redact_text(out_str)
+            out_str = redact_text(out_str, known_values=known_values)
         return out_str
     return value

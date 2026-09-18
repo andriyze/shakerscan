@@ -51,7 +51,7 @@ class CredentialResolutionAuthority:
     scope_receipt_id: str | None
 
     def validate(self, target: TargetBinding) -> None:
-        if self.owner_kind not in {"scan", "hunt"} or not str(self.owner_id or "").strip():
+        if self.owner_kind not in {"scan", "hunt", "validation"} or not str(self.owner_id or "").strip():
             raise CredentialResolutionError("credential owner authority is invalid")
         if not self.credential_access_allowed:
             raise CredentialResolutionError("credential access is not allowed by policy")
@@ -445,6 +445,7 @@ class WorkerCredentialResolver:
         capability: str,
         authority: CredentialResolutionAuthority,
         expected_version: int | None = None,
+        expected_record_version: int | None = None,
         expected_principal_slot: str | None = None,
     ) -> AsyncIterator[ResolvedCredential]:
         # Authority is checked before even looking up the profile, and decryption comes
@@ -465,6 +466,11 @@ class WorkerCredentialResolver:
                 type(expected_version) is not int
                 or expected_version < 1
                 or stored.metadata.current_version != expected_version
+            ))
+            or (expected_record_version is not None and (
+                type(expected_record_version) is not int
+                or expected_record_version < 1
+                or stored.metadata.record_version != expected_record_version
             ))
             or (expected_principal_slot is not None
                 and stored.metadata.principal_slot != expected_principal_slot)

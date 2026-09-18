@@ -6,6 +6,7 @@ from tests.api_sources import (
     api_tree_source, definition_source, route_is_declared, route_source,
 )
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -33,6 +34,30 @@ def test_every_planner_capability_has_one_registry_owned_executor():
         HUNT_ACTION_DISPATCHER.require(spec.name).name for spec in planner_specs
     }
     assert routed == {spec.name for spec in planner_specs}
+
+
+def test_identity_contract_is_registry_owned_and_does_not_assert_authentication():
+    http = CAPABILITY_REGISTRY.require("http.request")
+    assert http.identity_contract() == {
+        "schema_version": "capability-identity/v1", "credential_transport": "exact_origin",
+        "credential_interruption": "cooperative", "proves_application_identity": False,
+        "proves_continuous_authentication": False,
+    }
+    assert http.planner_contract()["identity_contract"] == http.identity_contract()
+    assert CAPABILITY_REGISTRY.require("web.probe").identity_contract()["credential_transport"] == "unverified"
+    assert CAPABILITY_REGISTRY.require("scan.finalize").identity_contract()["credential_transport"] == "not_used"
+    for spec in CAPABILITY_REGISTRY.list():
+        assert spec.identity_contract()["proves_application_identity"] is False
+        assert spec.identity_contract()["proves_continuous_authentication"] is False
+
+
+def test_invalid_or_contradictory_identity_contracts_are_rejected():
+    http = CAPABILITY_REGISTRY.require("http.request")
+    for changes in ({"credential_transport": "validated"}, {"credential_interruption": "automatic"},
+                    {"credential_transport": "not_used"},
+                    {"credential_transport": "not_used", "credential_interruption": "not_needed"}):
+        with pytest.raises(ValueError):
+            replace(http, **changes)
 
 
 @pytest.mark.parametrize("target_kind", ["web", "api", "network", "device"])

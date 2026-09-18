@@ -277,6 +277,7 @@ COPY api/operations /app/operations
 COPY api/interactive /app/interactive
 COPY api/policy_profiles /app/policy_profiles
 COPY api/runtime /app/runtime
+COPY api/authenticated_assurance /app/authenticated_assurance
 COPY api/schedules /app/schedules
 COPY api/settings_routes /app/settings_routes
 COPY api/targets /app/targets

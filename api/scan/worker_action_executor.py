@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -12,8 +13,9 @@ except (ImportError, ModuleNotFoundError):  # top-level worker imports
     from runtime.receipts import CapabilityReceipt
 
 from .action_plan import ScanAction
-from .capability_result import CapabilityResultReference
+from .capability_result import CapabilityResultReference, CapabilityResultReason
 from .execution_backend import ActionHeartbeat, ActionLease
+from .action_interruption import ActionInterruption, interruption_scope
 
 
 class WorkerActionExecutionError(RuntimeError):
@@ -42,6 +44,8 @@ class ReceiptScanActionExecutor:
         dispatcher: ActionDispatcher,
         scope_receipt_id: str | None = None,
         approval_receipt_id: str | None = None,
+        credential_check: Callable[[ScanAction], Awaitable[str | None]] | None = None,
+        user_cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
         self._scan_id = str(scan_id)
         self._target_id = str(target_id)
@@ -49,6 +53,8 @@ class ReceiptScanActionExecutor:
         self._dispatcher = dispatcher
         self._scope_receipt_id = scope_receipt_id
         self._approval_receipt_id = approval_receipt_id
+        self._credential_check = credential_check
+        self._user_cancelled = user_cancelled
 
     async def execute(
         self,
@@ -67,10 +73,51 @@ class ReceiptScanActionExecutor:
                     await heartbeat()
 
         heartbeat_task = asyncio.create_task(keep_lease_alive())
+        signal = ActionInterruption()
+        monitor = None
+        check = self._credential_check if action.action_id != "finalize.report" else None
+
+        async def check_authority():
+            assert check is not None
+            try:
+                reason = await check(action)
+                reason = CapabilityResultReason(reason).value if reason is not None else None
+            except Exception:
+                reason = CapabilityResultReason.AUTHENTICATION_UNCERTAIN.value
+            signal.record(reason)
+            return reason
+
+        async def observe_authority():
+            assert check is not None
+            while not stop_heartbeats.is_set() and signal.reason is None:
+                try:
+                    await asyncio.wait_for(stop_heartbeats.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    await check_authority()
+
         try:
-            result = await self._dispatcher(action, lease, heartbeat)
+            denial = None
+            if check is not None:
+                denial = await check_authority()
+            if denial is not None:
+                reason = CapabilityResultReason(denial).value
+                result = await self.terminal_without_execution(action, lease,
+                    status="blocked", reason_code=reason, charge_full_reservation=False)
+            else:
+                with interruption_scope(signal):
+                    if check is not None:
+                        monitor = asyncio.create_task(observe_authority())
+                    result = await self._dispatcher(action, lease, heartbeat)
+                    if check is not None:
+                        await check_authority()
         finally:
             stop_heartbeats.set()
+            if monitor is not None:
+                monitor.cancel()
+                try:
+                    await monitor
+                except asyncio.CancelledError:
+                    pass
             await heartbeat_task
         if isinstance(result, CapabilityReceipt):
             receipt = result
@@ -98,6 +145,13 @@ class ReceiptScanActionExecutor:
             raise WorkerActionExecutionError(
                 "worker receipt differs from immutable action authority"
             )
+        if signal.reason is not None and denial is None and not self._user_cancelled():
+            interruption = {"reason_code": signal.reason, "last_authority_check_at": signal.last_confirmed_at,
+                "observed_at": signal.observed_at, "continuous_identity_proven": False}
+            receipt = replace(receipt, status="partial", partial=True,
+                errors=(signal.reason, *tuple(error for error in receipt.errors if error != "cancelled")),
+                observations=(*receipt.observations, {"kind": "identity_authority_interruption", **interruption}),
+                redacted_execution={**dict(receipt.redacted_execution), "identity_interruption": interruption})
         return receipt
 
     async def restore_terminal_state(

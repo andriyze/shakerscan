@@ -327,6 +327,15 @@ def resolve_scan_http_principal(
     capability_denied = bool(lane_refs and not refs)
     if capability_denied:
         safe_headers = {}
+    reviewed_profiles = [item for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping) and "authenticated_profile_snapshot" in item]
+    if reviewed_profiles:
+        selected = [item for item in reviewed_profiles
+            if str(item.get("scan_lane") or item.get("principal_slot") or "").lower() == normalized_lane]
+        expected = {(str(item.get("profile_id")), item.get("profile_version")) for item in selected}
+        actual = {(item["profile_id"], item["profile_version"]) for item in refs}
+        if not selected or expected != actual or not safe_headers or capability_denied or interactive:
+            raise ScanCredentialError("authenticated_profile_identity_unavailable")
     binding = {
         "schema_version": "scan-http-principal-binding/v1",
         "lane": normalized_lane,
@@ -658,6 +667,7 @@ def admit_scan_credential_profiles(
         rows.append({
             "profile_id": profile.profile_id,
             "profile_version": profile.current_version,
+            "credential_record_version": profile.record_version,
             "target_kind": profile.target_kind,
             "principal_slot": slot,
             "scan_lane": lane,

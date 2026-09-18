@@ -422,7 +422,6 @@ def test_run_tool_rejects_flag_injection():
 @pytest.mark.parametrize(
     ("tool_name", "header_flag"),
     [
-        ("httpx", "-H"),
         ("nuclei", "-H"),
         ("katana", "-H"),
         ("ffuf", "-H"),
@@ -467,6 +466,24 @@ def test_sqlmap_worker_private_credentials_use_one_bounded_header_argument():
         "Authorization: Bearer worker-private\n"
         "Cookie: session=worker-private"
     )
+
+
+def test_httpx_credentials_require_a_private_descriptor_and_never_enter_argv():
+    headers = {"Authorization": "Bearer worker-private", "Cookie": "session=cookie-private"}
+    with pytest.raises(at.AgentToolError, match="sealed worker configuration"):
+        at.build_scanner_argv("httpx", "https://app.example.test/", {}, trusted_headers=headers)
+    for descriptor in (None, True, 0, 2, "/tmp/config"):
+        with pytest.raises(at.AgentToolError, match="sealed worker configuration"):
+            at.build_enforced_scanner_plan("httpx", "https://app.example.test/", {},
+                reserved_budget={"http_requests": 1, "tool_wall_seconds": 10}, trusted_headers=headers,
+                runtime_paths={"httpx_config_fd": descriptor})
+    plan = at.build_enforced_scanner_plan("httpx", "https://app.example.test/", {},
+        reserved_budget={"http_requests": 1, "tool_wall_seconds": 10}, trusted_headers=headers,
+        runtime_paths={"httpx_config_fd": 7})
+    assert "worker-private" not in str(plan.argv) and "cookie-private" not in str(plan.argv)
+    assert plan.argv[-2:] == ("-config", "/proc/self/fd/7")
+    assert json.loads(at.httpx_credential_config_bytes(headers)) == {"header": [
+        "Authorization: Bearer worker-private", "Cookie: session=cookie-private"]}
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,8 @@ left to the model.
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import ipaddress
 import math
@@ -808,6 +810,34 @@ def _trusted_scanner_header_args(
     return [value for line in lines for value in (flag, line)]
 
 
+def httpx_credential_config_bytes(trusted_headers: Mapping[str, Any]) -> bytes:
+    """Serialize only validated header values, never arbitrary tool configuration."""
+    lines = _trusted_scanner_header_args("httpx", trusted_headers)[1::2]
+    encoded = json.dumps({"header": lines}, ensure_ascii=True, separators=(",", ":")).encode()
+    if not lines or len(encoded) > 65_536:
+        raise AgentToolError("HTTP probe configuration is invalid")
+    return encoded
+
+
+def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Worker-local reflection redaction, including supported Authorization and Cookie forms."""
+    values = set()
+    for name, value in (headers or {}).items():
+        value = str(value)
+        values.add(value)
+        if str(name).lower() in {"authorization", "proxy-authorization"} and " " in value:
+            scheme, material = value.split(" ", 1)
+            values.add(material)
+            if scheme.lower() == "basic":
+                try:
+                    values.update(base64.b64decode(material, validate=True).decode().split(":", 1))
+                except (ValueError, UnicodeError, binascii.Error):
+                    pass
+        if str(name).lower() == "cookie":
+            values.update(part.partition("=")[2].strip().strip('"') for part in value.split(";"))
+    return tuple(value for value in values if value)
+
+
 def build_scanner_argv(
     name: str,
     url: str,
@@ -821,6 +851,9 @@ def build_scanner_argv(
 ) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
+    if name == "httpx" and trusted_headers:
+        _trusted_scanner_header_args(name, trusted_headers)
+        raise AgentToolError("httpx credentials require sealed worker configuration")
     template = SCANNER_ARG_TEMPLATES[name]
     execution_url = url
     pin_args: list[str] = []
@@ -956,6 +989,12 @@ def build_enforced_scanner_plan(
     if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
         internal_options["wordlist"] = "common"
 
+    httpx_config_fd = None
+    if scanner == "httpx" and trusted_headers:
+        httpx_credential_config_bytes(trusted_headers)
+        httpx_config_fd = runtime.get("httpx_config_fd")
+        if type(httpx_config_fd) is not int or httpx_config_fd < 3:
+            raise AgentToolError("httpx credentials require sealed worker configuration")
     binary, argv, template_timeout_ms = build_scanner_argv(
         scanner,
         url,
@@ -966,8 +1005,10 @@ def build_enforced_scanner_plan(
         # counted by the target-bound limiter, so it is always disabled here.
         oob_interactsh_server=None,
         oob_interactsh_token=None,
-        trusted_headers=trusted_headers,
+        trusted_headers=None if httpx_config_fd is not None else trusted_headers,
     )
+    if httpx_config_fd is not None:
+        argv.extend(["-config", f"/proc/self/fd/{httpx_config_fd}"])
     timeout_seconds = max(1, min(wall, int(math.ceil(template_timeout_ms / 1000))))
     timeout_ms = timeout_seconds * 1_000
     proof_inputs: dict[str, Any]

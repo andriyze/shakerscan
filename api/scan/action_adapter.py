@@ -461,6 +461,7 @@ class DatabaseNeutralScanActionDispatcher:
         private_inputs: BrokerPrivateScanInputs | None = None,
         private_replay_plan_loader: PrivateReplayPlanLoader | None = None,
         browser_login_adapter_factory: Callable[..., Any] | None = None,
+        authentication_health_adapter_factory: Callable[..., Any] | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
@@ -501,9 +502,12 @@ class DatabaseNeutralScanActionDispatcher:
         self.plan_revision = revision
         self.backend = backend
         self.process_runner = process_runner
-        self.cancelled = cancelled
+        from .action_interruption import action_interrupted
+        self.cancelled = lambda: cancelled() or action_interrupted()
         self._private_replay_plan_loader = private_replay_plan_loader
         self._browser_login_adapter_factory = browser_login_adapter_factory
+        self._authentication_health_adapter_factory = authentication_health_adapter_factory
+        self._authentication_health_records: dict[str, Any] = {}
         self._private_replay_plans = dict(
             private_inputs.replay_plans if private_inputs is not None else {}
         )
@@ -607,13 +611,7 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     def _empty_slice_reason(self, manifest: ScanWorkManifest) -> str:
-        """An empty batch slice is a clean "nothing to do" only when its producer finished.
-
-        When the manifest is partial or cancelled, the work this slice was scheduled for was
-        never published. Calling that "not applicable" lets the finalizer count the escalation
-        as cleanly complete and launders an upstream timeout into good-looking coverage, so it
-        is reported as incomplete dependency work instead.
-        """
+        """Do not launder an incomplete producer into clean not-applicable coverage."""
         if str(getattr(manifest, "status", "complete")) != "complete":
             return "dependency_incomplete"
         return "not_applicable"
@@ -625,6 +623,8 @@ class DatabaseNeutralScanActionDispatcher:
         self, action: ScanAction, _result: Any,
     ) -> bool:
         """Rehydrate sealed prerequisites without repeating completed traffic."""
+        if "authentication_profile_ref" in action.capability_args:
+            return False  # A prior process's health sample cannot authorize resumed traffic.
         if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
             lane = (
                 "primary" if action.action_id.endswith("primary") else "secondary"
@@ -810,7 +810,24 @@ class DatabaseNeutralScanActionDispatcher:
             redacted_execution=prepared.redacted_execution,
         )
 
+    def authentication_health_status(self, action: ScanAction) -> str | None:
+        from authenticated_assurance.scan_health import scan_health_status
+        return scan_health_status(self._authentication_health_records, self.options, action)
+
     async def _http(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        if "authentication_profile_ref" in action.capability_args:
+            if self._authentication_health_adapter_factory is None:
+                return self._skip(action, "authentication_uncertain")
+            try:
+                adapter = self._authentication_health_adapter_factory(action=action, dispatcher=self)
+            except (ValueError, TypeError):
+                return self._skip(action, "authentication_uncertain")
+            receipt = await self._execute_adapter(action, adapter, heartbeat)
+            for observation in receipt.observations:
+                if observation.get("kind") == "authentication_health":
+                    record = dict(observation["record"])
+                    self._authentication_health_records[str(record["profile_id"])] = record
+            return receipt
         parsed = urllib.parse.urlsplit(self.target_url)
         scheme = "http" if action.action_id == "baseline.http_redirect" else parsed.scheme
         origin = urllib.parse.urlunsplit((scheme, parsed.netloc, "", "", ""))

@@ -27,7 +27,7 @@ from .budgets import (
 ReservationStatus = Literal[
     "requested", "reserved", "running", "committed", "released", "failed"
 ]
-OwnerKind = Literal["scan", "hunt"]
+OwnerKind = Literal["scan", "hunt", "validation"]
 TERMINAL_RESERVATION_STATUSES = frozenset({"committed", "released", "failed"})
 _RECEIPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,119}$")
@@ -120,8 +120,8 @@ class DurableBudgetReservation:
             raise ReservationTransitionError(
                 "reservation_id, owner_id, and capability_name are required"
             )
-        if self.owner_kind not in {"scan", "hunt"}:
-            raise ReservationTransitionError("owner_kind must be scan or hunt")
+        if self.owner_kind not in {"scan", "hunt", "validation"}:
+            raise ReservationTransitionError("owner_kind must be scan, hunt, or validation")
         if self.status not in {
             "requested", "reserved", "running", "committed", "released", "failed"
         }:

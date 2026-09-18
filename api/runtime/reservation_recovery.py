@@ -75,6 +75,11 @@ async def _lock_owner(conn: Any, stored: StoredBudgetReservation) -> Any:
             "SELECT id, budget_used_json FROM scans WHERE id=$1 FOR UPDATE",
             owner_id,
         )
+    if stored.record.owner_kind == "validation":
+        return await conn.fetchrow(
+            "SELECT id, budget_used_json FROM authentication_validation_requests WHERE id=$1 FOR UPDATE",
+            owner_id,
+        )
     raise ReservationRecoveryError("stale reservation owner kind is invalid")
 
 
@@ -107,6 +112,28 @@ async def _persist_owner_ledger(
                 "execution_uncertain": stored.record.status == "running",
             }, sort_keys=True, separators=(",", ":")),
         )
+    elif stored.record.owner_kind == "validation":
+        request = await conn.fetchrow(
+            """UPDATE authentication_validation_requests SET budget_used_json=$2::jsonb,
+               status=CASE WHEN status='cancelled' THEN status ELSE 'failed' END,
+               reason_code=CASE WHEN status='cancelled' THEN 'validation_cancelled' ELSE 'process_restarted' END,
+               finished_at=COALESCE(finished_at, NOW()) WHERE id=$1
+               RETURNING profile_id, revision, process_generation, reason_code""",
+            owner_id, encoded,
+        )
+        if request:
+            try:
+                from authenticated_assurance.job_lifecycle import unknown_observation
+                from authenticated_assurance.store import AssuranceStore
+            except ModuleNotFoundError:
+                from api.authenticated_assurance.job_lifecycle import unknown_observation
+                from api.authenticated_assurance.store import AssuranceStore
+            profiles = AssuranceStore()
+            profile = await profiles.get(conn, request["profile_id"], revision=request["revision"])
+            observation = await profiles.record(conn, unknown_observation(
+                profile, request["process_generation"], request["reason_code"], request_id=owner_id))
+            await conn.execute("UPDATE authentication_validation_requests SET validation_record_id=$2 WHERE id=$1",
+                               owner_id, observation.validation_id)
     else:
         await conn.execute(
             "UPDATE scans SET budget_used_json=$2::jsonb WHERE id=$1",

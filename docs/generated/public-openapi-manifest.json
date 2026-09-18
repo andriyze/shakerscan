@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 174,
+  "component_schema_count": 178,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -130,6 +130,8 @@
     "OperationPlanRequest": "4b89871f289608ba2ac21cbd2972c11ab2e34c441c0d95c12b9bc1f3aade6369",
     "PlannerHypothesisRequest": "b8116cfe3dc8d40d3136fdc94ba8dc2b920b21511892669d94757737e125085f",
     "PolicyProfileRequest": "d548181521df56813de4b960e643834b98c27afbeef0a0af4f2c31bc71440a73",
+    "ProfileConfiguration": "38cdcfebb861a98f7aa6bdcf19d08fd2139dc3a8f25d95e6e7b0b6859a3a71dd",
+    "ProfileWrite": "87facdddd13d1dbd0af3af6757d9b71dc2d1116744787e9ea3959b1fe05450d5",
     "RefuterReviewDeriveVerdictRequest": "9e98144281c057266c03b0b86baeb50b2a50e9621b04690839d0db7dc9c9d955",
     "RefuterReviewExecuteRequest": "fd5ae0475c78e40ee7064ee506d8a7ede2cb3cfdd8c6ab9abcfeeb4085e5c498",
     "RefuterReviewQueueRequest": "43e3d46fb0321acca0aa5a1e54a2ab78de6b901c8035c3dc40fbde2a772ec301",
@@ -178,11 +180,13 @@
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
+    "ValidationPolicy": "992d13e084c36df0e6701ccd04a7f13d8b1aaaea89be7ab1c28dd623bd6f3096",
+    "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "c96616ada98f6ce0c912b2c1ae881570620b4c3def5d64fd05616b597cb636ed",
+  "contract_sha256": "8ecd08cac6c8e499d7337fc59ca093bb31bd96e2ec3c8724ae540245004d6b8b",
   "openapi": "3.1.0",
-  "operation_count": 406,
+  "operation_count": 415,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1084,6 +1088,80 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /authenticated-scan-profiles": {
+      "deprecated": false,
+      "operation_id": "list_profiles_authenticated_scan_profiles_get",
+      "parameters_sha256": "e654da15a4c30158f3f0fa1e2c0f60365af4481790cfa768877834d299f4206b",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "GET /authenticated-scan-profiles/contract": {
+      "deprecated": false,
+      "operation_id": "contract_authenticated_scan_profiles_contract_get",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "GET /authenticated-scan-profiles/validations/{request_id}": {
+      "deprecated": false,
+      "operation_id": "get_validation_authenticated_scan_profiles_validations__request_id__get",
+      "parameters_sha256": "55c77f97103bbb157071e3ce34d601224eca00ddbd0f02130775cf914b3d15f2",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "GET /authenticated-scan-profiles/{profile_id}": {
+      "deprecated": false,
+      "operation_id": "get_profile_authenticated_scan_profiles__profile_id__get",
+      "parameters_sha256": "96bf4d0c056810ede3597a714e1d60b4f9ef2a340ea8979959adc5cea97be0dd",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "GET /authenticated-scan-profiles/{profile_id}/history": {
+      "deprecated": false,
+      "operation_id": "get_profile_history_authenticated_scan_profiles__profile_id__history_get",
+      "parameters_sha256": "5870ba031fb1f6ff8e0ed786134fca281cef68ada7c85d351432212a34bae5e3",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
     },
     "GET /credential-profiles": {
       "deprecated": false,
@@ -2403,6 +2481,21 @@
       "surface": "scan",
       "tags": []
     },
+    "GET /scans/{scan_id}/authentication-assurance": {
+      "deprecated": false,
+      "operation_id": "get_scan_assurance_scans__scan_id__authentication_assurance_get",
+      "parameters_sha256": "bf4d900aa38e980e98a61210dd39f6f6d52d359d03fefee910972cd52fb787a4",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "scan",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
     "GET /scans/{scan_id}/capabilities": {
       "deprecated": false,
       "operation_id": "get_scan_capabilities_scans__scan_id__capabilities_get",
@@ -3621,6 +3714,51 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "POST /authenticated-scan-profiles": {
+      "deprecated": false,
+      "operation_id": "write_profile_authenticated_scan_profiles_post",
+      "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
+      "request_schema_sha256": "c4f83b9282c9c79e66332b913ed2a6ea7de0679517c93bfdbb62254d3912d9fb",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "POST /authenticated-scan-profiles/validations/{request_id}/cancel": {
+      "deprecated": false,
+      "operation_id": "cancel_validation_authenticated_scan_profiles_validations__request_id__cancel_post",
+      "parameters_sha256": "2975ea96d0adb8fa6d44616a80384d4feaa0e59ed1706588be50c3e393071e8d",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
+    },
+    "POST /authenticated-scan-profiles/{profile_id}/validate": {
+      "deprecated": false,
+      "operation_id": "validate_profile_authenticated_scan_profiles__profile_id__validate_post",
+      "parameters_sha256": "7491c199dd70472dcc17b3560914325ff9487debef397d7c0cf4fca1a80de27a",
+      "request_schema_sha256": "2997bf09f831975bb98d45da82fb8e7447d340fbb9094c0ff58dc13577cc40a1",
+      "response_schema_sha256": {
+        "202": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "authentication assurance"
+      ]
     },
     "POST /credential-profiles": {
       "deprecated": false,
@@ -5512,10 +5650,18 @@
     ],
     "credentials": [
       "DELETE /credential-profiles/{profile_id}",
+      "GET /authenticated-scan-profiles",
+      "GET /authenticated-scan-profiles/contract",
+      "GET /authenticated-scan-profiles/validations/{request_id}",
+      "GET /authenticated-scan-profiles/{profile_id}",
+      "GET /authenticated-scan-profiles/{profile_id}/history",
       "GET /credential-profiles",
       "GET /credential-profiles/capabilities",
       "GET /credential-profiles/{profile_id}",
       "PATCH /credential-profiles/{profile_id}",
+      "POST /authenticated-scan-profiles",
+      "POST /authenticated-scan-profiles/validations/{request_id}/cancel",
+      "POST /authenticated-scan-profiles/{profile_id}/validate",
       "POST /credential-profiles",
       "POST /credential-profiles/{profile_id}/rotate"
     ],
@@ -5628,6 +5774,7 @@
       "GET /scans/{scan_id}/ai-redteam-report",
       "GET /scans/{scan_id}/artifacts",
       "GET /scans/{scan_id}/artifacts/{artifact_id}",
+      "GET /scans/{scan_id}/authentication-assurance",
       "GET /scans/{scan_id}/capabilities",
       "GET /scans/{scan_id}/coverage",
       "GET /scans/{scan_id}/deployment-decision",

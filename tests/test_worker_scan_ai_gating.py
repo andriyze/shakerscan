@@ -221,6 +221,9 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     class Resolver:
         @asynccontextmanager
         async def resolve(self, *_args, **_kwargs):
+            assert _kwargs["expected_version"] == 2
+            assert _kwargs["expected_record_version"] == 4
+            assert _kwargs["expected_principal_slot"] == "primary"
             profile = types.SimpleNamespace(
                 profile_id=str(profile_id),
                 current_version=2,
@@ -247,6 +250,7 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
         "credential_profile_refs": [{
             "profile_id": str(profile_id),
             "profile_version": 2,
+            "credential_record_version": 4,
             "target_kind": "web",
             "principal_slot": "primary",
             "scan_lane": "primary",
@@ -277,6 +281,35 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     assert hydrated["resolved_credential_profiles"][0]["secret_values_visible"] is False
     assert "worker-only-secret" not in json.dumps(hydrated["credential_profile_refs"])
     assert "worker-only-secret" not in json.dumps(queued)
+
+
+@pytest.mark.parametrize("version,record_version", [(4, 5), (3, 6), (3, True)])
+def test_scan_hydration_refuses_changed_identity_before_decryption(monkeypatch, version, record_version):
+    from tests.test_credential_resolver import FakeStore, _metadata, TARGET_ID, PROFILE_ID
+    from runtime.credential_resolver import WorkerCredentialResolver, CredentialResolutionAuthority
+
+    decrypted = []
+    resolver = WorkerCredentialResolver(store=FakeStore(metadata=_metadata("bearer_token", target_kind="web")),
+        decryptor=lambda value: decrypted.append(value) or value)
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", lambda: resolver)
+    monkeypatch.setattr(worker, "db_pool", _GenericCredentialPool(uuid.UUID(TARGET_ID)))
+
+    async def authority(_conn, **kwargs):
+        return CredentialResolutionAuthority(owner_kind="scan", owner_id=kwargs["owner_id"],
+            credential_access_allowed=True, approval_validated=True,
+            approval_receipt_id=kwargs["approval_receipt_id"], scope_receipt_id="scope-1")
+
+    monkeypatch.setattr(worker, "validate_worker_credential_authority", authority)
+    queued = {"credential_profile_refs": [{"profile_id": PROFILE_ID, "profile_version": version,
+        "credential_record_version": record_version, "target_kind": "web", "principal_slot": "primary",
+        "scan_lane": "primary", "auth_kind": "bearer_token", "allowed_capabilities": ["request.replay"],
+        "credential_resolution_capability": "request.replay", "source": "credential_profiles"}],
+        "credential_target_kind": "web", "credential_action_name": "scan.submit",
+        "approval_receipt_id": str(uuid.uuid4()), "scope_receipt_id": "scope-1",
+        "runtime_scope_guard": {"environment": "production", "allowed_root_domains": ["example.com"]}}
+    with pytest.raises(RuntimeError, match="changed before decryption"):
+        asyncio.run(worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4())))
+    assert decrypted == []
 
 
 def test_parallel_executor_projection_isolates_opaque_principal_refs():

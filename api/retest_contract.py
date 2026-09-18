@@ -1110,6 +1110,16 @@ async def _run_schema_migrations_once(pool) -> None:
             # under the same startup lock so neither API nor workers can observe profiles
             # without their immutable version and binding tables.
             await PostgresCredentialProfileStore().ensure_schema(conn)
+            try:
+                from authenticated_assurance.store import AssuranceStore
+            except ModuleNotFoundError:
+                from api.authenticated_assurance.store import AssuranceStore
+            await AssuranceStore().ensure_schema(conn)
+            try:
+                from authenticated_assurance.jobs import SCHEMA_SQL as validation_jobs_schema
+            except ModuleNotFoundError:
+                from api.authenticated_assurance.jobs import SCHEMA_SQL as validation_jobs_schema
+            await conn.execute(validation_jobs_schema)
 
             # Interactive Hunt identities are durable opaque references whose
             # cookies/tokens remain encrypted until a leased worker uses them.

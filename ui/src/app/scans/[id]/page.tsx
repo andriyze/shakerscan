@@ -151,7 +151,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
   const scopeSummary = [
     resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
-    resultPresentation.authenticated ? 'authenticated' : 'anonymous',
+    resultPresentation.authenticationRequested ? 'identity unverified' : 'anonymous',
   ].filter(Boolean).join(' · ')
 
   return (
@@ -266,7 +266,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <CoverageMetric label="Budget" value={resultPresentation.budgetProfile} />
           <CoverageMetric label="Testing" value={resultPresentation.activeTesting ? 'Active allowed' : 'Passive only'} />
-          <CoverageMetric label="Identity coverage" value={resultPresentation.authenticated ? 'Authenticated' : 'Anonymous only'} />
+          <CoverageMetric label="Identity assurance" value={resultPresentation.authenticationAssurance} />
           <CoverageMetric label="HTTP requests used" value={resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()} />
         </div>
         {resultPresentation.resolvedFamilies.length > 0 && (

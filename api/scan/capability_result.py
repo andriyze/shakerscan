@@ -41,10 +41,12 @@ class CapabilityResultReason(str, Enum):
     POLICY_DISABLED = "policy_disabled"
     INSUFFICIENT_PLAN_BUDGET = "insufficient_plan_budget"
     DEPENDENCY_FAILED = "dependency_failed"
+    DEPENDENCY_INCOMPLETE = "dependency_incomplete"
     DEPENDENCY_PRIVATE_STATE_UNAVAILABLE = "dependency_private_state_unavailable"
     PLACEMENT_UNAVAILABLE = "placement_unavailable"
     AUTHORIZATION_EXPIRED = "authorization_expired"
     AUTHORIZATION_REVOKED = "authorization_revoked"
+    AUTHENTICATION_UNCERTAIN = "authentication_uncertain"
     SCOPE_INVALID = "scope_invalid"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
@@ -54,7 +56,6 @@ class CapabilityResultReason(str, Enum):
     MANIFEST_UNAVAILABLE = "manifest_unavailable"
     UNSUPPORTED_OUTPUT_SCHEMA = "unsupported_output_schema"
     NOT_APPLICABLE = "not_applicable"
-    DEPENDENCY_INCOMPLETE = "dependency_incomplete"
 
 
 class CapabilityResultError(ValueError):

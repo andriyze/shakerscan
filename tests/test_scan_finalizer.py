@@ -149,6 +149,43 @@ def test_finalizer_projects_server_observed_principal_contexts():
         "principal_contexts_exercised": ["primary"],
         "principal_context_semantics": "server_observed_authenticated_target_traffic",
     }
+    assert report["authentication_assurance"]["state"] == "unknown"
+    assert report["authentication_assurance"]["reason_code"] == "legacy_unverified"
+    assert report["authentication_assurance"]["coverage"] == "unverified"
+    assert report["authentication_assurance"]["continuous_authentication_proven"] is False
+
+
+def test_credential_interruption_is_inconclusive_and_preserves_earlier_findings():
+    plan = _plan()
+    baseline, blocked, _ = plan.actions
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {"origin": "https://app.example.test", "pinned_address": "192.0.2.10"},
+        "response": {"status": 200, "selected_headers": {"referrer-policy": ""}},
+    },), blocked.action_id: ()}
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1),
+        blocked.action_id: _result(blocked, status=CapabilityResultStatus.SUCCESS)}
+    before = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    results[blocked.action_id] = _result(blocked, status=CapabilityResultStatus.BLOCKED,
+        reason=CapabilityResultReason.AUTHENTICATION_UNCERTAIN)
+    after = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    assert after["findings"] == before["findings"] and after["findings"]
+    assert after["authentication_assurance"]["reason_code"] == "authentication_gap"
+    assert after["authentication_assurance"]["interrupted_action_count"] == 1
+    assert after["authentication_assurance"]["state"] == "unknown"
+    assert after["coverage"]["status"] == "partial"
+    # A simultaneous timeout keeps its own execution reason without hiding the
+    # separately recorded loss of identity authority.
+    observations[blocked.action_id] = ({"kind": "identity_authority_interruption", "reason_code": "authentication_uncertain"},)
+    results[blocked.action_id] = replace(_result_with_observation_count(blocked, 1),
+        status=CapabilityResultStatus.TIMED_OUT, reason_code=CapabilityResultReason.TIMED_OUT,
+        partial=True, timed_out=True, result_digest=None)
+    timed = finalize_scan_report(plan=plan, target_url="https://app.example.test",
+        action_results=results, observations=observations)
+    assert timed["authentication_assurance"]["interrupted_action_count"] == 1
+    assert timed["findings"] == before["findings"]
 
 
 def test_finalizer_projects_content_free_runtime_destinations_from_observations():

@@ -4023,6 +4023,11 @@ except ModuleNotFoundError:
     )
 
 app.include_router(credential_router)
+try:
+    from authenticated_assurance.router import router as authenticated_assurance_router, configure_assurance_engine
+except ModuleNotFoundError:
+    from api.authenticated_assurance.router import router as authenticated_assurance_router, configure_assurance_engine
+app.include_router(authenticated_assurance_router)
 configure_scan_read_router(lambda: db_pool)
 app.include_router(scan_read_router)
 configure_request_collection_router(lambda: db_pool)
@@ -15266,6 +15271,7 @@ async def _validate_approval_receipt_for_action(
 
 
 configure_credential_api(approval_validator=_validate_approval_receipt_for_action)
+configure_assurance_engine(approve=_validate_approval_receipt_for_action, freeze=_freeze_scan_target_binding, enqueue=lambda payload: enqueue_job(get_redis(), AGENT_TOOL_QUEUE_NAME, payload), build=expected_build_fingerprint)
 
 
 

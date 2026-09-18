@@ -150,6 +150,22 @@ def test_authority_fails_before_profile_lookup_or_decryption():
     assert "top-secret" in envelope
 
 
+@pytest.mark.parametrize("expected", [4, 6, 0, True])
+def test_metadata_revision_is_checked_before_decryption(expected):
+    decrypted = []
+    resolver = WorkerCredentialResolver(store=FakeStore(metadata=_metadata("bearer_token")),
+        decryptor=lambda value: decrypted.append(value) or value)
+
+    async def exercise():
+        with pytest.raises(CredentialResolutionError, match="changed before decryption"):
+            async with resolver.resolve(object(), profile_id=PROFILE_ID, target=_target(),
+                    capability="request.replay", authority=_authority(), expected_version=3,
+                    expected_record_version=expected):
+                pytest.fail("stale metadata must not resolve")
+    asyncio.run(exercise())
+    assert decrypted == []
+
+
 def test_scope_mismatch_fails_before_profile_lookup():
     store = FakeStore(metadata=_metadata("bearer_token"))
     resolver = WorkerCredentialResolver(store=store, decryptor=lambda value: value)
