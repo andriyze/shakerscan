@@ -381,3 +381,19 @@ def test_a_nuclei_hold_smaller_than_its_wall_shortens_the_wall():
     assert rate == 1
     assert hard["tool_wall_seconds"] <= 30
     assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]
+
+
+def test_nuclei_pacing_never_raises_the_rate_above_the_existing_ceiling():
+    """Pacing derives the rate from the reservation, but the reservation must not become a
+    way to send more than the previously fixed 10/s: a 900-request, 45-second hold computed
+    20/s, doubling target load as a side effect of a throttling fix. The ceiling is policy;
+    raising it is a separate, tested decision."""
+    plan = _batch_plan("nuclei", {"http_requests": 900, "tool_wall_seconds": 45})
+    argv = list(plan.argv)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+    assert rate == 10, f"rate {rate}/s exceeds the 10/s ceiling"
+    assert int(argv[argv.index("-concurrency") + 1]) <= 10
+    assert int(argv[argv.index("-bulk-size") + 1]) <= 10
+    # ...and the paced rate still fits the hold across the whole wall.
+    hard = dict(plan.hard_budget)
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]

@@ -543,3 +543,50 @@ def test_a_clean_receipt_carries_no_diagnostic_noise():
         plan_budget_limits={"max_http_requests": 20, "max_tool_wall_seconds": 60},
     )
     assert "diagnostic" not in explanation["actions"][0]["receipt"]
+
+
+def _explanation_with_first_row(**overrides):
+    rows = json.loads(json.dumps(_rows()))
+    rows[0].update({k: v for k, v in overrides.items() if k != "receipt"})
+    rows[0]["receipt_json"].update(overrides.get("receipt", {}))
+    return build_scan_execution_explanation(
+        scan_id=SCAN_ID, scan_status="running", plan_payload=_plan(), action_rows=rows,
+        plan_budget_limits={"max_http_requests": 20, "max_tool_wall_seconds": 60},
+    )
+
+
+def test_work_that_never_launched_an_adapter_is_not_reported_as_an_adapter_error():
+    """A skip retains its reason in receipt.errors, so the diagnostic classified it as an
+    adapter error. Reproduced against stored rows: `not_applicable` with errors
+    ["target_is_http"], `insufficient_plan_budget`, and a blocked `dependency_failed` all read
+    as `unclassified_adapter_error` -- the very confusion the diagnostic exists to remove.
+    The operator log already knew better; the projection must apply the same rule."""
+    cases = [
+        ("skipped", "not_applicable", ["target_is_http"]),
+        ("skipped", "insufficient_plan_budget", ["insufficient_plan_budget"]),
+        ("skipped", "dependency_incomplete", ["dependency_incomplete"]),
+        ("blocked", "dependency_failed", ["dependency_failed"]),
+    ]
+    for status, reason, errors in cases:
+        explanation = _explanation_with_first_row(
+            status=status, reason_code=reason,
+            receipt={"errors": errors, "redacted_execution": {"execution_started": False,
+                                                              "provenance": {"source_revision": "r"}}},
+        )
+        action = explanation["actions"][0]
+        assert action["reason_code"] == reason, (status, reason)  # the skip reason stays visible
+        assert "diagnostic" not in action["receipt"], (status, reason, action["receipt"])
+
+
+def test_a_real_failed_execution_keeps_its_diagnostic():
+    """The skip rule must not swallow a genuine failure: an adapter that ran and died keeps
+    its class even when the action ends partial or failed."""
+    explanation = _explanation_with_first_row(
+        status="partial", reason_code="adapter_failed",
+        receipt={"errors": ["adapter_failed", "external_process_contract:wire limiter"],
+                 "redacted_execution": {"execution_started": True,
+                                        "provenance": {"source_revision": "r"}}},
+    )
+    diagnostic = explanation["actions"][0]["receipt"]["diagnostic"]
+    assert diagnostic["error_class"] == "external_process_contract"
+    assert diagnostic["execution_started"] is True
