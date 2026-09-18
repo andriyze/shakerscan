@@ -13,12 +13,14 @@ name: E2E smoke
 
 on:
   pull_request:
+  # Also the required check in the merge queue; see python-suite.yml.
+  merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: e2e-smoke-${{ github.event.pull_request.number }}
+  group: e2e-smoke-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
   cancel-in-progress: true
 
 jobs:
@@ -42,8 +44,8 @@ jobs:
         shell: bash
         run: |
           if git diff --quiet \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
+            "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
             -- api scanner db tests/e2e docker-compose.yml Makefile scanner.sh \
                scripts/generate_public_api_contract.py \
                docs/generated/public-openapi-manifest.json \
@@ -55,8 +57,8 @@ jobs:
             echo "backend=true" >> "$GITHUB_OUTPUT"
           fi
           if git diff --quiet \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
+            "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
             -- ui api/api.py api/scan/contracts.py \
                api/public_api_contract.py \
                scripts/generate_scan_contract.py scripts/generate_hunt_contract.py \
@@ -270,7 +272,7 @@ jobs:
         if: always() && steps.changes.outputs.stack == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: e2e-smoke-${{ github.event.pull_request.head.sha }}
+          name: e2e-smoke-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           path: |
             artifacts/e2e-scorecard.json
             artifacts/e2e-actual-assertions.json
