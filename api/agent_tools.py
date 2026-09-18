@@ -274,6 +274,8 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # remainder absorbs process start-up and teardown so a healthy run finishes
 # inside its deadline instead of being killed at it.
 _BATCH_ATTEMPT_WALL_UTILISATION = 0.6
+# nuclei's global request rate, as fixed in its argv; batch pacing may lower it, never raise it.
+_NUCLEI_RATE_CEILING = 10
 # The tool-keyed view of the shared per-attempt floors, so argv enforcement can
 # reason in tool terms. scan.external_process owns the numbers: duplicating them
 # is how the planner and the adapter drifted apart in the first place.
@@ -1199,7 +1201,10 @@ def build_enforced_scanner_plan(
             # whole wall, so the bound is rate x wall <= hold across the entire wall. The
             # delay-based _batch_attempt_pacing used by sqlmap/dalfox paces against a
             # fraction of the wall, which would overshoot here.
-            rate_per_second = max(1, http // max(1, wall))
+            # Derive the rate from the hold, but never above the rate this argv has always
+            # used: a large reservation must not become a way to send more than 10/s as a
+            # side effect of a throttling fix. Raising the ceiling is a separate decision.
+            rate_per_second = min(_NUCLEI_RATE_CEILING, max(1, http // max(1, wall)))
             paced_wall = wall
             if rate_per_second * paced_wall > http:
                 # One request per second is nuclei's floor: a hold thinner than the wall has

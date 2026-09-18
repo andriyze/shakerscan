@@ -103,6 +103,33 @@ def diagnostic_error_class(value: Any) -> str:
     return fallback or "none"
 
 
+# Outcomes decided before any adapter launched. The reason for one of these is retained in
+# receipt.errors to explain the scheduler's decision, and is not an adapter error.
+_NEVER_LAUNCHED_STATUSES = frozenset({"skipped", "blocked"})
+_NEVER_LAUNCHED_REASONS = frozenset({
+    "insufficient_plan_budget", "not_applicable", "dependency_incomplete", "dependency_failed",
+})
+
+
+def action_diagnostic_error_class(
+    *, status: Any, reason: Any, execution_started: Any, errors: Any,
+) -> str:
+    """The failure class for an action, or "none" when no adapter ever ran.
+
+    The operator log had this rule and the public receipt projection did not, so a
+    `not_applicable` skip whose receipt retained ["target_is_http"] was published as
+    `unclassified_adapter_error` -- an empty candidate set dressed up as a broken adapter,
+    which is the confusion the diagnostic exists to remove. Both readers now share it.
+    """
+    if (
+        str(status or "") in _NEVER_LAUNCHED_STATUSES
+        and execution_started is False
+        and str(reason or "") in _NEVER_LAUNCHED_REASONS
+    ):
+        return "none"
+    return diagnostic_error_class(errors)
+
+
 def _diagnostic_error_class(value: Any) -> str:
     return diagnostic_error_class(value)
 
@@ -134,16 +161,10 @@ def scan_action_diagnostic_line(
         else "unknown"
     )
     reason = result.reason_code.value if result.reason_code is not None else "none"
-    error_class = _diagnostic_error_class(public_receipt.get("errors"))
-    if (
-        result.status.value == "skipped"
-        and execution_started is False
-        and reason in {"insufficient_plan_budget", "not_applicable", "dependency_incomplete"}
-    ):
-        # Allocation/policy skips never launched an adapter. A retained internal
-        # diagnostic may explain the scheduler decision, but it is not an adapter
-        # error and must not be rendered as one in the operator log.
-        error_class = "none"
+    error_class = action_diagnostic_error_class(
+        status=result.status.value, reason=reason,
+        execution_started=execution_started, errors=public_receipt.get("errors"),
+    )
     label = _action_label(action.action_id)
     if not enforcement and not wire:
         if result.status.value == "success":

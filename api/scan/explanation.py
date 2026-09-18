@@ -7,7 +7,7 @@ from datetime import date, datetime
 import json
 from typing import Any, Mapping, Sequence
 
-from .activity import diagnostic_error_class
+from .activity import action_diagnostic_error_class
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -223,13 +223,16 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
     # URL, a token or response text.
     errors = receipt.get("errors")
     errors = errors if isinstance(errors, (list, tuple)) else ()
-    error_class = diagnostic_error_class(errors)
+    started = execution.get("execution_started")
+    error_class = action_diagnostic_error_class(
+        status=row.get("status"), reason=row.get("reason_code"),
+        execution_started=started, errors=errors,
+    )
     if error_class != "none":
         counts = {
             key: value for key in ("attempted_count", "unattempted_count")
             if isinstance(value := execution.get(key), int) and not isinstance(value, bool)
         }
-        started = execution.get("execution_started")
         projection["diagnostic"] = {
             "error_class": error_class,
             "error_count": len(errors),
