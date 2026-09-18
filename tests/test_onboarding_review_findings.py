@@ -74,14 +74,58 @@ def test_reporting_a_fleet_never_raises_the_configured_execution_cap():
     assert deployment_policy.operational_max_allowed_workers(configured, running_count=0) == configured
 
 
-def test_the_workers_endpoint_publishes_the_configured_cap_not_the_reported_one():
-    source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
-    publish = re.search(r"_publish_max_active_scans\(max_allowed=([^)]+)\)", source)
-    assert publish, "the workers endpoint no longer publishes an active-scan cap"
-    assert "reported" not in publish.group(1), (
-        "the reported (display) maximum is being published as the execution cap: a GET of the "
-        "worker list can then raise real concurrency"
-    )
+def test_the_published_execution_cap_does_not_flow_from_the_worker_inventory():
+    """P02, traced rather than pattern-matched.
+
+    The first version of this test asserted only that the published argument did not contain the
+    word "reported". The buggy code passed `max_allowed_workers`, which does not contain it
+    either, so the test passed on the very defect it was written to catch. The second version
+    walked assignments but collected them across the whole module, so it matched the wrong one
+    and passed too.
+
+    This resolves names inside the function that publishes, which is the only scope where the
+    question means anything.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "api" / "api.py").read_text(encoding="utf-8"))
+    checked = 0
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        publishes = [
+            node for node in ast.walk(func)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "_publish_max_active_scans"
+            and node.keywords
+        ]
+        if not publishes:
+            continue
+        local: dict[str, ast.AST] = {}
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                local[node.targets[0].id] = node.value
+
+        def from_inventory(expr: ast.AST, seen: frozenset[str] = frozenset()) -> bool:
+            for node in ast.walk(expr):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_reported_max_allowed_workers":
+                    return True
+                if isinstance(node, ast.Name):
+                    if node.id == "worker_list":
+                        return True
+                    if node.id in local and node.id not in seen:
+                        if from_inventory(local[node.id], seen | {node.id}):
+                            return True
+            return False
+
+        for call in publishes:
+            checked += 1
+            assert not from_inventory(call.keywords[0].value), (
+                f"in {func.name}(), the published execution cap derives from the worker "
+                f"inventory, so reading the worker list -- which includes exited containers -- "
+                f"can raise real concurrency"
+            )
+    assert checked, "no call publishes an active-scan cap any more"
 
 
 @pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.release.yml"])
