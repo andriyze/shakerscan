@@ -3,12 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import contextlib
 import ipaddress
 import struct
 from typing import Any, Iterable
 
 from runtime.target_bound_socket import FrozenTargetSocketFactory
+
+
+_REQUEST_LINE = re.compile(
+    rb"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT) /\S* HTTP/1\.[01]\r\n"
+)
+
+
+def count_request_lines(chunk: bytes, carry: bytes) -> tuple[int, bytes]:
+    """Count HTTP request lines in bytes flowing toward the target.
+
+    Close to exact for plaintext HTTP and a lower bound under TLS, where nothing is visible. A
+    request line is matched wherever it occurs, not only at a line start: under keep-alive the
+    next request follows the previous body directly, with no newline between them, so anchoring
+    to line starts would miss every request after a POST. The match requires the whole request
+    line through its CRLF, so a bare method word inside a body does not count. Chunks split
+    anywhere, so the bytes after the last complete match are carried into the next call and a
+    line straddling two reads counts once.
+    """
+    data = carry + chunk
+    count = 0
+    last_end = 0
+    for match in _REQUEST_LINE.finditer(data):
+        count += 1
+        last_end = match.end()
+    return count, data[max(last_end, len(data) - 4096):]
 
 
 class PinnedSocksProxy:
@@ -46,6 +72,7 @@ class PinnedSocksProxy:
         self._connections: set[asyncio.Task[Any]] = set()
         self.connection_attempts = 0
         self.connections_opened = 0
+        self.http_requests_observed = 0
         self.connections_rejected = 0
         self.upstream_connection_attempts = 0
         self.address_attempts = {
@@ -180,10 +207,13 @@ class PinnedSocksProxy:
                 *,
                 toward_target: bool,
             ) -> None:
+                carry = b""
                 try:
                     while chunk := await source.read(65536):
                         if toward_target:
                             self.bytes_to_target += len(chunk)
+                            seen, carry = count_request_lines(chunk, carry)
+                            self.http_requests_observed += seen
                         else:
                             self.bytes_from_target += len(chunk)
                         target.write(chunk)

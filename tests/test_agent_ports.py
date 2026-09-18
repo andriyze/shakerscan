@@ -795,8 +795,13 @@ def test_hunt_dns_authorization_is_frozen_in_session_state():
 
 
 def test_scanner_request_settlement_distinguishes_exact_from_observed():
+    # nuclei's own counters are progress, not wire evidence (see
+    # test_nuclei_progress_counter_is_not_wire_evidence); a generic tool's explicit counter is exact.
     assert at.scanner_request_settlement(
         "nuclei", json.dumps({"stats": {"total-requests": 17}})
+    )["mode"] == "unavailable"
+    assert at.scanner_request_settlement(
+        "generic-tool", json.dumps({"stats": {"total-requests": 17}})
     ) == {
         "mode": "exact", "actual": 17, "observed_minimum": 17,
         "source": "scanner_counter",
@@ -897,10 +902,9 @@ def test_nuclei_focused_default_and_progress_counter_contract():
             json.dumps({"duration": "0:00:10", "requests": 149}),
         ]),
     )
-    assert settlement == {
-        "mode": "exact", "actual": 149, "observed_minimum": 149,
-        "source": "scanner_counter",
-    }
+    # The progress counter is parsed (both int and v3.11 string forms) but is not wire evidence.
+    assert settlement["mode"] == "unavailable" and settlement["actual"] is None
+    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
     string_counter = at.scanner_request_settlement(
         "nuclei",
         json.dumps({"duration": "0:00:10", "requests": "149", "templates": "1183"}),
@@ -1389,3 +1393,63 @@ def test_tool_output_records_stay_bounded():
     )
     parsed = at.parse_scanner_output("katana", flood)
     assert parsed["record_count"] <= at.MAX_TOOL_RECORDS
+
+
+def test_nuclei_progress_counter_is_not_wire_evidence():
+    """Measured on the deployed 2.3.6 candidate through the real pinned proxy at a counting
+    target: one 120-request/45-second attempt at `-rate-limit 2` sent 33 HTTP requests over 5
+    connections while nuclei's stats reported `requests: 277` (`total: 2729`, `percent: 10`).
+    The counter is progress through the request plan, about eight times the wire. Taken as
+    exact it made every batch attempt fail the hard-ceiling contract regardless of pacing --
+    thirteen of thirteen on the rerun -- and charged each its full hold.
+    """
+    settlement = at.scanner_request_settlement(
+        "nuclei",
+        json.dumps({"duration": "0:00:40", "errors": "2", "hosts": "1", "matched": "0",
+                    "percent": "10", "requests": "277", "rps": "6", "templates": "1183",
+                    "total": "2729"}),
+    )
+    assert settlement["mode"] != "exact"
+    assert settlement["actual"] is None
+    # The progress counter must not masquerade as a lower bound either; nothing about the
+    # wire is known from it.
+    assert settlement["observed_minimum"] == 0
+    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
+
+
+def test_request_lines_are_counted_across_chunk_boundaries():
+    """The proxy counts HTTP request lines toward the target: exact for plaintext, a lower
+    bound under TLS. Chunks split anywhere, so a request line straddling two reads counts once."""
+    from pinned_socks_proxy import count_request_lines
+    carry = b""
+    total = 0
+    for chunk in (b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HT", b"TP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok",
+                  b"GET /c HTTP/1.1\r\n\r\n"):
+        n, carry = count_request_lines(chunk, carry)
+        total += n
+    assert total == 3
+    # A body that happens to contain a method word is not a request line.
+    n, carry = count_request_lines(b"POST /d HTTP/1.1\r\nContent-Length: 20\r\n\r\nGET /not-a-request!!", b"")
+    assert n == 1
+
+
+def test_worker_prefers_proxy_wire_evidence_over_an_unavailable_settlement():
+    """What the pinned proxy relayed is wire evidence; a tool's progress counter is not. When the
+    scanner settlement is not exact, the proxy's request-line count becomes the lower bound the
+    hard-ceiling contract checks -- so 33 real requests pass a 120 hold and 312 fail it, instead
+    of every attempt failing on a counter that was eight times the wire."""
+    w = at
+
+    class Proxy:
+        http_requests_observed = 33
+    unavailable = {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": "progress_counter_is_not_wire_evidence"}
+    settled = w.wire_evidence_settlement(unavailable, Proxy())
+    assert settled == {"mode": "observed_lower_bound", "actual": None, "observed_minimum": 33, "source": "proxy_request_lines"}
+    # An exact settlement from a tool's own complete wire log is kept as is.
+    exact = {"mode": "exact", "actual": 17, "observed_minimum": 17, "source": "tool_wire_log"}
+    assert w.wire_evidence_settlement(exact, Proxy()) == exact
+    # Without a proxy, or with nothing relayed, the settlement is unchanged.
+    assert w.wire_evidence_settlement(unavailable, None) == unavailable
+    class Quiet:
+        http_requests_observed = 0
+    assert w.wire_evidence_settlement(unavailable, Quiet()) == unavailable

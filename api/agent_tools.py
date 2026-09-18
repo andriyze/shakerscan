@@ -1644,6 +1644,19 @@ def scanner_request_settlement(
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
     counters = _explicit_request_counters(decoded)
+    if counters and scanner == "nuclei":
+        # nuclei's stats `requests` is progress through its request plan, not traffic sent.
+        # Measured through the pinned proxy at a counting target: one paced attempt sent 33
+        # requests while the counter read 277 (total 2729, percent 10) -- about eight times the
+        # wire. Taken as exact it failed the hard-ceiling contract on every batch attempt
+        # regardless of pacing and charged each its full hold. It says nothing about the wire;
+        # the worker substitutes what the proxy actually relayed.
+        return {
+            "mode": "unavailable",
+            "actual": None,
+            "observed_minimum": 0,
+            "source": "progress_counter_is_not_wire_evidence",
+        }
     if counters:
         # Nested summaries sometimes repeat the same cumulative counter.  The maximum is the final
         # cumulative total and is safer than summing duplicate snapshots.
@@ -1680,6 +1693,41 @@ def scanner_request_settlement(
             "source": "typed_result_records",
         }
     return {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": None}
+
+
+def agent_scanner_request_settlement(
+    scanner_name: str, stdout: str, stderr: bytes | str | None,
+    *, file_counter: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Settle scanner traffic without exposing diagnostic stderr to the planner."""
+    normalized = str(scanner_name or "").strip().lower()
+    settlement_input = str(stdout or "")
+    if normalized == "nuclei" and stderr:
+        diagnostics = (
+            stderr.decode("utf-8", "replace")
+            if isinstance(stderr, bytes)
+            else str(stderr)
+        )
+        settlement_input = f"{settlement_input}\n{diagnostics}"
+    return scanner_request_settlement(
+        normalized, settlement_input, file_counter=file_counter,
+    )
+
+
+def wire_evidence_settlement(settlement: Mapping[str, Any], pinned_proxy: Any) -> dict[str, Any]:
+    """Prefer what the pinned proxy relayed over a tool's own non-exact accounting.
+
+    The proxy counts HTTP request lines toward the target: close to exact for plaintext, a lower
+    bound under TLS. A tool's exact counter from its own complete wire log is kept. Otherwise,
+    when the proxy saw requests, they become the lower bound the hard-ceiling contract checks --
+    real traffic, so a paced attempt passes its hold and an overrun still fails it.
+    """
+    current = dict(settlement or {})
+    observed = int(getattr(pinned_proxy, "http_requests_observed", 0) or 0) if pinned_proxy is not None else 0
+    if str(current.get("mode") or "") == "exact" or observed <= 0:
+        return current
+    return {"mode": "observed_lower_bound", "actual": None, "observed_minimum": observed,
+            "source": "proxy_request_lines"}
 
 
 def _public_observed_url(value: Any) -> str | None:
