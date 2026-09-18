@@ -20303,13 +20303,16 @@ def _compute_max_allowed_workers() -> int:
         platform_reserve_gb = float(os.environ.get("SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB") or 7)
     except (TypeError, ValueError):
         platform_reserve_gb = 7
-    if mem_gb <= 0 or per_worker_gb <= 0:
-        return 5
-    if mem_gb < 8:
-        return max(1, min(4, int(mem_gb) - 3))
-    if mem_gb < 16:
-        return 5
-    return max(5, min(200, int((mem_gb - max(0, platform_reserve_gb)) / per_worker_gb)))
+    return deployment_policy.max_allowed_workers_for_memory_gb(
+        mem_gb, per_worker_gb=per_worker_gb, platform_reserve_gb=platform_reserve_gb,
+    )
+
+
+def _reported_max_allowed_workers(running_count: int = 0) -> int:
+    """The capacity to report, never below the fleet that is actually running."""
+    return deployment_policy.reported_max_allowed_workers(
+        _compute_max_allowed_workers(), running_count,
+    )
 
 # Hard per-worker memory cap applied to scaler-created worker containers. Without
 # it, a runaway/large scan can exhaust the whole Docker VM and OOM-thrash every
@@ -20805,7 +20808,9 @@ def _socket_less_workers_response(scaling_reason):
     not the inventory."""
     summary = _web_dast_worker_readiness()
     common = {
-        "max_allowed": _compute_max_allowed_workers(),
+        "max_allowed": _reported_max_allowed_workers(
+            len((summary or {}).get("workers") or ()) if summary else 0
+        ),
         "max_active_scans": _compute_max_active_scans(),
         "expected_build_fingerprint": expected_build_fingerprint(),
         "expected_scanner_version": current_scanner_version(),
@@ -20983,7 +20988,9 @@ async def get_workers():
 
         summary = compute_fleet_summary(worker_list)
         execution_capacity = await _execution_capacity_snapshot(summary)
-        max_allowed_workers = _compute_max_allowed_workers()
+        # Never report a maximum below the fleet that is actually running; see
+        # _reported_max_allowed_workers.
+        max_allowed_workers = _reported_max_allowed_workers(len(worker_list))
         # Refresh the per-scan active-scan concurrency cap for workers.
         max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
         # Refresh the real build label so workers stamp/report the deployed commit.

@@ -674,63 +674,72 @@ async def create_target(request: TargetCreate):
 
     async with _pool().acquire() as conn:
         try:
-            # Canonical find-or-create: a scheme/trailing-slash variant of an existing
-            # origin reuses that target instead of creating a duplicate. xmax = 0 is
-            # true only for a freshly INSERTed row, so we can report created vs reused.
-            row = await conn.fetchrow("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id, url, name, discovery_source, metadata_json,
-                          root_domain, is_root, (xmax = 0) AS created
-            """, normalized_target, request.name, root_domain, is_root,
-                 json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
-                 json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
-                 _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")))
+            # One transaction, so a refused authorization leaves no target behind. The insert
+            # committed before the authorization step could raise, so a private-range target was
+            # created and the caller still got 400: the UI said "Failed to add target" while the
+            # target sat in the list, and retrying hit "Target already exists".
+            async with conn.transaction():
+                # Canonical find-or-create: a scheme/trailing-slash variant of an existing
+                # origin reuses that target instead of creating a duplicate. xmax = 0 is
+                # true only for a freshly INSERTed row, so we can report created vs reused.
+                row = await conn.fetchrow("""
+                    INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                    RETURNING id, url, name, discovery_source, metadata_json,
+                              root_domain, is_root, (xmax = 0) AS created
+                """, normalized_target, request.name, root_domain, is_root,
+                     json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                     json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
+                     _default_asm_enabled_for_new_web_target("manual"),
+                     json.dumps(_default_asm_config_for_new_web_target("manual")))
 
-            response = {
-                'id': str(row['id']),
-                'url': row['url'],
-                # When a different origin reuses an existing host-level target,
-                # report the stored target metadata rather than metadata derived
-                # from the just-submitted origin.
-                'root_domain': row['root_domain'],
-                'is_root': row['is_root'],
-                'cohort': target_cohort(
-                    url=row['url'],
-                    name=row.get('name'),
-                    discovery_source=row.get('discovery_source'),
-                    metadata=_decode_json_value(row.get('metadata_json')) or {},
-                ),
-                'status': 'created' if row['created'] else 'already_exists'
-            }
-            # Surface warning if path/query was stripped
-            if target_note:
-                response['warning'] = target_note
-                response['original_url'] = request.url
-            # Web identity is host-level, so a different scheme or port resolves to an existing
-            # target rather than creating a new one. That merge is deliberate, but returning only
-            # an id let a caller believe it had registered the origin it asked for: a scope receipt
-            # and a Hunt were then bound to one application while the work ran against another on
-            # the same host, and the result looked correct. Say so explicitly.
-            if not scope_origin_matches_target(request.url, row['url']):
-                response['origin_merged'] = True
-                response['requested_url'] = request.url
-                response['warning'] = (
-                    f"{request.url} resolves to the existing host-level target {row['url']}; "
-                    "web targets are identified by host, so scans, scope receipts and Hunts bound "
-                    "to this id address that origin, not the one requested."
-                )
-            authorized_by = getattr(request, "authorized_by", None)
-            if authorized_by:
-                try:
-                    response['authorization'] = await target_authorization.authorize_target(
-                        conn, row['id'], approved_by=authorized_by,
+                response = {
+                    'id': str(row['id']),
+                    'url': row['url'],
+                    # When a different origin reuses an existing host-level target,
+                    # report the stored target metadata rather than metadata derived
+                    # from the just-submitted origin.
+                    'root_domain': row['root_domain'],
+                    'is_root': row['is_root'],
+                    'cohort': target_cohort(
+                        url=row['url'],
+                        name=row.get('name'),
+                        discovery_source=row.get('discovery_source'),
+                        metadata=_decode_json_value(row.get('metadata_json')) or {},
+                    ),
+                    'status': 'created' if row['created'] else 'already_exists'
+                }
+                # Surface warning if path/query was stripped
+                if target_note:
+                    response['warning'] = target_note
+                    response['original_url'] = request.url
+                # Web identity is host-level, so a different scheme or port resolves to an existing
+                # target rather than creating a new one. That merge is deliberate, but returning only
+                # an id let a caller believe it had registered the origin it asked for: a scope receipt
+                # and a Hunt were then bound to one application while the work ran against another on
+                # the same host, and the result looked correct. Say so explicitly.
+                if not scope_origin_matches_target(request.url, row['url']):
+                    response['origin_merged'] = True
+                    response['requested_url'] = request.url
+                    response['warning'] = (
+                        f"{request.url} resolves to the existing host-level target {row['url']}; "
+                        "web targets are identified by host, so scans, scope receipts and Hunts bound "
+                        "to this id address that origin, not the one requested."
                     )
-                except target_authorization.TargetAuthorizationError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return response
+                authorized_by = getattr(request, "authorized_by", None)
+                if authorized_by:
+                    try:
+                        # The cohort the operator picked is the target's environment. Without it
+                        # every authorization evaluated scope as "production", so choosing Lab in
+                        # the add-target dialog changed nothing and a lab address was refused.
+                        response['authorization'] = await target_authorization.authorize_target(
+                            conn, row['id'], approved_by=authorized_by,
+                            environment=requested_cohort or None,
+                        )
+                    except target_authorization.TargetAuthorizationError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return response
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Target already exists")
 

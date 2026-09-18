@@ -457,7 +457,14 @@ def _evaluate_runtime_dns_observations(
             if frozen_addresses and normalized_ip not in frozen_addresses:
                 blocked.append("runtime_dns_address_drift")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_address_drift"})
-            elif not frozen_addresses and _ip_scope_block_reason(ip, environment):
+            elif not frozen_addresses and _ip_scope_block_reason(
+                ip, environment, allow_private_networks=False,
+            ):
+                # Every host reaching here is a name, not a literal address: literal targets are
+                # skipped above. A name that resolves into the private space at run time is DNS
+                # rebinding, and stays blocked whatever the deployment's private-network policy
+                # says. That policy decides whether an address the operator *declared* is in
+                # scope; it never lets a public name quietly reach the operator's intranet.
                 blocked.append("runtime_dns_private_range")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_private_range"})
         results.append(result)
