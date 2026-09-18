@@ -147,18 +147,18 @@
     "name": "list_ai_surfaces"
   },
   {
-    "path": "/ai/surfaces/{surface_id}/attempts",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_ai_surface_attempts"
-  },
-  {
     "path": "/ai/surfaces/sync",
     "methods": [
       "POST"
     ],
     "name": "sync_ai_surfaces"
+  },
+  {
+    "path": "/ai/surfaces/{surface_id}/attempts",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_ai_surface_attempts"
   },
   {
     "path": "/ai/targets",
@@ -455,41 +455,6 @@
     "name": "arsenal_record_hypothesis"
   },
   {
-    "path": "/arsenal/hypotheses/{hypothesis_id}/claim",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_claim_hypothesis"
-  },
-  {
-    "path": "/arsenal/hypotheses/{hypothesis_id}/plan-campaign",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_plan_hypothesis_campaign"
-  },
-  {
-    "path": "/arsenal/hypotheses/{hypothesis_id}/reconcile-proof",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_reconcile_hypothesis_proof"
-  },
-  {
-    "path": "/arsenal/hypotheses/{hypothesis_id}/signals",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_append_hypothesis_signal"
-  },
-  {
-    "path": "/arsenal/hypotheses/{hypothesis_id}/transition",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_transition_hypothesis"
-  },
-  {
     "path": "/arsenal/hypotheses/from-benchmark",
     "methods": [
       "POST"
@@ -525,6 +490,41 @@
     "name": "arsenal_generate_hypotheses_from_source"
   },
   {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/claim",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_claim_hypothesis"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/plan-campaign",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_plan_hypothesis_campaign"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/reconcile-proof",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_reconcile_hypothesis_proof"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/signals",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_append_hypothesis_signal"
+  },
+  {
+    "path": "/arsenal/hypotheses/{hypothesis_id}/transition",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_transition_hypothesis"
+  },
+  {
     "path": "/arsenal/plans",
     "methods": [
       "GET"
@@ -553,20 +553,6 @@
     "name": "arsenal_record_refuter_review"
   },
   {
-    "path": "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_derive_refuter_review_verdict"
-  },
-  {
-    "path": "/arsenal/refuter-reviews/{refuter_review_id}/execute",
-    "methods": [
-      "POST"
-    ],
-    "name": "arsenal_execute_refuter_review_plan"
-  },
-  {
     "path": "/arsenal/refuter-reviews/queue-from-summary",
     "methods": [
       "POST"
@@ -579,6 +565,20 @@
       "GET"
     ],
     "name": "arsenal_refuter_review_summary"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/derive-verdict",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_derive_refuter_review_verdict"
+  },
+  {
+    "path": "/arsenal/refuter-reviews/{refuter_review_id}/execute",
+    "methods": [
+      "POST"
+    ],
+    "name": "arsenal_execute_refuter_review_plan"
   },
   {
     "path": "/arsenal/scope/preview",
@@ -637,27 +637,6 @@
     "name": "write_profile"
   },
   {
-    "path": "/authenticated-scan-profiles/{profile_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_profile"
-  },
-  {
-    "path": "/authenticated-scan-profiles/{profile_id}/history",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_profile_history"
-  },
-  {
-    "path": "/authenticated-scan-profiles/{profile_id}/validate",
-    "methods": [
-      "POST"
-    ],
-    "name": "validate_profile"
-  },
-  {
     "path": "/authenticated-scan-profiles/contract",
     "methods": [
       "GET"
@@ -679,6 +658,27 @@
     "name": "cancel_validation"
   },
   {
+    "path": "/authenticated-scan-profiles/{profile_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_profile"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/history",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_profile_history"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/validate",
+    "methods": [
+      "POST"
+    ],
+    "name": "validate_profile"
+  },
+  {
     "path": "/credential-profiles",
     "methods": [
       "GET"
@@ -691,6 +691,13 @@
       "POST"
     ],
     "name": "create_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/capabilities",
+    "methods": [
+      "GET"
+    ],
+    "name": "credential_capability_catalog"
   },
   {
     "path": "/credential-profiles/{profile_id}",
@@ -719,13 +726,6 @@
       "POST"
     ],
     "name": "rotate_credential_profile"
-  },
-  {
-    "path": "/credential-profiles/capabilities",
-    "methods": [
-      "GET"
-    ],
-    "name": "credential_capability_catalog"
   },
   {
     "path": "/dashboard",
@@ -810,6 +810,13 @@
       "POST"
     ],
     "name": "create_device"
+  },
+  {
+    "path": "/devices/readiness",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_device_readiness"
   },
   {
     "path": "/devices/{device_id}",
@@ -931,13 +938,6 @@
     "name": "verify_device_service"
   },
   {
-    "path": "/devices/readiness",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_device_readiness"
-  },
-  {
     "path": "/discovery",
     "methods": [
       "GET"
@@ -980,13 +980,6 @@
       "GET"
     ],
     "name": "list_domains"
-  },
-  {
-    "path": "/evidence/{evidence_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_evidence_object"
   },
   {
     "path": "/evidence/export-bundle",
@@ -1036,6 +1029,13 @@
       "POST"
     ],
     "name": "evidence_retention_sweep"
+  },
+  {
+    "path": "/evidence/{evidence_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_evidence_object"
   },
   {
     "path": "/experiments/workflows/{workflow_id}/cancel",
@@ -1101,6 +1101,13 @@
     "name": "create_finding_exception"
   },
   {
+    "path": "/finding-exceptions/lifecycle/sweep",
+    "methods": [
+      "POST"
+    ],
+    "name": "finding_exception_lifecycle_sweep"
+  },
+  {
     "path": "/finding-exceptions/{exception_id}",
     "methods": [
       "DELETE"
@@ -1115,18 +1122,39 @@
     "name": "update_finding_exception"
   },
   {
-    "path": "/finding-exceptions/lifecycle/sweep",
-    "methods": [
-      "POST"
-    ],
-    "name": "finding_exception_lifecycle_sweep"
-  },
-  {
     "path": "/findings",
     "methods": [
       "GET"
     ],
     "name": "list_findings"
+  },
+  {
+    "path": "/findings/bulk",
+    "methods": [
+      "POST"
+    ],
+    "name": "bulk_update_findings"
+  },
+  {
+    "path": "/findings/cleanup",
+    "methods": [
+      "POST"
+    ],
+    "name": "cleanup_findings"
+  },
+  {
+    "path": "/findings/manual",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_manual_finding"
+  },
+  {
+    "path": "/findings/retest",
+    "methods": [
+      "POST"
+    ],
+    "name": "bulk_retest_findings"
   },
   {
     "path": "/findings/{finding_id:path}",
@@ -1162,34 +1190,6 @@
       "GET"
     ],
     "name": "list_finding_evidence"
-  },
-  {
-    "path": "/findings/bulk",
-    "methods": [
-      "POST"
-    ],
-    "name": "bulk_update_findings"
-  },
-  {
-    "path": "/findings/cleanup",
-    "methods": [
-      "POST"
-    ],
-    "name": "cleanup_findings"
-  },
-  {
-    "path": "/findings/manual",
-    "methods": [
-      "POST"
-    ],
-    "name": "create_manual_finding"
-  },
-  {
-    "path": "/findings/retest",
-    "methods": [
-      "POST"
-    ],
-    "name": "bulk_retest_findings"
   },
   {
     "path": "/fleet/acceptance/lease-probe",
@@ -1311,6 +1311,13 @@
     "name": "list_fleet_nodes"
   },
   {
+    "path": "/fleet/nodes/join",
+    "methods": [
+      "POST"
+    ],
+    "name": "join_fleet_node"
+  },
+  {
     "path": "/fleet/nodes/{node_id}/activity",
     "methods": [
       "GET"
@@ -1365,13 +1372,6 @@
       "PATCH"
     ],
     "name": "update_fleet_node_state"
-  },
-  {
-    "path": "/fleet/nodes/join",
-    "methods": [
-      "POST"
-    ],
-    "name": "join_fleet_node"
   },
   {
     "path": "/fleet/public-health",
@@ -1442,6 +1442,20 @@
       "POST"
     ],
     "name": "start_hunt"
+  },
+  {
+    "path": "/hunts/contract",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_contract"
+  },
+  {
+    "path": "/hunts/lifecycle-metrics",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_lifecycle_metrics"
   },
   {
     "path": "/hunts/{hunt_id}",
@@ -1577,6 +1591,13 @@
     "name": "confirm_hunt_shell_plan"
   },
   {
+    "path": "/hunts/{hunt_id}/skills/suggestions",
+    "methods": [
+      "POST"
+    ],
+    "name": "suggest_hunt_skills"
+  },
+  {
     "path": "/hunts/{hunt_id}/skills/{skill_id}",
     "methods": [
       "DELETE"
@@ -1603,27 +1624,6 @@
       "POST"
     ],
     "name": "record_hunt_skill_usage"
-  },
-  {
-    "path": "/hunts/{hunt_id}/skills/suggestions",
-    "methods": [
-      "POST"
-    ],
-    "name": "suggest_hunt_skills"
-  },
-  {
-    "path": "/hunts/contract",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_hunt_contract"
-  },
-  {
-    "path": "/hunts/lifecycle-metrics",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_hunt_lifecycle_metrics"
   },
   {
     "path": "/investigation/candidates",
@@ -1661,20 +1661,6 @@
     "name": "list_model_intake_admissions"
   },
   {
-    "path": "/model-intake/admissions/{admission_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_model_intake_admission"
-  },
-  {
-    "path": "/model-intake/admissions/{admission_id}/revoke",
-    "methods": [
-      "POST"
-    ],
-    "name": "revoke_model_intake_admission"
-  },
-  {
     "path": "/model-intake/admissions/v2/observe",
     "methods": [
       "POST"
@@ -1687,6 +1673,20 @@
       "POST"
     ],
     "name": "verify_model_intake_admission_v2"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_model_intake_admission"
+  },
+  {
+    "path": "/model-intake/admissions/{admission_id}/revoke",
+    "methods": [
+      "POST"
+    ],
+    "name": "revoke_model_intake_admission"
   },
   {
     "path": "/model-intake/agent/session/{session_id}",
@@ -2174,18 +2174,18 @@
     "name": "deactivate_request_collection_selection"
   },
   {
-    "path": "/research/campaigns/{campaign_id}/control",
-    "methods": [
-      "POST"
-    ],
-    "name": "control_research_campaign"
-  },
-  {
     "path": "/research/campaigns/launch",
     "methods": [
       "POST"
     ],
     "name": "launch_research_campaign"
+  },
+  {
+    "path": "/research/campaigns/{campaign_id}/control",
+    "methods": [
+      "POST"
+    ],
+    "name": "control_research_campaign"
   },
   {
     "path": "/research/episodes",
@@ -2272,18 +2272,18 @@
     "name": "get_latest_result"
   },
   {
-    "path": "/retests/{retest_id}",
-    "methods": [
-      "GET"
-    ],
-    "name": "get_retest"
-  },
-  {
     "path": "/retests/finding/{finding_id:path}",
     "methods": [
       "GET"
     ],
     "name": "list_finding_retests"
+  },
+  {
+    "path": "/retests/{retest_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_retest"
   },
   {
     "path": "/scan/contracts",
@@ -2312,6 +2312,20 @@
       "POST"
     ],
     "name": "submit_scan_endpoint"
+  },
+  {
+    "path": "/scans/batch",
+    "methods": [
+      "POST"
+    ],
+    "name": "submit_batch_endpoint"
+  },
+  {
+    "path": "/scans/dispatch-receipts/lookup",
+    "methods": [
+      "GET"
+    ],
+    "name": "scan_dispatch_receipt"
   },
   {
     "path": "/scans/{scan_id}",
@@ -2433,20 +2447,6 @@
     "name": "get_scan_result"
   },
   {
-    "path": "/scans/batch",
-    "methods": [
-      "POST"
-    ],
-    "name": "submit_batch_endpoint"
-  },
-  {
-    "path": "/scans/dispatch-receipts/lookup",
-    "methods": [
-      "GET"
-    ],
-    "name": "scan_dispatch_receipt"
-  },
-  {
     "path": "/schedules",
     "methods": [
       "GET"
@@ -2480,6 +2480,13 @@
       "PATCH"
     ],
     "name": "update_schedule"
+  },
+  {
+    "path": "/session/start",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_session"
   },
   {
     "path": "/session/{session_id}",
@@ -2529,13 +2536,6 @@
       "POST"
     ],
     "name": "session_test_endpoint"
-  },
-  {
-    "path": "/session/start",
-    "methods": [
-      "POST"
-    ],
-    "name": "start_session"
   },
   {
     "path": "/sessions",
@@ -2613,6 +2613,20 @@
       "POST"
     ],
     "name": "create_target"
+  },
+  {
+    "path": "/targets/dedupe",
+    "methods": [
+      "POST"
+    ],
+    "name": "dedupe_targets"
+  },
+  {
+    "path": "/targets/grouped",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_targets_grouped"
   },
   {
     "path": "/targets/{target_id}",
@@ -2804,6 +2818,20 @@
     "name": "create_target_invariant_contract"
   },
   {
+    "path": "/targets/{target_id}/invariants/compile",
+    "methods": [
+      "POST"
+    ],
+    "name": "compile_target_invariant_rule"
+  },
+  {
+    "path": "/targets/{target_id}/invariants/hypotheses",
+    "methods": [
+      "POST"
+    ],
+    "name": "generate_target_invariant_hypotheses"
+  },
+  {
     "path": "/targets/{target_id}/invariants/{contract_id}/approve",
     "methods": [
       "POST"
@@ -2823,20 +2851,6 @@
       "GET"
     ],
     "name": "get_target_invariant_verification_plan"
-  },
-  {
-    "path": "/targets/{target_id}/invariants/compile",
-    "methods": [
-      "POST"
-    ],
-    "name": "compile_target_invariant_rule"
-  },
-  {
-    "path": "/targets/{target_id}/invariants/hypotheses",
-    "methods": [
-      "POST"
-    ],
-    "name": "generate_target_invariant_hypotheses"
   },
   {
     "path": "/targets/{target_id}/inventory/hypotheses",
@@ -2888,6 +2902,13 @@
     "name": "create_target_principal"
   },
   {
+    "path": "/targets/{target_id}/principals/auto-provision",
+    "methods": [
+      "POST"
+    ],
+    "name": "auto_provision_target_principals"
+  },
+  {
     "path": "/targets/{target_id}/principals/{principal_id}",
     "methods": [
       "DELETE"
@@ -2902,32 +2923,11 @@
     "name": "update_target_principal"
   },
   {
-    "path": "/targets/{target_id}/principals/auto-provision",
-    "methods": [
-      "POST"
-    ],
-    "name": "auto_provision_target_principals"
-  },
-  {
     "path": "/targets/{target_id}/scan",
     "methods": [
       "POST"
     ],
     "name": "scan_target"
-  },
-  {
-    "path": "/targets/dedupe",
-    "methods": [
-      "POST"
-    ],
-    "name": "dedupe_targets"
-  },
-  {
-    "path": "/targets/grouped",
-    "methods": [
-      "GET"
-    ],
-    "name": "list_targets_grouped"
   },
   {
     "path": "/timeline",
