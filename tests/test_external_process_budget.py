@@ -338,3 +338,46 @@ def test_the_planner_and_the_adapter_share_one_set_of_floors():
     assert batch_attempt_capacity(
         "sqli.verify_batch", {"http_requests": 1_600, "tool_wall_seconds": 300},
     ) == 10
+
+
+def test_nuclei_batch_attempt_is_paced_to_what_it_reserved():
+    """nuclei was the only batched tool never re-paced to its reservation.
+
+    Its argv fixes `-rate-limit 10`, so a 45-second attempt holding 120 requests planned
+    roughly 450 -- about 3.75x its hold. Every attempt tripped the wire ceiling
+    ("external_process_contract:wire limiter reported traffic above the hard ceiling"),
+    was charged its whole reservation anyway, and surfaced as `adapter_failed`. On one deep
+    scan three shards spent ~1,560 requests and ~10 minutes that way and proved nothing.
+
+    katana, headless katana, ffuf and dalfox are all re-paced; nuclei is the one that was not.
+    """
+    reserved = {"http_requests": 120, "tool_wall_seconds": 45}
+    plan = _batch_plan("nuclei", reserved)
+    argv = list(plan.argv)
+    hard = dict(plan.hard_budget)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+
+    assert hard["http_requests"] <= reserved["http_requests"]
+    assert hard["tool_wall_seconds"] <= reserved["tool_wall_seconds"]
+    # The invariant that matters: the tool may run for its whole wall, so the rate has to
+    # fit the hold across the whole wall -- not across some fraction of it.
+    assert rate >= 1
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"], (
+        f"-rate-limit {rate} over {hard['tool_wall_seconds']}s plans "
+        f"{rate * hard['tool_wall_seconds']} requests against a {hard['http_requests']} hold"
+    )
+    # Bursting past the rate defeats the rate.
+    assert int(argv[argv.index("-concurrency") + 1]) <= rate
+    assert int(argv[argv.index("-bulk-size") + 1]) <= rate
+
+
+def test_a_nuclei_hold_smaller_than_its_wall_shortens_the_wall():
+    """nuclei cannot go below one request per second, so a hold thinner than the wall
+    must shorten the wall rather than let the rate outrun the hold."""
+    plan = _batch_plan("nuclei", {"http_requests": 30, "tool_wall_seconds": 45})
+    argv = list(plan.argv)
+    hard = dict(plan.hard_budget)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+    assert rate == 1
+    assert hard["tool_wall_seconds"] <= 30
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]

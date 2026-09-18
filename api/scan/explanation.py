@@ -7,6 +7,7 @@ from datetime import date, datetime
 import json
 from typing import Any, Mapping, Sequence
 
+from .activity import diagnostic_error_class
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -208,7 +209,7 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
         key: _text(raw_provenance.get(key), maximum=300)
         for key in provenance_keys if _text(raw_provenance.get(key), maximum=300)
     }
-    return {
+    projection = {
         "receipt_id": receipt_id,
         "receipt_hash": receipt_hash,
         "started_at": _timestamp(receipt.get("started_at") or row.get("started_at")),
@@ -216,6 +217,26 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
         "parser_version": _text(receipt.get("parser_version"), maximum=200),
         "provenance": provenance,
     }
+    # Name the failure class. Without this an operator saw "The capability adapter failed"
+    # and nothing else, while the cause sat in receipt_json->errors in the database. Only the
+    # normalised class travels -- never the tool's own sentence, which can carry the target
+    # URL, a token or response text.
+    errors = receipt.get("errors")
+    errors = errors if isinstance(errors, (list, tuple)) else ()
+    error_class = diagnostic_error_class(errors)
+    if error_class != "none":
+        counts = {
+            key: value for key in ("attempted_count", "unattempted_count")
+            if isinstance(value := execution.get(key), int) and not isinstance(value, bool)
+        }
+        started = execution.get("execution_started")
+        projection["diagnostic"] = {
+            "error_class": error_class,
+            "error_count": len(errors),
+            **({"execution_started": started} if isinstance(started, bool) else {}),
+            **counts,
+        }
+    return projection
 
 
 def _work_manifests(execution: Mapping[str, Any]) -> list[dict[str, Any]]:
