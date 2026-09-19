@@ -287,7 +287,7 @@ async def list_targets(
 ):
     """List all targets."""
     async with _pool().acquire() as conn:
-        query = """
+        query = f"""
             SELECT t.id,
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
@@ -297,14 +297,7 @@ async def list_targets(
                    t.total_scans, t.active_findings_count, t.created_at,
                    fs.total_active as active_findings,
                    COALESCE(origins.items, '[]'::jsonb) AS origins,
-                   EXISTS (
-                       SELECT 1 FROM approval_receipts a
-                       JOIN scope_receipts s ON s.id = a.scope_receipt_id
-                       WHERE s.target_id = t.id AND a.status = 'active'
-                         AND a.approved_by IS NOT NULL
-                         AND a.action_name = 'target.authorization'
-                         AND (a.expires_at IS NULL OR a.expires_at > NOW())
-                   ) AS authorized_for_active_testing
+                   {_authorized_for_active_testing_sql()}
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             LEFT JOIN LATERAL (
@@ -407,7 +400,7 @@ async def list_targets_grouped(
 ):
     """List all targets grouped by root domain for hierarchical display."""
     async with _pool().acquire() as conn:
-        query = """
+        query = f"""
             SELECT
                 t.id,
                 LEFT(t.url, 2049) AS url,
@@ -417,7 +410,12 @@ async def list_targets_grouped(
                 t.discovery_source, t.is_active, t.metadata_json,
                 t.last_scanned_at, t.last_score, t.last_grade,
                 t.total_scans, t.active_findings_count,
-                t.created_at
+                t.created_at,
+                -- The targets page reads this grouped shape, not the flat list. Without the flag
+                -- every row rendered "Authorize for active testing (once)" forever: the click
+                -- recorded a real authorization and said so, then the row was unchanged on the
+                -- next load, so an operator had no way to tell it had worked.
+                {_authorized_for_active_testing_sql()}
             FROM targets t
             WHERE 1=1
         """
@@ -674,63 +672,79 @@ async def create_target(request: TargetCreate):
 
     async with _pool().acquire() as conn:
         try:
-            # Canonical find-or-create: a scheme/trailing-slash variant of an existing
-            # origin reuses that target instead of creating a duplicate. xmax = 0 is
-            # true only for a freshly INSERTed row, so we can report created vs reused.
-            row = await conn.fetchrow("""
-                INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
-                RETURNING id, url, name, discovery_source, metadata_json,
-                          root_domain, is_root, (xmax = 0) AS created
-            """, normalized_target, request.name, root_domain, is_root,
-                 json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
-                 json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
-                 _default_asm_enabled_for_new_web_target("manual"),
-                 json.dumps(_default_asm_config_for_new_web_target("manual")))
+            # One transaction, so a refused authorization leaves no target behind. The insert
+            # committed before the authorization step could raise, so a private-range target was
+            # created and the caller still got 400: the UI said "Failed to add target" while the
+            # target sat in the list, and retrying hit "Target already exists".
+            async with conn.transaction():
+                # Canonical find-or-create: a scheme/trailing-slash variant of an existing
+                # origin reuses that target instead of creating a duplicate. xmax = 0 is
+                # true only for a freshly INSERTed row, so we can report created vs reused.
+                row = await conn.fetchrow("""
+                    INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                    RETURNING id, url, name, discovery_source, metadata_json,
+                              root_domain, is_root, (xmax = 0) AS created
+                """, normalized_target, request.name, root_domain, is_root,
+                     json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                     json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
+                     _default_asm_enabled_for_new_web_target("manual"),
+                     json.dumps(_default_asm_config_for_new_web_target("manual")))
 
-            response = {
-                'id': str(row['id']),
-                'url': row['url'],
-                # When a different origin reuses an existing host-level target,
-                # report the stored target metadata rather than metadata derived
-                # from the just-submitted origin.
-                'root_domain': row['root_domain'],
-                'is_root': row['is_root'],
-                'cohort': target_cohort(
-                    url=row['url'],
-                    name=row.get('name'),
-                    discovery_source=row.get('discovery_source'),
-                    metadata=_decode_json_value(row.get('metadata_json')) or {},
-                ),
-                'status': 'created' if row['created'] else 'already_exists'
-            }
-            # Surface warning if path/query was stripped
-            if target_note:
-                response['warning'] = target_note
-                response['original_url'] = request.url
-            # Web identity is host-level, so a different scheme or port resolves to an existing
-            # target rather than creating a new one. That merge is deliberate, but returning only
-            # an id let a caller believe it had registered the origin it asked for: a scope receipt
-            # and a Hunt were then bound to one application while the work ran against another on
-            # the same host, and the result looked correct. Say so explicitly.
-            if not scope_origin_matches_target(request.url, row['url']):
-                response['origin_merged'] = True
-                response['requested_url'] = request.url
-                response['warning'] = (
-                    f"{request.url} resolves to the existing host-level target {row['url']}; "
-                    "web targets are identified by host, so scans, scope receipts and Hunts bound "
-                    "to this id address that origin, not the one requested."
-                )
-            authorized_by = getattr(request, "authorized_by", None)
-            if authorized_by:
-                try:
-                    response['authorization'] = await target_authorization.authorize_target(
-                        conn, row['id'], approved_by=authorized_by,
+                response = {
+                    'id': str(row['id']),
+                    'url': row['url'],
+                    # When a different origin reuses an existing host-level target,
+                    # report the stored target metadata rather than metadata derived
+                    # from the just-submitted origin.
+                    'root_domain': row['root_domain'],
+                    'is_root': row['is_root'],
+                    'cohort': target_cohort(
+                        url=row['url'],
+                        name=row.get('name'),
+                        discovery_source=row.get('discovery_source'),
+                        metadata=_decode_json_value(row.get('metadata_json')) or {},
+                    ),
+                    'status': 'created' if row['created'] else 'already_exists'
+                }
+                # Surface warning if path/query was stripped
+                if target_note:
+                    response['warning'] = target_note
+                    response['original_url'] = request.url
+                # Web identity is host-level, so a different scheme or port resolves to an existing
+                # target rather than creating a new one. That merge is deliberate, but returning only
+                # an id let a caller believe it had registered the origin it asked for: a scope receipt
+                # and a Hunt were then bound to one application while the work ran against another on
+                # the same host, and the result looked correct. Say so explicitly.
+                if not scope_origin_matches_target(request.url, row['url']):
+                    response['origin_merged'] = True
+                    response['requested_url'] = request.url
+                    response['warning'] = (
+                        f"{request.url} resolves to the existing host-level target {row['url']}; "
+                        "web targets are identified by host, so scans, scope receipts and Hunts bound "
+                        "to this id address that origin, not the one requested."
                     )
-                except target_authorization.TargetAuthorizationError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return response
+                authorized_by = getattr(request, "authorized_by", None)
+                if authorized_by:
+                    try:
+                        # One environment for the row, resolved from what is stored. The cohort
+                        # the operator picked has to reach authorization -- without it every
+                        # authorization evaluated scope as "production" and choosing Lab changed
+                        # nothing -- but a *reused* row keeps its own. Passing the incoming cohort
+                        # unconditionally let a new request authorize an existing Production
+                        # target under a Lab evaluation while the row still read Production.
+                        stored_metadata = _decode_json_value(row.get('metadata_json')) or {}
+                        response['authorization'] = await target_authorization.authorize_target(
+                            conn, row['id'], approved_by=authorized_by,
+                            environment=target_authorization.effective_target_environment(
+                                stored_metadata,
+                                requested=requested_cohort if row['created'] else None,
+                            ),
+                        )
+                    except target_authorization.TargetAuthorizationError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return response
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=409, detail="Target already exists")
 
@@ -2998,6 +3012,46 @@ async def asm_activity(
         "timeline": timeline,
         "hypothesis_situation": hypothesis_situation,
     }
+# The target's host as current_target_authorization() computes it in Python: scheme stripped,
+# path and port removed, IPv6 brackets dropped, lowercased. Written once so the listings and the
+# canonical reader cannot drift apart on what "the target's host" means.
+_TARGET_HOST_SQL = """lower(trim(both '[]' from
+    CASE WHEN split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1) LIKE '[%'
+         THEN split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ']', 1)
+         ELSE split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ':', 1)
+    END))"""
+
+
+def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
+    """The EXISTS predicate for a standing authorization, matching the canonical reader.
+
+    A listing that only checked status, approver and expiry reported "Authorized" for receipts
+    current_target_authorization() rejects -- a blocked scope, or one naming a host the target no
+    longer has. The page then showed authority that later steps did not honour.
+    """
+    host = _TARGET_HOST_SQL.format(col=column)
+    return f"""EXISTS (
+                    SELECT 1 FROM approval_receipts a
+                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                    WHERE s.target_id = t.id AND a.status = 'active'
+                      AND a.approved_by IS NOT NULL
+                      AND a.risk_tier = ANY(ARRAY['active', 'intrusive'])
+                      AND (a.action_name IS NULL OR a.action_name = 'target.authorization')
+                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                      AND COALESCE(s.verdict, '') <> 'blocked'
+                      AND (
+                          lower(COALESCE(s.normalized_scope->>'host', '')) = {host}
+                          OR EXISTS (
+                              SELECT 1 FROM jsonb_array_elements_text(
+                                  CASE WHEN jsonb_typeof(s.allowed_hosts) = 'array'
+                                       THEN s.allowed_hosts ELSE '[]'::jsonb END
+                              ) AS scope_host
+                              WHERE lower(scope_host) = {host}
+                          )
+                      )
+                ) AS authorized_for_active_testing"""
+
+
 def _public_target_row(row: Any) -> dict[str, Any]:
     """Serialize a target without exposing credentials stored in scan options."""
     target = row_to_dict(row)

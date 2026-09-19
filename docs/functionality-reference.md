@@ -2621,7 +2621,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
-| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |

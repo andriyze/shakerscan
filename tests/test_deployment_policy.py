@@ -8,10 +8,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 import deployment_policy as policy  # noqa: E402
 
 
-def test_private_network_targets_are_refused_unless_explicitly_allowed():
-    assert policy.private_network_targets_policy({}) == "refuse"
+def test_private_network_targets_are_admitted_by_default_and_refusable():
+    """A self-hosted scanner exists to examine the operator's own network.
+
+    Refusing by default made a clean install unable to do the first thing an operator tries:
+    adding 192.168.1.50 reported "Failed to add target" (while creating it anyway), the standing
+    authorization granted by ticking "I own or am authorized to test this target" was refused
+    with `loopback_or_private_range`, and the active scan that needs that authorization was then
+    refused for want of an approval receipt the operator had no way to create.
+
+    A deployment whose network is not the customer's -- hosted or multi-tenant -- still refuses
+    them explicitly, and the Enterprise gateway always passes a value, so its behaviour is
+    unchanged by the default.
+    """
+    assert policy.private_network_targets_policy({}) == "allow"
+    assert policy.private_network_targets_allowed({})
     assert policy.private_network_targets_policy({policy.PRIVATE_NETWORK_TARGETS_ENV: "no"}) == "refuse"
     assert policy.private_network_targets_policy({policy.PRIVATE_NETWORK_TARGETS_ENV: "refuse"}) == "refuse"
+    assert not policy.private_network_targets_allowed({policy.PRIVATE_NETWORK_TARGETS_ENV: "0"})
     assert policy.private_network_targets_policy({policy.PRIVATE_NETWORK_TARGETS_ENV: "allow"}) == "allow"
     assert policy.private_network_targets_allowed({policy.PRIVATE_NETWORK_TARGETS_ENV: "true"})
 

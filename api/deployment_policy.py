@@ -22,20 +22,78 @@ CRAWLER_TOOLS_WITH_MEMORY_BOUND = frozenset({"katana"})
 def private_network_targets_policy(environ: dict[str, str] | None = None) -> str:
     """``allow`` when the deployment admits private and loopback targets, else ``refuse``.
 
-    The default refuses them unless the target is labelled as a lab environment (the historical
-    rule). ``allow`` is meant for self-hosted installations scanning their own intranet; every
-    admission under it is recorded in the scope receipt as ``allowed_by_deployment_policy``.
+    A self-hosted scanner exists to examine the operator's own network, so the default admits
+    RFC1918, loopback and unique-local targets. The refusing default made a fresh install unable
+    to do the first thing an operator tries: adding `192.168.1.50` reported "Failed to add
+    target" (while creating it anyway), the standing authorization the operator grants by ticking
+    "I own or am authorized to test this target" was refused with `loopback_or_private_range`,
+    and the active scan that needs that authorization was then refused for want of an approval
+    receipt the operator had no way to create.
+
+    This is a deployment decision, not a silent one: every admission under it is recorded in the
+    scope receipt as ``allowed_by_deployment_policy``, and ``/health`` reports the policy so a
+    gateway in front of the engine can see it. A deployment that must not reach private ranges --
+    a hosted or multi-tenant one, where the engine's network is not the customer's -- sets
+    ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``. The Enterprise gateway always passes an
+    explicit value, so its behaviour does not change with this default.
     """
     if environ is not None:
         raw = environ.get(PRIVATE_NETWORK_TARGETS_ENV)
     else:
         raw = os.environ.get("SHAKERSCAN_PRIVATE_NETWORK_TARGETS")
     value = str(raw or "").strip().lower()
+    if not value:
+        return "allow"
     return "allow" if value in {"allow", "allowed", "1", "true", "yes", "on"} else "refuse"
 
 
 def private_network_targets_allowed(environ: dict[str, str] | None = None) -> bool:
     return private_network_targets_policy(environ) == "allow"
+
+
+def max_allowed_workers_for_memory_gb(
+    mem_gb: float, *, per_worker_gb: float = 1.0, platform_reserve_gb: float = 7.0,
+) -> int:
+    """Workers a host of this size can carry: what is left after the platform reserve.
+
+    The launcher computes the same curve in shell, and the two read memory from different places
+    -- the launcher from the host, the API from Docker's ``MemTotal``, which is smaller. A flat
+    five-worker band between 8 and 16 GB used to make that difference matter: one 16 GB machine
+    could land on either side of the step, and the dashboard reported "9 running - max 5". Above
+    the small-machine floor capacity now grows with memory, so the two readings stay within about
+    a worker of each other, and no host size gets fewer workers than the flat band gave it.
+    """
+    if mem_gb <= 0 or per_worker_gb <= 0:
+        return 5
+    if mem_gb < 8:
+        return max(1, min(4, int(mem_gb) - 3))
+    return max(5, min(200, int((mem_gb - max(0.0, platform_reserve_gb)) / per_worker_gb)))
+
+
+def reported_max_allowed_workers(computed: int, running_count: int = 0) -> int:
+    """The capacity to *display*, never below the fleet that is actually running.
+
+    A dashboard reading "9 running, max 5" is nonsense, so what is shown accommodates what is
+    there. This number is for presentation only: it must never become the cap that governs
+    execution. Use `operational_max_allowed_workers` for that.
+    """
+    try:
+        running = max(0, int(running_count))
+    except (TypeError, ValueError):
+        running = 0
+    return max(int(computed), running)
+
+
+def operational_max_allowed_workers(computed: int, running_count: int = 0) -> int:
+    """The cap that governs execution: what the deployment configured, and nothing else.
+
+    The displayed maximum was briefly fed into the published active-scan concurrency, so reading
+    the worker list could raise the limit workers obey -- and that list includes exited
+    containers, so stopped workers inflated it above an explicitly configured
+    SHAKERSCAN_MAX_WORKERS. A monitoring read must not change policy. `running_count` is accepted
+    so callers can pass the same inputs to both functions; it deliberately has no effect.
+    """
+    return int(computed)
 
 
 def fleet_memory_declaration_gb(environ: dict[str, str] | None = None) -> float | None:

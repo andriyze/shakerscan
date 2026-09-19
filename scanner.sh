@@ -1733,14 +1733,16 @@ auto_workers_for_memory_gb() {
         per_worker_gb=1
     fi
 
-    # Very small installations cannot safely carry five scanner processes.
-    # Normal sub-16GB installations get a predictable five-worker fleet.
+    # Very small installations cannot safely carry five scanner processes; every larger one
+    # spends what memory it has, with five as the floor.
     if [ "$memory_gb" -lt 8 ]; then
         workers=$((memory_gb - 3))
         [ "$workers" -lt 1 ] && workers=1
-    elif [ "$memory_gb" -lt 16 ]; then
-        workers=5
     else
+        # No flat band between 8 and 16GB. That step was a cliff: this reads the host's memory
+        # while the API reads Docker's smaller MemTotal, so one 16GB machine could land on either
+        # side and the dashboard reported "9 running - max 5". Capacity now grows with memory in
+        # both places, and never falls below the five the flat band gave.
         # Reserve memory for Docker/the OS plus PostgreSQL, Redis, API and UI,
         # then spend the remaining budget at roughly 1GB per scanner worker.
         workers=$(( (memory_gb - platform_reserve_gb) / per_worker_gb ))

@@ -20508,6 +20508,18 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     existing_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):
+            # Target creation and its authorization run in one transaction, so a refused
+            # authorization leaves no target behind.
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
         async def fetchrow(self, query, *args):
             assert "RETURNING id, url, name, discovery_source, metadata_json" in query
             return {

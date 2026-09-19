@@ -118,10 +118,24 @@ def _ip_scope_block_reason(
         ip_obj = ipaddress.ip_address(lowered)
     except ValueError:
         return None
+    # ::ffff:a.b.c.d is a.b.c.d. Classify the embedded IPv4 address so a mapped spelling of a
+    # restricted address is not admitted where the plain spelling is refused.
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None:
+        ip_obj = mapped
+    # Restricted classes first, so no label can admit them. A lab environment used to return
+    # here before this check, which let "Lab" admit link-local, multicast and unspecified
+    # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
+    # reachable from the add-target dialog once the chosen cohort started reaching authorization.
+    if (
+        ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or str(ip_obj) == "255.255.255.255"
+    ):
+        return "loopback_or_private_range"
     if environment in SAFE_LAB_ENVIRONMENTS:
         return None
-    if ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
-        return "loopback_or_private_range"
     if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_reserved:
         return None if deployment_allows else "loopback_or_private_range"
     return None
@@ -457,7 +471,14 @@ def _evaluate_runtime_dns_observations(
             if frozen_addresses and normalized_ip not in frozen_addresses:
                 blocked.append("runtime_dns_address_drift")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_address_drift"})
-            elif not frozen_addresses and _ip_scope_block_reason(ip, environment):
+            elif not frozen_addresses and _ip_scope_block_reason(
+                ip, environment, allow_private_networks=False,
+            ):
+                # Every host reaching here is a name, not a literal address: literal targets are
+                # skipped above. A name that resolves into the private space at run time is DNS
+                # rebinding, and stays blocked whatever the deployment's private-network policy
+                # says. That policy decides whether an address the operator *declared* is in
+                # scope; it never lets a public name quietly reach the operator's intranet.
                 blocked.append("runtime_dns_private_range")
                 result.update({"verdict": "blocked", "reason": "runtime_dns_private_range"})
         results.append(result)

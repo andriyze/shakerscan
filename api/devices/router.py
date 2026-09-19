@@ -605,20 +605,35 @@ def _device_worker_readiness() -> dict[str, Any]:
             "capable": build_current is True and {"nmap", "naabu"}.issubset(tools),
         })
     capable_count = sum(1 for report in reports if report["capable"])
+    # The connected-device worker is a separate, opt-in container, so a fresh install has none
+    # and every device scan waits forever. Saying only "not ready" left the operator to guess;
+    # each reason now carries the one command that resolves it.
+    remedy = None
     if not enabled:
         status, reason = "disabled", "feature_disabled"
+        remedy = "Set DEVICE_POSTURE_ENABLED=true for the API, then restart it."
     elif capable_count:
         status, reason = "ready", None
     elif reports and any(report["build_current"] is False for report in reports):
         status, reason = "not_ready", "device_worker_build_stale"
+        remedy = "The device worker is running an older build. Run: ./scanner.sh devices restart"
     elif reports:
         status, reason = "not_ready", "device_worker_missing_nmap_naabu_or_build_identity"
+        remedy = (
+            "The device worker is running but does not report Nmap and Naabu with the expected "
+            "release identity. Run: ./scanner.sh devices restart"
+        )
     else:
         status, reason = "not_ready", "no_fresh_device_worker"
+        remedy = (
+            "No connected-device worker is running. It is a separate opt-in container and a new "
+            "install does not start one. Run: ./scanner.sh devices start"
+        )
     return {
         "enabled": enabled,
         "status": status,
         "reason": reason,
+        "remedy": remedy,
         "queue_name": DEVICE_QUEUE_NAME,
         "worker_count": len(reports),
         "capable_worker_count": capable_count,

@@ -263,7 +263,10 @@ function TargetsContent() {
       fetchTargets()
     } catch (err) {
       console.error('Failed to add target:', err)
-      toast.error('Failed to add target')
+      // Say why. The server's reason -- a blocked scope, a duplicate, an invalid URL -- was
+      // discarded here, so an operator whose target was refused saw only "Failed to add target"
+      // with nothing to act on.
+      toast.error(err instanceof Error ? err.message : 'Failed to add target')
     } finally {
       setAdding(false)
     }

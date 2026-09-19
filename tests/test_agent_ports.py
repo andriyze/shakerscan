@@ -784,8 +784,9 @@ def test_hunt_dns_authorization_is_frozen_in_session_state():
     seed = definition_source("_agent_seed_state")
     http_request = definition_source("_agent_tool_http_request")
     assert (
-        'state["authorized_target_addresses"] = await '
-        '_resolve_agent_target_addresses(target_url)'
+        'state["authorized_target_addresses"] = await _resolve_agent_target_addresses(\n'
+        '        target_url, environment=target_environment,\n'
+        '    )'
     ) in seed
     assert "await _resolve_agent_target_addresses" not in http_request
     assert (
