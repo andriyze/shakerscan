@@ -479,7 +479,7 @@ jobs:
 
       - name: Build and push scanner by digest
         id: scanner
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: scanner/Dockerfile
@@ -507,7 +507,7 @@ jobs:
 
       - name: Build and push API control plane by digest
         id: api
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: scanner/Dockerfile.api
@@ -536,7 +536,7 @@ jobs:
 
       - name: Build and push Model Intake by digest
         id: model_intake
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: scanner/Dockerfile.model-intake
@@ -650,7 +650,7 @@ jobs:
 
       - name: Build and push UI by digest
         id: ui
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: ./ui
           file: ui/Dockerfile
@@ -732,7 +732,7 @@ jobs:
 
       - name: Build and push signer by digest
         id: signer
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: api/model_intake_signer.Dockerfile
