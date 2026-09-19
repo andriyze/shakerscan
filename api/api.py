@@ -13125,7 +13125,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             target_uuid,
         )
         device = await conn.fetchrow(
-            "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
+            "SELECT id, name, primary_locator, device_class, environment, is_active FROM device_targets WHERE id=$1",
             target_uuid,
         )
 
@@ -13159,9 +13159,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                     "url": target_url,
                     "origins": origins,
                     "root_domain": web["root_domain"],
-                    "environment": str(
-                        _hunt_json(web["metadata_json"], {}).get("environment")
-                        or "unknown"
+                    "environment": target_authorization.effective_target_environment(
+                        _hunt_json(web["metadata_json"], {})
                     ),
                 },
                 "principal_refs_available": bool(credential_rows),
@@ -13169,7 +13168,10 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 "secret_values_visible_to_planner": False,
                 "request_collections": collection_refs,
                 "authorized_target_addresses": await _resolve_agent_target_addresses(
-                    target_url
+                    target_url,
+                    environment=target_authorization.effective_target_environment(
+                        _hunt_json(web["metadata_json"], {})
+                    ),
                 ),
                 "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
                     conn, target_uuid),
@@ -13223,7 +13225,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                         else f"http://[{target_url}]"
                         if ":" in target_url
                         else f"http://{target_url}"
-                    )
+                    ),
+                    environment=str(device["environment"] or "production"),
                 ),
                 "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
                     conn, target_uuid, device=True),

@@ -2445,6 +2445,7 @@ async def _materialize_control_plane_scan_job_v2(
         addresses = (
             await _resolve_runtime_target_addresses(
                 str(row["target_url"] or ""), subject="broker Scan target",
+                environment=_binding_environment_from_options(row["options"]),
             )
             if revalidate_dns
             else list(CanonicalScanJob.from_queue_payload(queue_payload).target.allowed_addresses)
@@ -3659,6 +3660,22 @@ _BROKER_PRIVATE_INPUT_CAPABILITIES = frozenset({
     "xss.request_verify_batch",
     "sqli.request_verify_batch",
 })
+
+
+def _binding_environment_from_options(options: Any) -> str:
+    """The environment a Scan was admitted under, read from its frozen runtime binding.
+
+    Dispatch-time DNS revalidation re-runs admission on fresh answers, so it must judge them under
+    the environment the original admission used. Defaulting to production here refused a Lab scan
+    that had been admitted correctly on any deployment that refuses private ranges.
+    """
+    try:
+        parsed = parse_json_field(options) or {}
+        guard = parsed.get("runtime_scope_guard") if isinstance(parsed, Mapping) else None
+        value = str(guard.get("environment") or "").strip().lower() if isinstance(guard, Mapping) else ""
+    except Exception:
+        value = ""
+    return value if value and value != "unknown" else "production"
 
 
 async def _resolve_runtime_target_addresses(

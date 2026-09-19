@@ -118,6 +118,11 @@ def _ip_scope_block_reason(
         ip_obj = ipaddress.ip_address(lowered)
     except ValueError:
         return None
+    # ::ffff:a.b.c.d is a.b.c.d. Classify the embedded IPv4 address so a mapped spelling of a
+    # restricted address is not admitted where the plain spelling is refused.
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None:
+        ip_obj = mapped
     # Restricted classes first, so no label can admit them. A lab environment used to return
     # here before this check, which let "Lab" admit link-local, multicast and unspecified
     # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
