@@ -190,3 +190,89 @@ def test_surface_manifest_ingests_declared_spec_routes_including_body_endpoints(
     assert login["content_type"] == "application/json"
     # The spec is a first-party declaration, ranked at depth 0 like a seeded endpoint.
     assert login["discovery_depth"] == 0
+
+
+def _wildcard_content_observations(paths, *, status=301):
+    """ffuf counts a 3xx as a hit, so an apex-wide redirect 'finds' every path."""
+    return [
+        {
+            "kind": "content_discovery",
+            "url": f"https://app.example.test{path}",
+            "status": status,
+            "length": 0,
+            "redirect_location": f"https://www.app.example.test{path}",
+        }
+        for path in paths
+    ]
+
+
+def test_blanket_redirect_content_discovery_is_not_discovered_surface():
+    """A host that redirects every path discovers no path.
+
+    Measured on a static site whose apex 301s to its www origin: content
+    discovery reported 108 endpoints -- /graphql, /api-docs, /coupon -- none of
+    which existed, and every one was persisted into the ASM inventory as real
+    attack surface with no evidence behind it.
+    """
+    wordlist = [
+        "/admin", "/graphql", "/api-docs", "/coupon", "/login", "/config", "/.env",
+    ]
+    manifest = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        browser=_summary("skipped"),
+        content=_summary("success", _wildcard_content_observations(wordlist)),
+        spec=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=200,
+    )
+
+    discovered = {
+        entry["concrete_path"] for entry in manifest["endpoints"]
+        if entry.get("source") == "web.content_discover"
+    }
+    assert discovered == set()
+    producer = manifest["producers"]["web.content_discover"]
+    # The drop is recorded, never silent: coverage must not read as complete.
+    assert producer["status"] == "partial"
+    assert f"wildcard_redirect_observations:{len(wordlist)}" in producer["reason"]
+
+
+def test_individual_redirects_remain_discovered_surface():
+    """A per-path redirect carries real information and is kept."""
+    observations = [
+        {
+            "kind": "content_discovery",
+            "url": "https://app.example.test/admin",
+            "status": 302,
+            "redirect_location": "https://app.example.test/admin/login",
+        },
+        {
+            "kind": "content_discovery",
+            "url": "https://app.example.test/dashboard",
+            "status": 200,
+        },
+    ]
+    manifest = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        browser=_summary("skipped"),
+        content=_summary("success", observations),
+        spec=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=200,
+    )
+
+    discovered = {
+        entry["concrete_path"] for entry in manifest["endpoints"]
+        if entry.get("source") == "web.content_discover"
+    }
+    assert discovered == {"/admin", "/dashboard"}
