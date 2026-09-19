@@ -149,7 +149,13 @@ async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, A
            AND a.approved_by IS NOT NULL
            AND a.status = 'active'
            AND a.risk_tier = ANY($2::text[])
-           AND (a.action_name IS NULL OR a.action_name = $3)
+           -- A receipt recorded before the standing-authorization contract has no
+           -- action_name. Counting it as standing made the target report itself
+           -- authorized while the submission gate, which requires the exact
+           -- action_name, refused every active scan of it -- and revoke, which
+           -- matches the same name, could never clear it. One definition here,
+           -- at the gate, and at revoke, so re-authorizing is the way out.
+           AND a.action_name = $3
            AND (a.expires_at IS NULL OR a.expires_at > NOW())
          ORDER BY (a.expires_at IS NULL) DESC, a.created_at DESC
          LIMIT 20
