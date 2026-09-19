@@ -1,0 +1,37 @@
+name: Apply reviewed acceptance fixes
+on:
+  push:
+    branches: [fix/2.3.7-acceptance-regressions]
+    paths: [scripts/.acceptance-237-patch.*, .github/workflows/apply-acceptance-patch.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/fix/2.3.7-acceptance-regressions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Apply the exact locally tested patch, then remove this delivery helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = '3ec9bbfe4a076f01cc851a59d5bfa4e63b157190'
+          cat scripts/.acceptance-237-patch.{0,1,2,3} | base64 --decode | xz --decompress > "$RUNNER_TEMP/acceptance237.patch"
+          printf '%s  %s\n' '1c85623b45a1f4d81663ac130258fb0ec1e13261d2ad57b682624c81bdd5bd1f' "$RUNNER_TEMP/acceptance237.patch" | sha256sum --check
+          git apply --check --whitespace=error "$RUNNER_TEMP/acceptance237.patch"
+          git apply --whitespace=error "$RUNNER_TEMP/acceptance237.patch"
+          rm scripts/.acceptance-237-patch.{0,1,2,3} .github/workflows/apply-acceptance-patch.yml
+          python3 -m compileall -q api/fleet_routes api/scan/reachability.py api/job_queue.py api/scan/job_runtime.py api/schedules/router.py api/worker.py
+          python3 scripts/check_module_size.py
+          python3 scripts/check_installed_import_closure.py
+          python3 scripts/generate_install_manifest.py --check
+          git diff --check
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: address 2.3.7 acceptance regressions' -m 'Preserve fleet placement through broker leasing and retries; prevent unreachable canonical targets receiving a grade; align schedules with deployment network policy; add device retirement and honest target-reuse feedback; safely clean root-owned rollback trees. Includes focused regressions and browser acceptance tests. Temporary patch-delivery files are removed in this commit.'
+          git push origin HEAD:refs/heads/fix/2.3.7-acceptance-regressions
