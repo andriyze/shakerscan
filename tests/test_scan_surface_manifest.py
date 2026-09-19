@@ -276,3 +276,44 @@ def test_individual_redirects_remain_discovered_surface():
         if entry.get("source") == "web.content_discover"
     }
     assert discovered == {"/admin", "/dashboard"}
+
+
+def test_unexpanded_client_template_routes_are_not_discovered_surface():
+    """A route string the client has not substituted yet is not a route.
+
+    Parsing an application's own JavaScript recovers template literals before
+    substitution. Measured on a real site, that persisted /js/${PGP_PATH} and
+    /js/${paths[f]} into the endpoint manifest and the durable ASM inventory as
+    attack surface -- routes that exist in no deployment, which every later
+    probe can only 404.
+    """
+    manifest = build_scan_surface_manifest(
+        target_url="https://app.example.test",
+        target=TARGET,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success", [
+            {"kind": "discovered_route", "method": "GET",
+             "url": "https://app.example.test/js/$%7BPGP_PATH%7D"},
+            {"kind": "discovered_route", "method": "GET",
+             "url": "https://app.example.test/js/$%7Bpaths%5Bf%5D%7D"},
+            {"kind": "discovered_route", "method": "GET",
+             "url": "https://app.example.test/tools/tax.html"},
+            {"kind": "discovered_route", "method": "GET",
+             "url": "https://app.example.test/api/v1/tax?country=US"},
+        ]),
+        browser=_summary("skipped"),
+        content=_summary("skipped"),
+        spec=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=200,
+    )
+
+    crawled = {
+        entry["concrete_path"] for entry in manifest["endpoints"]
+        if entry.get("source") == "web.crawl"
+    }
+    assert crawled == {"/tools/tax.html", "/api/v1/tax"}
+    # Dropped, and counted rather than silently absent.
+    assert "invalid_observations:2" in manifest["producers"]["web.crawl"]["reason"]
