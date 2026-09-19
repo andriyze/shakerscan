@@ -358,6 +358,12 @@ def _validate_schema_value(
 
 _HTTP_TARGETS = frozenset({"web", "api"})
 _NETWORK_TARGETS = frozenset({"web", "api", "network"})
+# The connection-based network capabilities slice their address list from the
+# reserved ``hosts_attempted`` grant, so a spec that omits that dimension can
+# never bind a single address and self-skips as not_applicable on every run.
+# Declare it beside the port grant: both are worst-case reservations, and this
+# ceiling covers the resolved address set of a real web/API target.
+_NETWORK_ADDRESS_GRANT = 8
 
 
 def _schema(
@@ -1002,7 +1008,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
-            "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 60, "tool_wall_seconds": 90,
+            },
             {"network_reachability": True, "binary": "nmap"}, _schema({
                 "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 256},
                 "profile": {"type": "string", "enum": ["version_light", "version_default"]},
@@ -1015,7 +1024,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "ports.discover", "Bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
-            "network_discovery", {"tcp_ports_attempted": 1_200, "tool_wall_seconds": 120},
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 1_200, "tool_wall_seconds": 120,
+            },
             {"network_reachability": True, "binary": "naabu"}, _schema({
                 "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000"]},
                 "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},

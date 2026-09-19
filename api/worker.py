@@ -231,12 +231,12 @@ from scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
-    absent_receipt_summary,
     build_discovery_continuation_manifests,
     continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     load_discovery_shard_receipts,
     merge_scan_action_continuation,
+    placed_discovery_stage_receipts,
 )
 from scan.manifest_store import PostgresScanManifestStore
 from scan.continuation_rounds import (
@@ -15536,22 +15536,22 @@ async def process_scan_plan_job(job_data: dict):
             return
         recon_result = _as_report_dict(discovery.get('result')) or {}
         discovery_status = str(discovery.get('status') or '')
-        placed_subdomain_summary = absent_receipt_summary(
-            recon_result.get('subdomain_discovery'),
-            kind="subdomain",
-            enabled=canonical_subdomain_discovery,
-            root_domain=(
-                canonical_parent_job.target.allowed_root_domains[0]
-                if canonical_parent_job.target.allowed_root_domains else None
-            ),
-            error=discovery.get('error_message'),
-        ) or placed_subdomain_summary
-        placed_network_summary = absent_receipt_summary(
-            recon_result.get('network_discovery'),
-            kind="network",
-            enabled=canonical_network_discovery,
-            error=discovery.get('error_message'),
-        ) or placed_network_summary
+        async with db_pool.acquire() as conn:
+            placed_subdomain, placed_network = await placed_discovery_stage_receipts(
+                conn,
+                scan_id=discovery_scan_id,
+                root_domain=(
+                    canonical_parent_job.target.allowed_root_domains[0]
+                    if canonical_parent_job.target.allowed_root_domains else None
+                ),
+                addresses=canonical_parent_job.target.allowed_addresses,
+                subdomain_enabled=canonical_subdomain_discovery,
+                network_enabled=canonical_network_discovery,
+                legacy_result=recon_result,
+                error=discovery.get('error_message'),
+            )
+        placed_subdomain_summary = placed_subdomain or placed_subdomain_summary
+        placed_network_summary = placed_network or placed_network_summary
         if discovery_status == 'failed':
             # A failed producer may still have durable, trustworthy partial output. Harvest it
             # and continue; coverage truth is reported separately from the parent run status.

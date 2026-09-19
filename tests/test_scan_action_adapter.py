@@ -1496,6 +1496,126 @@ def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monke
     assert len(captured["ports"]) == 4
 
 
+@pytest.mark.parametrize(
+    "capability_name, action_id",
+    [("ports.discover", "discover.ports"), ("service.fingerprint", "discover.services")],
+)
+def test_network_capabilities_reserve_the_addresses_they_slice(capability_name, action_id):
+    """The registry grant must fund the dimension the adapter binds addresses from.
+
+    ``_network`` slices ``target.allowed_addresses`` by the reserved
+    ``hosts_attempted`` grant. A spec that funds only ports reserves zero hosts,
+    so the slice is empty and the action self-skips as ``not_applicable`` on
+    every target -- which is what shipped: across the whole action history
+    ``ports.discover`` had never once executed, and ``discover.services``
+    was always blocked behind it as ``dependency_failed``.
+    """
+    spec = CAPABILITY_REGISTRY.require(capability_name)
+    del action_id
+    assert int(dict(spec.budget_cost).get("hosts_attempted") or 0) >= 1
+
+
+def test_network_action_binds_addresses_under_the_registry_budget(monkeypatch):
+    """Plan the action from the registry cost, exactly as the allocator does."""
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=TARGET.allowed_origins,
+        allowed_addresses=("192.0.2.10", "192.0.2.11", "192.0.2.12"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("ports.discover")
+    action = ScanAction(
+        action_id="discover.ports",
+        stage="discover_network",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args={},
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        # The allocator hands the adapter the registry cost, never a hand-written
+        # budget; pinning a literal here is what hid the missing host grant.
+        requested_budget=dict(spec.budget_cost),
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=True,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class Factory:
+        capability_name = spec.name
+        adapter_name = spec.adapter
+        adapter_version = spec.adapter_version
+        parser_version = spec.output_schema
+
+        def prepare(self, *, target, args, policy):
+            del policy
+            captured["addresses"] = target.allowed_addresses
+            captured["ports"] = tuple(args["ports"])
+            return PreparedExecution(
+                capability_name=spec.name,
+                adapter_name=spec.adapter,
+                adapter_version=spec.adapter_version,
+                commands=(),
+                estimated_budget={
+                    "hosts_attempted": len(target.allowed_addresses),
+                    "tcp_ports_attempted": len(args["ports"]),
+                    "tool_wall_seconds": 5,
+                },
+                input_digest="f" * 64,
+                redacted_execution={},
+                parser_version=spec.output_schema,
+            )
+
+    class ExecutionAdapter:
+        manages_cancellation = False
+
+        def __init__(self, *, prepared, parser, **_kwargs):
+            del parser
+            self.capability_name = prepared.capability_name
+            self.adapter_name = prepared.adapter_name
+            self.adapter_version = prepared.adapter_version
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    "hosts_attempted": len(captured["addresses"]),
+                    "tcp_ports_attempted": len(captured["ports"]),
+                    "tool_wall_seconds": 1,
+                },
+                execution_started=True,
+                parser_version=spec.output_schema,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "network_capability_adapter", lambda _name: Factory())
+    monkeypatch.setattr(action_adapter_module, "NetworkExecutionAdapter", ExecutionAdapter)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    # A skip would come back as a receipt that never entered execution.
+    assert receipt.status == "success"
+    # Every bound address is examined, and each one gets a real port list.
+    assert captured["addresses"] == target.allowed_addresses
+    assert len(captured["ports"]) >= 1
+
+
+
 def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeypatch):
     target = TargetBinding(
         target_id=TARGET.target_id,
