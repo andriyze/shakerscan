@@ -1,8 +1,9 @@
 'use client'
 
 import Link from '@/components/WorkspaceLink'
+import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { useParams, useSearchParams } from 'next/navigation'
+import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
@@ -64,6 +65,7 @@ function DeviceDetailContent() {
   const deviceId = params.id as string
   const selectedScanId = searchParams.get('scan')?.trim() || null
   const toast = useToast()
+  const router = useRouter()
   const [data, setData] = useState<DeviceDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -387,7 +389,7 @@ function DeviceDetailContent() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan device' : 'A current device worker is required'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
+      <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<><RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => router.push('/devices')} /><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?source_type=device&device_target_id=${device.id}`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan device' : 'A current device worker is required'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Scan device</Button></>} />
 
       {!workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory remains available, but scans are paused until a current device worker with Nmap and Naabu is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.{readinessRemedy && <span className="mt-2 block text-amber-100">{readinessRemedy}</span>}</Card>}
 

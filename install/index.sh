@@ -187,6 +187,47 @@ prune_retired_files() {
     done < "$previous"
 }
 
+cleanup_activated_rollback() {
+    # Only the backup made by this activation, and only after the new tree exists.
+    # Never run privileged cleanup on an operator-supplied directory or symlink.
+    [ "$INSTALL_BACKUP" = "${INSTALL_DIR}.shakerscan-rollback.$$" ] || return 0
+    [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] || return 0
+    [ -d "$INSTALL_BACKUP" ] && [ ! -L "$INSTALL_BACKUP" ] || return 0
+    cleanup_image=""
+    # Capture a local immutable image before rm removes the old lock file. No pull,
+    # registry access, shell sourcing of .env, or Docker socket in the container.
+    if command -v docker >/dev/null 2>&1; then
+        for cleanup_lock in "$INSTALL_BACKUP/release-image-lock.env" "$INSTALL_DIR/release-image-lock.env"; do
+            [ -f "$cleanup_lock" ] && [ ! -L "$cleanup_lock" ] || continue
+            cleanup_candidate="$(sed -n 's/^API_IMAGE=//p' "$cleanup_lock")"
+            if printf '%s\n' "$cleanup_candidate" | grep -Eq '^[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}$' && \
+                [ "$(printf '%s\n' "$cleanup_candidate" | wc -l | tr -d ' ')" = 1 ] && \
+                docker image inspect "$cleanup_candidate" >/dev/null 2>&1; then
+                cleanup_image="$cleanup_candidate"
+                break
+            fi
+        done
+    fi
+    if rm -rf -- "$INSTALL_BACKUP" 2>/dev/null; then
+        return 0
+    fi
+    # Containers can leave root-owned result directories in the previous tree.
+    # Bind only that obsolete tree; do not chown/delete the activated installation.
+    case "$INSTALL_BACKUP" in *,*) cleanup_image="" ;; esac
+    if [ -n "$cleanup_image" ] && [ ! -L "$INSTALL_BACKUP" ] && \
+        docker run --rm --pull=never --network none --user 0:0 --read-only \
+            --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges \
+            --mount "type=bind,src=$INSTALL_BACKUP,dst=/rollback" \
+            --entrypoint /bin/sh "$cleanup_image" \
+            -c 'find /rollback -xdev -depth -mindepth 1 -delete' >/dev/null 2>&1 && \
+        rmdir -- "$INSTALL_BACKUP" 2>/dev/null; then
+        return 0
+    fi
+    # Activation succeeded. Keep an explicit recovery path rather than failing
+    # the upgrade or printing dozens of per-file Permission denied messages.
+    printf 'Warning: installation updated; old rollback files remain at %s (cleanup needs a local pinned API image and Docker permission).\n' "$INSTALL_BACKUP" >&2
+}
+
 commit_staged_downloads() {
     [ -n "$INSTALL_STAGE" ] && [ -d "$INSTALL_STAGE" ] || \
         fail "installer staging directory is unavailable"
@@ -216,7 +257,7 @@ commit_staged_downloads() {
     fi
     INSTALL_STAGE=""
     if [ -n "$INSTALL_BACKUP" ] && [ -d "$INSTALL_BACKUP" ]; then
-        rm -rf -- "$INSTALL_BACKUP"
+        cleanup_activated_rollback
     fi
     INSTALL_BACKUP=""
 }
@@ -587,6 +628,7 @@ download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/contin
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
+download "$REPO_RAW_BASE/api/scan/reachability.py" "$INSTALL_DIR/api/scan/reachability.py"
 download "$REPO_RAW_BASE/api/authenticated_assurance/__init__.py" "$INSTALL_DIR/api/authenticated_assurance/__init__.py"
 download "$REPO_RAW_BASE/api/authenticated_assurance/models.py" "$INSTALL_DIR/api/authenticated_assurance/models.py"
 download "$REPO_RAW_BASE/api/authenticated_assurance/evaluation.py" "$INSTALL_DIR/api/authenticated_assurance/evaluation.py"

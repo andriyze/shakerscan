@@ -1960,6 +1960,8 @@ def finalize_scan_report(
             "grade_reliability_reasons": reliability_reasons,
         },
     }
+    from .reachability import apply_reachability_outcome
+    apply_reachability_outcome(report, action_results=action_results, observations=observations)
     report["report_digest"] = hashlib.sha256(json.dumps(
         report,
         sort_keys=True,

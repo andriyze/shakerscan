@@ -1,6 +1,7 @@
 'use client'
 
 import Link from '@/components/WorkspaceLink'
+import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Router, ShieldCheck } from 'lucide-react'
 import {
@@ -157,7 +158,7 @@ export default function DevicesPage() {
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
             </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => { if (devices.length === 1 && page > 0) setPage(page - 1); else void load() }} /><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
           </Card>
         })}</div>}
       {!loading && !failed && total > PAGE_SIZE && <div className="mt-5 flex items-center justify-between text-sm text-gray-400"><span>Showing {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button size="sm" variant="secondary" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>}

@@ -799,7 +799,10 @@ def test_finalizer_explains_required_action_degradation():
     )
 
     assert report["coverage"]["status"] == "failed"
-    assert report["coverage"]["reasons"] == ["adapter_failed"]
+    assert report["coverage"]["reasons"] == ["adapter_failed", "target_unreachable"]
+    assert report["error"]
+    assert report["result"]["score"] is None
+    assert report["result"]["grade"] is None
     assert report["coverage"]["capability_coverage"] == {
         "total": 2,
         "required": 2,
@@ -826,9 +829,9 @@ def test_finalizer_explains_required_action_degradation():
             },
         ],
     }
-    assert report["result"]["grade"] == "A*"
+    assert report["result"]["grade"] is None
     assert report["result"]["grade_reliable"] is False
-    assert report["scan_metadata"]["grade_reliability_reasons"] == ["adapter_failed"]
+    assert report["scan_metadata"]["grade_reliability_reasons"] == ["adapter_failed", "target_unreachable"]
     row = report["canonical_action_execution"]["actions"][0]
     assert row["status"] == "failed"
     assert row["reason_code"] == "adapter_failed"
