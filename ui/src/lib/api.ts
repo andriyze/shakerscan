@@ -5786,6 +5786,7 @@ export async function getFindings(params?: {
   device_target_id?: string
   search?: string
   seen_within_days?: number
+  not_seen_within_days?: number
   first_seen_within_days?: number
   resolved_within_days?: number
   verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
@@ -5820,6 +5821,7 @@ export async function getFindings(params?: {
   if (params?.device_target_id) searchParams.set('device_target_id', params.device_target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
+  if (params?.not_seen_within_days) searchParams.set('not_seen_within_days', params.not_seen_within_days.toString())
   if (params?.first_seen_within_days) searchParams.set('first_seen_within_days', params.first_seen_within_days.toString())
   if (params?.resolved_within_days) searchParams.set('resolved_within_days', params.resolved_within_days.toString())
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
