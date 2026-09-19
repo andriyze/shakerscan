@@ -37,7 +37,11 @@ def test_main_ruleset_requires_pr_linear_history_and_every_pre_merge_gate():
             "required_status_checks"} <= set(rules)
     assert rules["pull_request"]["required_review_thread_resolution"] is True
     checks = rules["required_status_checks"]
-    assert checks["strict_required_status_checks_policy"] is True
+    # Decided 2026-09-18 with #159: a branch is NOT required to be up to date with main. The
+    # merge queue is unavailable on this repository, so requiring it would re-run the 35-minute
+    # gates on every rebase. Nothing merged is released untested: the candidate certification
+    # re-runs every gate on the exact main commit it builds, and refuses any other commit.
+    assert checks["strict_required_status_checks_policy"] is False
     contexts = {check["context"] for check in checks["required_status_checks"]}
     # Every job that is required must exist as a workflow job id that reports on every PR.
     assert contexts == {"commit-policy", "python-suite", "smoke"}
@@ -61,7 +65,11 @@ def test_a_deletion_only_live_ruleset_is_reported_as_under_protection():
 
 
 def test_a_partial_required_check_set_names_the_missing_gates():
+    # A committed ruleset that does ask for up-to-date branches must see their absence reported.
     committed = _committed()
+    for rule in committed["rules"]:
+        if rule["type"] == "required_status_checks":
+            rule["parameters"]["strict_required_status_checks_policy"] = True
     partial = json.loads(json.dumps(committed))
     for rule in partial["rules"]:
         if rule["type"] == "required_status_checks":
