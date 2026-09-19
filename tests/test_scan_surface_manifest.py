@@ -201,6 +201,8 @@ def _wildcard_content_observations(paths, *, status=301):
             "status": status,
             "length": 0,
             "redirect_location": f"https://www.app.example.test{path}",
+            # The producer decides this on the raw pair before redaction.
+            "redirect_preserves_request_target": True,
         }
         for path in paths
     ]
@@ -321,13 +323,15 @@ def test_unexpanded_client_template_routes_are_not_discovered_surface():
     assert "invalid_observations:2" in manifest["producers"]["web.crawl"]["reason"]
 
 
-def _redirect_row(path, *, host="apex.example.test", to="www.apex.example.test", status=301):
+def _redirect_row(path, *, host="apex.example.test", to="www.apex.example.test",
+                  status=301, preserves=True):
     return {
         "kind": "content_discovery",
         "url": f"https://{host}{path}",
         "status": status,
         "length": 0,
         "redirect_location": f"https://{to}{path}",
+        "redirect_preserves_request_target": preserves,
     }
 
 
@@ -399,7 +403,7 @@ def test_real_content_survives_the_calibration_that_drops_its_neighbours():
         "length": 843,
         "redirect_location": None,
     }
-    moved = _redirect_row("/admin", to="apex.example.test/admin/login")
+    moved = _redirect_row("/admin", to="apex.example.test/admin/login", preserves=False)
     moved["redirect_location"] = "https://apex.example.test/admin/login"
     manifest = _apex_surface(
         [_redirect_row(p) for p in ["/graphql", "/coupon", "/.env"]]
@@ -614,3 +618,87 @@ def test_one_malformed_hint_reference_does_not_end_the_ingestion():
     assert issues == ["hint_reference_unparsable:llms.txt:2"]
     # The diagnostic is a bounded class and a count; it never quotes the document.
     assert all("broken" not in issue and "::1" not in issue for issue in issues)
+
+
+def _parsed_content_row(raw_request, raw_location, *, status=301, length=0):
+    """Build the observation exactly as the ffuf projection emits it."""
+    import agent_tools
+    from scanner_tools.url_redaction import redact_url
+
+    return {
+        "kind": "content_discovery",
+        "url": redact_url(raw_request, max_length=2_000),
+        "status": status,
+        "length": length,
+        "redirect_location": redact_url(raw_location, max_length=2_000),
+        "redirect_preserves_request_target": agent_tools._redirect_preserves_request_target(
+            raw_request, raw_location,
+        ),
+    }
+
+
+def test_redaction_cannot_make_a_route_specific_redirect_look_like_a_rewrite():
+    """Redaction is not injective, so the comparison cannot be made after it.
+
+    The projection strips the fragment outright and collapses every query value
+    and secret-shaped path segment to a single marker. Judged on those strings,
+    /report?mode=summary -> /report?mode=restricted and /admin ->
+    /admin#/admin/users both look like the controls' origin-only rewrite, and
+    both real routes were deleted from the endpoint manifest.
+    """
+    from api.scan.negative_control import (
+        indistinguishable_from_absent,
+        negative_control_entries,
+    )
+
+    controls = negative_control_entries(3, seed="surface-test")
+    observations = [
+        _parsed_content_row(
+            f"https://apex.example.test/{entry}",
+            f"https://www.apex.example.test/{entry}",
+        )
+        for entry in controls
+    ] + [
+        # A: origin AND query value change.
+        _parsed_content_row(
+            "https://apex.example.test/report?mode=summary",
+            "https://www.apex.example.test/report?mode=restricted",
+        ),
+        # B: the destination adds a client-routing fragment.
+        _parsed_content_row(
+            "https://apex.example.test/admin",
+            "https://www.apex.example.test/admin#/admin/users",
+        ),
+        # C: a secret-shaped path segment changes.
+        _parsed_content_row(
+            f"https://apex.example.test/reset/{'A' * 32}",
+            f"https://www.apex.example.test/reset/{'B' * 32}",
+        ),
+        # D: a genuine origin-only move, which must still be recognised.
+        _parsed_content_row(
+            "https://apex.example.test/graphql",
+            "https://www.apex.example.test/graphql",
+        ),
+    ]
+
+    suppressed = indistinguishable_from_absent(observations)
+
+    assert not any("/report" in url for url in suppressed)
+    assert not any("/admin" in url for url in suppressed)
+    assert not any("/reset/" in url for url in suppressed)
+    assert suppressed == frozenset({"https://apex.example.test/graphql"})
+
+
+def test_an_observation_without_the_producer_fact_claims_nothing():
+    """The fact is decided before redaction; absent it, make no claim."""
+    from api.scan.negative_control import (
+        indistinguishable_from_absent,
+        negative_control_entries,
+    )
+
+    controls = negative_control_entries(3, seed="surface-test")
+    rows = [_redirect_row(f"/{entry}") for entry in controls] + [_redirect_row("/admin")]
+    for row in rows:
+        row.pop("redirect_preserves_request_target")
+
+    assert indistinguishable_from_absent(rows) == frozenset()

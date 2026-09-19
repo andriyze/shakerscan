@@ -1745,6 +1745,30 @@ def wire_evidence_settlement(settlement: Mapping[str, Any], pinned_proxy: Any) -
             "source": "proxy_request_lines"}
 
 
+def _redirect_preserves_request_target(raw_url: Any, raw_location: Any) -> bool | None:
+    """Whether a redirect changed only the origin, judged before redaction.
+
+    Returns None when either side is missing or unparsable, so a caller can tell
+    "not a pure origin move" apart from "could not be determined".
+    """
+    request = str(raw_url or "").strip()
+    location = str(raw_location or "").strip()
+    if not request or not location:
+        return None
+    try:
+        probed = urllib.parse.urlsplit(request)
+        moved = urllib.parse.urlsplit(urllib.parse.urljoin(request, location))
+    except ValueError:
+        return None
+    if not moved.netloc or not probed.netloc:
+        return None
+    return (
+        (moved.path or "/") == (probed.path or "/")
+        and moved.query == probed.query
+        and moved.fragment == probed.fragment
+    )
+
+
 def _public_observed_url(value: Any) -> str | None:
     """Retain route shape while removing secrets from untrusted scanner output."""
     text = str(value or "").strip()
@@ -1872,6 +1896,18 @@ def parse_scanner_output(
                 "status": item.get("status"),
                 "length": item.get("length"),
                 "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+                # Whether the redirect only moved the origin, decided on the raw
+                # pair before redaction. Redaction is not injective -- it strips
+                # the fragment outright and collapses every query value and
+                # secret-shaped path segment to one marker -- so this fact cannot
+                # be recovered downstream. One boolean carries it and leaks
+                # nothing: a route-specific redirect stays distinguishable from a
+                # blanket origin rewrite.
+                "redirect_preserves_request_target": _redirect_preserves_request_target(
+                    item.get("url") or (item.get("input", {}) or {}).get("FUZZ")
+                    if isinstance(item.get("input"), dict) else item.get("url"),
+                    item.get("redirectlocation") or item.get("redirect_location"),
+                ),
                 # How this host answers a path that cannot exist. Retained as an
                 # observation so the calibration is evidence in the receipt, not a
                 # filter applied out of band.

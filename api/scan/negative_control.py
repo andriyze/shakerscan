@@ -31,6 +31,8 @@ CONTROL_PATH_PREFIX = ".shakerscan-absent-"
 _CONTROL_SEGMENT = re.compile(re.escape(".shakerscan-absent-") + r"[0-9a-f]{16}")
 # One absent path answering unusually is not a server-wide rule.
 _MIN_AGREEING_CONTROLS = 2
+# How the scanner projection marks a value it removed, raw and percent-encoded.
+_REDACTION_MARKERS = ("<redacted>", "%3credacted%3e")
 # Enough to distinguish a stable rewrite from one unlucky collision, small enough
 # that it never meaningfully displaces real wordlist coverage.
 DEFAULT_CONTROL_COUNT = 3
@@ -80,6 +82,17 @@ def is_negative_control_url(url: Any) -> bool:
     )
 
 
+def _redaction_obscured(value: Any) -> bool:
+    """Whether a URL arrives with a value the redactor has already replaced.
+
+    The scanner projection removes secret-shaped path segments and every query
+    value before these observations exist, so two URLs that differed only there
+    are identical by the time they are compared.
+    """
+    text = str(value or "").lower()
+    return any(marker in text for marker in _REDACTION_MARKERS)
+
+
 def absent_response_signature(
     item: Mapping[str, Any],
 ) -> tuple[Any, ...] | None:
@@ -109,10 +122,17 @@ def absent_response_signature(
         moved = urllib.parse.urlsplit(destination)
     except ValueError:
         return None
+    # Whether the redirect only moved the origin is decided by the producer, on
+    # the raw pair, before redaction. It cannot be re-derived here: redaction
+    # strips the fragment outright and collapses every query value and
+    # secret-shaped path segment to one marker, so /report?mode=summary ->
+    # /report?mode=restricted and /admin -> /admin#/admin/users both arrive
+    # looking like a blanket origin rewrite. Absent that fact, make no claim.
+    if item.get("redirect_preserves_request_target") is not True:
+        return None
+    if _redaction_obscured(url) or _redaction_obscured(destination):
+        return None
     if (moved.path or "/") != (probed.path or "/") or moved.query != probed.query:
-        # The destination is specific to this path, so it says something about
-        # this path. /admin -> /admin/login is a real route that moved; it is
-        # not the same answer the server gives to everything.
         return None
     return ("origin_rewrite", status, source, origin)
 
