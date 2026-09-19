@@ -2374,6 +2374,29 @@ show_status() {
         fi
     fi
 
+    # The UI is baked into its image while the API and workers run mounted
+    # source, so a rebuild that recreates the services still leaves the UI on
+    # whatever artifact was last built. Worker staleness has always been
+    # reported here; UI staleness was not, and a UI serving hours-old code
+    # reads to an operator as a flaky page rather than a stale build.
+    local ui_json ui_revision local_revision
+    ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+    ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
+    local_revision="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
+    if [ -n "$ui_revision" ]; then
+        echo ""
+        echo -e "${BLUE}UI Build:${NC}"
+        echo "  Serving:  $ui_revision"
+        if [ -z "$local_revision" ]; then
+            echo "  Checkout: unknown (not a git checkout)"
+        elif build_versions_match "$local_revision" "$ui_revision"; then
+            echo -e "  Checkout: ${GREEN}$local_revision — UI matches this checkout${NC}"
+        else
+            echo -e "  Checkout: ${RED}$local_revision — UI is STALE${NC}"
+            echo -e "            ${YELLOW}run './scanner.sh rebuild ui' before trusting the pages${NC}"
+        fi
+    fi
+
     echo ""
     echo -e "${BLUE}Access:${NC}"
     echo "  UI:  $(ui_base_url)"
