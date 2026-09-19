@@ -21,7 +21,7 @@ def _harness(tmp_path: Path, ships: list[str]) -> Path:
     source = INSTALLER.read_text(encoding="utf-8")
     functions = []
     for name in ("download", "cleanup_install_stage", "prune_retired_files",
-                 "commit_staged_downloads"):
+                 "cleanup_activated_rollback", "commit_staged_downloads"):
         start = source.index(f"{name}() {{")
         depth, index = 0, start
         while True:

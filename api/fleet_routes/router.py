@@ -28,6 +28,7 @@ import re
 import secrets
 import time
 from typing import Any, Callable, Literal, Mapping, Optional
+
 import urllib.parse
 import uuid
 
@@ -67,7 +68,7 @@ try:
     from scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from scan.continuation import ContinuationBudgetCeiling, reconciled_continuation_ceiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from scan.continuation_rounds import compile_next_continuation
-    from scan.contracts import SCAN_AUTHENTICATION_KEYS
+    from scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from scan.executor import build_native_scan_execution
     from scan.job_runtime import CanonicalScanJobMaterializationError, materialize_canonical_scan_job
@@ -114,7 +115,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..scan.collection_replay import EXECUTABLE_REPLAY_POLICIES, ScanCollectionReplayContractError, narrow_replay_plan_to_request_manifest, scan_replay_authorization, scan_replay_selector
     from ..scan.continuation import ContinuationBudgetCeiling, ScanContinuationError, amended_scan_plan_revision, build_discovery_continuation_manifests, merge_scan_action_continuation
     from ..scan.continuation_rounds import compile_next_continuation
-    from ..scan.contracts import SCAN_AUTHENTICATION_KEYS
+    from ..scan.contracts import SCAN_AUTHENTICATION_KEYS, scan_authentication_value_present
     from ..scan.execution_backend import ActionAlreadyTerminal, ActionLease, ActionLeaseLost, PostgresScanExecutionBackend, ScanExecutionBackendError
     from ..scan.executor import build_native_scan_execution
     from ..scan.job_runtime import CanonicalScanJobMaterializationError, materialize_canonical_scan_job
@@ -128,6 +129,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.request_replay import build_selected_replay_plan
     from ..secret_store import decrypt_secret
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
+
+
+from .placement import private_input_retry_payload, placement_from_payload, matches_broker_placement
 
 
 router = APIRouter()
@@ -673,7 +677,7 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
 
     redis_client = get_redis()
     labels = _broker_node_labels(node)
-    queue_names = [QUEUE_NAME, *qualified_route_queues(redis_client, [QUEUE_NAME], worker_labels=labels)]
+    queue_names = [*qualified_route_queues(redis_client, [QUEUE_NAME], worker_labels=labels), QUEUE_NAME]
     consumer_name = f"broker:{node_id}:{body.worker_id}"[:250]
     lease = await asyncio.to_thread(
         lease_job,
@@ -769,6 +773,15 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 )
             await asyncio.to_thread(acknowledge_lease, redis_client, lease)
             return Response(status_code=204)
+    executable_payload = canonical_materialized or payload
+    if not matches_broker_placement(labels, executable_payload):
+        retry = dict(queued_payload)
+        retry["placement"] = placement_from_payload(executable_payload)
+        enqueue_job(redis_client, str(retry.get("_base_queue_name") or QUEUE_NAME), retry)
+        await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+        return Response(status_code=204)
+    if canonical_materialized is not None and canonical_materialized.get("placement"):
+        queued_payload["placement"] = canonical_materialized["placement"]
     execution_target = (
         canonical_materialized.get("target")
         if canonical_materialized is not None else payload.get("target")
@@ -809,13 +822,12 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
             )
         broker_requires_private_inputs = bool(
             broker_candidate_plan is not None
-            and _broker_action_plan_requires_local_private_inputs(
-                broker_candidate_plan,
-            )
+            and (_broker_action_plan_requires_local_private_inputs(broker_candidate_plan)
+                 or _broker_job_has_private_inputs(canonical_materialized))
         )
         if broker_requires_private_inputs and not body.private_input_public_key:
-            local_payload = dict(queued_payload)
-            local_payload["placement"] = {"node_scope": "local"}
+            # A missing sealed-input key is not permission to change the node.
+            local_payload = private_input_retry_payload(queued_payload)
             enqueue_job(
                 redis_client,
                 str(local_payload.get("_base_queue_name") or QUEUE_NAME),
@@ -830,10 +842,9 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
         and not broker_requires_private_inputs
     ):
         # Legacy/non-canonical execution has no action-bound sealed-input
-        # contract.  Keep it local instead of placing credentials or exact
-        # imported requests in an HTTPS broker lease response.
-        local_payload = dict(queued_payload)
-        local_payload["placement"] = {"node_scope": "local"}
+        # contract. Keep its requested placement pending (or local if unpinned);
+        # never publish credentials/imported requests in an unsealed lease response.
+        local_payload = private_input_retry_payload(queued_payload)
         enqueue_job(
             redis_client,
             str(local_payload.get("_base_queue_name") or QUEUE_NAME),
@@ -2764,7 +2775,7 @@ def _broker_job_has_private_inputs(payload: Mapping[str, Any]) -> bool:
     if not isinstance(options, Mapping):
         return False
     if any(
-        options.get(key) not in (None, "", [], {})
+        scan_authentication_value_present(options.get(key))
         for key in _BROKER_PRIVATE_OPTION_KEYS
     ):
         return True
@@ -3374,7 +3385,7 @@ def _split_broker_private_options(
     public = copy.deepcopy(dict(options))
     private: dict[str, Any] = {}
     for key in _BROKER_PRIVATE_OPTION_KEYS:
-        if key in public and public[key] not in (None, "", [], {}):
+        if key in public and scan_authentication_value_present(public[key]):
             private[key] = public.pop(key)
         else:
             public.pop(key, None)

@@ -172,6 +172,7 @@ from scan.parallel_outcome import (
     mark_parallel_parent_coverage_incomplete as _mark_parallel_parent_coverage_incomplete,
     mark_parallel_parent_degraded as _mark_parallel_parent_degraded,
 )
+from scan.reachability import fail_unreachable_parallel_report
 from scan.capability_execution import (
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
@@ -8108,6 +8109,12 @@ async def _record_runtime_scope_block_command_result(conn, **kwargs) -> str | No
 
 
 def _failure_result_for_scan_error(result: dict[str, Any], error: Any, diag: Any) -> dict[str, Any]:
+    if result.get("schema_version") == "canonical-scan-report/v2":
+        # Keep the failed run's receipts, coverage and budget evidence. Reducing
+        # an unreachable canonical report to an error string hides its cause.
+        failure = copy.deepcopy(result)
+        failure["error"] = error
+        return failure
     metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
     metadata.setdefault("status", "failed")
     if diag is not None:
@@ -13838,7 +13845,8 @@ async def process_scan_job(job_data: dict):
                         completed_at = $3,
                         duration_seconds = $4,
                         progress = 100,
-                        current_phase = 'failed', coverage_status=$5, coverage_json=$6,
+                        current_phase = 'failed', score=NULL, grade=NULL,
+                        coverage_status=$5, coverage_json=$6,
                         budget_used_json=$7, assurance_score=$9
                     WHERE id = $8
                 """, error_detail[:2000], json.dumps(failure_result), completed_at, duration,
@@ -17015,6 +17023,11 @@ async def process_scan_merge_job(job_data: dict):
     scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=completed_n, total_count=len(children),
     )
+    preflight_failed = fail_unreachable_parallel_report(
+        merged, [_as_report_dict(child.get('result')) or {} for child in children],
+    )
+    if preflight_failed:
+        agg_score = agg_grade = None
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.
@@ -17063,13 +17076,13 @@ async def process_scan_merge_job(job_data: dict):
         duration = int((completed_at - start.replace(tzinfo=None)).total_seconds())
 
     # Parent is failed only if every shard failed; otherwise it completed.
-    parent_status = 'failed' if (children and completed_n == 0) else 'completed'
+    parent_status = 'failed' if preflight_failed or (children and completed_n == 0) else 'completed'
 
     # When every shard failed, summarize the first shard's error onto the parent so
     # the scan detail page shows WHY it failed instead of a bare 'failed' row with an
     # empty error_message.
-    parent_error_message = None
-    if parent_status == 'failed':
+    parent_error_message = str(merged['error']) if preflight_failed else None
+    if parent_status == 'failed' and not preflight_failed:
         failed_children = [c for c in children if c['status'] == 'failed']
         first = failed_children[0] if failed_children else None
         if first is not None:

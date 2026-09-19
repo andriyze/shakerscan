@@ -38,7 +38,8 @@ def test_schedule_rejects_ambiguous_integer_host_after_resolution():
     "http://[::ffff:169.254.169.254]/",
     "http://127.0.0.1/",
 ])
-def test_schedule_rejects_visible_non_public_addresses(url):
+def test_schedule_rejects_visible_non_public_addresses(url, monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     with pytest.raises(ScheduleTargetSafetyError, match="must not resolve"):
         asyncio.run(validate_schedule_target_destination(url))
 
@@ -54,7 +55,8 @@ def test_schedule_accepts_only_fully_public_resolution():
     )) == ("93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946")
 
 
-def test_schedule_rejects_mixed_public_and_private_dns_answers():
+def test_schedule_rejects_mixed_public_and_private_dns_answers(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     async def resolver(_host, _port):
         return _records("93.184.216.34", "10.0.0.2")
 
@@ -299,3 +301,30 @@ def test_transient_dns_retry_does_not_reactivate_a_concurrently_paused_schedule(
     ))
 
     assert state == {"is_active": False, "next_run_at": None}
+
+
+@pytest.mark.parametrize("url", ["http://192.168.1.50", "http://127.0.0.1", "https://[fd00::50]", "http://[::1]"])
+def test_self_hosted_schedule_accepts_private_destinations_and_revalidates_policy(url, monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    assert asyncio.run(validate_schedule_target_destination(url))
+    # This same validation runs again at dispatch; a saved schedule cannot freeze
+    # an earlier permission after the deployment is changed to hosted/refuse.
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    with pytest.raises(ScheduleTargetSafetyError):
+        asyncio.run(validate_schedule_target_destination(url))
+
+
+@pytest.mark.parametrize("address", ["169.254.169.254", "::ffff:169.254.169.254", "0.0.0.0", "::", "224.0.0.1", "fe80::1", "fd00:ec2::254", "100.100.100.200", "168.63.129.16", "::ffff:100.100.100.200"])
+def test_private_network_opt_in_never_admits_metadata_or_non_unicast(address, monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    async def resolver(_host, _port):
+        return _records("192.168.1.50", address)
+    with pytest.raises(ScheduleTargetSafetyError):
+        asyncio.run(validate_schedule_target_destination("https://printer.internal", resolver=resolver))
+
+
+def test_schedule_and_on_demand_share_private_dns_policy(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
+    async def resolver(_host, _port):
+        return _records("192.168.1.50", "::ffff:192.168.1.51")
+    assert len(asyncio.run(validate_schedule_target_destination("https://printer.internal", resolver=resolver))) == 2

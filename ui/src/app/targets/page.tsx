@@ -247,7 +247,7 @@ function TargetsContent() {
 
     setAdding(true)
     try {
-      await createTarget(
+      const created = await createTarget(
         url,
         newTargetName.trim() || undefined,
         newTargetCohort || undefined,
@@ -259,7 +259,7 @@ function TargetsContent() {
       setNewTargetAuthorized(false)
       setUrlError('')
       setShowAddModal(false)
-      toast.success('Target added')
+      toast.success(created.status === 'already_exists' ? 'Target already present' : 'Target added')
       fetchTargets()
     } catch (err) {
       console.error('Failed to add target:', err)

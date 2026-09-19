@@ -469,16 +469,23 @@ def lease_job(
             )
 
     try:
-        response = redis_client.xreadgroup(
-            CONSUMER_GROUP,
-            consumer_name,
-            {stream_key(queue_name): ">" for queue_name in queues},
-            count=1,
-            block=max(1, block_ms),
-        )
+        response = []
+        # COUNT is per stream, not per XREADGROUP call. Reading every route in
+        # one call could acquire several deliveries while returning only the
+        # first, stranding the others in the pending list without a job lease.
+        # Probe each route without blocking, then long-poll only the last one.
+        # Blocking each empty stream can multiply Redis' minimum wait by the
+        # number of routes and make a broker lease request exceed its deadline.
+        for index, queue_name in enumerate(queues):
+            response = redis_client.xreadgroup(
+                CONSUMER_GROUP, consumer_name, {stream_key(queue_name): ">"},
+                count=1, block=max(1, block_ms) if index == len(queues) - 1 else None,
+            )
+            if _decode_messages(response):
+                break
     except Exception as exc:
         if _is_nogroup_error(exc):
-            # XREADGROUP covers every qualified route in one blocking call.
+            # A newly discovered route may lose its group during a queue reset.
             # If any one is pruned while blocked, Redis aborts the whole read.
             # Refresh all groups, but do not start a second long poll inside
             # this request; returning no work keeps the broker timeout bounded.

@@ -477,3 +477,47 @@ def test_stale_worker_route_snapshot_does_not_recreate_orphan_stream():
         visibility_timeout_ms=1000,
     ) is None
     assert stream_key(route) not in redis.streams
+
+
+def test_leasing_multiple_ready_routes_does_not_hide_other_deliveries():
+    class PerStreamCountRedis(FakeStreams):
+        # Real Redis applies COUNT to each stream, not to the response as a whole.
+        def xreadgroup(self, group, consumer, streams, count, block):
+            response = []
+            for name in streams:
+                rows = []
+                for message_id, fields in self.streams.get(name, []):
+                    if message_id not in self.pending:
+                        self.pending[message_id] = {"consumer": consumer, "times_delivered": 1}
+                        rows.append((message_id, fields))
+                        if len(rows) == count:
+                            break
+                if rows:
+                    response.append((name, rows))
+            return response
+
+    redis = PerStreamCountRedis()
+    enqueue_job(redis, "scan_jobs", {"scan_id": "one", "placement": {"node_scope": "remote"}})
+    enqueue_job(redis, "scan_jobs", {"scan_id": "two", "placement": {"node_id": "node-1"}})
+    queues = qualified_route_queues(redis, ["scan_jobs"], worker_labels={
+        "node_scope": "remote", "node_id": "node-1",
+    })
+    assert len(queues) == 2
+    first = lease_job(redis, queues, consumer_name="broker:one", block_ms=10, visibility_timeout_ms=1000)
+    assert first is not None
+    assert len(redis.pending) == 1, "only the returned delivery may become pending"
+    second = lease_job(redis, queues, consumer_name="broker:two", block_ms=10, visibility_timeout_ms=1000)
+    assert second is not None and second.message_id != first.message_id
+    assert {json.loads(first.payload)["scan_id"], json.loads(second.payload)["scan_id"]} == {"one", "two"}
+
+
+def test_empty_route_poll_has_only_one_blocking_read():
+    class RecordingRedis(FakeStreams):
+        calls = []
+        def xreadgroup(self, group, consumer, streams, count, block):
+            self.calls.append(block)
+            return []
+    redis = RecordingRedis()
+    assert lease_job(redis, ["one", "two", "three"], consumer_name="worker", block_ms=100,
+                     visibility_timeout_ms=1000) is None
+    assert redis.calls == [None, None, 100]
