@@ -1,0 +1,26 @@
+name: Scan1 source review
+on:
+  push:
+    branches: [fix/scan1]
+    paths: [.github/workflows/scan1-source-review.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Archive exact tracked source
+        run: |
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/source-commit.txt
+          git archive --format=tar.gz HEAD > artifacts/source.tar.gz
+          sha256sum artifacts/source.tar.gz > artifacts/source.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: scan1-source-${{ github.sha }}
+          path: artifacts
+          retention-days: 3
