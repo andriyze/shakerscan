@@ -166,31 +166,6 @@ def _normalized_route_path(path: str) -> str:
 
 
 
-# A crawler that parses an application's own JavaScript recovers route strings
-# before the client has substituted them. Measured on a real site, that put
-# /js/${PGP_PATH} and /js/${paths[f]} into the endpoint manifest and the durable
-# ASM inventory as attack surface: routes that exist in no deployment and that
-# every later probe can only 404. Single braces stay legal -- {id} is how this
-# module writes its own normalized route parameters.
-_CLIENT_TEMPLATE_EXPRESSION = re.compile(r"\$\{|\{\{|<%")
-
-
-def _unexpanded_client_template(value: str) -> bool:
-    """Whether a path or query still carries an unsubstituted template expression."""
-    text = str(value or "")
-    for _ in range(3):  # bounded: a crawler may emit a doubly-encoded string
-        if _CLIENT_TEMPLATE_EXPRESSION.search(text):
-            return True
-        try:
-            decoded = urllib.parse.unquote(text)
-        except (TypeError, ValueError):
-            return False
-        if decoded == text:
-            return False
-        text = decoded
-    return bool(_CLIENT_TEMPLATE_EXPRESSION.search(text))
-
-
 def normalize_endpoint(
     *, method: str, url: str, source: str, content_type: str | None = None,
     body_schema: Any = None,
@@ -213,8 +188,9 @@ def normalize_endpoint(
     except ValueError as exc:
         raise ValueError("endpoint URL contains an invalid port") from exc
     concrete = parsed.path or "/"
-    if _unexpanded_client_template(concrete) or _unexpanded_client_template(parsed.query):
-        raise ValueError("endpoint URL contains an unexpanded client template expression")
+    # This shared normalizer also receives concrete seeds and replayed requests.
+    # Template syntax can be literal input, not an unresolved source expression.
+    # Inferred crawler paths are filtered at their acquisition boundary instead.
     normalized = _normalized_route_path(concrete)
     query_keys = tuple(sorted({
         str(key).strip()[:200]

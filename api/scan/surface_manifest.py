@@ -7,6 +7,8 @@ import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
+from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+
 try:
     from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package imports in host-side tests
@@ -22,7 +24,7 @@ except ModuleNotFoundError:  # package imports through scanner
 def wildcard_redirect_urls(
     observations: Iterable[Mapping[str, Any]],
 ) -> frozenset[str]:
-    """Return content-discovery URLs answered by a blanket, information-free redirect.
+    """Return suspected origin-wide rewrites, not proof that these paths do not exist.
 
     Content discovery counts a 3xx as a hit. A host that permanently redirects
     every path to its canonical origin therefore "discovers" the entire wordlist:
@@ -31,46 +33,63 @@ def wildcard_redirect_urls(
     which existed, and every one of them was persisted into the ASM inventory as
     real attack surface.
 
-    A redirect that keeps the requested path and only moves the origin says
-    nothing about that path, so once the same rewrite answers several distinct
-    paths it is a wildcard signature. Paths the target answers individually --
-    ``/admin`` -> ``/admin/login`` -- change the path and are kept.
+    Count distinct paths within the exact source/destination origin pair. Query
+    variants do not add paths. Without a negative control even five real moved
+    routes are not proof of a wildcard: callers must retain them as uncertain.
     """
-    groups: dict[tuple[int, str, str], set[str]] = {}
+    groups: dict[tuple[int, str, str], dict[str, set[str]]] = {}
     for item in observations:
         if not isinstance(item, Mapping) or item.get("kind") != "content_discovery":
             continue
         status = item.get("status")
         url = str(item.get("url") or "")
         location = str(item.get("redirect_location") or "")
-        if type(status) is not int or not 300 <= status < 400 or not url or not location:
+        if type(status) is not int or status not in REDIRECT_STATUSES:
+            continue
+        source_origin = http_origin(url)
+        destination = redirect_destination(url, location)
+        destination_origin = http_origin(destination)
+        if not source_origin or not destination_origin or source_origin == destination_origin:
             continue
         try:
             probed = urllib.parse.urlsplit(url)
-            moved = urllib.parse.urlsplit(location)
+            moved = urllib.parse.urlsplit(destination)
         except ValueError:
             continue
-        probed_host = (probed.hostname or "").lower().rstrip(".")
-        moved_host = (moved.hostname or "").lower().rstrip(".")
-        if not moved_host or moved_host == probed_host:
+        path = probed.path or "/"
+        if (moved.path or "/") != path or moved.query != probed.query:
             continue
-        if (moved.path or "/") != (probed.path or "/"):
-            continue
-        key = (status, (moved.scheme or "").lower(), moved_host)
-        groups.setdefault(key, set()).add(url)
+        key = (status, source_origin, destination_origin)
+        groups.setdefault(key, {}).setdefault(path, set()).add(url)
     return frozenset(
         url
-        for urls in groups.values()
-        if len(urls) >= _WILDCARD_REDIRECT_MIN_PATHS
+        for paths in groups.values()
+        if len(paths) >= _WILDCARD_REDIRECT_MIN_PATHS
+        for urls in paths.values()
         for url in urls
     )
 
 
 _HTTP_METHOD = re.compile(r"^[A-Z]{3,12}$")
 _DEGRADED_STATUSES = frozenset({"partial", "failed", "blocked"})
-# A blanket redirect has to cover more than a couple of paths before it is a
-# server-wide rule rather than a handful of real moved routes.
+# Several distinct paths can suggest a server-wide rewrite, but cannot prove
+# absent content without a negative-control request (which we do not invent).
 _WILDCARD_REDIRECT_MIN_PATHS = 5
+
+_CLIENT_TEMPLATE_EXPRESSION = re.compile(r"\$\{|\{\{|<%")
+
+
+def _unexpanded_crawler_path(url: str) -> bool:
+    """Filter source-inferred paths, never query values or concrete seeded traffic."""
+    path = urllib.parse.urlsplit(url).path
+    for _ in range(3):
+        if _CLIENT_TEMPLATE_EXPRESSION.search(path):
+            return True
+        decoded = urllib.parse.unquote(path)
+        if decoded == path:
+            return False
+        path = decoded
+    return bool(_CLIENT_TEMPLATE_EXPRESSION.search(path))
 
 
 def _record_origin(record: EndpointRecord) -> str:
@@ -269,6 +288,8 @@ def build_scan_surface_manifest(
             raw_content_type = raw[2] if len(raw) > 2 else None
             raw_body_schema = raw[3] if len(raw) > 3 else None
             try:
+                if name in {"web.crawl", "web.browser_crawl"} and _unexpanded_crawler_path(str(raw_url or "")):
+                    raise ValueError("unexpanded inferred crawler path")
                 record = normalize_endpoint(
                     method=str(raw_method or "GET"),
                     url=str(raw_url or ""),
@@ -377,11 +398,10 @@ def build_scan_surface_manifest(
             ("GET", item.get("url"))
             for item in content_observations
             if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
-            and str(item.get("url") or "") not in blanket_redirects
         ),
         summary=content,
         extra_reasons=(
-            (f"wildcard_redirect_observations:{len(blanket_redirects)}",)
+            (f"unverified_redirect_observations:{len(blanket_redirects)}",)
             if blanket_redirects else ()
         ),
     )

@@ -206,8 +206,8 @@ def _wildcard_content_observations(paths, *, status=301):
     ]
 
 
-def test_blanket_redirect_content_discovery_is_not_discovered_surface():
-    """A host that redirects every path discovers no path.
+def test_suspected_blanket_redirects_are_retained_as_uncertain_surface():
+    """Several moved routes do not prove that nonexistent paths also redirect.
 
     Measured on a static site whose apex 301s to its www origin: content
     discovery reported 108 endpoints -- /graphql, /api-docs, /coupon -- none of
@@ -235,11 +235,13 @@ def test_blanket_redirect_content_discovery_is_not_discovered_surface():
         entry["concrete_path"] for entry in manifest["endpoints"]
         if entry.get("source") == "web.content_discover"
     }
-    assert discovered == set()
+    # ffuf provides no negative-control observation in this profile. Preserve
+    # possibly real moved routes, but do not claim that this discovery is complete.
+    assert discovered == set(wordlist)
     producer = manifest["producers"]["web.content_discover"]
-    # The drop is recorded, never silent: coverage must not read as complete.
+    # The uncertainty is recorded, never silent: coverage must not read as complete.
     assert producer["status"] == "partial"
-    assert f"wildcard_redirect_observations:{len(wordlist)}" in producer["reason"]
+    assert f"unverified_redirect_observations:{len(wordlist)}" in producer["reason"]
 
 
 def test_individual_redirects_remain_discovered_surface():

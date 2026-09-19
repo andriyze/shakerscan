@@ -1222,7 +1222,9 @@ def test_network_receipt_of_only_skipped_actions_is_not_reported_as_success():
             "budget_consumed": {},
         },
     }
-    summary = network_receipt_from_capability_receipts(receipts, addresses=())
+    summary = network_receipt_from_capability_receipts(
+        receipts, addresses=(), expected_action_ids=("discover.ports",),
+    )
 
     assert summary is not None
     assert summary["status"] == "skipped"

@@ -868,6 +868,8 @@ _RECEIPT_STATUS_TO_STAGE_STATUS: Mapping[str, str] = MappingProxyType({
     "succeeded": "success",
     "success": "success",
     "partial": "partial",
+    "timed_out": "timed_out",
+    "timeout": "timed_out",
     "blocked": "blocked",
     "cancelled": "cancelled",
     "skipped": "skipped",
@@ -876,6 +878,10 @@ _RECEIPT_STATUS_TO_STAGE_STATUS: Mapping[str, str] = MappingProxyType({
 
 def _stage_status(receipt: Mapping[str, Any]) -> str:
     raw = str(receipt.get("status") or "failed").strip().lower()
+    if raw != "cancelled" and receipt.get("timed_out") is True:
+        return "timed_out"
+    if raw in {"success", "succeeded"} and receipt.get("partial") is True:
+        return "partial"
     return _RECEIPT_STATUS_TO_STAGE_STATUS.get(raw, "failed")
 
 
@@ -907,9 +913,16 @@ async def load_discovery_shard_capability_receipts(
         uuid.UUID(str(scan_id)), list(action_ids),
     ):
         raw = row["receipt_json"]
-        decoded = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        try:
+            decoded = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        except (ValueError, UnicodeError):
+            decoded = None
         receipt = dict(decoded) if isinstance(decoded, Mapping) else {}
-        receipt.setdefault("status", str(row["status"] or ""))
+        if not receipt:
+            # A terminal action row without its receipt is not execution evidence.
+            receipt = {"status": "failed", "errors": ["capability_receipt_unavailable"]}
+        else:
+            receipt.setdefault("status", str(row["status"] or ""))
         receipts[str(row["action_id"])] = receipt
     return receipts
 
@@ -951,8 +964,8 @@ async def placed_discovery_stage_receipts(
         error=error,
     )
     network = absent_receipt_summary(
-        network_receipt_from_capability_receipts(receipts, addresses=addresses)
-        or legacy.get("network_discovery"),
+        (network_receipt_from_capability_receipts(receipts, addresses=addresses)
+         or legacy.get("network_discovery")) if network_enabled else None,
         kind="network",
         enabled=network_enabled,
         error=error,
@@ -990,11 +1003,15 @@ def subdomain_receipt_from_capability_receipts(
 
 def network_receipt_from_capability_receipts(
     receipts: Mapping[str, Mapping[str, Any]], *, addresses: Sequence[str],
+    expected_action_ids: Sequence[str] = DISCOVERY_NETWORK_ACTION_IDS,
 ) -> dict[str, Any] | None:
-    """Render the canonical network receipt from a shard's stored receipts."""
+    """Summarize expected enabled actions, not just the actions that succeeded."""
+    expected = tuple(dict.fromkeys(expected_action_ids))
+    if set(expected) - set(DISCOVERY_NETWORK_ACTION_IDS):
+        raise ValueError("unknown expected network discovery action")
     present = [
         (action_id, receipts[action_id])
-        for action_id in DISCOVERY_NETWORK_ACTION_IDS
+        for action_id in expected
         if isinstance(receipts.get(action_id), Mapping) and receipts[action_id]
     ]
     if not present:
@@ -1003,6 +1020,12 @@ def network_receipt_from_capability_receipts(
     observations: list[dict[str, Any]] = []
     consumed: dict[str, int] = {}
     errors: list[str] = []
+    missing = set(expected) - {action_id for action_id, _ in present}
+    for action_id in expected:
+        if action_id in missing:
+            present.append((action_id, {
+                "status": "failed", "errors": [f"missing_capability_receipt:{action_id}"],
+            }))
     for action_id, receipt in present:
         rows = _receipt_observations(receipt)
         observations.extend(rows)
@@ -1019,6 +1042,7 @@ def network_receipt_from_capability_receipts(
             "errors": action_errors,
             "observations": rows,
             "budget_consumed": dict(receipt.get("budget_consumed") or {}),
+            "reason_code": str(receipt.get("reason_code") or (action_errors[0] if action_errors else "")),
         })
     open_ports: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str]] = set()
@@ -1034,16 +1058,27 @@ def network_receipt_from_capability_receipts(
             seen.add(identity)
             open_ports.append(item)
     services = [item for item in observations if str(item.get("kind") or "") == "service"]
-    statuses = {
-        str(action["status"]) for action in actions if action["status"] != "skipped"
+    # Only a completed port search with no open ports justifies not fingerprinting
+    # anything. Budget, authority, placement and missing-receipt gaps stay incomplete.
+    ports = next((action for action in actions if action["action_id"] == "discover.ports"), {})
+    no_ports = ports.get("status") == "success" and not open_ports
+    benign_skips = {
+        action["action_id"] for action in actions
+        if action["action_id"] == "discover.services" and action["status"] == "skipped"
+        and action["reason_code"] == "not_applicable" and no_ports
     }
+    statuses = {action["status"] for action in actions if action["action_id"] not in benign_skips}
+    all_inapplicable = bool(actions) and all(
+        action["status"] == "skipped" and action["reason_code"] == "not_applicable"
+        for action in actions
+    )
     if "cancelled" in statuses:
         status = "cancelled"
-    elif not statuses:
+    elif all_inapplicable:
         # Every recorded action self-skipped: the stage produced nothing, and
         # calling that success would launder an unexamined surface.
         status = "skipped"
-    elif statuses & {"failed", "blocked", "partial"}:
+    elif statuses & {"failed", "blocked", "partial", "timed_out", "skipped"}:
         status = "partial" if observations else (
             "blocked" if statuses == {"blocked"} else "failed"
         )
@@ -1061,10 +1096,12 @@ def network_receipt_from_capability_receipts(
         "observation_count": len(observations),
         "observations_truncated": len(observations) > 5000,
         "partial": status == "partial",
-        "timed_out": any(action["timed_out"] for action in actions),
+        "timed_out": any(action["timed_out"] or action["status"] == "timed_out" for action in actions),
         "errors": errors[:20],
         "budget_consumed": consumed,
-        "durable_budget_settled": True,
+        "durable_budget_settled": not missing and all(
+            receipt.get("budget_consumed") is not None for _, receipt in present
+        ),
     }
 
 

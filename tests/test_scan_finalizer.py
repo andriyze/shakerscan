@@ -1158,7 +1158,7 @@ def test_an_origin_that_only_forwards_elsewhere_did_not_observe_the_application(
 
 
 def test_a_same_host_redirect_is_not_a_forwarded_origin():
-    """http -> https on the same host still serves the application."""
+    """A relative/same-origin move is not an off-origin redirect."""
     report = _apex_redirect_report(location="https://app.example.test/home")
 
     assert "application_origin_redirect" not in report["http"]

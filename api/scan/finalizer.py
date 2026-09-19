@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from . import scoring
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
+from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
@@ -1339,25 +1340,18 @@ def _posture_sections(
 def _off_origin_redirect(
     response: Mapping[str, Any], *, origin: Any,
 ) -> str | None:
-    """Return the origin a bound-origin redirect forwards to, when it leaves the host."""
+    """Return a different HTTP origin, including scheme and effective-port changes."""
     status = response.get("status")
-    location = str(response.get("location") or "").strip()
-    if type(status) is not int or not 300 <= status < 400 or not location:
+    location = response.get("location")
+    if type(status) is not int or status not in REDIRECT_STATUSES:
         return None
-    try:
-        moved = urllib.parse.urlsplit(location)
-        probed = urllib.parse.urlsplit(str(origin or ""))
-    except ValueError:
-        return None
-    moved_host = (moved.hostname or "").lower().rstrip(".")
-    probed_host = (probed.hostname or "").lower().rstrip(".")
-    if not moved_host or not moved.netloc or moved_host == probed_host:
-        return None
-    return f"{(moved.scheme or 'https').lower()}://{moved.netloc}"
+    moved = http_origin(redirect_destination(origin, location))
+    return moved if moved and moved != http_origin(origin) else None
 
 
 def _observed_success_response(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    *, origins: frozenset[str],
 ) -> bool:
     """Whether any capability retrieved a 2xx application response."""
     for rows in observations.values():
@@ -1368,11 +1362,15 @@ def _observed_success_response(
             if kind == "http_observation":
                 inner = row.get("response")
                 status = inner.get("status") if isinstance(inner, Mapping) else None
+                request = row.get("request")
+                url = request.get("origin") if isinstance(request, Mapping) else None
+                url = url or (inner.get("final_url") if isinstance(inner, Mapping) else None)
             elif kind in {"http_fingerprint", "content_discovery"}:
                 status = row.get("status")
+                url = row.get("url")
             else:
                 continue
-            if type(status) is int and 200 <= status < 300:
+            if type(status) is int and 200 <= status < 300 and http_origin(url) in origins:
                 return True
     return False
 
@@ -1765,20 +1763,30 @@ def finalize_scan_report(
     explicit_http_status = http_posture.get("status")
     application_proof_observed = any(
         item.get("verified") is True
-        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect"}
+        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect", "http_baseline"}
+        and not (
+            isinstance(item.get("evidence"), Mapping)
+            and item["evidence"].get("template_id") == "http-missing-security-headers"
+        )
         for item in findings
     )
-    # A bound origin that only forwards elsewhere served no application. Header
-    # posture on the redirect is real and still reported, but a thorough Scan of
-    # such an origin examined nothing: measured on an apex whose whole path space
-    # 301s to its www origin, the run reported grade A*, "0 issue(s) found" and
-    # application_observed true after retrieving one empty redirect body.
-    application_forwarded_off_origin = bool(
-        http_posture.get("application_origin_redirect")
-    ) and not application_proof_observed and not _observed_success_response(observations)
+    # Header posture on a redirect is real, but is not proof of the application
+    # behind it. Neither a same-host port change nor a relative redirect proves
+    # a follow-up request occurred. An unrelated origin's 2xx cannot fill this gap.
+    application_origins = frozenset(origin for value in (
+        target_url, http_posture.get("application_origin_redirect"),
+    ) if (origin := http_origin(value)) is not None)
+    redirect_without_application = (
+        type(explicit_http_status) is int and explicit_http_status in REDIRECT_STATUSES
+        and not application_proof_observed
+        and not _observed_success_response(observations, origins=application_origins)
+    )
+    application_forwarded_off_origin = (
+        bool(http_posture.get("application_origin_redirect")) and redirect_without_application
+    )
     risk_assessment_state = (
         "not_examined"
-        if application_forwarded_off_origin
+        if redirect_without_application
         else "observed"
         if http_posture.get("posture_observed") is True or application_proof_observed
         else "not_examined"
