@@ -75,6 +75,7 @@ try:
     from scan.manifest_store import PostgresScanManifestStore, ScanManifestStoreError
     from scan.operational_metrics import record_operational_event
     from scan.private_inputs import BROKER_PRIVATE_SCAN_INPUT_SCHEMA, private_replay_plan_payload
+    import action_scope
     from scan.private_state import SCAN_PRIVATE_STATE_KEY_OPTION
     from scan.work_manifests import ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
     from scan.worker_dispatch import is_deterministic_dast, prepare_worker_dispatch
@@ -87,6 +88,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _int_or_none, _iso_or_none, _json_safe_row, _optional_uuid, _parse_iso_datetime,
         _record_map, _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
+    from .. import action_scope
     from ..operator_auth import _fleet_bearer_credential, _require_fleet_operator
     from .. import asm_inventory
     from .. import parallel_scan
@@ -3660,9 +3662,20 @@ _BROKER_PRIVATE_INPUT_CAPABILITIES = frozenset({
 
 
 async def _resolve_runtime_target_addresses(
-    url: str, *, subject: str = "runtime target",
+    url: str, *, subject: str = "runtime target", environment: str = "production",
 ) -> list[str]:
-    """Resolve once at admission time; execution connects only to this address set."""
+    """Resolve once at admission time; execution connects only to this address set.
+
+    Every answer is classified under the deployment's destination policy before it is frozen.
+    Execution treats membership of the frozen set as authority and skips the generic
+    private-range check, so an address admitted here is admitted for the whole run: freezing an
+    unchecked answer meant a name resolving to 169.254.169.254 -- the cloud metadata address --
+    was pinned and then allowed. Pinning stops later drift; it never established that the first
+    answer was acceptable.
+
+    Addresses the policy refuses are dropped rather than failing the whole resolution, because
+    a name may legitimately return a mix. If nothing survives, the target is refused.
+    """
     parsed = urllib.parse.urlsplit(str(url or ""))
     hostname = str(parsed.hostname or "").strip().rstrip(".")
     if not hostname:
@@ -3670,9 +3683,16 @@ async def _resolve_runtime_target_addresses(
             status_code=400, detail=f"{subject} has no resolvable hostname"
         )
     try:
-        return [str(ipaddress.ip_address(hostname))]
+        literal = str(ipaddress.ip_address(hostname))
     except ValueError:
-        pass
+        literal = None
+    if literal is not None:
+        if action_scope._ip_scope_block_reason(literal, environment) is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{subject} address is not an allowed destination class",
+            )
+        return [literal]
     port = int(parsed.port or (443 if parsed.scheme.lower() == "https" else 80))
     try:
         records = await asyncio.get_running_loop().getaddrinfo(
@@ -3696,7 +3716,16 @@ async def _resolve_runtime_target_addresses(
         raise HTTPException(
             status_code=422, detail=f"{subject} DNS returned no usable address"
         )
-    return addresses
+    admitted = [
+        address for address in addresses
+        if action_scope._ip_scope_block_reason(address, environment) is None
+    ]
+    if not admitted:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{subject} resolves only to addresses this deployment does not allow",
+        )
+    return admitted
 def _broker_json_object(value: Any, *, subject: str) -> dict[str, Any]:
     parsed = parse_json_field(value)
     if not isinstance(parsed, Mapping):

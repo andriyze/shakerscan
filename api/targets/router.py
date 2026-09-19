@@ -287,7 +287,7 @@ async def list_targets(
 ):
     """List all targets."""
     async with _pool().acquire() as conn:
-        query = """
+        query = f"""
             SELECT t.id,
                    LEFT(t.url, 2049) AS url,
                    LEFT(t.name, 512) AS name,
@@ -297,14 +297,7 @@ async def list_targets(
                    t.total_scans, t.active_findings_count, t.created_at,
                    fs.total_active as active_findings,
                    COALESCE(origins.items, '[]'::jsonb) AS origins,
-                   EXISTS (
-                       SELECT 1 FROM approval_receipts a
-                       JOIN scope_receipts s ON s.id = a.scope_receipt_id
-                       WHERE s.target_id = t.id AND a.status = 'active'
-                         AND a.approved_by IS NOT NULL
-                         AND a.action_name = 'target.authorization'
-                         AND (a.expires_at IS NULL OR a.expires_at > NOW())
-                   ) AS authorized_for_active_testing
+                   {_authorized_for_active_testing_sql()}
             FROM targets t
             LEFT JOIN findings_summary fs ON t.id = fs.target_id
             LEFT JOIN LATERAL (
@@ -407,7 +400,7 @@ async def list_targets_grouped(
 ):
     """List all targets grouped by root domain for hierarchical display."""
     async with _pool().acquire() as conn:
-        query = """
+        query = f"""
             SELECT
                 t.id,
                 LEFT(t.url, 2049) AS url,
@@ -422,14 +415,7 @@ async def list_targets_grouped(
                 -- every row rendered "Authorize for active testing (once)" forever: the click
                 -- recorded a real authorization and said so, then the row was unchanged on the
                 -- next load, so an operator had no way to tell it had worked.
-                EXISTS (
-                    SELECT 1 FROM approval_receipts a
-                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
-                    WHERE s.target_id = t.id AND a.status = 'active'
-                      AND a.approved_by IS NOT NULL
-                      AND a.action_name = 'target.authorization'
-                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
-                ) AS authorized_for_active_testing
+                {_authorized_for_active_testing_sql()}
             FROM targets t
             WHERE 1=1
         """
@@ -742,12 +728,19 @@ async def create_target(request: TargetCreate):
                 authorized_by = getattr(request, "authorized_by", None)
                 if authorized_by:
                     try:
-                        # The cohort the operator picked is the target's environment. Without it
-                        # every authorization evaluated scope as "production", so choosing Lab in
-                        # the add-target dialog changed nothing and a lab address was refused.
+                        # One environment for the row, resolved from what is stored. The cohort
+                        # the operator picked has to reach authorization -- without it every
+                        # authorization evaluated scope as "production" and choosing Lab changed
+                        # nothing -- but a *reused* row keeps its own. Passing the incoming cohort
+                        # unconditionally let a new request authorize an existing Production
+                        # target under a Lab evaluation while the row still read Production.
+                        stored_metadata = _decode_json_value(row.get('metadata_json')) or {}
                         response['authorization'] = await target_authorization.authorize_target(
                             conn, row['id'], approved_by=authorized_by,
-                            environment=requested_cohort or None,
+                            environment=target_authorization.effective_target_environment(
+                                stored_metadata,
+                                requested=requested_cohort if row['created'] else None,
+                            ),
                         )
                     except target_authorization.TargetAuthorizationError as exc:
                         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3019,6 +3012,46 @@ async def asm_activity(
         "timeline": timeline,
         "hypothesis_situation": hypothesis_situation,
     }
+# The target's host as current_target_authorization() computes it in Python: scheme stripped,
+# path and port removed, IPv6 brackets dropped, lowercased. Written once so the listings and the
+# canonical reader cannot drift apart on what "the target's host" means.
+_TARGET_HOST_SQL = """lower(trim(both '[]' from
+    CASE WHEN split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1) LIKE '[%'
+         THEN split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ']', 1)
+         ELSE split_part(split_part(regexp_replace({col}, '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''), '/', 1), ':', 1)
+    END))"""
+
+
+def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
+    """The EXISTS predicate for a standing authorization, matching the canonical reader.
+
+    A listing that only checked status, approver and expiry reported "Authorized" for receipts
+    current_target_authorization() rejects -- a blocked scope, or one naming a host the target no
+    longer has. The page then showed authority that later steps did not honour.
+    """
+    host = _TARGET_HOST_SQL.format(col=column)
+    return f"""EXISTS (
+                    SELECT 1 FROM approval_receipts a
+                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                    WHERE s.target_id = t.id AND a.status = 'active'
+                      AND a.approved_by IS NOT NULL
+                      AND a.risk_tier = ANY(ARRAY['active', 'intrusive'])
+                      AND (a.action_name IS NULL OR a.action_name = 'target.authorization')
+                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                      AND COALESCE(s.verdict, '') <> 'blocked'
+                      AND (
+                          lower(COALESCE(s.normalized_scope->>'host', '')) = {host}
+                          OR EXISTS (
+                              SELECT 1 FROM jsonb_array_elements_text(
+                                  CASE WHEN jsonb_typeof(s.allowed_hosts) = 'array'
+                                       THEN s.allowed_hosts ELSE '[]'::jsonb END
+                              ) AS scope_host
+                              WHERE lower(scope_host) = {host}
+                          )
+                      )
+                ) AS authorized_for_active_testing"""
+
+
 def _public_target_row(row: Any) -> dict[str, Any]:
     """Serialize a target without exposing credentials stored in scan options."""
     target = row_to_dict(row)

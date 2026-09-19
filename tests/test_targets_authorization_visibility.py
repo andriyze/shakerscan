@@ -17,14 +17,6 @@ from pathlib import Path
 ROUTER = Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py"
 SOURCE = ROUTER.read_text(encoding="utf-8")
 
-AUTHORIZATION_EXISTS = re.compile(
-    r"EXISTS\s*\(\s*SELECT 1 FROM approval_receipts a.*?"
-    r"a\.action_name = 'target\.authorization'.*?"
-    r"\)\s*AS authorized_for_active_testing",
-    re.DOTALL,
-)
-
-
 def _query_after(marker: str) -> str:
     """The SQL string that follows a route definition."""
     start = SOURCE.index(marker)
@@ -33,22 +25,13 @@ def _query_after(marker: str) -> str:
 
 def test_both_target_listings_expose_the_authorization_state():
     """Whichever listing a client reads, it can tell an authorized target from an unauthorized
-    one. The page uses the grouped one."""
-    flat = _query_after('@router.get("/targets")')
-    grouped = _query_after('@router.get("/targets/grouped")')
-    assert AUTHORIZATION_EXISTS.search(flat), "the flat listing lost its authorization flag"
-    assert AUTHORIZATION_EXISTS.search(grouped), (
-        "GET /targets/grouped does not select authorized_for_active_testing, so the targets page "
-        "cannot show that a target is authorized and offers 'Authorize' forever"
-    )
-
-
-def test_the_authorization_predicate_is_the_same_in_both():
-    """Two different predicates would let the two listings disagree about the same target."""
-    flat = AUTHORIZATION_EXISTS.search(_query_after('@router.get("/targets")'))
-    grouped = AUTHORIZATION_EXISTS.search(_query_after('@router.get("/targets/grouped")'))
-    normalize = lambda text: re.sub(r"\s+|--[^\n]*", " ", text).strip()
-    assert normalize(flat.group(0)) == normalize(grouped.group(0))
+    one. The page uses the grouped one, which originally omitted the field entirely."""
+    for marker in ('@router.get("/targets")', '@router.get("/targets/grouped")'):
+        query = _query_after(marker)
+        assert "_authorized_for_active_testing_sql()" in query, (
+            f"{marker} does not project the authorization state, so a client cannot tell an "
+            f"authorized target from an unauthorized one"
+        )
 
 
 def test_the_ui_renders_the_authorized_state_from_that_field():
@@ -57,3 +40,53 @@ def test_the_ui_renders_the_authorized_state_from_that_field():
     assert "root_target.authorized_for_active_testing" in page
     assert "Authorize for active testing (once)" in page
     assert "Revoke" in page
+
+
+def _render_predicate():
+    """The predicate as the router builds it, without importing the router's dependencies."""
+    import ast
+
+    src = (Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py").read_text()
+    tree = ast.parse(src)
+    wanted = {"_TARGET_HOST_SQL", "_authorized_for_active_testing_sql"}
+    chunks = [
+        ast.get_source_segment(src, node) for node in tree.body
+        if (isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") in wanted)
+        or (isinstance(node, ast.FunctionDef) and node.name in wanted)
+    ]
+    namespace: dict = {}
+    exec("\n\n".join(chunks), namespace)
+    return namespace["_authorized_for_active_testing_sql"]()
+
+
+def test_the_listing_predicate_applies_the_canonical_reader_conditions():
+    """Review finding R3: a listing said "Authorized" for receipts the canonical reader rejects.
+
+    current_target_authorization() filters on the standing risk tiers and then discards a receipt
+    whose scope is blocked or whose scope no longer names the target's current host. The listing
+    checked only status, approver, action name and expiry, so a renamed target or a blocked scope
+    still showed an Authorized badge while every later check found no authority.
+    """
+    predicate = _render_predicate()
+    canonical = (Path(__file__).resolve().parents[1] / "api" / "target_authorization.py").read_text()
+
+    # the conditions the canonical reader applies, each now present in the listing predicate
+    assert "risk_tier = ANY(ARRAY['active', 'intrusive'])" in predicate, "standing tiers"
+    assert "STANDING_RISK_TIERS = (\"active\", \"intrusive\")" in canonical, (
+        "the canonical tier list changed; the listing predicate must follow it"
+    )
+    assert "COALESCE(s.verdict, '') <> 'blocked'" in predicate, "blocked scope must not count"
+    assert 'scope_verdict") or "") == "blocked"' in canonical
+    assert "normalized_scope->>'host'" in predicate and "allowed_hosts" in predicate, (
+        "the listing must require the scope to still name the target's current host"
+    )
+    assert "if host and host not in hosts:" in canonical
+
+
+def test_both_listings_use_the_one_predicate_builder():
+    """Two copies drift. The flat and grouped listings are built from the same function."""
+    router = (Path(__file__).resolve().parents[1] / "api" / "targets" / "router.py").read_text()
+    assert router.count("_authorized_for_active_testing_sql()") == 2
+    assert router.count("AS authorized_for_active_testing") == 1, (
+        "a second hand-written predicate has appeared; build it from the shared function"
+    )

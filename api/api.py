@@ -10547,8 +10547,11 @@ async def _freeze_scan_target_binding(
         for item in guard.get("allowed_root_domains") or ()
         if str(item).strip()
     ] or [extract_root_domain(target_url) or canonical_host]
+    # Judge the answers under the same environment this binding will carry, so a lab target's
+    # own addresses are admitted and a production one's are not by accident.
+    binding_environment = str(guard.get("environment") or "unknown").strip().lower()
     allowed_addresses = await _resolve_runtime_target_addresses(
-        target_url, subject=subject,
+        target_url, subject=subject, environment=binding_environment,
     )
     guard.update({
         "target_id": str(target_id),

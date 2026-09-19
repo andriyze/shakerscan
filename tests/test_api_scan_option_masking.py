@@ -270,7 +270,7 @@ def test_scan_collection_replay_freezes_exact_origins_and_addresses(monkeypatch)
     target_id = uuid.uuid4()
     calls = []
 
-    async def resolve(url, *, subject):
+    async def resolve(url, *, subject, environment="production"):
         calls.append((url, subject))
         return ["192.0.2.10", "2001:db8::10"]
 
@@ -2183,8 +2183,9 @@ def test_canonical_options_builder_erases_legacy_identity_and_uses_plan_budget()
 
 
 def test_canonical_scan_target_binding_freezes_dns_and_both_inferred_origins(monkeypatch):
-    async def resolve(_url, *, subject):
+    async def resolve(_url, *, subject, environment="production"):
         assert subject == "Scan target"
+        assert environment, "the binding must say which environment the answers are judged under"
         return ["192.0.2.10"]
 
     monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)

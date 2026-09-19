@@ -104,6 +104,28 @@ async def persist_scope_receipt(conn: Any, receipt: Mapping[str, Any], target_id
     )
 
 
+def effective_target_environment(
+    metadata: Any, *, requested: str | None = None,
+) -> str:
+    """The one environment a target is judged under.
+
+    Creation stores the operator's choice as `metadata.cohort`, while authorization used to read
+    `metadata.environment` and default to production. So a target saved as Lab authorized under a
+    Lab evaluation at creation and a Production one when authorized later, and the two paths
+    could reach opposite verdicts on the same row.
+
+    `environment` wins where both exist -- it is the older, explicitly-set field -- then the
+    stored cohort, then production. A caller may still pass one explicitly; it does not change
+    what is stored.
+    """
+    stored = metadata if isinstance(metadata, Mapping) else {}
+    for value in (requested, stored.get("environment"), stored.get("cohort")):
+        text = str(value or "").strip().lower()
+        if text and text != "unclassified":
+            return text
+    return "production"
+
+
 async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
     """The target's standing (or still valid bounded) authorization, or None.
 
@@ -177,7 +199,7 @@ async def authorize_target(
     if not target:
         raise TargetAuthorizationError("target not found")
     metadata = _json(target.get("metadata_json")) or {}
-    env = str(environment or (metadata.get("environment") if isinstance(metadata, dict) else "") or "production").strip().lower()
+    env = effective_target_environment(metadata, requested=environment)
     url = str(target.get("url") or "")
     host = _host(url)
     receipt = receipt_to_dict(evaluate_scope(
