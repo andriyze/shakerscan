@@ -314,7 +314,7 @@ def test_self_hosted_schedule_accepts_private_destinations_and_revalidates_polic
         asyncio.run(validate_schedule_target_destination(url))
 
 
-@pytest.mark.parametrize("address", ["169.254.169.254", "::ffff:169.254.169.254", "0.0.0.0", "::", "224.0.0.1", "fe80::1"])
+@pytest.mark.parametrize("address", ["169.254.169.254", "::ffff:169.254.169.254", "0.0.0.0", "::", "224.0.0.1", "fe80::1", "fd00:ec2::254", "100.100.100.200", "168.63.129.16", "::ffff:100.100.100.200"])
 def test_private_network_opt_in_never_admits_metadata_or_non_unicast(address, monkeypatch):
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "allow")
     async def resolver(_host, _port):

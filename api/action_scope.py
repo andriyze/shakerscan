@@ -21,6 +21,12 @@ import deployment_policy
 SAFE_LAB_ENVIRONMENTS = {"development", "dev", "preview", "staging", "lab", "test"}
 ALLOWED_SCHEMES = {"http", "https"}
 CIDR_RE = re.compile(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}(?![\w:])")
+# These special cloud-service destinations are also denied by device_posture.
+# They are not all link-local: private-network permission must not admit them.
+_CLOUD_SERVICE_ADDRESSES = frozenset({
+    "169.254.169.254", "169.254.170.2", "100.100.100.200",
+    "168.63.129.16", "fd00:ec2::254",
+})
 
 
 @dataclass(frozen=True)
@@ -103,10 +109,10 @@ def _ip_scope_block_reason(
 ) -> str | None:
     """Why an address is refused, or None.
 
-    Lab environments admit everything local. A deployment that sets
-    SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow (a self-hosted installation scanning its own
-    intranet) admits loopback and private ranges for every environment; link-local, multicast,
-    reserved and unspecified addresses stay refused because they are never a web application.
+    Lab environments admit local targets. A deployment that sets
+    SHAKERSCAN_PRIVATE_NETWORK_TARGETS=allow also admits loopback/private targets in other
+    environments. Special cloud-service destinations, link-local, multicast, unspecified
+    addresses and the limited broadcast address remain denied regardless of that permission.
     """
     lowered = host.lower().strip("[]")
     deployment_allows = _deployment_allows_private_networks(allow_private_networks)
@@ -128,7 +134,8 @@ def _ip_scope_block_reason(
     # addresses -- 169.254.169.254 among them -- contradicting the docstring above. That became
     # reachable from the add-target dialog once the chosen cohort started reaching authorization.
     if (
-        ip_obj.is_link_local
+        str(ip_obj) in _CLOUD_SERVICE_ADDRESSES
+        or ip_obj.is_link_local
         or ip_obj.is_multicast
         or ip_obj.is_unspecified
         or str(ip_obj) == "255.255.255.255"
