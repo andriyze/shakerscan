@@ -1219,6 +1219,14 @@ def _posture_sections(
                     key: row.get(key) for key in (
                         "protocol", "cipher", "cipher_bits", "weak_cipher",
                         "alpn_protocol", "origin", "port", "status",
+                        # Which versions the server actually accepts, and the
+                        # cipher it negotiated for each. The capability probes
+                        # every protocol and records the result; keeping only the
+                        # one handshake it happened to report first threw that
+                        # away, so a report could not say whether a deprecated
+                        # version was still enabled.
+                        "supported_protocols", "protocol_attempts",
+                        "legacy_protocol_negotiated",
                     ) if row.get(key) is not None
                 }
                 certificate = _certificate_section(row)

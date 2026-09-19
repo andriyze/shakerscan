@@ -2369,7 +2369,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* TLS */}
-      {tls && (tls.certificate || tls.protocol || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap) && (
+      {tls && (tls.certificate || tls.protocol || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap || tls.supported_protocols) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">TLS/SSL Configuration</h2>
           {tls.certificate && (
@@ -2548,6 +2548,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           {(() => {
             // Collect TLS versions from all available sources
             const versions: Record<string, boolean> = {}
+            // From the canonical probe: supported_protocols is the list the
+            // capability confirmed by handshaking each version in turn.
+            if (Array.isArray(tls.supported_protocols)) {
+              tls.supported_protocols.forEach((v: any) => {
+                if (v) versions[String(v)] = true
+              })
+            }
             // From sslyze.tls_versions
             if (tls.sslyze?.tls_versions) {
               Object.entries(tls.sslyze.tls_versions).forEach(([v, supported]) => {
@@ -2592,6 +2599,31 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
             )
           })()}
+
+          {/* Per-protocol negotiation from the canonical probe: one confirmed
+              handshake per version, with the cipher the server chose for it. */}
+          {Array.isArray(tls.protocol_attempts)
+            && tls.protocol_attempts.some((a: any) => a?.supported && a?.cipher) && (
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-400 mb-2">Negotiated Ciphers</h3>
+              <div className="space-y-1">
+                {tls.protocol_attempts
+                  .filter((a: any) => a?.supported && a?.cipher)
+                  .map((attempt: any, index: number) => (
+                    <div key={`${attempt.protocol}-${index}`} className="flex flex-wrap items-baseline gap-2 text-sm">
+                      <span className="font-mono text-gray-400">{attempt.protocol}</span>
+                      <span className="font-mono text-gray-200">{attempt.cipher}</span>
+                      {attempt.cipher_bits ? (
+                        <span className="text-xs text-gray-500">{attempt.cipher_bits}-bit</span>
+                      ) : null}
+                      {attempt.alpn_protocol ? (
+                        <span className="text-xs text-gray-500">ALPN {attempt.alpn_protocol}</span>
+                      ) : null}
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
 
           {/* Cipher Suites - prefer nmap data (has grades), fallback to sslyze */}
           {(tls.nmap?.ciphers_by_protocol || tls.sslyze?.cipher_suites) && (

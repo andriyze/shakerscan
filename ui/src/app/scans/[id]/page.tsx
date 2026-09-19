@@ -1430,7 +1430,7 @@ function ShardCard({ shard }: { shard: any }) {
             <div className="truncate text-gray-200">{String(contribution.auth_state).replace(/_/g, ' ')}</div>
           </div>
         )}
-        {(endpointBudget || activeSeconds) && (
+        {(endpointBudget > 0 || activeSeconds > 0) && (
           <div className="rounded bg-gray-950/60 px-2 py-1">
             <div className="text-gray-500">Active budget</div>
             <div className="text-gray-200">
