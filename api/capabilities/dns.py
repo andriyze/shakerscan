@@ -213,15 +213,35 @@ async def inspect_dns_posture(
         async with gate:
             return await query(label, name, query_type)
 
+    # Keep what already answered. Wrapping the whole plan in one deadline and
+    # discarding its result on expiry threw away every completed record: a
+    # nineteen-query plan run four at a time can cross the deadline mid-wave, and
+    # the run then reported nothing at all while its own metadata still showed a
+    # dozen answers. Settle each query as it finishes and cancel only the rest.
+    records: dict[str, list[Any]] = {}
+    tasks = [asyncio.ensure_future(bounded(*item)) for item in query_plan]
     try:
-        rows = await asyncio.wait_for(
-            asyncio.gather(*(bounded(*item) for item in query_plan)),
+        done, pending = await asyncio.wait(
+            tasks,
             timeout=max(1, min(15, int(timeout_seconds))),
+            return_when=asyncio.ALL_COMPLETED,
         )
-    except asyncio.TimeoutError:
-        rows = []
-        errors.append("dns_inspection:Timeout")
-    records = {label: values for label, values in rows}
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        raise
+    if pending:
+        errors.append(f"dns_inspection:Timeout:{len(pending)}")
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        try:
+            label, values = task.result()
+        except Exception as exc:  # noqa: BLE001 - one query must not lose the rest
+            errors.append(f"dns_inspection:{type(exc).__name__}"[:200])
+            continue
+        records[label] = values
     for label, _name, _query_type in query_plan:
         records.setdefault(label, [])
     bound_ipv4: list[str] = []

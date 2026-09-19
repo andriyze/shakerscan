@@ -621,6 +621,8 @@ download "$REPO_RAW_BASE/api/model_intake_runner_storage.py" "$INSTALL_DIR/api/m
 download "$REPO_RAW_BASE/api/model_intake_runner_service.py" "$INSTALL_DIR/api/model_intake_runner_service.py"
 download "$REPO_RAW_BASE/api/scan/__init__.py" "$INSTALL_DIR/api/scan/__init__.py"
 download "$REPO_RAW_BASE/api/scan/action_plan.py" "$INSTALL_DIR/api/scan/action_plan.py"
+download "$REPO_RAW_BASE/api/scan/capability_execution.py" "$INSTALL_DIR/api/scan/capability_execution.py"
+download "$REPO_RAW_BASE/api/scan/negative_control.py" "$INSTALL_DIR/api/scan/negative_control.py"
 download "$REPO_RAW_BASE/api/scan/health_plan.py" "$INSTALL_DIR/api/scan/health_plan.py"
 download "$REPO_RAW_BASE/api/scan/plan_errors.py" "$INSTALL_DIR/api/scan/plan_errors.py"
 download "$REPO_RAW_BASE/api/scan/capability_result.py" "$INSTALL_DIR/api/scan/capability_result.py"

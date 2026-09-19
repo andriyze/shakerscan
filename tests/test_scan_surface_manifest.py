@@ -496,3 +496,121 @@ def test_hint_documents_never_declare_another_origin():
     assert "https://app.example.test/tools/" in urls
     assert "https://app.example.test/api/v1/tax?country=US" in urls
     assert not any("github.example" in url or "evil.example" in url for url in urls)
+
+
+def test_a_route_that_moved_somewhere_of_its_own_is_not_absent():
+    """A destination specific to one path says something about that path.
+
+    The first version of this filter reduced every non-path-preserving redirect
+    to "some redirect", so a control forwarding to /login and a real
+    /admin -> /admin/login collided and the real route was deleted from the
+    surface before anything could test it.
+    """
+    from api.scan.negative_control import negative_control_entries
+
+    controls = negative_control_entries(3, seed="surface-test")
+    observations = [
+        {
+            "kind": "content_discovery",
+            "url": f"https://apex.example.test/{entry}",
+            "status": 302,
+            "length": 0,
+            "redirect_location": "https://apex.example.test/login",
+        }
+        for entry in controls
+    ] + [{
+        "kind": "content_discovery",
+        "url": "https://apex.example.test/admin",
+        "status": 302,
+        "length": 0,
+        "redirect_location": "https://apex.example.test/admin/login",
+    }]
+
+    assert _content_paths(_apex_surface(observations)) == ["/admin"]
+
+
+def test_equal_status_and_length_is_not_proof_of_the_same_page():
+    """Content discovery reports a length, not the body it measured."""
+    from api.scan.negative_control import negative_control_entries
+
+    controls = negative_control_entries(3, seed="surface-test")
+    observations = [
+        {"kind": "content_discovery", "url": f"https://apex.example.test/{entry}",
+         "status": 200, "length": 10, "redirect_location": None}
+        for entry in controls
+    ] + [{
+        "kind": "content_discovery", "url": "https://apex.example.test/report",
+        "status": 200, "length": 10, "redirect_location": None,
+    }]
+
+    assert _content_paths(_apex_surface(observations)) == ["/report"]
+
+
+def test_one_disagreeing_control_does_not_establish_a_rule():
+    """Two absent paths must answer alike before it is a server-wide rewrite."""
+    from api.scan.negative_control import negative_control_entries
+
+    controls = negative_control_entries(3, seed="surface-test")
+    observations = [
+        # Only one control shows the rewrite; the others answer differently.
+        _redirect_row(f"/{controls[0]}"),
+        {"kind": "content_discovery", "url": f"https://apex.example.test/{controls[1]}",
+         "status": 404, "length": 12, "redirect_location": None},
+        _redirect_row("/admin"),
+    ]
+
+    assert _content_paths(_apex_surface(observations)) == ["/admin"]
+
+
+def test_another_origins_controls_never_classify_this_origin():
+    from api.scan.negative_control import indistinguishable_from_absent, negative_control_entries
+
+    controls = negative_control_entries(3, seed="surface-test")
+    observations = [
+        {"kind": "content_discovery", "url": f"https://other.test/{entry}", "status": 301,
+         "length": 0, "redirect_location": f"https://www.other.test/{entry}"}
+        for entry in controls
+    ] + [_redirect_row("/admin")]
+
+    assert indistinguishable_from_absent(observations) == frozenset()
+
+
+def test_a_path_that_merely_looks_like_a_control_is_not_one():
+    """Only the exact generated shape counts as our own measurement."""
+    from api.scan.negative_control import is_negative_control_url
+
+    assert not is_negative_control_url(
+        "https://apex.example.test/.shakerscan-absent-not-a-digest"
+    )
+    assert is_negative_control_url(
+        "https://apex.example.test/.shakerscan-absent-0123456789abcdef"
+    )
+
+
+def test_one_malformed_hint_reference_does_not_end_the_ingestion():
+    """A reference is written by the target, so it can be anything at all.
+
+    A single unparsable link raised out of the whole ingester, which shares its
+    action with OpenAPI specification parsing, so one bad line in llms.txt could
+    lose every declaration the action had already collected.
+    """
+    from api.capabilities.hint_files import ingest_hint_documents
+
+    issues: list[str] = []
+    routes = ingest_hint_documents(
+        [(
+            "https://app.example.test/llms.txt",
+            b"# Documentation\n- [Good](/api/orders?id=123)\n"
+            b"- [Broken](https://[broken/path)\n- [Worse](http://[::1x)\n",
+            "text/markdown",
+        )],
+        origin="https://app.example.test",
+        issues=issues,
+    )
+
+    assert [route["url"] for route in routes] == [
+        "https://app.example.test/api/orders?id=123",
+    ]
+    assert issues == ["hint_reference_unparsable:llms.txt:2"]
+    # The diagnostic is a bounded class and a count; it never quotes the document.
+    assert all("broken" not in issue and "::1" not in issue for issue in issues)

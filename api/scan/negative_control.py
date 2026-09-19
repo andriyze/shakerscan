@@ -17,6 +17,7 @@ send traffic, follow redirects, or widen scope.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
@@ -25,6 +26,11 @@ from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destinat
 # A leading dot keeps the probe off any routable namespace, and the digest keeps
 # it out of any wordlist or real deployment.
 CONTROL_PATH_PREFIX = ".shakerscan-absent-"
+# Match the exact shape this module generates, so a target-supplied path that
+# merely starts with the prefix cannot pose as our own measurement.
+_CONTROL_SEGMENT = re.compile(re.escape(".shakerscan-absent-") + r"[0-9a-f]{16}")
+# One absent path answering unusually is not a server-wide rule.
+_MIN_AGREEING_CONTROLS = 2
 # Enough to distinguish a stable rewrite from one unlucky collision, small enough
 # that it never meaningfully displaces real wordlist coverage.
 DEFAULT_CONTROL_COUNT = 3
@@ -69,63 +75,78 @@ def is_negative_control_url(url: Any) -> bool:
     except ValueError:
         return False
     return any(
-        segment.startswith(CONTROL_PATH_PREFIX)
+        _CONTROL_SEGMENT.fullmatch(segment)
         for segment in path.split("/")
     )
 
 
-def absent_response_signature(item: Mapping[str, Any]) -> tuple[Any, ...] | None:
-    """Describe a response so an absent path and a claimed hit compare exactly.
+def absent_response_signature(
+    item: Mapping[str, Any],
+) -> tuple[Any, ...] | None:
+    """Describe a response only when two of them could not be told apart.
 
-    Two responses share a signature when a client could not tell them apart: the
-    same status, the same redirect destination origin with the requested path
-    carried through unchanged, and the same body length.
+    Returns None when the observation cannot establish sameness. Content
+    discovery reports a status, a length and a redirect location and nothing
+    else, so two 200s of equal length are not demonstrably the same page: a
+    real route that happens to match a catch-all's length is indistinguishable
+    to this projection but not to a client, and suppressing it would remove a
+    genuine endpoint before it was ever tested. Only an origin-wide rewrite --
+    the same status forwarding the requested path unchanged to the same other
+    origin -- is a rule rather than a coincidence.
     """
     status = item.get("status")
-    if type(status) is not int:
+    if type(status) is not int or status not in REDIRECT_STATUSES:
         return None
     url = str(item.get("url") or "")
-    length = item.get("length")
-    length = int(length) if type(length) is int else None
-    if status in REDIRECT_STATUSES:
-        location = item.get("redirect_location")
-        destination = redirect_destination(url, location) if location else None
-        origin = http_origin(destination)
-        if not origin:
-            return None
-        try:
-            probed = urllib.parse.urlsplit(url)
-            moved = urllib.parse.urlsplit(destination)
-        except ValueError:
-            return None
-        carried = (moved.path or "/") == (probed.path or "/")
-        return ("redirect", status, origin, carried, length)
-    return ("response", status, length)
+    source = http_origin(url)
+    location = item.get("redirect_location")
+    destination = redirect_destination(url, location) if location else None
+    origin = http_origin(destination)
+    if not source or not origin:
+        return None
+    try:
+        probed = urllib.parse.urlsplit(url)
+        moved = urllib.parse.urlsplit(destination)
+    except ValueError:
+        return None
+    if (moved.path or "/") != (probed.path or "/") or moved.query != probed.query:
+        # The destination is specific to this path, so it says something about
+        # this path. /admin -> /admin/login is a real route that moved; it is
+        # not the same answer the server gives to everything.
+        return None
+    return ("origin_rewrite", status, source, origin)
 
 
 def indistinguishable_from_absent(
     observations: Iterable[Mapping[str, Any]],
 ) -> frozenset[str]:
-    """Return discovered URLs whose response matches a measured absent path.
+    """Return discovered URLs answered by the same rule as a measured absent path.
 
-    Empty when the run carried no control probe: without the measurement this
-    makes no claim, and the caller keeps every observation.
+    Empty when the run carried no control probe, or when a single control
+    disagreed with the others: one anomalous answer is not a server-wide rule,
+    and this makes no claim it cannot support.
     """
     rows = [item for item in observations if isinstance(item, Mapping)]
-    controls = {
-        signature
-        for item in rows
-        if is_negative_control_url(item.get("url"))
-        and (signature := absent_response_signature(item)) is not None
+    control_signatures: dict[tuple[Any, ...], int] = {}
+    for item in rows:
+        if not is_negative_control_url(item.get("url")):
+            continue
+        signature = absent_response_signature(item)
+        if signature is not None:
+            control_signatures[signature] = control_signatures.get(signature, 0) + 1
+    # Two independent absent paths answered the same way before it is a rule.
+    absent = {
+        signature for signature, seen in control_signatures.items()
+        if seen >= _MIN_AGREEING_CONTROLS
     }
-    if not controls:
+    if not absent:
         return frozenset()
     return frozenset(
         url
         for item in rows
         if not is_negative_control_url(item.get("url"))
         and (url := str(item.get("url") or ""))
-        and absent_response_signature(item) in controls
+        and absent_response_signature(item) in absent
     )
 
 

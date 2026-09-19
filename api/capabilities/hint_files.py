@@ -20,6 +20,11 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 import urllib.parse
 
+try:
+    from scan.redirect_evidence import http_origin
+except ModuleNotFoundError:  # package import in host-side tests
+    from ..scan.redirect_evidence import http_origin
+
 # The two conventional, standardized locations. robots.txt is RFC 9309; llms.txt is
 # the published convention for describing a site to language-model clients. Both are
 # fetched at the origin root and nowhere else, so the cost stays exactly two requests.
@@ -62,19 +67,28 @@ def _is_markup(text: str, content_type: str | None) -> bool:
 
 
 def _same_origin_path(value: str, *, origin: str) -> str | None:
-    """Return the origin-relative path of a declared reference, or None if elsewhere."""
+    """Return the origin-relative path of a declared reference, or None.
+
+    A reference is written by the target, so it can be anything at all. A single
+    malformed one used to raise out of the whole ingestion and take the good
+    declarations -- and the OpenAPI results this action collects alongside them --
+    with it. Every reference is now judged on its own.
+    """
     candidate = str(value or "").strip().strip("<>").rstrip(",;")
     if not candidate or candidate.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
         return None
+    # Parsing failures are not silently swallowed here: the caller counts them so
+    # a partly unusable document is visible rather than quietly smaller.
     joined = urllib.parse.urljoin(f"{origin}/", candidate)
     parsed = urllib.parse.urlsplit(joined)
-    base = urllib.parse.urlsplit(origin)
-    if parsed.scheme != base.scheme or parsed.netloc.lower() != base.netloc.lower():
+    # One definition of "same origin", shared with the report projections, so a
+    # scheme or port change can never be judged differently in two places.
+    if http_origin(joined) != http_origin(origin):
         return None
     path = parsed.path or "/"
-    # A pattern is not a path. Keep the literal prefix a wildcard rule is anchored on
-    # and drop the rule entirely when that prefix is the whole site, which declares
-    # nothing about any particular route.
+    # A pattern is not a path. Keep the literal prefix a wildcard rule is anchored
+    # on and drop the rule entirely when that prefix is the whole site, which
+    # declares nothing about any particular route.
     for marker in ("*", "$", "?"):
         index = path.find(marker)
         if index >= 0:
@@ -130,8 +144,13 @@ def ingest_hint_documents(
         references = (
             _robots_references(text) if name == "robots.txt" else _llms_references(text)
         )
+        rejected = 0
         for reference in references:
-            path = _same_origin_path(reference, origin=origin)
+            try:
+                path = _same_origin_path(reference, origin=origin)
+            except Exception:  # noqa: BLE001 - a target's text must not end ingestion
+                rejected += 1
+                continue
             if path is None or path in seen:
                 continue
             if len(routes) >= _MAX_ROUTES:
@@ -144,6 +163,10 @@ def ingest_hint_documents(
                 "url": f"{origin}{path}",
                 "source": f"hint:{name}",
             })
+        if rejected:
+            # A count and the file it came from: enough to see that the document
+            # was partly unusable, without quoting any of its content back.
+            recorded.append(f"hint_reference_unparsable:{name}:{rejected}")
     return routes
 
 

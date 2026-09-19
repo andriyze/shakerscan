@@ -1919,9 +1919,17 @@ class DatabaseNeutralScanActionDispatcher:
                 target.append((spec_url, result.response_body, content_type))
         ingestion_issues: list[str] = []
         routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
-        routes = list(routes) + ingest_hint_documents(
-            hint_documents, origin=base_origin, issues=ingestion_issues,
-        )
+        # The hint files are an optional extra source. Whatever they do, the
+        # specification results this action already parsed must survive them.
+        try:
+            routes = list(routes) + ingest_hint_documents(
+                hint_documents, origin=base_origin, issues=ingestion_issues,
+            )
+        except Exception as hint_error:  # noqa: BLE001 - target-supplied content
+            routes = list(routes)
+            ingestion_issues.append(
+                f"hint_ingestion_failed:{type(hint_error).__name__}"
+            )
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)

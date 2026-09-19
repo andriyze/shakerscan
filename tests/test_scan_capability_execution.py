@@ -607,8 +607,7 @@ def test_discovery_reservations_scale_with_the_authority_the_operator_granted():
     truncated to 220 entries, and browser actions read 0 of the 3,000 the
     profile granted while a real Chromium was driving the crawl.
     """
-    from api.scan.capability_execution import scan_discovery_reservation
-    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+    from scan.capability_execution import scan_discovery_reservation
 
     small = _budget(max_http_requests=1_000, max_tool_wall_seconds=600)
     large = _budget(

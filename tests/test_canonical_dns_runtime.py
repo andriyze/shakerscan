@@ -222,3 +222,39 @@ def test_dns_inspection_bounds_its_fan_out_so_records_are_not_lost_to_contention
     # Bounding the fan-out must not drop any planned lookup.
     assert len(resolver.calls) == 19
     assert not posture.get("errors")
+
+
+def test_the_action_deadline_keeps_the_answers_that_already_arrived():
+    """A deadline must end the remaining work, not the work already done.
+
+    The plan was wrapped in one deadline whose expiry replaced the whole result
+    with an empty list. A nineteen-query plan run four at a time can cross that
+    deadline mid-wave, and the run then reported no records at all while its own
+    metadata still showed a dozen completed answers.
+    """
+    class _Slow(_Resolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = 0
+
+        async def resolve(self, name, query_type, **kwargs):
+            self.started += 1
+            await asyncio.sleep(0.3)
+            return await super().resolve(name, query_type, **kwargs)
+
+    resolver = _Slow()
+    result = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=1, resolver=resolver,
+    ))
+    observation = result["observation"]
+    answered = {label for label, values in observation["records"].items() if values}
+
+    # Every query that finished inside the deadline is reported, and its values
+    # agree with the metadata it recorded. Before this, metadata showed a dozen
+    # completed answers while every record set was empty.
+    assert answered, "a crossed deadline discarded records that had already arrived"
+    for label, meta in observation["record_metadata"].items():
+        assert len(observation["records"][label]) == meta["answer_count"], label
+    # The run is honest about the part that did not finish.
+    assert result["partial"] is True
+    assert any(item.startswith("dns_inspection:Timeout") for item in observation["errors"])
