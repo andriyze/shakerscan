@@ -18,8 +18,59 @@ except ModuleNotFoundError:  # package imports through scanner
     from scanner.manifests import EndpointManifest, EndpointRecord, normalize_endpoint
 
 
+
+def wildcard_redirect_urls(
+    observations: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return content-discovery URLs answered by a blanket, information-free redirect.
+
+    Content discovery counts a 3xx as a hit. A host that permanently redirects
+    every path to its canonical origin therefore "discovers" the entire wordlist:
+    measured against a static site whose apex 301s to its www origin, the scan
+    recorded 108 endpoints -- ``/graphql``, ``/api-docs``, ``/coupon`` -- none of
+    which existed, and every one of them was persisted into the ASM inventory as
+    real attack surface.
+
+    A redirect that keeps the requested path and only moves the origin says
+    nothing about that path, so once the same rewrite answers several distinct
+    paths it is a wildcard signature. Paths the target answers individually --
+    ``/admin`` -> ``/admin/login`` -- change the path and are kept.
+    """
+    groups: dict[tuple[int, str, str], set[str]] = {}
+    for item in observations:
+        if not isinstance(item, Mapping) or item.get("kind") != "content_discovery":
+            continue
+        status = item.get("status")
+        url = str(item.get("url") or "")
+        location = str(item.get("redirect_location") or "")
+        if type(status) is not int or not 300 <= status < 400 or not url or not location:
+            continue
+        try:
+            probed = urllib.parse.urlsplit(url)
+            moved = urllib.parse.urlsplit(location)
+        except ValueError:
+            continue
+        probed_host = (probed.hostname or "").lower().rstrip(".")
+        moved_host = (moved.hostname or "").lower().rstrip(".")
+        if not moved_host or moved_host == probed_host:
+            continue
+        if (moved.path or "/") != (probed.path or "/"):
+            continue
+        key = (status, (moved.scheme or "").lower(), moved_host)
+        groups.setdefault(key, set()).add(url)
+    return frozenset(
+        url
+        for urls in groups.values()
+        if len(urls) >= _WILDCARD_REDIRECT_MIN_PATHS
+        for url in urls
+    )
+
+
 _HTTP_METHOD = re.compile(r"^[A-Z]{3,12}$")
 _DEGRADED_STATUSES = frozenset({"partial", "failed", "blocked"})
+# A blanket redirect has to cover more than a couple of paths before it is a
+# server-wide rule rather than a handful of real moved routes.
+_WILDCARD_REDIRECT_MIN_PATHS = 5
 
 
 def _record_origin(record: EndpointRecord) -> str:
@@ -206,6 +257,7 @@ def build_scan_surface_manifest(
         *,
         summary: Mapping[str, Any] | None = None,
         root_scoped: bool = False,
+        extra_reasons: Iterable[str] = (),
     ) -> None:
         nonlocal cancelled
         manifest.start_producer(name)
@@ -246,13 +298,15 @@ def build_scan_surface_manifest(
                 endpoint_identities.add(record.identity)
         status, summary_reason, producer_cancelled = _summary_status(summary)
         cancelled = cancelled or producer_cancelled
+        discarded = [str(item) for item in extra_reasons if str(item or "").strip()]
         reasons = [item for item in (
             summary_reason,
             f"invalid_observations:{invalid}" if invalid else None,
             f"out_of_scope_observations:{out_of_scope}" if out_of_scope else None,
             f"endpoint_limit_reached:{truncated}" if truncated else None,
+            *discarded,
         ) if item]
-        if status == "complete" and (invalid or out_of_scope or truncated):
+        if status == "complete" and (invalid or out_of_scope or truncated or discarded):
             status = "partial"
         manifest.finish_producer(
             name,
@@ -315,14 +369,21 @@ def build_scan_surface_manifest(
         ),
         summary=browser,
     )
+    content_observations = list(content.get("observations") or ())
+    blanket_redirects = wildcard_redirect_urls(content_observations)
     collect(
         "web.content_discover",
         (
             ("GET", item.get("url"))
-            for item in content.get("observations") or ()
+            for item in content_observations
             if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
+            and str(item.get("url") or "") not in blanket_redirects
         ),
         summary=content,
+        extra_reasons=(
+            (f"wildcard_redirect_observations:{len(blanket_redirects)}",)
+            if blanket_redirects else ()
+        ),
     )
     collect(
         "web.spec_ingest",
