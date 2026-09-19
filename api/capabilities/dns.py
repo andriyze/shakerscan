@@ -24,7 +24,23 @@ _QUERY_PLAN = (
     ("dmarc", "_dmarc", "TXT"),
     ("tls_rpt", "_smtp._tls", "TXT"),
     ("mta_sts", "_mta-sts", "TXT"),
+    # DKIM has no discoverable name: a key is published under a selector the
+    # sender chooses, so a scanner can only ask for the conventional ones. These
+    # are the selectors the common providers publish, and a miss is silence, not
+    # an error. Without them the mail-policy picture stopped at SPF and DMARC and
+    # could never say whether the domain signs at all.
+    ("dkim_default", "default._domainkey", "TXT"),
+    ("dkim_google", "google._domainkey", "TXT"),
+    ("dkim_selector1", "selector1._domainkey", "TXT"),
+    ("dkim_selector2", "selector2._domainkey", "TXT"),
+    ("dkim_k1", "k1._domainkey", "TXT"),
+    ("dkim_mail", "mail._domainkey", "TXT"),
 )
+
+
+# Small enough that one resolver answers every wave promptly, large enough that
+# the whole plan still finishes well inside the action's wall.
+_MAX_CONCURRENT_QUERIES = 4
 
 
 def _safe_text(value: Any, limit: int) -> str:
@@ -186,9 +202,20 @@ async def inspect_dns_posture(
         }
         return label, values
 
+    # Bound the fan-out. Firing the whole plan at one resolver at once made
+    # later queries report LifetimeTimeout after the full five seconds while the
+    # same lookups answer in under a tenth of a second on their own: a measured
+    # run lost TXT, CAA, DNSKEY, MX and CNAME that way, so the report silently
+    # dropped SPF, CAA policy and DNSSEC while spending a third of its wall.
+    gate = asyncio.Semaphore(_MAX_CONCURRENT_QUERIES)
+
+    async def bounded(label: str, name: str, query_type: str) -> tuple[str, list[Any]]:
+        async with gate:
+            return await query(label, name, query_type)
+
     try:
         rows = await asyncio.wait_for(
-            asyncio.gather(*(query(*item) for item in query_plan)),
+            asyncio.gather(*(bounded(*item) for item in query_plan)),
             timeout=max(1, min(15, int(timeout_seconds))),
         )
     except asyncio.TimeoutError:

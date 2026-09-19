@@ -92,7 +92,9 @@ def test_dns_inspection_queries_only_binding_derived_names():
     assert result["ok"] is True
     assert result["status"] == "success"
     assert result["budget_consumed"] == {
-        "hosts_attempted": 5,
+        # One per distinct query name: the host, the root, the three mail-policy
+        # names and the six conventional DKIM selectors.
+        "hosts_attempted": 11,
         "tool_wall_seconds": 1,
     }
     observation = result["observation"]
@@ -116,13 +118,22 @@ def test_dns_inspection_queries_only_binding_derived_names():
     assert observation["records"]["root_ds"][0]["key_tag"] == 12345
     assert observation["record_metadata"]["root_ns"]["ttl"] == 300
     assert observation["records"]["dmarc"] == ["v=DMARC1; p=reject"]
-    assert len(resolver.calls) == 13
+    assert len(resolver.calls) == 19
     assert {name for name, _query_type, _kwargs in resolver.calls} == {
         "app.example.test",
         "example.test",
         "_dmarc.app.example.test",
         "_smtp._tls.app.example.test",
         "_mta-sts.app.example.test",
+        # DKIM keys are published under a selector the sender chooses, so the
+        # conventional ones are asked for by name. Every one stays derived from
+        # the binding: the host is the frozen host and nothing else.
+        "default._domainkey.app.example.test",
+        "google._domainkey.app.example.test",
+        "selector1._domainkey.app.example.test",
+        "selector2._domainkey.app.example.test",
+        "k1._domainkey.app.example.test",
+        "mail._domainkey.app.example.test",
     }
     assert all(call[2]["search"] is False for call in resolver.calls)
 
@@ -174,3 +185,40 @@ def test_dns_adapter_marks_host_budget_as_started():
         "tool_wall_seconds": 1,
     }
     assert result.observations == ({"kind": "dns_posture"},)
+
+
+def test_dns_inspection_bounds_its_fan_out_so_records_are_not_lost_to_contention():
+    """The plan must not flood one resolver and then report its own pressure.
+
+    Firing all thirteen lookups at once made the later ones report
+    LifetimeTimeout after the full five seconds, while the same queries answer
+    in under a tenth of a second on their own. A measured scan lost TXT, CAA,
+    DNSKEY, MX and CNAME that way, so the report silently dropped SPF, CAA
+    policy and DNSSEC while spending only a third of its wall.
+    """
+    import api.capabilities.dns as dns_module
+
+    class _ConcurrencyProbe(_Resolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inflight = 0
+            self.peak = 0
+
+        async def resolve(self, name, query_type, **kwargs):
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            try:
+                await asyncio.sleep(0)
+                return await super().resolve(name, query_type, **kwargs)
+            finally:
+                self.inflight -= 1
+
+    resolver = _ConcurrencyProbe()
+    posture = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=15, resolver=resolver,
+    ))
+
+    assert resolver.peak <= dns_module._MAX_CONCURRENT_QUERIES
+    # Bounding the fan-out must not drop any planned lookup.
+    assert len(resolver.calls) == 19
+    assert not posture.get("errors")

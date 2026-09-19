@@ -1278,7 +1278,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
             "internal", "passive", _HTTP_TARGETS, "scanner.dns", "1", None,
-            {"hosts_attempted": 5, "tool_wall_seconds": 15},
+            # One reservation per distinct query name: the host, the root, the
+            # three mail-policy names, and the conventional DKIM selectors.
+            {"hosts_attempted": 11, "tool_wall_seconds": 15},
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,

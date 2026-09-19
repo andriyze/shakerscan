@@ -1265,6 +1265,10 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   }
 
   const rollup = scan.shard_rollup || {}
+  // Contribution totals are summed from shards that have settled, so they only
+  // mean what they say once every shard is terminal.
+  const rollupSettled = Number(rollup.terminal || 0) >= Number(rollup.total || 0)
+    && Number(rollup.total || 0) > 0
   const plannedRequestBudget = Number(scan.options?.parallel_planned_request_budget || 0)
   const backboneRequestBudget = Number(scan.options?.parallel_backbone_request_budget || 0)
   return (
@@ -1300,7 +1304,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           Actual traffic remains subject to per-target rate limits and completion budgets.
         </div>
       )}
-      <ShardContributionRollup rollup={rollup} />
+      <ShardContributionRollup rollup={rollup} settled={rollupSettled} />
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {scan.shards.map((shard: any) => (
           <ShardCard shard={shard} key={shard.id} />
@@ -1310,7 +1314,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   )
 }
 
-function ShardContributionRollup({ rollup }: { rollup: any }) {
+function ShardContributionRollup({ rollup, settled }: { rollup: any; settled: boolean }) {
   const contribution = rollup?.contribution
   if (!contribution || typeof contribution !== 'object') return null
 
@@ -1333,7 +1337,7 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
           {attemptTelemetryAvailable
             ? `${attempted || selected || 0} attempted${assigned ? ` · ${assigned} assigned` : ''}`
             : assigned
-              ? `Attempt telemetry unavailable · ${assigned} assigned`
+              ? `${assigned} assigned · ${settled ? 'shards did not report how many were attempted' : 'attempts reported when each shard finishes'}`
               : 'No endpoint work assigned'}
         </div>
         {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
@@ -1341,8 +1345,13 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
       <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Runtime / active cap</div>
         <div className="mt-1 text-gray-200">
-          {duration ? formatDuration(duration) : '0s'}
-          {activeBudget ? ` / ${formatDuration(activeBudget)}` : ''}
+          {/* Shard runtime is summed from settled shards, so during a run it is
+              legitimately 0 -- printing "0s" while the scan has been going for
+              minutes reads as a stuck scan rather than an unsettled total. */}
+          {duration > 0
+            ? formatDuration(duration)
+            : settled ? '0s' : 'settles as shards finish'}
+          {activeBudget > 0 ? ` / ${formatDuration(activeBudget)}` : ''}
         </div>
         {typeof contribution.active_budget_utilization === 'number' && (
           <div className="mt-1 text-gray-500">{formatPct(contribution.active_budget_utilization)} of cap</div>
@@ -1380,7 +1389,7 @@ function ShardCard({ shard }: { shard: any }) {
   const endpointSummary = assigned || attempted
     ? hasAttemptTelemetry
       ? `${attempted || selected || 0}${assigned ? ` / ${assigned}` : ''}`
-      : `${assigned} assigned · attempts unavailable`
+      : `${assigned} assigned · attempts not reported`
     : selected || worklistTotal
       ? `${selected}${worklistTotal ? ` / ${worklistTotal}` : ''}`
       : null

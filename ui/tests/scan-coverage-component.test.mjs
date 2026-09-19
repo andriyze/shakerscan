@@ -16,7 +16,11 @@ test('scan coverage is a bounded report component with canonical language', () =
   assert.match(coverage, /run_approximate/)
   assert.match(coverage, /\sestimated\s/)
   assert.match(coverage, /endpointTelemetryUnavailable/)
-  assert.match(coverage, /Attempt telemetry unavailable/)
+  // The unavailable case stays distinguished, but says what it means. "Attempt
+  // telemetry unavailable" told an operator nothing about what was or was not
+  // examined.
+  assert.match(coverage, /how many were attempted was not reported/)
+  assert.doesNotMatch(coverage, /telemetry unavailable/)
 })
 
 test('coverage bars clamp malformed persisted percentages', () => {
