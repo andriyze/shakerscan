@@ -1,0 +1,42 @@
+name: Apply acceptance destination guard
+on:
+  push:
+    branches: [fix/2.3.7-acceptance-regressions]
+    paths: [scripts/.acceptance237-cloud-fix.py, .github/workflows/apply-acceptance-cloud-guard.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/fix/2.3.7-acceptance-regressions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Apply the reviewed guard and remove delivery files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = '31d3a66a4071be15aa67a45b526aea3a6d8eb868'
+          python3 scripts/.acceptance237-cloud-fix.py
+          rm scripts/.acceptance237-cloud-fix.py .github/workflows/apply-acceptance-cloud-guard.yml
+          PYTHONPATH=api python3 - <<'PY'
+          import action_scope
+          for address in ('100.100.100.200', '168.63.129.16', 'fd00:ec2::254', '::ffff:100.100.100.200'):
+              for environment in ('production', 'lab'):
+                  assert action_scope._ip_scope_block_reason(address, environment, allow_private_networks=True)
+          for address in ('192.168.1.50', '127.0.0.1', '::1', 'fd00:1234::1'):
+              assert action_scope._ip_scope_block_reason(address, 'production', allow_private_networks=True) is None
+          PY
+          python3 scripts/generate_install_manifest.py
+          python3 scripts/check_module_size.py
+          python3 scripts/check_installed_import_closure.py
+          python3 scripts/generate_install_manifest.py --check
+          git diff --check
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(scope): exclude cloud-service addresses from private target permission' -m 'Keep the special destinations already denied by device posture outside both scheduled and on-demand web target permission, including IPv4-mapped IPv6 spellings. Reuse the central classifier; extend mixed-DNS scheduler regressions and regenerate the installer manifest. Remove the temporary delivery helper.'
+          git push origin HEAD:refs/heads/fix/2.3.7-acceptance-regressions
