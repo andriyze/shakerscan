@@ -1096,3 +1096,70 @@ def test_xss_execution_preserves_distinct_existing_impact_assessments():
         assert finding["evidence"]["cvss"] == assessment
         assert finding["proof_state"] == "verified"
         assert finding["evidence"]["execution_sink"]["signal"] == "dialog"
+
+
+def _apex_redirect_report(*, status: int = 301, location: str = "https://www.app.example.test/"):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "status": status,
+            "location": location,
+            "bytes_observed": 0,
+            "security_headers": {
+                "content-security-policy": "default-src 'self'",
+                "referrer-policy": "strict-origin-when-cross-origin",
+                "permissions-policy": "camera=()",
+                "strict-transport-security": "max-age=31536000",
+            },
+        },
+    },)}
+    return finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+
+def test_an_origin_that_only_forwards_elsewhere_did_not_observe_the_application():
+    """A thorough Scan of an apex that 301s everywhere examined nothing.
+
+    Measured on a real static site: every path under the bound origin
+    permanently redirected to its www origin, so the only body the run ever
+    retrieved was empty -- and it still reported grade A*, "0 issue(s) found"
+    and application_observed true. The redirect's own headers are real posture
+    and stay reported; the application behind it was never reached.
+    """
+    report = _apex_redirect_report()
+
+    assert report["http"]["application_origin_redirect"] == "https://www.app.example.test"
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["application_observed"] is False
+    assert report["result"]["grade_reliable"] is False
+    assert "bound_origin_redirects_off_origin" in report["coverage"]["reasons"]
+    assert "bound_origin_redirects_off_origin" in (
+        report["coverage"]["grade_reliability"]["reasons"]
+    )
+    # Header posture observed on the redirect is still published, not discarded.
+    assert report["http"]["observed_headers"]["referrer-policy"]
+
+
+def test_a_same_host_redirect_is_not_a_forwarded_origin():
+    """http -> https on the same host still serves the application."""
+    report = _apex_redirect_report(location="https://app.example.test/home")
+
+    assert "application_origin_redirect" not in report["http"]
+    assert "bound_origin_redirects_off_origin" not in report["coverage"]["reasons"]

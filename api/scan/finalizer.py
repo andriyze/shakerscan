@@ -1178,6 +1178,7 @@ def _posture_sections(
                     continue
                 posture_observed = isinstance(status, int) and 200 <= status < 400
                 origin = request.get("origin") or response.get("final_url")
+                canonical_origin = _off_origin_redirect(response, origin=origin)
                 is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
                 expected_headers = tuple(
                     name for name in _EXPECTED_SECURITY_HEADERS
@@ -1186,6 +1187,12 @@ def _posture_sections(
                 http_section = {
                     "status": status,
                     "posture_observed": posture_observed,
+                    # Where the application actually lives when the bound origin
+                    # only forwards to it. Reported so a scan of an apex that
+                    # redirects to its www origin names the origin that serves
+                    # the application instead of silently examining nothing.
+                    **({"application_origin_redirect": canonical_origin}
+                       if canonical_origin else {}),
                     "security_headers": {
                         key: headers[header]
                         for key, header in _UI_SECURITY_HEADERS
@@ -1326,6 +1333,48 @@ def _posture_sections(
             discovery["server_versions"] = server_versions
         sections["discovery"] = discovery
     return sections
+
+
+
+def _off_origin_redirect(
+    response: Mapping[str, Any], *, origin: Any,
+) -> str | None:
+    """Return the origin a bound-origin redirect forwards to, when it leaves the host."""
+    status = response.get("status")
+    location = str(response.get("location") or "").strip()
+    if type(status) is not int or not 300 <= status < 400 or not location:
+        return None
+    try:
+        moved = urllib.parse.urlsplit(location)
+        probed = urllib.parse.urlsplit(str(origin or ""))
+    except ValueError:
+        return None
+    moved_host = (moved.hostname or "").lower().rstrip(".")
+    probed_host = (probed.hostname or "").lower().rstrip(".")
+    if not moved_host or not moved.netloc or moved_host == probed_host:
+        return None
+    return f"{(moved.scheme or 'https').lower()}://{moved.netloc}"
+
+
+def _observed_success_response(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> bool:
+    """Whether any capability retrieved a 2xx application response."""
+    for rows in observations.values():
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "http_observation":
+                inner = row.get("response")
+                status = inner.get("status") if isinstance(inner, Mapping) else None
+            elif kind in {"http_fingerprint", "content_discovery"}:
+                status = row.get("status")
+            else:
+                continue
+            if type(status) is int and 200 <= status < 300:
+                return True
+    return False
 
 
 def _evaluate_csp(policy: Any) -> dict[str, Any]:
@@ -1719,8 +1768,18 @@ def finalize_scan_report(
         and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect"}
         for item in findings
     )
+    # A bound origin that only forwards elsewhere served no application. Header
+    # posture on the redirect is real and still reported, but a thorough Scan of
+    # such an origin examined nothing: measured on an apex whose whole path space
+    # 301s to its www origin, the run reported grade A*, "0 issue(s) found" and
+    # application_observed true after retrieving one empty redirect body.
+    application_forwarded_off_origin = bool(
+        http_posture.get("application_origin_redirect")
+    ) and not application_proof_observed and not _observed_success_response(observations)
     risk_assessment_state = (
-        "observed"
+        "not_examined"
+        if application_forwarded_off_origin
+        else "observed"
         if http_posture.get("posture_observed") is True or application_proof_observed
         else "not_examined"
         if isinstance(explicit_http_status, int)
@@ -1737,12 +1796,15 @@ def finalize_scan_report(
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
-      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set()))
+      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set())
+      | ({"bound_origin_redirects_off_origin"} if application_forwarded_off_origin else set()))
     grade_reliable = not reliability_reasons
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"placement_unavailable"} if placement_gaps else set())
+        | ({"bound_origin_redirects_off_origin"}
+           if application_forwarded_off_origin else set())
     )
     coverage_action_rows = [
         row for row in action_rows
