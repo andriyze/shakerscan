@@ -607,9 +607,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "web.spec_ingest",
-            "Fetch the target's own OpenAPI/Swagger description and declare its routes.",
+            "Fetch what the target declares about itself (OpenAPI, robots.txt, llms.txt) and declare its routes.",
             "internal", "read_only", _HTTP_TARGETS, "agent.spec_ingest", "1",
-            None, {"http_requests": 12, "tool_wall_seconds": 30},
+            # Nine conventional spec locations plus the two hint files, and headroom.
+            None, {"http_requests": 14, "tool_wall_seconds": 30},
             {"network_reachability": True, "runtime_target_binding": True},
             _http_principal_schema(),
             "spec-ingest/v1", ("discovered_route",),

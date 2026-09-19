@@ -419,3 +419,80 @@ def test_without_a_control_probe_nothing_is_claimed_absent():
     reason = manifest["producers"]["web.content_discover"]["reason"]
     assert f"unverified_redirect_observations:{len(wordlist)}" in reason
     assert "indistinguishable_from_absent" not in reason
+
+
+def test_hint_files_declare_the_paths_a_crawl_cannot_reach():
+    """robots.txt is the operator's own list of paths kept out of the link graph.
+
+    A disallow rule is hand-written surface: OWASP Juice Shop publishes
+    ``Disallow: /ftp`` and nothing links to it, so no crawl reaches it.
+    """
+    from api.capabilities.hint_files import ingest_hint_documents
+
+    issues = []
+    routes = ingest_hint_documents(
+        [(
+            "http://app.example.test/robots.txt",
+            b"User-agent: *\nDisallow: /ftp\nDisallow: /admin/*\nAllow: /public\n"
+            b"# a comment\nDisallow: /\nSitemap: http://app.example.test/sitemap.xml\n",
+            "text/plain",
+        )],
+        origin="http://app.example.test",
+        issues=issues,
+    )
+
+    assert [route["url"] for route in routes] == [
+        "http://app.example.test/ftp",
+        # A wildcard rule keeps the literal prefix it is anchored on.
+        "http://app.example.test/admin/",
+        "http://app.example.test/public",
+        "http://app.example.test/sitemap.xml",
+    ]
+    # "Disallow: /" declares nothing about any particular route and is dropped.
+    assert all(route["url"] != "http://app.example.test/" for route in routes)
+    assert issues == []
+
+
+def test_a_single_page_shell_is_not_a_published_hint_document():
+    """A 200 for /llms.txt is usually the SPA catch-all, not a description.
+
+    Juice Shop answers /llms.txt and /sitemap.xml with its own shell at an
+    identical byte length. Mining that markup would invent declared routes.
+    """
+    from api.capabilities.hint_files import ingest_hint_documents
+
+    issues = []
+    routes = ingest_hint_documents(
+        [(
+            "http://app.example.test/llms.txt",
+            b"<!DOCTYPE html><html><head><title>Shop</title></head>"
+            b"<body><a href=\"/invented\">x</a></body></html>",
+            "text/html",
+        )],
+        origin="http://app.example.test",
+        issues=issues,
+    )
+
+    assert routes == []
+    assert issues == ["hint_document_is_markup:llms.txt"]
+
+
+def test_hint_documents_never_declare_another_origin():
+    from api.capabilities.hint_files import ingest_hint_documents
+
+    routes = ingest_hint_documents(
+        [(
+            "https://app.example.test/llms.txt",
+            b"# Docs\n- [Tools](https://app.example.test/tools/)\n"
+            b"- [Source](https://github.example/other)\n"
+            b"Also /api/v1/tax?country=US and https://evil.example/x\n",
+            "text/markdown",
+        )],
+        origin="https://app.example.test",
+        issues=[],
+    )
+
+    urls = {route["url"] for route in routes}
+    assert "https://app.example.test/tools/" in urls
+    assert "https://app.example.test/api/v1/tax?country=US" in urls
+    assert not any("github.example" in url or "evil.example" in url for url in urls)

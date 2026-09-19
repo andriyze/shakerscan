@@ -43,6 +43,7 @@ try:
         bfla_finding,
         boundary_established,
     )
+    from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
@@ -104,6 +105,7 @@ except (ImportError, ModuleNotFoundError):
         bfla_finding,
         boundary_established,
     )
+    from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
@@ -1852,13 +1854,19 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     async def _spec_ingest(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
-        """Fetch the target's own OpenAPI/Swagger description and declare its routes.
+        """Fetch what the target declares about itself and turn it into routes.
 
-        A crawl only observes the endpoints an application happens to call; the spec declares the
-        whole surface, including body-bearing routes a black-box crawl never exercises. Each
-        conventional spec location is fetched once over the pinned transport, under the primary
-        principal so an authenticated spec is reachable, and parsed into value-free
-        ``discovered_route`` observations that flow into the same endpoint manifest as the crawl.
+        A crawl only observes the endpoints an application happens to call. Its own
+        description declares the rest: an OpenAPI document gives the body-bearing
+        routes a black-box crawl never exercises, and robots.txt and llms.txt give
+        the paths an operator wrote down by hand -- including the ones deliberately
+        kept out of the link graph, which is exactly the surface a crawl cannot see.
+
+        Each conventional location is fetched once over the pinned transport, under
+        the primary principal so an authenticated document is reachable, and parsed
+        into value-free ``discovered_route`` observations that flow into the same
+        endpoint manifest as the crawl. A declared path is a claim, never a
+        confirmed route; it is probed like any other candidate.
         """
         origin = self._exposure_origin()
         if origin is None:
@@ -1877,7 +1885,8 @@ class DatabaseNeutralScanActionDispatcher:
         documents: list[tuple[str, bytes, str | None]] = []
         errors: list[str] = []
         attempted = 0
-        for path in SPEC_DISCOVERY_PATHS:
+        hint_documents: list[tuple[str, bytes, str | None]] = []
+        for path in (*SPEC_DISCOVERY_PATHS, *HINT_DISCOVERY_PATHS):
             if self.cancelled() or attempted >= http_ceiling:
                 break
             spec_url = f"{base_origin}{path}"
@@ -1904,9 +1913,15 @@ class DatabaseNeutralScanActionDispatcher:
                     result.response_headers.get("content-type")
                     or result.response_headers.get("Content-Type") or ""
                 ) or None
-                documents.append((spec_url, result.response_body, content_type))
+                target = (
+                    hint_documents if path in HINT_DISCOVERY_PATHS else documents
+                )
+                target.append((spec_url, result.response_body, content_type))
         ingestion_issues: list[str] = []
         routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
+        routes = list(routes) + ingest_hint_documents(
+            hint_documents, origin=base_origin, issues=ingestion_issues,
+        )
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
@@ -1930,6 +1945,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
                 "specs_probed": attempted,
                 "specs_parsed": len(documents),
+                "hint_documents_parsed": len(hint_documents),
                 "routes_declared": len(routes),
                 "ingestion_limitations": ingestion_issues,
                 "authenticated": bool(header_items),
