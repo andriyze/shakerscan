@@ -74,6 +74,9 @@ _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "timed_out", "timeout", "connection_limit_exceeded",
     "external_process_contract", "scanner_not_available",
     "cancelled_before_execution", "output_limit_exceeded", "output_truncated",
+    # A bound HTTP request that never got a response, by cause: a certificate the client
+    # would not trust is a different finding from a port nobody answers on.
+    "tls_certificate_untrusted", "request_error",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.
