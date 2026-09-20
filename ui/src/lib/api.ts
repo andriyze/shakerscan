@@ -1177,6 +1177,8 @@ export interface LocalAgentsResponse {
 }
 
 export interface Scan {
+  risk_assessment_state?: string | null
+  application_observed?: boolean | null
   id: string
   target_id?: string | null
   target_url: string

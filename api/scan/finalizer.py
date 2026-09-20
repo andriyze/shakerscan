@@ -9,6 +9,7 @@ from collections import Counter
 from typing import Any, Mapping, Sequence
 
 from . import scoring
+from .assessment import withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
@@ -2040,6 +2041,7 @@ def finalize_scan_report(
     }
     from .reachability import apply_reachability_outcome
     apply_reachability_outcome(report, action_results=action_results, observations=observations)
+    withhold_unexamined_grade(report)
     report["report_digest"] = hashlib.sha256(json.dumps(
         report,
         sort_keys=True,

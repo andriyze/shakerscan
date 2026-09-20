@@ -799,7 +799,7 @@ def test_one_unrepresentable_endpoint_does_not_end_the_whole_scan():
     """
     manifest = _built([
         _surface_endpoint("/good", ["mode"]),
-        _surface_endpoint("/bad", ["filter[type]"]),
+        _surface_endpoint("/bad", ["bad name"]),
         _surface_endpoint("/also-good", ["_rsc"]),
     ])
 
@@ -830,13 +830,13 @@ def test_the_skippable_error_is_a_strict_subset_of_manifest_errors():
     from api.scan.work_manifests import (
         ScanWorkManifestUnrepresentableError,
         _reject_sensitive_keys,
-        _token,
+        _parameter_name,
     )
 
     assert issubclass(ScanWorkManifestUnrepresentableError, ScanWorkManifestError)
     # A shape failure driven by target data is skippable...
     with pytest.raises(ScanWorkManifestUnrepresentableError):
-        _token("filter[type]", name="query_parameter_names entry")
+        _parameter_name("bad name", name="query_parameter_names entry")
     # ...while a secret rejection is not.
     with pytest.raises(ScanWorkManifestError) as caught:
         _reject_sensitive_keys({"authorization": "Bearer never-persist"})

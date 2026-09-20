@@ -172,7 +172,7 @@ from scan.parallel_outcome import (
     mark_parallel_parent_coverage_incomplete as _mark_parallel_parent_coverage_incomplete,
     mark_parallel_parent_degraded as _mark_parallel_parent_degraded,
 )
-from scan.reachability import fail_unreachable_parallel_report
+from scan.assessment import finalize_parallel_assessment
 from scan.capability_execution import (
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
@@ -17024,11 +17024,10 @@ async def process_scan_merge_job(job_data: dict):
     scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=completed_n, total_count=len(children),
     )
-    preflight_failed = fail_unreachable_parallel_report(
+    preflight_failed = finalize_parallel_assessment(
         merged, [_as_report_dict(child.get('result')) or {} for child in children],
     )
-    if preflight_failed:
-        agg_score = agg_grade = None
+    agg_score, agg_grade = merged['result'].get('score'), merged['result'].get('grade')
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.

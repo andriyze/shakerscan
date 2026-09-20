@@ -115,7 +115,7 @@ def absent_response_signature(
     location = item.get("redirect_location")
     destination = redirect_destination(url, location) if location else None
     origin = http_origin(destination)
-    if not source or not origin:
+    if not source or not origin or source == origin:
         return None
     try:
         probed = urllib.parse.urlsplit(url)
@@ -147,18 +147,28 @@ def indistinguishable_from_absent(
     and this makes no claim it cannot support.
     """
     rows = [item for item in observations if isinstance(item, Mapping)]
-    control_signatures: dict[tuple[Any, ...], int] = {}
+    # Query variants, fragments and default-port spellings do not make the
+    # same high-entropy path an independent control. A duplicate with conflicting
+    # evidence invalidates that origin's calibration rather than winning a vote.
+    by_origin: dict[str, dict[str, set[tuple[Any, ...] | None]]] = {}
     for item in rows:
-        if not is_negative_control_url(item.get("url")):
+        url = item.get("url")
+        if not is_negative_control_url(url):
             continue
-        signature = absent_response_signature(item)
-        if signature is not None:
-            control_signatures[signature] = control_signatures.get(signature, 0) + 1
-    # Two independent absent paths answered the same way before it is a rule.
-    absent = {
-        signature for signature, seen in control_signatures.items()
-        if seen >= _MIN_AGREEING_CONTROLS
-    }
+        source = http_origin(url)
+        if source is None:
+            continue
+        path = urllib.parse.urlsplit(str(url)).path
+        by_origin.setdefault(source, {}).setdefault(path, set()).add(
+            absent_response_signature(item)
+        )
+    absent: set[tuple[Any, ...]] = set()
+    for controls in by_origin.values():
+        if len(controls) < _MIN_AGREEING_CONTROLS:
+            continue
+        signatures = set().union(*controls.values())
+        if len(signatures) == 1 and None not in signatures:
+            absent.update(signatures)
     if not absent:
         return frozenset()
     return frozenset(

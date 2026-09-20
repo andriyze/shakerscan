@@ -307,7 +307,7 @@ def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
     assert report["result"]["posture_penalty"] == 0
     assert report["result"]["risk_assessment_state"] == "not_examined"
     assert report["result"]["grade_reliable"] is False
-    assert report["result"]["grade"].endswith("*")
+    assert report["result"]["grade"] is None
     assert report["coverage"]["grade_reliability"] == {
         "reliable": False,
         "reasons": ["application_not_observed"],

@@ -51,6 +51,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
+from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -11654,7 +11655,7 @@ async def list_scans(
                    s.shard_index, s.shard_count
         """
         query = f"""
-            SELECT {scan_columns},
+            SELECT {scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
                    COALESCE(t.name, ait.name) as target_name,
                    t.root_domain,
                    ait.target_type as ai_target_type
@@ -11741,7 +11742,7 @@ async def list_scans(
 
     scans = []
     for row in rows:
-        scan = dict(row)
+        scan = project_scan_assessment_row(dict(row))
         if scan.get("options") is not None:
             scan["options"] = (
                 _sanitize_scan_options(scan["options"])

@@ -206,3 +206,20 @@ test('latest device reachability is not confused with retained service history',
   assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: true }), 'at least one service responded')
   assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: null }), 'service accessibility still being assessed')
 })
+
+
+test('explicit no-application evidence withholds even a stale row grade', () => {
+  for (const row of [
+    { grade: 'A*', score: 100, result: { result: { application_observed: false } } },
+    { grade: 'A*', score: 100, risk_assessment_state: 'not_examined' },
+  ]) {
+    const result = deviceScorePresentation(row)
+    assert.equal(result.status, 'not_examined')
+    assert.equal(result.grade, null)
+    assert.equal(result.score, null)
+  }
+})
+
+test('a missing score is not coerced into a measured zero', () => {
+  assert.equal(deviceScorePresentation({ grade: null, score: null }).score, null)
+})

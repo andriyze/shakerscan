@@ -161,7 +161,7 @@ export function scanResultPresentation(scan, assurance) {
   const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
   const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
   const weakExamination = ['none', 'weak', 'limited'].includes(assuranceBand)
-  const notExamined = result.risk_assessment_state === 'not_examined'
+  const notExamined = result.risk_assessment_state === 'not_examined' || result.application_observed === false
 
   let headline = 'No material vulnerability confirmed in this run'
   let explanation = findings.length
@@ -248,8 +248,8 @@ export function scanResultPresentation(scan, assurance) {
     coverageGapReasons,
     incompleteFamilies,
     observedCount: findings.length,
-    observedRiskScore: finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
-    observedRiskGrade: String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
+    observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
+    observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
     budgetProfile,
     activeTesting,
     authenticated,

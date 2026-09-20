@@ -631,6 +631,7 @@ download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
 download "$REPO_RAW_BASE/api/scan/reachability.py" "$INSTALL_DIR/api/scan/reachability.py"
+download "$REPO_RAW_BASE/api/scan/assessment.py" "$INSTALL_DIR/api/scan/assessment.py"
 download "$REPO_RAW_BASE/api/scan/redirect_evidence.py" "$INSTALL_DIR/api/scan/redirect_evidence.py"
 download "$REPO_RAW_BASE/api/authenticated_assurance/__init__.py" "$INSTALL_DIR/api/authenticated_assurance/__init__.py"
 download "$REPO_RAW_BASE/api/authenticated_assurance/models.py" "$INSTALL_DIR/api/authenticated_assurance/models.py"

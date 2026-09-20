@@ -3,6 +3,7 @@ function record(value) {
 }
 
 function finiteScore(value) {
+  if (value === null || value === undefined || value === '') return null
   const score = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(score) ? score : null
 }
@@ -39,7 +40,8 @@ export function deviceScorePresentation(scan) {
     : (resultSummary.risk_score ?? resultSummary.score ?? scanRecord.score))
 
   if (!isDevice) {
-    if (resultSummary.risk_assessment_state === 'not_examined') {
+    if (resultSummary.risk_assessment_state === 'not_examined' || resultSummary.application_observed === false
+      || scanRecord.risk_assessment_state === 'not_examined' || scanRecord.application_observed === false) {
       return {
         isDevice: false,
         status: 'not_examined',
