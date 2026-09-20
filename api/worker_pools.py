@@ -21,6 +21,7 @@ def _specialized_pool(readiness: Mapping[str, Any]) -> dict[str, Any]:
         "pending": pending,
         "status": str(readiness.get("status") or "not_ready"),
         "reason": readiness.get("reason"),
+        "remedy": readiness.get("remedy") if isinstance(readiness.get("remedy"), str) else None,
     }
 
 

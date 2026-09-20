@@ -253,3 +253,15 @@ test('the release line claims an earlier-scan origin only when the decision says
   assert.match(review.text, /^Required deployment evidence is missing or incomplete\. 1 unresolved finding on this target\.$/)
   assert.equal(releaseLine(null, 'scan-2', 0), null)
 })
+
+
+test('a parallel child prefix stays visible as the entry origin instead of being eaten as the source', () => {
+  const entry = scanLogEntry('[Discovery] [scan] Started Discover Web Probe · 5%')
+  assert.equal(entry.child, 'Discovery')
+  assert.equal(entry.source, 'scan')
+  assert.equal(entry.kind, 'milestone')
+  assert.match(entry.meta, /^Discovery/)
+  const shard = scanLogEntry('[Shard 3] [scan] Finished Verify XSS · timed_out · 44%')
+  assert.equal(shard.child, 'Shard 3')
+  assert.equal(scanLogEntry('[scan] plain line').child, '')
+})

@@ -627,7 +627,8 @@ def _device_worker_readiness() -> dict[str, Any]:
         status, reason = "not_ready", "no_fresh_device_worker"
         remedy = (
             "No connected-device worker is running. It is a separate opt-in container and a new "
-            "install does not start one. Run: ./scanner.sh devices start"
+            "install does not start one. Start it with: shakerscan devices start "
+            "(./scanner.sh devices start from a source checkout)"
         )
     return {
         "enabled": enabled,

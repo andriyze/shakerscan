@@ -2455,6 +2455,7 @@ export interface WorkerPoolSummary {
   pending: number
   status: 'ready' | 'not_ready' | 'disabled'
   reason?: string | null
+  remedy?: string | null
 }
 
 export interface WorkerStats {

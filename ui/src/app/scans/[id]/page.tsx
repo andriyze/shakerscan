@@ -1617,7 +1617,9 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
                 href={`/scan/new?target=${encodeURIComponent(targetUrl)}`}
                 className="mt-3 inline-flex rounded-lg bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25"
               >
-                Review target and retry
+                {/heartbeat|queue delivery|worker job|worker ownership|reclaimed|lease/i.test(String(rawFailureMessage || ''))
+                  ? 'Retry scan'
+                  : 'Review target and retry'}
               </Link>
             )}
           </div>

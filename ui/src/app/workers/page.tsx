@@ -2,25 +2,16 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Button, Card, ErrorState, LastUpdated, PageHeader } from '@/components/ui'
-import { getWorkers, type WorkerPoolSummary, type WorkerStats } from '@/lib/api'
+import { getWorkers, type WorkerStats } from '@/lib/api'
+import { poolBadge, poolDetail } from '@/lib/workerPools.mjs'
 
 const REFRESH_MS = 10_000
-const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; detail: string }[] = [
+const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; detail: string; optIn?: boolean }[] = [
   { key: 'web_dast', label: 'Web DAST', detail: 'Deterministic Scan execution and verification' },
   { key: 'agent_tool', label: 'Agent tools', detail: 'Isolated process capabilities used by Hunt' },
-  { key: 'device', label: 'Connected devices', detail: 'Opt-in network and device examination' },
+  { key: 'device', label: 'Connected devices', detail: 'Opt-in network and device examination', optIn: true },
   { key: 'model_intake', label: 'Model Intake', detail: 'Dedicated artifact inspection toolchain' },
 ]
-
-function statusClass(status: WorkerPoolSummary['status']): string {
-  if (status === 'ready') return 'bg-emerald-500/15 text-emerald-300'
-  if (status === 'disabled') return 'bg-gray-700 text-gray-300'
-  return 'bg-amber-500/15 text-amber-300'
-}
-
-function reasonLabel(reason?: string | null): string {
-  return reason ? reason.replaceAll('_', ' ') : 'All reported workers are current and capable.'
-}
 
 export default function WorkersPage() {
   const [workers, setWorkers] = useState<WorkerStats | null>(null)
@@ -62,8 +53,9 @@ export default function WorkersPage() {
       {error && <ErrorState message={error} onRetry={() => void load()} />}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {POOLS.map(({ key, label, detail }) => {
+        {POOLS.map(({ key, label, detail, optIn }) => {
           const pool = workers?.pools?.[key]
+          const badge = pool ? poolBadge(pool, optIn) : null
           return (
             <Card key={key} className="p-4">
               <div className="flex items-start justify-between gap-3">
@@ -71,8 +63,8 @@ export default function WorkersPage() {
                   <h2 className="font-medium text-white">{label}</h2>
                   <p className="mt-1 text-xs text-gray-500">{detail}</p>
                 </div>
-                <span className={`rounded px-2 py-1 text-xs font-medium ${pool ? statusClass(pool.status) : 'bg-gray-800 text-gray-400'}`}>
-                  {loading && !pool ? 'loading' : pool?.status.replace('_', ' ') || 'unknown'}
+                <span className={`rounded px-2 py-1 text-xs font-medium ${badge ? badge.className : 'bg-gray-800 text-gray-400'}`}>
+                  {loading && !pool ? 'loading' : badge?.text || 'unknown'}
                 </span>
               </div>
               <dl className="mt-5 grid grid-cols-4 gap-2 text-center">
@@ -89,7 +81,7 @@ export default function WorkersPage() {
                 ))}
               </dl>
               <p className="mt-4 border-t border-gray-800 pt-3 text-xs text-gray-500">
-                {pool ? reasonLabel(pool.reason) : 'Waiting for the pool summary.'}
+                {pool ? poolDetail(pool) : 'Waiting for the pool summary.'}
               </p>
             </Card>
           )

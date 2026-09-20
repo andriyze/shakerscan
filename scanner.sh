@@ -1335,7 +1335,7 @@ ensure_command_dependencies() {
         echo -e "${YELLOW}Missing dependencies: $missing${NC}"
 
         if ! confirm_install_missing; then
-            echo "Run './scanner.sh install-deps' to install prerequisites."
+            echo "Run '$(cli_hint) install-deps' to install prerequisites."
             return 1
         fi
 
@@ -2210,8 +2210,8 @@ start_services() {
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
     echo ""
-    echo "Use './scanner.sh status' to check service health"
-    echo "Use './scanner.sh logs -f' to follow logs"
+    echo "Use '$(cli_hint) status' to check service health"
+    echo "Use '$(cli_hint) logs -f' to follow logs"
 }
 
 stop_services() {
@@ -3098,21 +3098,35 @@ doctor() {
     fi
 }
 
-show_env_help() {
+# The command an operator actually has: the installed `shakerscan` wrapper when one
+# execs this runtime, else this script. Hints that said './scanner.sh install-deps'
+# on an installed runtime named a file the operator never ran.
+installed_launcher_path() {
     local default_launcher="$HOME/.local/bin/shakerscan"
-    local launcher
     local path_launcher
-
     if [ -x "$default_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$default_launcher" >/dev/null 2>&1; then
-        launcher="$default_launcher"
+        printf '%s\n' "$default_launcher"
+        return 0
     fi
+    path_launcher="$(command -v shakerscan 2>/dev/null || true)"
+    if [ -n "$path_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$path_launcher" >/dev/null 2>&1; then
+        printf '%s\n' "$path_launcher"
+        return 0
+    fi
+    return 1
+}
 
-    if [ -z "$launcher" ]; then
-        path_launcher="$(command -v shakerscan 2>/dev/null || true)"
-        if [ -n "$path_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$path_launcher" >/dev/null 2>&1; then
-            launcher="$path_launcher"
-        fi
+cli_hint() {
+    if installed_launcher_path >/dev/null 2>&1; then
+        printf 'shakerscan'
+    else
+        printf './scanner.sh'
     fi
+}
+
+show_env_help() {
+    local launcher
+    launcher="$(installed_launcher_path 2>/dev/null || true)"
 
     echo -e "${BLUE}ShakerScan Environment${NC}"
     echo "Runtime directory: $SCRIPT_DIR"

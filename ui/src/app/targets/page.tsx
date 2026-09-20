@@ -626,8 +626,8 @@ function TargetsContent() {
             const identity = classifyTargetGroupIdentity(domain.root_domain)
             const domainInfo = (
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="block max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="block min-w-[10rem] max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
                     identity.internal ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-400'
                   }`}>{identity.label}</span>

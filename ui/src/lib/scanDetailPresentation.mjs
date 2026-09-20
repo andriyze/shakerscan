@@ -68,9 +68,15 @@ export function scanPhasePresentation(scan) {
 
 export function scanLogEntry(rawLine) {
   const raw = String(rawLine || '').trim()
-  const sourceMatch = raw.match(/^\[([^\]]+)\]\s*/)
+  // A parallel parent's feed is assembled from its children, each line prefixed with the child
+  // that produced it. That prefix is not the log source; keep it as the entry's origin so the
+  // operator can still tell discovery from shard work.
+  const childMatch = raw.match(/^\[(Discovery|Shard \d+)\]\s*/)
+  const child = childMatch ? childMatch[1] : ''
+  const body = childMatch ? raw.slice(childMatch[0].length) : raw
+  const sourceMatch = body.match(/^\[([^\]]+)\]\s*/)
   const source = sourceMatch ? sourceMatch[1] : ''
-  let message = sourceMatch ? raw.slice(sourceMatch[0].length) : raw
+  let message = sourceMatch ? body.slice(sourceMatch[0].length) : body
   let kind = 'detail'
   let label = source ? source.replaceAll('_', ' ') : 'activity'
   let meta = ''
@@ -95,7 +101,8 @@ export function scanLogEntry(rawLine) {
     label = 'milestone'
   }
 
-  return { raw, source, message, kind, label, meta }
+  if (child) meta = meta ? `${child} · ${meta}` : child
+  return { raw, source, child, message, kind, label, meta }
 }
 
 function structuredValue(raw, key) {

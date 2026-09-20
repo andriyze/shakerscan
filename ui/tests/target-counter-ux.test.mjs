@@ -24,5 +24,5 @@ test('subdomain finding counters have an accessible text label', () => {
 })
 
 test('pathological domain labels stay inside their card', () => {
-  assert.match(targets, /block max-w-full truncate font-medium text-white/)
+  assert.match(targets, /block min-w-\[10rem\] max-w-full truncate font-medium text-white/)
 })
