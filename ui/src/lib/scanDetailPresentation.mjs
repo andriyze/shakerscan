@@ -171,6 +171,43 @@ const ACTIVE_FAMILY_LABELS = {
   sensitive_exposure: 'exposure', nosqli: 'NoSQLi', authz_surface: 'authz',
 }
 
+// The one thing to do next, derived from what limited this run. A page that lists every gap
+// but never says what to do about it leaves the operator to reverse-engineer the fix.
+export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http, authenticated, authenticationRequested, notExamined }) {
+  const steps = []
+  const target = String(targetUrl || '')
+  const encodedTarget = encodeURIComponent(target)
+  if (coverageReasons.includes('bound_origin_redirects_off_origin')) {
+    const destination = String(http.redirect_origin || http.redirect_location || http.location || '')
+    let origin = ''
+    try {
+      origin = destination ? new URL(destination, target || undefined).origin : ''
+    } catch {
+      origin = ''
+    }
+    steps.push({
+      key: 'serving-origin',
+      label: origin ? `Scan ${origin.replace(/^https?:\/\//, '')} instead` : 'Scan the origin that serves the application',
+      href: `/scan/new?target=${encodeURIComponent(origin || target)}`,
+    })
+  }
+  if (testingWarning) {
+    steps.push({
+      key: 'standard-active',
+      label: 'Re-run with the standard active preset',
+      href: `/scan/new?target=${encodedTarget}&preset=standard_active`,
+    })
+  }
+  if (!notExamined && !authenticated && !authenticationRequested) {
+    steps.push({
+      key: 'credentials',
+      label: 'Add credentials to examine the authenticated surface',
+      href: '/credentials',
+    })
+  }
+  return steps
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -272,9 +309,19 @@ export function scanResultPresentation(scan, assurance) {
       ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
       : `${assuranceLabel} supports this run-level conclusion.`
   const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
+  const nextSteps = nextStepsFor({
+    targetUrl: String(scanRecord.target_url || scanRecord.target || ''),
+    testingWarning,
+    coverageReasons: coverageReasons.map((reason) => String(reason || '')),
+    http: record(report.http),
+    authenticated,
+    authenticationRequested,
+    notExamined,
+  })
 
   return {
     headline,
+    nextSteps,
     explanation,
     tone,
     confidence,

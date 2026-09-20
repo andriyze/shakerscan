@@ -1186,8 +1186,16 @@ def _posture_sections(
                     name for name in _EXPECTED_SECURITY_HEADERS
                     if name != "strict-transport-security" or is_https
                 )
+                location = response.get("location")
                 http_section = {
                     "status": status,
+                    # Origin only: enough for the conclusion to say which host to
+                    # scan instead, never a path or query the redirect carried.
+                    "redirect_origin": (
+                        http_origin(redirect_destination(str(origin or ""), str(location or "")))
+                        if isinstance(status, int) and status in REDIRECT_STATUSES and location
+                        else None
+                    ),
                     "posture_observed": posture_observed,
                     # Where the application actually lives when the bound origin
                     # only forwards to it. Reported so a scan of an apex that
@@ -1547,6 +1555,13 @@ def finalize_scan_report(
             int(raw_slice.get("count") or 0)
             if isinstance(raw_slice, Mapping) else 0
         )
+        # A slice is sized from the profile's floor before the manifest is cut,
+        # so a shard whose manifest turned out empty still carries a slice of
+        # one. The manifest is what exists to attempt: planned work cannot
+        # exceed it, or an empty family reads as one candidate never tried.
+        declared_entries = action.capability_args.get("manifest_entries")
+        if isinstance(declared_entries, int) and not isinstance(declared_entries, bool) and declared_entries >= 0:
+            planned = min(planned, declared_entries)
         attempts = {
             str(item.get("attempt_id") or "")
             for item in observations.get(action.action_id, ())

@@ -187,3 +187,33 @@ test('the testing tile names what active permission bought, or warns that it bou
   }, { band: 'limited', label: 'Limited coverage' })
   assert.equal(passive.testingSummary, 'Passive only')
 })
+
+
+test('the conclusion names the next step for each limit it reports', () => {
+  const redirected = scanResultPresentation({
+    target_url: 'https://a3sec.net',
+    result: {
+      findings: [],
+      result: { risk_assessment_state: 'not_examined', application_observed: false },
+      http: { status: 301, redirect_location: 'https://www.a3sec.net/' },
+      coverage: { reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  }, { band: 'weak', label: 'Weak coverage' })
+  assert.deepEqual(redirected.nextSteps.map((step) => step.key), ['serving-origin'])
+  assert.equal(redirected.nextSteps[0].label, 'Scan www.a3sec.net instead')
+  assert.equal(redirected.nextSteps[0].href, '/scan/new?target=https%3A%2F%2Fwww.a3sec.net')
+
+  const permittedOnly = scanResultPresentation({
+    target_url: 'http://crapi-web',
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(permittedOnly.nextSteps.map((step) => step.key), ['standard-active', 'credentials'])
+  assert.match(permittedOnly.nextSteps[0].href, /preset=standard_active/)
+
+  const authenticated = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'xss'] }, credential_profile_refs: ['cred-1'] },
+    result: { findings: [], result: {}, smart_coverage: { auth_states_tested: ['anonymous', 'user'] } },
+  }, { band: 'adequate', label: 'Adequate coverage' })
+  assert.deepEqual(authenticated.nextSteps, [])
+})

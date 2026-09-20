@@ -59,6 +59,8 @@ def test_redirect_header_posture_is_not_application_proof(missing):
     assert report["result"]["risk_assessment_state"] == "not_examined"
     assert report["result"]["grade_reliable"] is False
     assert "bound_origin_redirects_off_origin" in report["coverage"]["reasons"]
+    # The conclusion can name the origin to scan instead, and only the origin.
+    assert report["http"]["redirect_origin"] == "https://www.app.example.test"
 
 
 @pytest.mark.parametrize("origin,location,expected", [
@@ -280,7 +282,9 @@ def test_a_family_with_no_candidate_is_complete_not_unfinished():
     unreliable and the page said "2 selected check families did not finish"."""
     baseline = _action("baseline.http", 0, capability_name="http.request")
     verify = _action("verify.xss.r01", 1, capability_name="xss.verify_batch", dependencies=(baseline.action_id,))
-    verify = replace(verify, capability_args={"slice": {"count": 0}, "manifest_entries": 0}, action_digest=None)
+    # The slice is sized from the profile floor before the manifest is cut, so
+    # it says one candidate while the manifest that exists to attempt is empty.
+    verify = replace(verify, capability_args={"slice": {"count": 1}, "manifest_entries": 0}, action_digest=None)
     prove = _action("prove.xss.r01", 2, capability_name="xss.browser_prove_batch", dependencies=(verify.action_id,))
     prove = replace(prove, capability_args={"slice": {"count": 0}}, action_digest=None)
     actions = (baseline, verify, prove,
@@ -301,6 +305,7 @@ def test_a_family_with_no_candidate_is_complete_not_unfinished():
     xss = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "xss")
     assert xss["coverage_status"] == "complete"
     assert xss["reason"] == "no_candidates"
+    assert xss["planned_candidates"] == 0
     assert xss["proof_escalation"]["status"] == "not_applicable"
     assert report["coverage"]["selected_family_gaps"] == []
     assert "dependency_failed" not in report["coverage"]["reasons"]
