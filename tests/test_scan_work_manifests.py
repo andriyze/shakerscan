@@ -734,7 +734,6 @@ def test_path_injection_never_invents_get_for_other_methods(method):
 
 
 def test_legacy_non_get_path_candidate_is_rejected_at_execution():
-    from dataclasses import replace
     surface = _surface(query_keys=())
     endpoint = build_endpoint_manifest(scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
                                        surface_manifest=surface, source_action_ids=("discover.spec",))
@@ -751,18 +750,47 @@ def test_legacy_non_get_path_candidate_is_rejected_at_execution():
         execution_url_for_manifest_candidate(endpoint, legacy, 0)
 
 
-def test_a_leading_underscore_is_a_legal_query_parameter_name():
-    """Frameworks send them constantly, and one rejected name failed a scan.
+def test_a_target_supplied_name_is_opaque_and_an_internal_token_is_not():
+    """Names the target chooses are data; identifiers this module mints are not.
 
-    shakerscan.com is a Next.js site, so its own client navigation appends
-    ?_rsc=<hash> to every route. Requiring an alphanumeric first character
-    rejected that name, the fan-out raised, the queue exhausted its retries and
-    the whole run was marked failed after discovery had already succeeded.
+    A form field called _csrf, user[email] or __utm_source is a name the
+    application chose, and execution serializes it with urlencode, so no
+    character in it can create a second field. Rejecting it on identifier
+    rules failed a whole scan over one such name. Internal tokens -- route ids,
+    lanes, source tools, reference ids -- are minted here and stay strict, so a
+    construction fault cannot hide behind the tolerance meant for targets.
     """
-    from api.scan.work_manifests import _token
+    from api.scan.work_manifests import _parameter_name, _token
 
-    for name in ("_rsc", "_method", "_csrf", "__utm_source"):
-        assert _token(name, name="query_parameter_names entry") == name
+    for name in ("_csrf", "_rsc", "user[email]", "$filter", "__utm_source"):
+        assert _parameter_name(name, name="body_field_names") == name
+    # The identifier rule is unchanged for what this module mints itself.
+    with pytest.raises(ScanWorkManifestError):
+        _token("_not_an_identifier", name="source_tool")
+
+
+def test_body_field_names_survive_endpoint_assembly_like_query_names():
+    manifest = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v1",
+            "status": "complete",
+            "endpoints": [{
+                "method": "POST", "scheme": "https", "host": "app.example.test",
+                "port": 443, "concrete_path": "/login", "normalized_path": "/login",
+                "query_keys": ["_rsc"], "body_field_names": ["_csrf", "user[email]"],
+                "content_type": "application/x-www-form-urlencoded",
+                "content_fingerprint": None, "sensitive_path_redacted": False,
+                "source": "web.browser_crawl",
+            }],
+        },
+        source_action_ids=("discover.browser_crawl",),
+    )
+
+    (entry,) = manifest.entries
+    assert entry["query_parameter_names"] == ("_rsc",)
+    assert entry["body_field_names"] == ("_csrf", "user[email]")
 
 
 def _surface_endpoint(path, query_names, *, normalized=None):

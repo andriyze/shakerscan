@@ -96,11 +96,11 @@ _MAX_ENTRIES = MappingProxyType({
     "template": 20_000,
 })
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
-# A query parameter name may legally begin with an underscore, and frameworks
-# use that constantly: Next.js sends ?_rsc= on every client navigation, and
-# _method, _token and _csrf are just as common. Requiring an alphanumeric
-# first character rejected them, and one such name failed a whole scan.
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+:/{}-]{0,255}$")
+# Internal identifiers only -- route ids, lanes, source tools, content types,
+# reference ids, family hints. Anything the target supplies (query parameter
+# names, body field names) is an opaque string validated by _parameter_name,
+# because a form field called _csrf or user[email] is a name, not an identifier.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:/{}-]{0,255}$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,12}$")
 _SENSITIVE_KEYS = frozenset({
     "authorization", "cookie", "password", "secret", "token", "api_key",
@@ -434,7 +434,7 @@ def _endpoint_entry(value: Mapping[str, Any], *, target_digest: str) -> dict[str
         "content_type": _token(
             value.get("content_type"), name="content_type", optional=True,
         ),
-        "body_field_names": list(_string_list(
+        "body_field_names": list(_parameter_names(
             value.get("body_field_names") or [], name="body_field_names", maximum=128,
         )),
     }
@@ -469,7 +469,7 @@ def _candidate_entry(value: Mapping[str, Any]) -> dict[str, Any]:
         name="query_parameter_names",
         maximum=64,
     )
-    body_names = _string_list(
+    body_names = _parameter_names(
         value["body_field_names"], name="body_field_names", maximum=128,
     )
     fragment_path = (

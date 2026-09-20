@@ -219,6 +219,31 @@ The canonical graph uses `web.probe`, `web.crawl`, `web.content_discover`, `subd
 family controls additional crawl/content breadth, and network/subdomain actions require their
 separate policy permission. Output is normalized into one content-addressed endpoint manifest.
 
+**Declared surface** (`web.spec_ingest`): besides the conventional OpenAPI/Swagger locations, the
+same action fetches `robots.txt` and `llms.txt` from the origin root. `Disallow`/`Allow` rules and
+Markdown links become `discovered_route` observations, origin-bound (another host's link is never
+declared), with a wildcard rule contributing only the literal prefix it is anchored on and
+`Disallow: /` contributing nothing. A path written in prose keeps its query string, since observed
+parameters are what candidate generation is built from. A 200 that is really the application's
+single-page shell is refused as `hint_document_is_markup` rather than mined. A declared path is a
+claim, never a confirmed route: it enters the endpoint manifest and is probed like any other.
+
+**Measured absence** (`web.content_discover`): a few high-entropy paths that cannot exist are probed
+inside the same exact request reservation as the wordlist, and their responses are the negative
+control. A hit whose response is an origin-only rewrite identical to at least two independent control
+paths (same status, request path/query/fragment carried through unchanged — a fact the producer records
+before redaction, because redaction is not injective) is dropped and counted as
+`indistinguishable_from_absent:N`. Anything the observations cannot distinguish from a real route is
+retained as uncertain and reported as `unverified_redirect_observations:N`; a run that carried no
+control claims nothing.
+
+**Discovery reservations scale with the profile.** Each producer keeps the share of the ceiling it
+always took, but the cap that share may reach now rises with the granted budget instead of staying at
+the constant sized for the smallest profile; the tools derive their rate from the reservation, so a
+larger grant buys a longer look, not a louder one. `dns.inspect` bounds its fan-out and asks the six
+conventional DKIM selectors alongside SPF/DMARC/CAA/DNSKEY/MTA-STS/TLS-RPT; absence from those names is
+not proof that the domain does not sign mail.
+
 The compatibility `scanner_tools/` directory supplies migrated adapter implementations and richer
 observations behind those registered capabilities. Its module inventory does not imply that every
 module is enabled in every V2 plan. Available discovery/recon implementations include:
@@ -995,6 +1020,19 @@ does not present two competing sources. `model_intake` and the AI sources also f
 from `dast` (R8).
 Findings support filtering, sorting, bulk status triage from the list selection dock (`POST /findings/bulk`), previewed cleanup, manual creation, and per-finding retest.
 
+**Findings freshness is separate from status.** Status answers whether someone triaged a finding;
+`first_seen_at` / `last_seen_at` answer when a scan actually observed it, and a scan that does not
+observe a finding never advances `last_seen_at`. The Findings page opens on **Current** (observed
+within the last 14 days), says how many older findings that leaves out, and offers **Not seen
+recently** and **All**; the card shows when the finding was last and first seen, whether it
+`returned` after being resolved (`resurfaced_count`), and the latest retest verdict. "Not seen
+recently" is deliberately not "fixed": absence from a later scan may only mean that scan never
+reached the route. Web findings are never auto-resolved on non-observation — only connected-device
+findings are, and only after a run that proved complete coverage — and a `false_positive` retest
+verdict does not change status unless `auto_fp_on_retest` is enabled, so a human stays in the loop.
+The API exposes the same partition through `seen_within_days` and its complement
+`not_seen_within_days`, so paging and totals are computed server-side.
+
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
 links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in
 S3/MinIO-compatible backend; evidence reads verify SHA-256 before returning remote or local content.
@@ -1223,7 +1261,7 @@ See [`docs/mcp.md`](mcp.md).
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report` ·
 `GET|DELETE /scans/{id}/http-transactions`
 
-**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}`
+**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`)
 · `POST /findings/bulk` · `POST /findings/cleanup` · `POST /findings/manual` ·
 `POST /findings/{id}/retest` · `POST /findings/retest` · `GET /retests/{id}` ·
 `GET /retests/finding/{id}`

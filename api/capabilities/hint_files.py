@@ -17,7 +17,7 @@ endpoint manifest as the crawl and are probed like any other candidate.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Sequence
 import urllib.parse
 
 try:

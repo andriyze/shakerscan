@@ -54,13 +54,16 @@ def wildcard_redirect_urls(
         destination_origin = http_origin(destination)
         if not source_origin or not destination_origin or source_origin == destination_origin:
             continue
-        try:
-            probed = urllib.parse.urlsplit(url)
-            moved = urllib.parse.urlsplit(destination)
-        except ValueError:
+        # Whether the rewrite kept the requested path, query and fragment is
+        # decided by the producer on the raw pair. It cannot be re-derived from
+        # these URLs: they arrive redacted, and redaction collapses every query
+        # value to one marker and strips the fragment outright, so a
+        # route-specific redirect would look like a blanket rewrite here.
+        if item.get("redirect_preserves_request_target") is not True:
             continue
-        path = probed.path or "/"
-        if (moved.path or "/") != path or moved.query != probed.query:
+        try:
+            path = urllib.parse.urlsplit(url).path or "/"
+        except ValueError:
             continue
         key = (status, source_origin, destination_origin)
         groups.setdefault(key, {}).setdefault(path, set()).add(url)

@@ -139,9 +139,19 @@ def test_inconsistent_success_flags_never_become_complete_network_coverage(flag)
     assert summary["status"] == "partial"
 
 
+def stamp_producer_flag(rows):
+    """Judge the raw request/location pair the way the ffuf parser does, before redaction."""
+    import agent_tools
+
+    for row in rows:
+        row["redirect_preserves_request_target"] = agent_tools._redirect_preserves_request_target(
+            row["url"], row["redirect_location"])
+    return rows
+
+
 def content_rows(paths, *, source="https://app.example.test", destination="https://www.app.example.test"):
-    return [{"kind": "content_discovery", "url": source + path, "status": 301,
-             "redirect_location": destination + path} for path in paths]
+    return stamp_producer_flag([{"kind": "content_discovery", "url": source + path, "status": 301,
+                                 "redirect_location": destination + path} for path in paths])
 
 
 def surface(**kwargs):
@@ -250,11 +260,11 @@ def test_unsafe_redirect_locations_do_not_become_rewrite_evidence(location):
     rows = content_rows([f"/p{i}" for i in range(5)])
     for row in rows:
         row["redirect_location"] = location.replace("p0", row["url"].rsplit("/", 1)[-1])
-    assert wildcard_redirect_urls(rows) == frozenset()
+    assert wildcard_redirect_urls(stamp_producer_flag(rows)) == frozenset()
 
 
 def test_redirect_query_changes_are_not_blanket_origin_rewrites():
     rows = content_rows([f"/p{i}" for i in range(5)])
     for row in rows:
         row["redirect_location"] += "?token=some-value"
-    assert wildcard_redirect_urls(rows) == frozenset()
+    assert wildcard_redirect_urls(stamp_producer_flag(rows)) == frozenset()
