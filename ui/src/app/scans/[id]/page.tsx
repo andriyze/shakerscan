@@ -265,10 +265,15 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
       <div className="space-y-3 border-t border-gray-800 p-5">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <CoverageMetric label="Budget" value={resultPresentation.budgetProfile} />
-          <CoverageMetric label="Testing" value={resultPresentation.activeTesting ? 'Active allowed' : 'Passive only'} />
+          <CoverageMetric label="Testing" value={resultPresentation.testingSummary} />
           <CoverageMetric label="Identity assurance" value={resultPresentation.authenticationAssurance} />
           <CoverageMetric label="HTTP requests used" value={resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()} />
         </div>
+        {resultPresentation.testingWarning && (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
+            {resultPresentation.testingWarning}
+          </p>
+        )}
         {resultPresentation.resolvedFamilies.length > 0 && (
           <p className="text-xs text-gray-500">
             Check families run: {resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}

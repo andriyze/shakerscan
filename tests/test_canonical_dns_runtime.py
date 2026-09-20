@@ -274,3 +274,105 @@ def test_a_resolver_failure_is_not_reported_as_truncated_output():
     assert result["partial"] is True
     assert result["errors"][0] == "adapter_failed"
     assert any(item.endswith(":RuntimeError") for item in result["errors"][1:])
+
+
+class _ForwarderDroppingRareTypes(_Resolver):
+    """Docker Desktop's embedded DNS: A/MX/TXT answer at once, CAA/DNSKEY/DS time out."""
+
+    async def resolve(self, name, query_type, **kwargs):
+        if query_type in {"CAA", "DNSKEY", "DS"}:
+            raise type("LifetimeTimeout", (Exception,), {})("resolution lifetime expired")
+        return await super().resolve(name, query_type, **kwargs)
+
+
+def _public_target() -> TargetBinding:
+    return TargetBinding(
+        target_id="target-2", target_kind="web", canonical_host="www.example.org",
+        allowed_origins=("https://www.example.org",), allowed_addresses=("93.184.216.34",),
+        allowed_root_domains=("example.org",), scope_receipt_id="scope-2",
+    )
+
+
+def _doh_answers(name, query_type):
+    import dns.rdatatype
+
+    class _RRset(list):
+        def __init__(self, values, rdtype):
+            super().__init__(values)
+            self.rdtype = rdtype
+            self.ttl = 120
+
+    wanted = dns.rdatatype.from_text(query_type)
+    values = {
+        "CAA": [SimpleNamespace(flags=0, tag=b"issue", value=b"letsencrypt.org")],
+        "DNSKEY": [SimpleNamespace(flags=257, protocol=3, algorithm=13)],
+        "DS": [],
+    }.get(query_type, [])
+    return SimpleNamespace(answer=[_RRset(values, wanted)] if values else [])
+
+
+def test_a_query_the_forwarder_drops_is_recovered_over_https_for_a_public_name():
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append((name, query_type))
+        return _doh_answers(name, query_type)
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    observation = result["observation"]
+    assert result["status"] == "success" and not observation["errors"]
+    assert {qt for _name, qt in calls} == {"CAA", "DNSKEY", "DS"}
+    assert observation["records"]["host_caa"] and observation["records"]["host_dnskey"]
+    assert observation["records"]["root_ds"] == []
+    assert observation["record_metadata"]["host_caa"]["resolver"] == "doh"
+    assert set(observation["doh_fallback_queries"]) == {"host_caa", "host_dnskey", "root_ds"}
+
+
+def test_an_internal_name_never_leaves_the_network_as_a_doh_query():
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append((name, query_type))
+        return _doh_answers(name, query_type)
+
+    # app.example.test resolves to a TEST-NET address and carries a private suffix.
+    result = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert calls == []
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+
+
+def test_doh_permission_requires_a_public_name_and_public_addresses():
+    from api.capabilities.dns import doh_permitted
+
+    assert doh_permitted(_public_target()) is True
+    assert doh_permitted(_target()) is False
+    private_address = TargetBinding(
+        target_id="t3", target_kind="web", canonical_host="intranet.example.org",
+        allowed_origins=("https://intranet.example.org",), allowed_addresses=("10.0.0.5",),
+        allowed_root_domains=("example.org",), scope_receipt_id="scope-3",
+    )
+    assert doh_permitted(private_address) is False
+    bare = TargetBinding(
+        target_id="t4", target_kind="web", canonical_host="crapi-web",
+        allowed_origins=("http://crapi-web",), allowed_addresses=("172.18.0.14",),
+        allowed_root_domains=("crapi-web",), scope_receipt_id="scope-4",
+    )
+    assert doh_permitted(bare) is False
+
+
+def test_a_doh_failure_keeps_the_primary_timeout_as_the_error():
+    async def doh(name, query_type):
+        raise RuntimeError("upstream 502")
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+    assert any(item.startswith("host_caa:doh:RuntimeError") for item in result["errors"])
+    assert any(item == "host_caa:LifetimeTimeout" for item in result["errors"])

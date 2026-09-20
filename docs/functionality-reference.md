@@ -237,6 +237,19 @@ before redaction, because redaction is not injective) is dropped and counted as
 retained as uncertain and reported as `unverified_redirect_observations:N`; a run that carried no
 control claims nothing.
 
+**Family presets and the active default.** `policy.preset` selects the family set: `passive`
+(recon, reviewed passive templates), `standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`). A submission that allows active testing and
+names no preset resolves to `standard_active`; one that does not allow it resolves to `passive`.
+Permission and work are reported separately: the scan page's Testing tile names the active
+families that ran, or warns that active testing was allowed but no active family was selected.
+
+**DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
+query times out and the bound host is a public name on public addresses, the same query is retried
+over DNS-over-HTTPS (`SHAKERSCAN_DNS_DOH_RESOLVERS`, comma-separated `https://` URLs, default
+Cloudflare then Google; empty disables it). Internal names and private addresses never leave the
+network as a resolver query. Recovered answers are marked `resolver: doh` in the record metadata and
+listed under `doh_fallback_queries`.
+
 **Discovery reservations scale with the profile.** Each producer keeps the share of the ceiling it
 always took, but the cap that share may reach now rises with the granted budget instead of staying at
 the constant sized for the smallest profile; the tools derive their rate from the reservation, so a
@@ -1572,7 +1585,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 385 | Python sources + Compose manifests |
+| Runtime environment keys | 386 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2635,6 +2648,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
+| `SHAKERSCAN_DNS_DOH_RESOLVERS` | `api/capabilities/dns.py` |
 | `SHAKERSCAN_DOCKER_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |

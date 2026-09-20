@@ -49,6 +49,8 @@ SCAN_V2_FAMILY_NAMES = (
 )
 SCAN_FAMILY_PRESETS: Mapping[str, tuple[str, ...]] = {
     "passive": ("recon", "nuclei_passive"),
+    # sensitive_exposure stays opt-in: it carries its own Lab/deep prerequisite,
+    # and a default that fails submission is no default.
     "standard_active": ("recon", "nuclei_passive", "xss", "sqli"),
     "custom": (),
 }
@@ -380,7 +382,12 @@ def resolve_scan_contract(
         )
     if set(include) & set(exclude):
         raise ValueError("include_families and exclude_families must not overlap")
-    preset = str(policy_data.get("preset") or "passive").strip().lower()
+    # A request that allows active testing and names no preset wants the standard
+    # active set. Defaulting it to passive ran nothing active while the page read
+    # "Active allowed", and the operator had no way to tell from the result.
+    preset = str(
+        policy_data.get("preset") or ("standard_active" if active_testing else "passive")
+    ).strip().lower()
     if preset not in SCAN_FAMILY_PRESETS:
         raise ValueError("scan family preset must be passive, standard_active, or custom")
     if preset == "standard_active" and not active_testing:

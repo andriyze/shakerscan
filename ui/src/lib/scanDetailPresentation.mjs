@@ -165,6 +165,12 @@ export function notExaminedExplanation(report) {
   return 'The responses observed on the bound origin did not expose application content.'
 }
 
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'sensitive_exposure', 'nosqli', 'authz_surface'])
+const ACTIVE_FAMILY_LABELS = {
+  xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
+  sensitive_exposure: 'exposure', nosqli: 'NoSQLi', authz_surface: 'authz',
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -205,6 +211,18 @@ export function scanResultPresentation(scan, assurance) {
   const resolvedFamilies = Array.isArray(plan.resolved_families) ? plan.resolved_families : []
   const budgetProfile = String(plan.budget_profile || options.budget_profile || 'unknown')
   const activeTesting = policy.active_testing === true
+  // What "active" bought. Permission alone ran nothing: a run allowed active testing under the
+  // passive preset and the tile said "Active allowed" over a report with no active family in it.
+  const activeFamilies = resolvedFamilies.filter((family) => ACTIVE_FAMILIES.has(String(family)))
+  const activeFamiliesLabel = activeFamilies.map((family) => ACTIVE_FAMILY_LABELS[family] || String(family).replaceAll('_', ' ')).join(', ')
+  const testingSummary = !activeTesting
+    ? 'Passive only'
+    : activeFamilies.length
+      ? `Active · ${activeFamiliesLabel}`
+      : 'Active allowed · none selected'
+  const testingWarning = activeTesting && !activeFamilies.length
+    ? 'Active testing was allowed but the passive preset ran no active family. Re-run with the standard active preset to test XSS and SQLi.'
+    : null
   const smartCoverage = record(report.smart_coverage)
   const authStates = Array.isArray(smartCoverage.auth_states_tested) ? smartCoverage.auth_states_tested : []
   const authenticated = authStates.some((state) => String(state).toLowerCase() !== 'anonymous')
@@ -273,6 +291,9 @@ export function scanResultPresentation(scan, assurance) {
     authenticationRequested,
     authenticationAssurance,
     resolvedFamilies,
+    activeFamilies,
+    testingSummary,
+    testingWarning,
     requestCount: finiteNumber(budgetUsed.http_requests, null),
     missingHeaders,
     posturePenalty,

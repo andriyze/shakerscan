@@ -164,3 +164,26 @@ test('requested coverage failures are promoted into the result summary', () => {
 
   assert.deepEqual(result.coverageWarnings, ['subdomain discovery failed'])
 })
+
+
+test('the testing tile names what active permission bought, or warns that it bought nothing', () => {
+  const ran = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(ran.testingSummary, 'Active · XSS, SQLi, exposure')
+  assert.equal(ran.testingWarning, null)
+
+  const permittedOnly = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(permittedOnly.testingSummary, 'Active allowed · none selected')
+  assert.match(permittedOnly.testingWarning, /standard active preset/)
+
+  const passive = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: false }, resolved_families: ['recon'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(passive.testingSummary, 'Passive only')
+})
