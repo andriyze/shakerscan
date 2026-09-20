@@ -96,7 +96,11 @@ _MAX_ENTRIES = MappingProxyType({
     "template": 20_000,
 })
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:/{}-]{0,255}$")
+# A query parameter name may legally begin with an underscore, and frameworks
+# use that constantly: Next.js sends ?_rsc= on every client navigation, and
+# _method, _token and _csrf are just as common. Requiring an alphanumeric
+# first character rejected them, and one such name failed a whole scan.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+:/{}-]{0,255}$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,12}$")
 _SENSITIVE_KEYS = frozenset({
     "authorization", "cookie", "password", "secret", "token", "api_key",

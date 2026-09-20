@@ -749,3 +749,17 @@ def test_legacy_non_get_path_candidate_is_rejected_at_execution():
         execution_request_for_manifest_candidate(endpoint, legacy, 0)
     with pytest.raises(ScanWorkManifestError, match="identity"):
         execution_url_for_manifest_candidate(endpoint, legacy, 0)
+
+
+def test_a_leading_underscore_is_a_legal_query_parameter_name():
+    """Frameworks send them constantly, and one rejected name failed a scan.
+
+    shakerscan.com is a Next.js site, so its own client navigation appends
+    ?_rsc=<hash> to every route. Requiring an alphanumeric first character
+    rejected that name, the fan-out raised, the queue exhausted its retries and
+    the whole run was marked failed after discovery had already succeeded.
+    """
+    from api.scan.work_manifests import _token
+
+    for name in ("_rsc", "_method", "_csrf", "__utm_source"):
+        assert _token(name, name="query_parameter_names entry") == name
