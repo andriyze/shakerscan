@@ -382,12 +382,10 @@ def resolve_scan_contract(
         )
     if set(include) & set(exclude):
         raise ValueError("include_families and exclude_families must not overlap")
-    # A request that allows active testing and names no preset wants the standard
-    # active set. Defaulting it to passive ran nothing active while the page read
-    # "Active allowed", and the operator had no way to tell from the result.
-    preset = str(
-        policy_data.get("preset") or ("standard_active" if active_testing else "passive")
-    ).strip().lower()
+    # The preset is explicit by contract: permission is not a family selection,
+    # and the parity workload depends on that. Clients that want the standard
+    # active set say so; the scan page reports what actually ran either way.
+    preset = str(policy_data.get("preset") or "passive").strip().lower()
     if preset not in SCAN_FAMILY_PRESETS:
         raise ValueError("scan family preset must be passive, standard_active, or custom")
     if preset == "standard_active" and not active_testing:

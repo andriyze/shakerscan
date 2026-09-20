@@ -143,10 +143,10 @@ shakerscan api POST /scans '{"target":"https://example.com","budget_profile":"ba
 ```
 
 For active work, first establish explicit authorization (authorize the target once, or provide a
-bounded approval receipt) and the policy. Never silently upgrade a passive request. A request with
-`active_testing: true` and no `preset` resolves to `standard_active` (recon, passive templates,
-XSS, SQLi); pass `"preset": "passive"` to allow active testing without
-running an active family, and read `resolved_families` on the result rather than the permission.
+bounded approval receipt) and the policy. Never silently upgrade a passive request. Permission is
+not a family selection: `active_testing: true` without `"preset": "standard_active"` (or explicit
+`include_families`) runs only the passive families, and the scan page says so. Read
+`resolved_families` on the result, not the permission.
 
 ### Build freshness and repeatability
 

@@ -238,8 +238,9 @@ retained as uncertain and reported as `unverified_redirect_observations:N`; a ru
 control claims nothing.
 
 **Family presets and the active default.** `policy.preset` selects the family set: `passive`
-(recon, reviewed passive templates), `standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`). A submission that allows active testing and
-names no preset resolves to `standard_active`; one that does not allow it resolves to `passive`.
+(recon, reviewed passive templates), `standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`). The preset is explicit: a submission that allows
+active testing but names no preset resolves to `passive` and runs no active family; the New Scan
+page selects `standard_active` when active testing is switched on.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
 
