@@ -2625,7 +2625,7 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     target_id = uuid.UUID("31313131-3131-3131-3131-313131313131")
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     options["placement"] = {
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -2694,6 +2694,7 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
             target_id,
             policy={
                 "active_testing": True,
+                "preset": "passive",
                 "include_families": ["xss"],
             },
             strategy="scope",
@@ -3256,7 +3257,7 @@ def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["nuclei"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["nuclei"]},
         approval_receipt_id="approval-1",
     )
     target = TargetBinding(
@@ -3476,7 +3477,7 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
 
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     options["coverage_per_shard_cap"] = 2
     conn = DiscoveryPlanConn(
@@ -3559,7 +3560,7 @@ def test_scan_plan_fanout_harvests_canonical_discovery_observations(monkeypatch)
 
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     conn = CanonicalDiscoveryConn(
         parent_id, target_id, uuid.uuid4(), parent_plan,
@@ -5444,7 +5445,7 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
         custom_endpoints=endpoints,
     )
     options.update({
@@ -5532,7 +5533,7 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
         custom_endpoints=endpoints,
     )
     options.update({
@@ -5784,6 +5785,7 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
         target_id,
         policy={
             "active_testing": True,
+            "preset": "passive",
             "allow_state_changing_http": True,
             "include_families": ["bola"],
         },

@@ -116,6 +116,25 @@ def templated_finding_identity(finding: dict) -> str | None:
     return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
 
 
+def legacy_templated_finding_identity(finding: dict) -> str | None:
+    """The identity a CWE-less endpoint finding carried before 2.3.8.
+
+    That key fell back to the bare tool name, so every CWE-less match on a route
+    shared one row. Persistence uses this to find the row an existing
+    installation already holds for a finding, and to carry its triage across
+    the identity change instead of opening a duplicate. Returns None when the
+    finding has a CWE: its identity did not change.
+    """
+    if str(finding.get("cwe") or "").strip():
+        return None
+    current = templated_finding_identity(finding)
+    if current is None:
+        return None
+    _vuln, rest = current.split("|", 1)
+    tool = str(finding.get("tool") or "").strip() or "generic"
+    return f"{tool}|{rest}"
+
+
 def _has_deterministic_proof(
     finding: dict[str, Any],
     evidence: dict[str, Any],

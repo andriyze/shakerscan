@@ -208,6 +208,57 @@ export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http,
   return steps
 }
 
+// What earlier scans found that this run did not observe. Only active rows count, and a row
+// counts as observed here when this scan wrote it, last saw it, or reported the same finding.
+// Subtracting list lengths counted resolved and false-positive rows as "unresolved".
+export function carriedOverSummary(scan, targetFindings, historyState = 'ready') {
+  const scanRecord = record(scan)
+  const scanId = String(scanRecord.id || '')
+  if (historyState !== 'ready') {
+    return { state: historyState, count: 0, material: 0, highest: null }
+  }
+  const reported = Array.isArray(record(scanRecord.result).findings) ? record(scanRecord.result).findings : []
+  const reportedKeys = new Set(reported.map(scanFindingIdentity))
+  const carried = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
+    const item = record(finding)
+    if (String(item.status || 'active') !== 'active') return false
+    if (String(item.scan_id || '') === scanId || String(item.last_seen_scan_id || '') === scanId) return false
+    return !reportedKeys.has(scanFindingIdentity(item))
+  })
+  const order = ['critical', 'high', 'medium', 'low', 'info']
+  const highest = order.find((severity) => carried.some((finding) => String(record(finding).severity || '').toLowerCase() === severity)) || null
+  const material = carried.filter((finding) => ['critical', 'high', 'medium'].includes(String(record(finding).severity || '').toLowerCase())).length
+  return { state: 'ready', count: carried.length, material, highest }
+}
+
+// The release line states provenance only when the decision supplies it: a blocker the gate
+// marked as carried from the target's unresolved set, and not written by this scan, came from
+// an earlier scan. Proof state says nothing about when a finding was observed.
+export function releaseLine(decision, scanId, confirmedCount) {
+  const item = record(decision)
+  const verdict = String(item.decision || item.deploy_decision || '').toLowerCase()
+  if (!verdict) return null
+  const blockers = Array.isArray(item.blocking_findings) ? item.blocking_findings : []
+  const earlier = blockers.filter((blocker) => (
+    record(blocker).from_target_active === true && String(record(blocker).scan_id || '') !== String(scanId || '')
+  ))
+  const rationale = String(item.rationale || item.reason || '').trim()
+  if (verdict === 'block' || verdict === 'blocked') {
+    if (blockers.length > 0 && earlier.length === blockers.length && confirmedCount === 0) {
+      return { verdict, tone: 'block', text: `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} from earlier scans that this run did not re-examine.` }
+    }
+    return { verdict, tone: 'block', text: blockers.length > 0
+      ? `Release is blocked by ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} on this target.`
+      : 'Release is blocked by unresolved findings on this target.' }
+  }
+  if (verdict === 'allow') {
+    return { verdict, tone: 'allow', text: 'Release policy allows this target on the findings currently unresolved.' }
+  }
+  return { verdict, tone: 'review', text: rationale
+    ? `${rationale}${blockers.length > 0 ? ` ${blockers.length} unresolved finding${blockers.length === 1 ? '' : 's'} on this target.` : ''}`
+    : `Release decision: ${verdict.replace(/_/g, ' ')}.` }
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)

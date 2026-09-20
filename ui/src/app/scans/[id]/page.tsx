@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -118,22 +118,9 @@ function scanLogBadgeTone(kind: string): string {
   }
 }
 
-function carriedOverSummary(scan: any, targetFindings: any[], targetFindingsTotal: number) {
-  const scanId = String(scan?.id || '')
-  const carried = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding: any) => (
-    String(finding?.scan_id || '') !== scanId
-    && String(finding?.last_seen_scan_id || '') !== scanId
-    && String(finding?.status || 'active') === 'active'
-  ))
-  const highest = SEVERITY_LEVELS.find((severity) => carried.some((finding: any) => String(finding?.severity || '').toLowerCase() === severity)) || null
-  const material = carried.filter((finding: any) => ['critical', 'high', 'medium'].includes(String(finding?.severity || '').toLowerCase())).length
-  const count = Math.max(carried.length, targetFindingsTotal > 0 ? targetFindingsTotal - (Array.isArray(scan?.result?.findings) ? scan.result.findings.length : 0) : 0)
-  return { count: Math.max(0, count), material, highest }
-}
-
-function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], targetFindingsTotal = 0 }: {
+function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], historyState = 'ready' }: {
   scan: any; buildVersion?: string | null; buildFingerprint?: string | null
-  decision?: DeploymentDecision | null; targetFindings?: any[]; targetFindingsTotal?: number
+  decision?: DeploymentDecision | null; targetFindings?: any[]; historyState?: 'loading' | 'error' | 'ready'
 }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
@@ -169,28 +156,13 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
     resultPresentation.authenticationRequested ? 'identity unverified' : 'anonymous',
   ].filter(Boolean).join(' · ')
-  const carried = carriedOverSummary(scan, targetFindings, targetFindingsTotal)
-  const releaseVerdict = String(decision?.decision || decision?.deploy_decision || '').toLowerCase()
-  const releaseBlocked = releaseVerdict === 'block' || releaseVerdict === 'blocked'
-  const releaseClass = releaseBlocked
+  const carried = carriedOverSummary(scan, targetFindings, historyState)
+  const release = releaseLine(decision, scan?.id, resultPresentation.confirmedCount)
+  const releaseClass = release?.tone === 'block'
     ? 'bg-red-900/50 text-red-200'
-    : releaseVerdict === 'allow'
+    : release?.tone === 'allow'
       ? 'bg-green-900/50 text-green-200'
       : 'bg-amber-900/50 text-amber-200'
-  // The one line a reader needs before any number: is this target releasable, and if not, why.
-  const blockingCount = Array.isArray(decision?.blocking_findings) ? decision.blocking_findings.length : 0
-  const releaseRationale = String(decision?.rationale || decision?.reason || '').trim()
-  const releaseLine = !releaseVerdict
-    ? null
-    : releaseBlocked
-      ? blockingCount > 0 && resultPresentation.confirmedCount === 0
-        ? `Release is blocked by ${blockingCount} unresolved finding${blockingCount === 1 ? '' : 's'} from earlier scans that this run did not re-examine.`
-        : 'Release is blocked by unresolved findings on this target.'
-      : releaseVerdict === 'allow'
-        ? 'Release policy allows this target on the findings currently unresolved.'
-        : releaseRationale
-          ? `${releaseRationale}${blockingCount > 0 ? ` ${blockingCount} unresolved finding${blockingCount === 1 ? '' : 's'} on this target.` : ''}`
-          : `Release decision: ${releaseVerdict.replace(/_/g, ' ')}.`
   const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
     + resultPresentation.coverageGapReasons.length
     + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
@@ -207,10 +179,10 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
               {resultPresentation.headline}
             </h2>
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
-            {releaseLine && (
+            {release && (
               <p className="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-200" data-testid="release-line">
-                <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{releaseVerdict.replace(/_/g, ' ')}</span>
-                <span>{releaseLine}</span>
+                <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
+                <span>{release.text}</span>
               </p>
             )}
             <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
@@ -312,12 +284,16 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
 
         <div className="bg-gray-950/80 p-4" data-testid="carried-over">
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Carried over</p>
-          {carried.count > 0 ? (
+          {carried.state === 'loading' ? (
+            <p className="mt-2 text-sm text-gray-500">Loading target history…</p>
+          ) : carried.state === 'error' ? (
+            <p className="mt-2 text-sm text-amber-300">Target history unavailable; earlier findings were not checked.</p>
+          ) : carried.count > 0 ? (
             <>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <Link
                   href={`/findings?target_id=${scan.target_id}&status=active`}
-                  className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest] : 'bg-gray-800 text-gray-300'}`}
+                  className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest as SeverityLevel] : 'bg-gray-800 text-gray-300'}`}
                 >
                   {carried.count} unresolved{carried.highest ? ` · up to ${carried.highest}` : ''}
                 </Link>
@@ -1915,6 +1891,7 @@ function ScanDetailContent() {
           try {
             const findingData = await getFindings({
               target_id: data.target_id,
+              status: 'active',
               limit: 100,
               sort_by: 'severity',
               sort_order: 'desc',
@@ -2338,7 +2315,7 @@ function ScanDetailContent() {
           buildFingerprint={buildFingerprint}
           decision={deploymentDecision}
           targetFindings={targetFindings}
-          targetFindingsTotal={targetFindingsTotal}
+          historyState={targetFindingsLoading ? 'loading' : targetFindingsError ? 'error' : 'ready'}
         />
       )}
       {scan.status === 'completed' && scan.target_id && (

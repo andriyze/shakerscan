@@ -77,7 +77,7 @@ def _plans():
     target = _target()
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     parent_raw = ScanActionPlanCompiler().compile(
         scan_id=SCAN_ID,
@@ -340,7 +340,7 @@ def test_continuation_round_ids_and_offsets_are_monotonic():
     candidate_ref = {**dict(candidate_ref), "entry_count": 5_000}
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
 
     first = ScanActionPlanCompiler().compile(
@@ -386,6 +386,7 @@ def test_continuation_request_verifier_binds_parent_collection_replay():
         budget_profile="balanced",
         policy={
             "active_testing": True,
+            "preset": "passive",
             "allow_state_changing_http": True,
             "include_families": ["xss"],
         },
@@ -530,6 +531,7 @@ def test_continuation_cannot_change_existing_private_input_authority():
         budget_profile="balanced",
         policy={
             "active_testing": True,
+            "preset": "passive",
             "allow_state_changing_http": True,
             "include_families": ["xss"],
         },

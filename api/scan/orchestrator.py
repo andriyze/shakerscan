@@ -319,18 +319,33 @@ class ScanOrchestrator:
                         and item.reason_code is CapabilityResultReason.NOT_APPLICABLE
                         for dependency_id, item in unmet
                     )
-                    result = await self._settle_without_execution(
-                        plan=plan,
-                        action=action,
-                        status=(
-                            CapabilityResultStatus.SKIPPED if nothing_to_do
-                            else CapabilityResultStatus.BLOCKED
-                        ),
-                        reason=(
-                            CapabilityResultReason.NOT_APPLICABLE if nothing_to_do
-                            else CapabilityResultReason.DEPENDENCY_FAILED
-                        ),
+                    # A proof step depends on every verify slice of its family.
+                    # One slice with nothing to do does not cancel the work of
+                    # a sibling that produced observations: the step runs over
+                    # what the satisfied siblings settled, and settles skipped
+                    # only when every prerequisite had nothing to do.
+                    satisfied_sibling = nothing_to_do and any(
+                        item is not None
+                        and item.status in _DEPENDENCY_SATISFIED
+                        and (dependency_id not in health_actions
+                             or item.status is CapabilityResultStatus.SUCCESS)
+                        for dependency_id, item in zip(action.dependencies, dependencies)
                     )
+                    if satisfied_sibling:
+                        result = await self._execute_action(plan=plan, action=action)
+                    else:
+                        result = await self._settle_without_execution(
+                            plan=plan,
+                            action=action,
+                            status=(
+                                CapabilityResultStatus.SKIPPED if nothing_to_do
+                                else CapabilityResultStatus.BLOCKED
+                            ),
+                            reason=(
+                                CapabilityResultReason.NOT_APPLICABLE if nothing_to_do
+                                else CapabilityResultReason.DEPENDENCY_FAILED
+                            ),
+                        )
                 else:
                     result = await self._execute_action(
                         plan=plan, action=action,
