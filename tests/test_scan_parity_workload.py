@@ -49,8 +49,9 @@ def test_the_parity_lane_resolves_to_real_active_work():
         assert family in resolved, f"parity lane does not exercise {family}"
 
 
-def test_active_testing_alone_still_resolves_to_the_passive_preset():
-    """Documents why the explicit preset is required, not incidental."""
+def test_active_testing_alone_resolves_to_the_standard_active_preset():
+    """Permission selects the standard active set; the parity lane still names
+    its families with an explicit custom preset rather than relying on this."""
     contract = resolve_scan_contract(
         budget_profile="balanced",
         policy={
@@ -60,8 +61,8 @@ def test_active_testing_alone_still_resolves_to_the_passive_preset():
         },
         approval_receipt_id="a" * 32,
     )
-    assert contract.policy.include_families == ("recon",)
-    assert contract.execution_plan.family_preset == "passive"
+    assert contract.policy.include_families == ("recon", "xss", "sqli")
+    assert contract.execution_plan.family_preset == "standard_active"
 
 
 def test_the_submitted_parity_policy_is_the_declared_one():

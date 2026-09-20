@@ -166,7 +166,7 @@ def _shared_round_fixture(endpoint_count=16):
     return dict(
         parent_plan=parent, allocation=allocation, parent_results={},
         execution_plan=resolve_scan_contract(
-            budget_profile="balanced", policy={"active_testing": True, "include_families": ["xss"]},
+            budget_profile="balanced", policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
         ).execution_plan,
         target=target, target_url="https://app.example.test", observations={}, request_manifests=(),
         options={"template_manifest_ref": template.reference().canonical_dict(), "custom_endpoints": [
