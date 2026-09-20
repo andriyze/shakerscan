@@ -7,7 +7,8 @@ use `../release-readiness.md` plus `RELEASES.md` at the repository root.
 
 ## 2.3 line
 
-- [`2.3.7.md`](2.3.7.md) — candidate prepared 2026-09-19; not yet published.
+- [`2.3.8.md`](2.3.8.md) — candidate prepared 2026-09-20; not yet published.
+- [`2.3.7.md`](2.3.7.md) — published 2026-09-19 and promoted to the stable installer channel.
 - [`2.3.6.md`](2.3.6.md) — published 2026-09-18 and promoted to the stable installer channel.
 - [`2.3.5.md`](2.3.5.md) — published 2026-09-18; not promoted to the stable channel (superseded by 2.3.6).
 - [`2.3.4.md`](2.3.4.md) — published 2026-09-15 and promoted to the stable installer channel.
