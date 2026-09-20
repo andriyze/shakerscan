@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
-from findings import template_path, templated_finding_identity  # noqa: E402
+from findings import legacy_templated_finding_identity, template_path, templated_finding_identity  # noqa: E402
 
 
 def fid(url, cwe="CWE-639", method=None, evidence=None):
@@ -134,3 +134,10 @@ def test_a_cwe_less_finding_without_a_template_falls_back_to_its_title():
     a = templated_finding_identity({"url": "http://h/", "tool": "custom", "title": "Directory listing enabled"})
     b = templated_finding_identity({"url": "http://h/", "tool": "custom", "title": "Server banner disclosed"})
     assert a != b
+
+
+def test_the_legacy_identity_is_the_pre_2_3_8_collapsed_key():
+    finding = _header_finding("X-Frame-Options")
+    assert legacy_templated_finding_identity(finding) == "nuclei|GET|/|"
+    assert legacy_templated_finding_identity({**finding, "cwe": "CWE-693"}) is None
+    assert legacy_templated_finding_identity({"title": "no url"}) is None

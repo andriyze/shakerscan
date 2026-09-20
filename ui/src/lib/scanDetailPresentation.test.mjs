@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -216,4 +216,40 @@ test('the conclusion names the next step for each limit it reports', () => {
     result: { findings: [], result: {}, smart_coverage: { auth_states_tested: ['anonymous', 'user'] } },
   }, { band: 'adequate', label: 'Adequate coverage' })
   assert.deepEqual(authenticated.nextSteps, [])
+})
+
+
+test('carried over counts only active rows this run neither wrote, last saw, nor reported', () => {
+  const scan = { id: 'scan-2', result: { findings: [{ title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' }] } }
+  const rows = [
+    { severity: 'high', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Sensitive exposure: environment secret file', url: 'http://app/.env', tool: 'probe' },
+    { severity: 'high', status: 'resolved', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Old thing', url: 'http://app/x', tool: 't' },
+    { severity: 'medium', status: 'false_positive', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'FP', url: 'http://app/y', tool: 't' },
+    { severity: 'info', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-3', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' },
+    { severity: 'info', status: 'active', scan_id: 'scan-2', last_seen_scan_id: 'scan-2', title: 'Seen here', url: 'http://app/z', tool: 't' },
+  ]
+  const summary = carriedOverSummary(scan, rows)
+  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, highest: 'high' })
+  assert.equal(carriedOverSummary(scan, [], 'loading').state, 'loading')
+  assert.equal(carriedOverSummary(scan, [], 'error').count, 0)
+})
+
+test('the release line claims an earlier-scan origin only when the decision says so', () => {
+  const carried = releaseLine({
+    decision: 'block',
+    blocking_findings: [{ id: 'f1', from_target_active: true, scan_id: 'scan-1' }],
+  }, 'scan-2', 0)
+  assert.match(carried.text, /from earlier scans that this run did not re-examine/)
+
+  const current = releaseLine({
+    decision: 'block',
+    blocking_findings: [{ id: 'f2', scan_id: 'scan-2' }],
+  }, 'scan-2', 0)
+  assert.doesNotMatch(current.text, /earlier scans/)
+  assert.match(current.text, /1 unresolved finding on this target/)
+
+  const review = releaseLine({ decision: 'needs_review', rationale: 'Required deployment evidence is missing or incomplete.', blocking_findings: [{ id: 'f1' }] }, 'scan-2', 0)
+  assert.equal(review.tone, 'review')
+  assert.match(review.text, /^Required deployment evidence is missing or incomplete\. 1 unresolved finding on this target\.$/)
+  assert.equal(releaseLine(null, 'scan-2', 0), null)
 })

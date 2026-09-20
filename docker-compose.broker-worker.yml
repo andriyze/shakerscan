@@ -15,6 +15,7 @@ services:
       - SHAKERSCAN_BROKER_LEASE=1
       - ARTIFACT_STORAGE_REQUIRED=false
       - RESULTS_DIR=/results
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
     volumes:
       - ${FLEET_RUNTIME_DIR:-./.shakerscan-fleet}:/run/shakerscan-fleet:ro
       - ${FLEET_RESULTS_DIR:-./results}:/results

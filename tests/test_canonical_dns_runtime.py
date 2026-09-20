@@ -376,3 +376,125 @@ def test_a_doh_failure_keeps_the_primary_timeout_as_the_error():
     assert result["errors"][0] == "timed_out"
     assert any(item.startswith("host_caa:doh:RuntimeError") for item in result["errors"])
     assert any(item == "host_caa:LifetimeTimeout" for item in result["errors"])
+
+
+def _doh_transport(builder):
+    """An httpx transport that answers every resolver URL with the wire message builder makes."""
+    import base64
+    import dns.message
+    import httpx
+
+    calls = []
+
+    def handler(request):
+        encoded = request.url.params["dns"]
+        padded = encoded + "=" * (-len(encoded) % 4)
+        query = dns.message.from_wire(base64.urlsafe_b64decode(padded))
+        calls.append(str(request.url.host))
+        message = builder(query)
+        return httpx.Response(200, content=message.to_wire(), headers={"content-type": "application/dns-message"})
+
+    return httpx.MockTransport(handler), calls
+
+
+def _run_doh(builder, name="www.example.org", qtype="CAA"):
+    from api.capabilities.dns import _doh_query
+
+    transport, calls = _doh_transport(builder)
+    try:
+        return asyncio.run(_doh_query(name, qtype, transport=transport)), calls
+    except Exception as exc:  # noqa: BLE001 - the test inspects the failure
+        return exc, calls
+
+
+def test_doh_rejects_servfail_refused_and_truncation_and_tries_the_next_resolver():
+    import dns.flags
+    import dns.message
+    import dns.rcode
+    from api.capabilities.dns import DohAnswerInvalid
+
+    for shape in ("servfail", "refused", "truncated"):
+        def build(query, shape=shape):
+            reply = dns.message.make_response(query)
+            if shape == "servfail":
+                reply.set_rcode(dns.rcode.SERVFAIL)
+            elif shape == "refused":
+                reply.set_rcode(dns.rcode.REFUSED)
+            else:
+                reply.flags |= dns.flags.TC
+            return reply
+
+        outcome, calls = _run_doh(build)
+        assert isinstance(outcome, DohAnswerInvalid), shape
+        assert len(calls) == 2, f"{shape}: every configured resolver must be tried"
+
+
+def test_doh_rejects_an_answer_for_another_owner():
+    import dns.message
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.rrset
+    from api.capabilities.dns import DohAnswerInvalid
+
+    def build(query):
+        reply = dns.message.make_response(query)
+        reply.answer.append(dns.rrset.from_text(
+            "unrelated.invalid.", 300, dns.rdataclass.IN, dns.rdatatype.CAA, '0 issue "letsencrypt.org"',
+        ))
+        return reply
+
+    outcome, _calls = _run_doh(build)
+    assert isinstance(outcome, DohAnswerInvalid) and "answer_owner_mismatch" in str(outcome)
+
+
+def test_doh_rejects_a_reply_to_a_different_question():
+    import dns.message
+    from api.capabilities.dns import DohAnswerInvalid
+
+    def build(query):
+        return dns.message.make_response(dns.message.make_query("other.example.org", "CAA"))
+
+    outcome, _calls = _run_doh(build)
+    assert isinstance(outcome, DohAnswerInvalid) and "question_mismatch" in str(outcome)
+
+
+def test_doh_accepts_a_matching_answer_and_a_real_negative_answer():
+    import dns.message
+    import dns.rcode
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.rrset
+
+    def positive(query):
+        reply = dns.message.make_response(query)
+        reply.answer.append(dns.rrset.from_text(
+            "www.example.org.", 120, dns.rdataclass.IN, dns.rdatatype.CAA, '0 issue "letsencrypt.org"',
+        ))
+        return reply
+
+    message, calls = _run_doh(positive)
+    assert len(message.answer) == 1 and calls == ["cloudflare-dns.com"]
+
+    def nxdomain(query):
+        reply = dns.message.make_response(query)
+        reply.set_rcode(dns.rcode.NXDOMAIN)
+        return reply
+
+    message, _calls = _run_doh(nxdomain)
+    assert message.answer == []
+
+
+def test_an_invalid_doh_answer_keeps_the_timeout_as_the_stated_reason():
+    from api.capabilities.dns import DohAnswerInvalid
+
+    async def doh(name, query_type):
+        raise DohAnswerInvalid("rcode:SERVFAIL")
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+    assert any(item == "host_caa:doh:DohAnswerInvalid:rcode:SERVFAIL" for item in result["errors"])
+    assert result["observation"]["records"]["host_caa"] == []
+    assert result["observation"]["doh_fallback_queries"] == []

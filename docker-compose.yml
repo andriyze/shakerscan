@@ -128,6 +128,7 @@ services:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
       - RESULTS_DIR=/results
@@ -397,6 +398,7 @@ services:
         SCANNER_SOURCE_REVISION: ${GIT_COMMIT:-unknown}
     environment:
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - PYTHONUNBUFFERED=1
       - ASM_DEFAULT_DOMAIN_RATE_PER_HOUR=${ASM_DEFAULT_DOMAIN_RATE_PER_HOUR:-1000}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
@@ -493,6 +495,7 @@ services:
       - "shakerscan-fixtures.internal:host-gateway"
     environment:
       - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner

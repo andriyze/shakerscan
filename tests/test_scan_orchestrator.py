@@ -395,6 +395,30 @@ def test_a_prerequisite_with_nothing_to_do_leaves_its_dependent_nothing_to_do():
     assert report.action_results["baseline.security_txt"].reason_code is CapabilityResultReason.NOT_APPLICABLE
 
 
+def test_a_prove_step_runs_when_one_verify_sibling_had_nothing_to_do_and_another_produced_work():
+    """verify.xss settles not_applicable, verify.xss.001 succeeds with observations.
+    The proof step that depends on both must run over the sibling that worked;
+    it was settled not_applicable and the executor was never called."""
+    first = _action("verify.xss", 0, capability_name="xss.verify_batch")
+    second = _action("verify.xss.001", 1, capability_name="xss.verify_batch")
+    prove = _action("prove.xss", 2, capability_name="xss.browser_prove_batch",
+                    dependencies=(first.action_id, second.action_id))
+    finalize = _action("finalize.report", 3, dependencies=(first.action_id, second.action_id, prove.action_id))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(first, second, prove, finalize))
+    backend = FakeBackend(plan, "local")
+    executor = FakeExecutor(inapplicable_action="verify.xss")
+
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    assert report.status_matrix == {
+        "verify.xss": "skipped", "verify.xss.001": "success",
+        "prove.xss": "success", "finalize.report": "success",
+    }
+    assert "prove.xss" in executor.executed
+    assert not any(item[0] == "prove.xss" for item in executor.synthetic)
+
+
 @pytest.mark.parametrize("status", [CapabilityResultStatus.PARTIAL, CapabilityResultStatus.TIMED_OUT])
 @pytest.mark.parametrize("health", [True, False])
 def test_uncertain_health_never_satisfies_dependency_but_partial_evidence_still_does(status, health):

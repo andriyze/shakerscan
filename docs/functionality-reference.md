@@ -246,9 +246,15 @@ families that ran, or warns that active testing was allowed but no active family
 **DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
 query times out and the bound host is a public name on public addresses, the same query is retried
 over DNS-over-HTTPS (`SHAKERSCAN_DNS_DOH_RESOLVERS`, comma-separated `https://` URLs, default
-Cloudflare then Google; empty disables it). Internal names and private addresses never leave the
-network as a resolver query. Recovered answers are marked `resolver: doh` in the record metadata and
-listed under `doh_fallback_queries`.
+Cloudflare then Google; empty disables it). Set it in the project `.env`: both Compose files pass it
+to the api, worker and agent-tool-worker services, and the broker worker file passes it to its
+worker, with `${VAR-default}` so an explicit blank stays blank. Internal names and private addresses
+never leave the network as a resolver query. An HTTP 200 is not a DNS answer: a reply is accepted
+only when its rcode is NOERROR or NXDOMAIN, it is not truncated, its question is the one asked, and
+every answer record belongs to the asked name or a CNAME target the answer introduces; anything else
+is refused, the next resolver is tried, and a run with no valid answer keeps the primary timeout as
+its stated reason. Recovered answers are marked `resolver: doh` in the record metadata and listed
+under `doh_fallback_queries`.
 
 **Discovery reservations scale with the profile.** Each producer keeps the share of the ceiling it
 always took, but the cap that share may reach now rises with the granted budget instead of staying at
@@ -2648,7 +2654,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
-| `SHAKERSCAN_DNS_DOH_RESOLVERS` | `api/capabilities/dns.py` |
+| `SHAKERSCAN_DNS_DOH_RESOLVERS` | `api/capabilities/dns.py`, `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DOCKER_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |

@@ -405,10 +405,12 @@ except ImportError:
     from scanner.constants import resolve_scan_budget
 try:
     from findings import templated_finding_identity as _templated_finding_identity
+    from scan.finding_reconciliation import reconcile_legacy_finding_row
 except ModuleNotFoundError as exc:
     if exc.name != "findings":
         raise
     from scanner.findings import templated_finding_identity as _templated_finding_identity
+    from api.scan.finding_reconciliation import reconcile_legacy_finding_row
 
 # Configuration
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -3297,6 +3299,8 @@ async def save_findings(scan_id: str, target_id: str, findings: list) -> int:
                     WHERE target_id = $1 AND fingerprint = $2
                     FOR UPDATE
                 """, target_uuid, fingerprint)
+                existing = existing or await reconcile_legacy_finding_row(
+                    conn, target_uuid=target_uuid, fingerprint=fingerprint, finding=finding)
 
                 if existing:
                     # Canonicalize JSON so cosmetic key-order/whitespace differences

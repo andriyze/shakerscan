@@ -81,22 +81,61 @@ def doh_permitted(target: TargetBinding) -> bool:
     return True
 
 
-async def _doh_query(name: str, query_type: str) -> Any:
-    """Resolve over HTTPS; the first resolver that answers wins."""
+class DohAnswerInvalid(ValueError):
+    """The resolver answered over HTTP, but not the question that was asked."""
+
+
+def validate_doh_message(message: Any, name: str, query_type: str) -> Any:
+    """Accept only a complete DNS answer to this exact question.
+
+    HTTP success is not DNS success (RFC 8484 §4.2.1): SERVFAIL, REFUSED, a
+    truncated message, or an answer to a different name all arrive as 200.
+    NXDOMAIN and an empty NOERROR are real negative answers and pass.
+    """
+    import dns.flags
+    import dns.name
+    import dns.rcode
+    import dns.rdatatype
+
+    rcode = message.rcode()
+    if rcode not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+        raise DohAnswerInvalid(f"rcode:{dns.rcode.to_text(rcode)}")
+    if int(message.flags) & int(dns.flags.TC):
+        raise DohAnswerInvalid("truncated")
+    wanted_name = dns.name.from_text(name)
+    wanted_type = dns.rdatatype.from_text(query_type)
+    questions = list(getattr(message, "question", ()))
+    if len(questions) != 1 or questions[0].name != wanted_name or questions[0].rdtype != wanted_type:
+        raise DohAnswerInvalid("question_mismatch")
+    # Every answer rrset must belong to the asked name or to a CNAME target the
+    # answer itself introduces; a record for some other owner is not evidence.
+    owners = {wanted_name}
+    for rrset in message.answer:
+        if rrset.rdtype == dns.rdatatype.CNAME and rrset.name in owners:
+            for record in rrset:
+                owners.add(record.target)
+    for rrset in message.answer:
+        if rrset.name not in owners:
+            raise DohAnswerInvalid("answer_owner_mismatch")
+    return message
+
+
+async def _doh_query(name: str, query_type: str, *, transport: Any | None = None) -> Any:
+    """Resolve over HTTPS; the first resolver with a valid answer wins."""
     import dns.message
     import httpx
 
     wire = dns.message.make_query(name, query_type).to_wire()
     encoded = base64.urlsafe_b64encode(wire).decode("ascii").rstrip("=")
     last: Exception | None = None
-    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, transport=transport) as client:
         for url in _DOH_RESOLVERS:
             try:
                 response = await client.get(
                     url, params={"dns": encoded}, headers={"accept": "application/dns-message"},
                 )
                 response.raise_for_status()
-                return dns.message.from_wire(response.content)
+                return validate_doh_message(dns.message.from_wire(response.content), name, query_type)
             except Exception as exc:  # noqa: BLE001 - try the next resolver
                 last = exc
     raise last or RuntimeError("no DoH resolver configured")
@@ -237,7 +276,8 @@ async def inspect_dns_posture(
         try:
             message = await asyncio.wait_for(doh_query(name, query_type), timeout=6)
         except Exception as exc:  # noqa: BLE001 - the primary timeout stays the error
-            errors.append(f"{label}:doh:{type(exc).__name__}"[:200])
+            detail = f":{exc}" if isinstance(exc, DohAnswerInvalid) else ""
+            errors.append(f"{label}:doh:{type(exc).__name__}{detail}"[:200])
             return None
         wanted = dns.rdatatype.from_text(query_type)
         records = [
