@@ -167,6 +167,12 @@ RUN PYTHONPATH=/app/scanner_tools \
     /opt/model-intake-tools/safetensors/bin/python \
     /app/scanner_tools/model_intake_safetensors_selftest.py
 
+# OpenBLAS sizes its per-thread buffers from the CPU count. Inside a build container on a
+# many-core host (a 96-vCPU metal instance) that allocation fails and modelscan's self-test
+# dies with "Memory allocation still failed after 10 retries". The scanners are not BLAS
+# bound, so one thread is the correct setting for the image, not just for this step.
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+
 # Verify the Model Intake toolchain and run the adapter self-test that gates the release image.
 RUN set -e && \
     /opt/tools/modelscan --version && \
