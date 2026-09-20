@@ -191,6 +191,11 @@ def _run(
         if not shutil.which("sudo"):
             raise FleetCLIError(f"root authority is required to run: {' '.join(argv)}")
         command = ["sudo", *command]
+    if not capture:
+        # The child writes straight to the terminal; anything we buffered must land first,
+        # or the preflight table prints after the child's "Services started" banner.
+        sys.stdout.flush()
+        sys.stderr.flush()
     try:
         return subprocess.run(
             command,
@@ -993,6 +998,65 @@ def _validated_range(value: int, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def _queued_or_running_scans(paths: RuntimePaths) -> dict[str, int] | None:
+    """Count scans the local control plane is running or holding in its queue.
+
+    Returns ``None`` when the standalone API is not reachable: a stopped stack has nothing to
+    interrupt, and fleet conversion must not fail because there is nothing to ask.
+    """
+    base = local_api_url(paths)
+    counts: dict[str, int] = {}
+    for status in ("running", "pending"):
+        try:
+            result = api_json(base, "GET", f"/scans?status={status}&limit=1", timeout=10.0)
+        except FleetCLIError:
+            return None
+        total = result.get("total")
+        if not isinstance(total, int):
+            rows = result.get("scans")
+            total = len(rows) if isinstance(rows, list) else 0
+        counts[status] = max(0, total)
+    return counts
+
+
+def _require_no_active_scans(paths: RuntimePaths) -> None:
+    counts = _queued_or_running_scans(paths)
+    if counts is None:
+        return
+    busy = {status: count for status, count in counts.items() if count > 0}
+    if busy:
+        detail = ", ".join(f"{count} {status}" for status, count in busy.items())
+        raise FleetCLIError(f"{detail} scan(s) would be interrupted by the restart")
+
+
+def _managed_gateway_failure_hint(paths: RuntimePaths) -> str:
+    """Explain a managed-gateway timeout from the gateway's own log when it can.
+
+    The usual cause is a cloud firewall or security group that never let the certificate
+    authority reach TCP 80/443, which the local port check cannot see.
+    """
+    firewall = (
+        "Most often the cloud security group or firewall does not allow inbound TCP 80 and 443 "
+        "to this host; open both and run fleet init again."
+    )
+    try:
+        compose = _docker_compose_command()
+        result = _run(
+            [*compose, "--profile", CADDY_PROFILE, "logs", "--no-color", "--tail", "60", CADDY_PROFILE],
+            check=False,
+        )
+    except FleetCLIError:
+        return firewall
+    lines = [
+        line.strip()
+        for line in (result.stdout or "").splitlines()
+        if re.search(r"acme|challenge|timeout|timed out|connection refused|no route", line, re.IGNORECASE)
+    ]
+    if not lines:
+        return firewall
+    return f"{firewall} Gateway log: {' | '.join(line[-200:] for line in lines[-3:])}"
+
+
 def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[str, Any]:
     """Validate a fleet conversion completely before any durable mutation."""
     checks: list[PreflightCheck] = []
@@ -1023,6 +1087,23 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
         success="available",
         hint="Install the Docker Compose plugin and ensure the Docker daemon is running.",
     )
+    if getattr(args, "allow_running_work", False):
+        checks.append(PreflightCheck(
+            "Queued or running scans",
+            "warn",
+            "operator accepted that the conversion restart interrupts them (--allow-running-work)",
+        ))
+    else:
+        _run_check(
+            checks,
+            "Queued or running scans",
+            lambda: _require_no_active_scans(paths),
+            success="none would be interrupted by the conversion restart",
+            hint=(
+                "Fleet conversion restarts the whole stack. Wait for the scans to finish or cancel "
+                "them, or pass --allow-running-work to accept the interruption."
+            ),
+        )
     public_url = _run_check(
         checks,
         "Public HTTPS URL",
@@ -1079,7 +1160,8 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
             checks.append(PreflightCheck(
                 "Public API reachability",
                 "warn",
-                f"not ready yet ({exc}); the managed HTTPS gateway will be provisioned",
+                f"not reachable yet ({exc}); ShakerScan will provision the managed HTTPS gateway, "
+                "which needs inbound TCP 80 and 443 open at the cloud firewall",
             ))
         else:
             try:
@@ -1158,16 +1240,23 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
             checks,
             "HTTP port 80",
             lambda: _assert_port_available("tcp", 80, existing_fleet=existing_managed_gateway),
-            success="available for ACME validation and HTTPS redirects",
+            success="free on this host for ACME validation and HTTPS redirects",
             hint="Stop the service using TCP 80 or select --https-mode external and configure that proxy.",
         )
         _run_check(
             checks,
             "HTTPS port 443",
             lambda: _assert_port_available("tcp", 443, existing_fleet=existing_managed_gateway),
-            success="available for fleet traffic",
+            success="free on this host for fleet traffic",
             hint="Stop the service using TCP 443 or select --https-mode external and configure that proxy.",
         )
+        checks.append(PreflightCheck(
+            "Inbound firewall",
+            "warn",
+            "cannot be verified from this host; the certificate authority and every worker must reach "
+            f"TCP 80 and 443 on {', '.join(addresses) if addresses else 'the public address'}",
+            "Open both ports in the cloud security group or host firewall before continuing.",
+        ))
 
     image_result = _run_check(
         checks,
@@ -1383,19 +1472,23 @@ def command_preflight(paths: RuntimePaths, args: argparse.Namespace) -> None:
     print("Preflight passed. No fleet state was changed.")
 
 
-def _backup_standalone_if_running(paths: RuntimePaths, env: dict[str, str]) -> None:
-    """Create a recoverable snapshot before the first standalone-to-fleet conversion."""
+def _backup_standalone_if_running(paths: RuntimePaths, env: dict[str, str]) -> bool:
+    """Create a recoverable snapshot before the first standalone-to-fleet conversion.
+
+    Returns True when a backup was taken so a rollback can say it is still there.
+    """
     if str(env.get("FLEET_NETWORK_BACKEND") or "").strip():
-        return
+        return False
     compose = _docker_compose_command()
     postgres = _run([*compose, "ps", "-q", "postgres"], check=False)
     if postgres.returncode != 0 or not (postgres.stdout or "").strip():
-        return
+        return False
     scanner = paths.root / "scanner.sh"
     if not scanner.is_file():
         raise FleetCLIError("scanner.sh is missing; cannot create the required pre-conversion backup")
     print("Existing standalone control plane detected; creating a pre-conversion backup...")
     _run([str(scanner), "backup"], capture=False)
+    return True
 
 
 def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
@@ -1409,9 +1502,10 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
         scanner = paths.root / "scanner.sh"
         if not scanner.is_file():
             raise FleetCLIError("scanner.sh is missing from the runtime")
-        _backup_standalone_if_running(paths, env)
+        backup_created = _backup_standalone_if_running(paths, env)
         dotenv_snapshot = _snapshot_file(paths.dotenv)
         gateway_snapshot = _snapshot_file(paths.gateway_config)
+        created_dirs = [path for path in (paths.control, paths.fleet) if not path.exists()]
         operator_token = fleet_operator_token(env)
         profiles = {item.strip() for item in env.get("COMPOSE_PROFILES", "").split(",") if item.strip()}
         # Broker control-plane services share the Compose network. Loopback here
@@ -1454,6 +1548,12 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
             _wait_for_artifact_store(paths)
         except Exception as exc:
             print("Fleet initialization failed; restoring the previous runtime configuration...", file=sys.stderr)
+            failure = str(exc)
+            if https_mode == "managed" and isinstance(exc, FleetCLIError):
+                failure = f"{failure}. {_managed_gateway_failure_hint(paths)}"
+            if backup_created:
+                failure = f"{failure} The pre-conversion backup under backups/ is kept."
+            exc = FleetCLIError(failure)
             stop_error: Exception | None = None
             try:
                 _run([str(scanner), "stop"], check=False, capture=False)
@@ -1462,6 +1562,11 @@ def command_init(paths: RuntimePaths, args: argparse.Namespace) -> None:
             try:
                 _restore_file(paths.dotenv, dotenv_snapshot)
                 _restore_file(paths.gateway_config, gateway_snapshot)
+                for created in created_dirs:
+                    # Generated on this attempt only; leaving it behind makes a rolled-back host
+                    # look half-initialized to the next operator.
+                    if created.is_dir() and not any(created.iterdir()):
+                        created.rmdir()
             except Exception as restore_exc:
                 raise FleetCLIError(
                     f"broker initialization failed ({exc}) and automatic configuration restore failed: "
@@ -2601,6 +2706,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--workers", type=int, default=1)
     init.add_argument(
+        "--allow-running-work",
+        action="store_true",
+        help="proceed although queued or running scans will be interrupted by the conversion restart",
+    )
+    init.add_argument(
         "--no-reconcile-service",
         action="store_true",
         help="skip systemd timer installation and reconcile peers manually",
@@ -2621,6 +2731,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--skip-public-check", action="store_true")
     preflight.add_argument("--worker-image", help="registry tag or digest-pinned scanner image")
     preflight.add_argument("--workers", type=int, default=1)
+    preflight.add_argument("--allow-running-work", action="store_true")
     preflight.add_argument("--no-reconcile-service", action="store_true")
 
     token = subparsers.add_parser("join-token", help="mint a bounded worker join command")
@@ -2689,6 +2800,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(line_buffering=True)
+            except (ValueError, OSError):
+                pass
     parser = build_parser()
     args = parser.parse_args(argv)
     paths = RuntimePaths(Path(args.runtime).expanduser().resolve())
