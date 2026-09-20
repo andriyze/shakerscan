@@ -59,6 +59,13 @@ function formatLimit(value: number | undefined): string {
 export default function NewScanPage() {
   const router = useRouter()
   const toast = useToast()
+  // The form is server-rendered, so an operator can start typing before React has hydrated
+  // it; hydration then resets every controlled field and the input is lost (seen on a clean
+  // Linux install over a slow link: the target and the first "Allow active testing" click
+  // vanished and submit said "Enter at least one target URL"). Render the inputs only once
+  // they are live.
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
   const [target, setTarget] = useState('')
   const [batchMode, setBatchMode] = useState(false)
   const [batchTargets, setBatchTargets] = useState('')
@@ -488,6 +495,9 @@ export default function NewScanPage() {
         <p className="mt-1 text-sm text-gray-400">One deterministic scan pipeline. Choose its resource budget and testing permissions.</p>
       </div>
 
+      {!hydrated ? (
+        <Card className="p-5 text-sm text-gray-400" role="status">Preparing the scan form…</Card>
+      ) : (
       <form
         noValidate
         onSubmit={handleSubmit}
@@ -769,6 +779,7 @@ export default function NewScanPage() {
           </Button>
         </div>
       </form>
+      )}
     </div>
   )
 }
