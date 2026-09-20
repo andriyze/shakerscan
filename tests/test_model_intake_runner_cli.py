@@ -165,3 +165,38 @@ def test_the_api_is_recreated_with_the_compose_file_the_runtime_actually_has(tmp
     assert cli._compose_file_args(tmp_path) == ["-f", str(tmp_path / "docker-compose.release.yml")]
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     assert cli._compose_file_args(tmp_path) == []
+
+
+def test_runtime_api_base_prefers_public_https_then_bind_host():
+    assert cli._runtime_api_base({"SHAKERSCAN_PUBLIC_API_URL": "https://scanner.example/"}) == "https://scanner.example"
+    assert cli._runtime_api_base({}) == "http://127.0.0.1:8080"
+    assert cli._runtime_api_base({"SHAKERSCAN_BIND_HOST": "0.0.0.0", "SHAKERSCAN_API_PORT": "9080"}) == "http://127.0.0.1:9080"
+    assert cli._runtime_api_base({"SHAKERSCAN_BIND_HOST": "fd00::1"}) == "http://[fd00::1]:8080"
+
+
+def test_status_reports_what_the_running_api_says_about_the_runner(tmp_path, monkeypatch):
+    # `.env` wired says only that the installer wrote it; the API container reads `.env` on
+    # (re)creation, so a failed recreate leaves the API blind while status said "wired".
+    (tmp_path / ".env").write_text("MODEL_INTAKE_RUNNER_URL=http://172.17.0.1:8092\n")
+    import io
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    answers = iter([
+        b'{"ready": true, "status": "READY"}',
+        b'{"ready": false, "status": "NOT_READY", "reason": "runner_service_not_configured"}',
+    ])
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_a, **_k: _Response(next(answers)))
+    assert cli._api_runner_readiness(tmp_path) == "ready"
+    assert cli._api_runner_readiness(tmp_path) == "not_ready (runner_service_not_configured)"
+
+    def refused(*_a, **_k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", refused)
+    assert cli._api_runner_readiness(tmp_path) == "unreachable (OSError)"

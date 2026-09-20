@@ -212,6 +212,11 @@ MODEL_INTAKE_ROOTFS_INPUTS_SHA256=$ROOTFS_INPUTS_SHA256
 MODEL_INTAKE_RUNNER_EGRESS_POLICY=deny-all
 EOF
 
-echo "Runner service installed but not enabled. Configure a production receipt signer and builder identity"
-echo "in /etc/shakerscan/model-intake-runner.env, copy its internal token to the API secret store, then run:"
-echo "  systemctl enable --now shakerscan-model-intake-runner"
+if [ "${MODEL_INTAKE_RUNNER_MANAGED_INSTALL:-0}" = "1" ]; then
+    # The runner CLI enables the unit and wires the API itself; this advice is for a manual install.
+    echo "Runner service installed; the installer enables it next."
+else
+    echo "Runner service installed but not enabled. Configure a production receipt signer and builder identity"
+    echo "in /etc/shakerscan/model-intake-runner.env, copy its internal token to the API secret store, then run:"
+    echo "  systemctl enable --now shakerscan-model-intake-runner"
+fi

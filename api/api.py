@@ -9346,6 +9346,28 @@ def _model_intake_auto_observed_embedding(job: dict[str, Any]) -> str | None:
     return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
 
 
+def _model_intake_auto_runner_outcome(job: dict[str, Any]) -> tuple[str, str | None]:
+    """Return the runner receipt's verdict and its first phase failure for a completed job.
+
+    A runner job that *ran to completion* still carries the guest's verdict (``PASS``, ``FAIL``,
+    ``TIMEOUT``...) and the phase that failed. The review must surface that, not a generic
+    "conversion completed without ..." line that hides the real cause in the receipt.
+    """
+    result = _model_intake_json_object(job.get("result_json"))
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
+    status = str(payload.get("status") or "").upper() or "UNKNOWN"
+    errors = observations.get("errors") if isinstance(observations.get("errors"), list) else []
+    first = next((item for item in errors if isinstance(item, dict) and item.get("message")), None)
+    detail = None
+    if first:
+        detail = (
+            f"phase {first.get('phase') or 'unknown'} failed with {first.get('type') or 'error'}: "
+            f"{str(first.get('message'))[:500]}"
+        )
+    return status, detail
+
+
 async def _model_intake_auto_memory_mib(
     conn: Any,
     submission_id: str,
@@ -9584,6 +9606,12 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 _model_intake_json_object(job.get("error_json")).get("message")
                 or "controlled conversion failed"
             ))
+        outcome, detail = _model_intake_auto_runner_outcome(job)
+        if outcome != "PASS":
+            raise RuntimeError(
+                f"controlled conversion did not pass (runner receipt {outcome}): "
+                f"{detail or 'see the signed runner receipt'}"
+            )
         rescan = response.get("conversion_rescan")
         next_subjects = (
             rescan.get("next_runtime_subjects") if isinstance(rescan, dict) else None
@@ -9641,6 +9669,15 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "calibration failed"))
+        # A calibration receipt reads FAIL by design: there is no known-answer digest to match yet
+        # and the guest records the observed one. Only an execution that never produced a digest
+        # is a failure here.
+        outcome, detail = _model_intake_auto_runner_outcome(job)
+        if outcome in {"TIMEOUT", "CRASHED", "UNSUPPORTED", "INCOMPLETE"}:
+            raise RuntimeError(
+                f"calibration did not complete (runner receipt {outcome}): "
+                f"{detail or 'see the signed runner receipt'}"
+            )
         digest = _model_intake_auto_observed_embedding(job)
         if not digest:
             raise RuntimeError("calibration completed without a bounded embedding digest")
@@ -9682,6 +9719,12 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "runtime verification failed"))
+        outcome, detail = _model_intake_auto_runner_outcome(job)
+        if outcome != "PASS":
+            raise RuntimeError(
+                f"runtime verification did not pass (runner receipt {outcome}): "
+                f"{detail or 'see the signed runner receipt'}"
+            )
         await _update_model_intake_automatic_review(
             conn, review, state="freeze_pending", current_step="freeze_technical_evidence",
             progress=92, event="runtime_verification_completed",
