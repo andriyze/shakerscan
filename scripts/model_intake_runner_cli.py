@@ -517,6 +517,20 @@ def _api_request(url: str, token: str, method: str = "GET",
     return decoded
 
 
+def _compose_file_args(runtime: Path) -> list[str]:
+    """The Compose file the runtime actually runs on.
+
+    A source checkout has docker-compose.yml; an installed runtime ships only
+    docker-compose.release.yml, and a bare `docker compose up` there answers
+    "no configuration file provided" -- which left the API wired to the runner
+    in .env but never recreated, and the trust anchor never registered.
+    """
+    if (runtime / "docker-compose.yml").is_file():
+        return []
+    release = runtime / "docker-compose.release.yml"
+    return ["-f", str(release)] if release.is_file() else []
+
+
 def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) -> None:
     dotenv = _read_dotenv_values(runtime / ".env")
     token = dotenv.get("MODEL_INTAKE_OPERATOR_TOKEN", "")
@@ -795,9 +809,10 @@ def cmd_install(args, runtime: Path) -> int:
     # `docker compose restart` reuses the existing container and never re-reads
     # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on
     # answering readiness from its own container instead of the runner.
-    recreated = _run(["docker", "compose", "up", "-d", "api"], cwd=str(runtime))
+    recreated = _run(["docker", "compose", *_compose_file_args(runtime), "up", "-d", "api"], cwd=str(runtime))
     if recreated.returncode != 0:
-        print("Could not recreate the api container; run 'docker compose up -d api' by hand.",
+        print("Could not recreate the api container; run "
+              f"'docker compose {' '.join(_compose_file_args(runtime))} up -d api' by hand.",
               file=sys.stderr)
         return recreated.returncode
 

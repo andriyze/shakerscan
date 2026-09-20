@@ -154,3 +154,14 @@ def test_host_package_manifest_rejects_shell_syntax(tmp_path):
         assert "invalid package name" in str(exc)
     else:
         raise AssertionError("unsafe package manifest value was accepted")
+
+
+def test_the_api_is_recreated_with_the_compose_file_the_runtime_actually_has(tmp_path):
+    """An installed runtime ships only docker-compose.release.yml; a bare `docker compose up`
+    there answers "no configuration file provided", which left the API wired in .env but never
+    recreated and the runner trust anchor never registered."""
+    assert cli._compose_file_args(tmp_path) == []
+    (tmp_path / "docker-compose.release.yml").write_text("services: {}\n", encoding="utf-8")
+    assert cli._compose_file_args(tmp_path) == ["-f", str(tmp_path / "docker-compose.release.yml")]
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert cli._compose_file_args(tmp_path) == []
