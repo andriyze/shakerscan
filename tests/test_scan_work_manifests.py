@@ -763,3 +763,81 @@ def test_a_leading_underscore_is_a_legal_query_parameter_name():
 
     for name in ("_rsc", "_method", "_csrf", "__utm_source"):
         assert _token(name, name="query_parameter_names entry") == name
+
+
+def _surface_endpoint(path, query_names, *, normalized=None):
+    return {
+        "method": "GET", "scheme": "https", "host": "app.example.test",
+        "port": 443, "concrete_path": path, "normalized_path": normalized or path,
+        "query_keys": query_names, "body_field_names": [],
+        "content_type": None, "content_fingerprint": None,
+        "sensitive_path_redacted": False, "source": "web.crawl",
+    }
+
+
+def _built(endpoints, **kwargs):
+    return build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v1",
+            "status": "complete",
+            "endpoints": endpoints,
+        },
+        source_action_ids=("discover.web_crawl",),
+        **kwargs,
+    )
+
+
+def test_one_unrepresentable_endpoint_does_not_end_the_whole_scan():
+    """A real target's awkward output must degrade, not fail the run.
+
+    A thorough Scan of a production site failed outright after discovery had
+    already succeeded: one query parameter name the manifest could not express
+    raised during fan-out, the queue exhausted its retries, and the run was
+    marked failed. Every other endpoint discovery found went with it.
+    """
+    manifest = _built([
+        _surface_endpoint("/good", ["mode"]),
+        _surface_endpoint("/bad", ["filter[type]"]),
+        _surface_endpoint("/also-good", ["_rsc"]),
+    ])
+
+    assert sorted(e["canonical_path"] for e in manifest.entries) == ["/also-good", "/good"]
+    assert manifest.status == "partial"
+    assert "unrepresentable_endpoints:1" in (manifest.reason_code or "")
+
+
+def test_that_tolerance_never_extends_to_a_sensitive_path():
+    """Skipping an awkward entry must not also skip a security rejection.
+
+    An earlier attempt caught the base error class, so forgiving an
+    unrepresentable endpoint silently forgave the sensitive-path and
+    secret-value rejections too. Those keep failing the build outright.
+    """
+    with pytest.raises(ScanWorkManifestError, match="sensitive path"):
+        _built([
+            _surface_endpoint("/fine", ["mode"]),
+            _surface_endpoint(
+                "/reset", ["mode"],
+                normalized="/reset/secret_abcdefghijklmnopqrstuvwxyz",
+            ),
+        ])
+
+
+def test_the_skippable_error_is_a_strict_subset_of_manifest_errors():
+    """The distinction is in the type, not in matching on message text."""
+    from api.scan.work_manifests import (
+        ScanWorkManifestUnrepresentableError,
+        _reject_sensitive_keys,
+        _token,
+    )
+
+    assert issubclass(ScanWorkManifestUnrepresentableError, ScanWorkManifestError)
+    # A shape failure driven by target data is skippable...
+    with pytest.raises(ScanWorkManifestUnrepresentableError):
+        _token("filter[type]", name="query_parameter_names entry")
+    # ...while a secret rejection is not.
+    with pytest.raises(ScanWorkManifestError) as caught:
+        _reject_sensitive_keys({"authorization": "Bearer never-persist"})
+    assert not isinstance(caught.value, ScanWorkManifestUnrepresentableError)

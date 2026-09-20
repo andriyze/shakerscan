@@ -124,6 +124,20 @@ class ScanWorkManifestError(ValueError):
     """A work manifest is unsafe, unbounded, or detached from Scan authority."""
 
 
+class ScanWorkManifestUnrepresentableError(ScanWorkManifestError):
+    """One observation cannot be expressed in this manifest's shape.
+
+    Separated from its parent so a caller can drop a single endpoint a real
+    target produced and keep the rest, without that tolerance also forgiving the
+    rejections that exist to stop secrets and sensitive paths entering durable
+    evidence. Those keep raising the base class and still fail the build.
+
+    Only the shape helpers driven by target-supplied values raise this. Identity
+    and integrity checks do not: an entry whose route_id disagrees with its own
+    fields is a construction fault, not an awkward target.
+    """
+
+
 class ScanWorkManifestKind(str, Enum):
     ENDPOINT = "endpoint"
     CANDIDATE = "candidate"
@@ -167,7 +181,7 @@ def _token(value: Any, *, name: str, optional: bool = False) -> str | None:
     if optional and not normalized:
         return None
     if not _TOKEN_RE.fullmatch(normalized):
-        raise ScanWorkManifestError(f"{name} is invalid")
+        raise ScanWorkManifestUnrepresentableError(f"{name} is invalid")
     return normalized
 
 
@@ -181,7 +195,9 @@ def _uuid(value: Any, *, name: str) -> str:
 def _path(value: Any) -> str:
     path = str(value or "").strip()
     if not path.startswith("/") or "?" in path or "#" in path or len(path) > 4_096:
-        raise ScanWorkManifestError("canonical_path must be a bounded path without query values")
+        raise ScanWorkManifestUnrepresentableError(
+            "canonical_path must be a bounded path without query values"
+        )
     redacted = redact_path(path)
     if redacted != path:
         raise ScanWorkManifestError("canonical_path must not retain sensitive path material")
@@ -205,12 +221,12 @@ def _client_route_path(value: Any) -> str:
 
 def _string_list(value: Any, *, name: str, maximum: int) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or len(value) > maximum:
-        raise ScanWorkManifestError(f"{name} must be a bounded list")
+        raise ScanWorkManifestUnrepresentableError(f"{name} must be a bounded list")
     normalized = tuple(
         str(_token(item, name=f"{name} entry")) for item in value
     )
     if len(set(normalized)) != len(normalized):
-        raise ScanWorkManifestError(f"{name} contains duplicates")
+        raise ScanWorkManifestUnrepresentableError(f"{name} contains duplicates")
     return normalized
 
 
@@ -232,7 +248,7 @@ def _body_field_list(value: Any, *, name: str) -> tuple[str, ...]:
 
 def _integer(value: Any, *, name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        raise ScanWorkManifestError(f"{name} is outside its allowed range")
+        raise ScanWorkManifestUnrepresentableError(f"{name} is outside its allowed range")
     return value
 
 
@@ -976,6 +992,7 @@ def build_endpoint_manifest(
     }
     entries: list[dict[str, Any]] = []
     excluded_sensitive_paths = 0
+    unrepresentable_endpoints = 0
     for raw in surface_manifest.get("endpoints") or ():
         if not isinstance(raw, Mapping):
             raise ScanWorkManifestError("surface manifest endpoint must be an object")
@@ -985,18 +1002,36 @@ def build_endpoint_manifest(
             excluded_sensitive_paths += 1
             continue
         source = str(raw.get("source") or "unknown")
-        base = endpoint_entry_from_public_record(
-            raw,
-            target_binding_digest=target_binding_digest,
-            source_tool=source,
-            discovery_depth=depth_by_source.get(source, 1),
-            auth_lane=auth_lane,
-            selected_shard=selected_shard,
-        )
-        base["auth_lane"] = auth_lanes.get(base["route_id"], auth_lane)
-        base["request_ref_ids"] = list(request_refs.get(base["route_id"], ()))
+        try:
+            base = endpoint_entry_from_public_record(
+                raw,
+                target_binding_digest=target_binding_digest,
+                source_tool=source,
+                discovery_depth=depth_by_source.get(source, 1),
+                auth_lane=auth_lane,
+                selected_shard=selected_shard,
+            )
+            base["auth_lane"] = auth_lanes.get(base["route_id"], auth_lane)
+            base["request_ref_ids"] = list(request_refs.get(base["route_id"], ()))
+            # Validate the shape here, where one entry can still be dropped. The
+            # manifest validates every entry again on construction, and a single
+            # endpoint this shape cannot express raising there failed the
+            # fan-out, exhausted the queue retries, and failed a whole run after
+            # discovery had already succeeded.
+            _endpoint_entry(base, target_digest=target_binding_digest)
+        except ScanWorkManifestUnrepresentableError:
+            # One awkward observation from a real target is not a reason to end
+            # the scan. Secret and sensitive-path rejections raise the base class
+            # and deliberately still do.
+            unrepresentable_endpoints += 1
+            continue
         entries.append(base)
     entries.sort(key=lambda item: item["route_id"])
+    if unrepresentable_endpoints:
+        status = "partial" if status != "cancelled" else status
+        reason = ";".join(item for item in (
+            reason, f"unrepresentable_endpoints:{unrepresentable_endpoints}",
+        ) if item)[:200]
     if excluded_sensitive_paths:
         status = "partial" if status != "cancelled" else status
         exclusion_reason = (
