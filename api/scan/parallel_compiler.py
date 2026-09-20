@@ -1995,8 +1995,14 @@ def summarize_parallel_action_coverage(
     ]
     counts = Counter(str(item.get("status") or "missing") for item in actions)
     required = [item for item in actions if item.get("required") is True]
+    # Skipped as not applicable is a settled "nothing to do", not missing work.
     required_incomplete = [
-        item for item in required if str(item.get("status") or "missing") != "success"
+        item for item in required
+        if str(item.get("status") or "missing") != "success"
+        and not (
+            str(item.get("status") or "") == "skipped"
+            and str(item.get("reason_code") or "") == "not_applicable"
+        )
     ]
     reliability_reasons = {
         str(item.get("reason_code") or "missing_terminal_result")

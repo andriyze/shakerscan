@@ -309,3 +309,7 @@ def test_a_family_with_no_candidate_is_complete_not_unfinished():
     assert xss["proof_escalation"]["status"] == "not_applicable"
     assert report["coverage"]["selected_family_gaps"] == []
     assert "dependency_failed" not in report["coverage"]["reasons"]
+    # The verifiers were required and settled with nothing to do: that is not
+    # unfinished required work, so the coverage and the grade stay reliable.
+    assert report["coverage"]["status"] == "complete"
+    assert report["coverage"]["grade_reliability"]["reliable"] is True

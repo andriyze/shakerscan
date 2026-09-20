@@ -993,6 +993,16 @@ def test_generic_action_merge_is_partition_bound_and_truthful_on_child_loss():
     coverage = summarize_parallel_action_coverage(merged)
     assert coverage["status"] == "complete"
     assert coverage["grade_reliability"] == {"reliable": True, "reasons": []}
+
+    # A required verifier that settled skipped/not_applicable had nothing to do.
+    settled = json.loads(json.dumps(merged))
+    settled["actions"].append({
+        "action_id": "verify.xss", "capability_name": "xss.verify_batch", "required": True,
+        "status": "skipped", "reason_code": "not_applicable", "observation_manifest": None,
+    })
+    assert summarize_parallel_action_coverage(settled)["grade_reliability"] == {"reliable": True, "reasons": []}
+    settled["actions"][-1]["reason_code"] = "insufficient_plan_budget"
+    assert summarize_parallel_action_coverage(settled)["grade_reliability"]["reliable"] is False
     assert coverage["candidate_coverage"]["nuclei_passive"][
         "attempted_candidates"
     ] == 1

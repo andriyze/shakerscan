@@ -1737,7 +1737,16 @@ def finalize_scan_report(
         (action, action_results[action.action_id])
         for action in coverage_actions if action.required
     ]
-    statuses = {result.status for _action, result in required_rows}
+    # Skipped as not applicable is a settled "nothing to do", not degraded
+    # coverage and not a reason the run fell short.
+    settled_rows = [
+        (action, result) for action, result in required_rows
+        if not (
+            result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        )
+    ]
+    statuses = {result.status for _action, result in settled_rows}
     cancelled = CapabilityResultStatus.CANCELLED in statuses
     failed = bool(statuses & {
         CapabilityResultStatus.FAILED,
@@ -1750,7 +1759,7 @@ def finalize_scan_report(
     )
     reasons = sorted({
         result.reason_code.value
-        for _action, result in required_rows if result.reason_code is not None
+        for _action, result in settled_rows if result.reason_code is not None
     })
     work_manifests = [dict(item) for item in work_manifest_references]
     candidate_count = sum(
@@ -1786,9 +1795,12 @@ def finalize_scan_report(
         if item.get("severity") in {"critical", "high"}
         and item.get("verified") is not True
     )
+    # A required verifier that settled skipped/not_applicable had nothing to do
+    # on this surface. That is not unfinished required work: counting it made
+    # every target without a parameterised route read grade-unreliable.
     required_incomplete = [
         (action, result)
-        for action, result in required_rows
+        for action, result in settled_rows
         if result.status is not CapabilityResultStatus.SUCCESS
     ]
     posture_sections = _posture_sections(observations)
