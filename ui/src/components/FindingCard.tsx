@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { ChevronDown, ChevronRight, Copy, Check, ExternalLink, AlertTriangle, Shield, Bug, Zap } from 'lucide-react'
 import { parseEvidence, extractEndpoint, formatAnomaly, decodePayload, type ParsedEvidence } from '@/lib/evidence-parser'
+import { findingFreshness } from '@/lib/findingFreshness'
 import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 
 interface Finding {
@@ -33,6 +34,15 @@ interface Finding {
   needs_verification?: boolean
   verified?: boolean
   confidence?: number
+  // Lifecycle facts the API already returns. Status answers "has someone
+  // triaged this"; these answer "when was it actually observed", which is a
+  // different question the card never asked.
+  status?: string
+  first_seen_at?: string | null
+  last_seen_at?: string | null
+  resolved_at?: string | null
+  resurfaced_count?: number | null
+  last_verification_verdict?: string | null
 }
 
 type FindingTriage = NonNullable<Finding['precision_policy']> extends infer P
@@ -318,6 +328,14 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
   const severityConfig = getSeverityConfig(finding.severity)
   const SeverityIcon = severityConfig.icon
+  // When this was actually observed, which the card never showed: a critical
+  // last seen in May and one found a minute ago rendered identically.
+  const freshness = findingFreshness(finding)
+  const freshnessTone = freshness.tone === 'amber'
+    ? 'bg-amber-900/50 text-amber-200'
+    : freshness.tone === 'emerald'
+      ? 'bg-emerald-900/50 text-emerald-200'
+      : 'bg-gray-800 text-gray-300'
   const evidence = parseEvidence(finding.evidence)
   const triage = readFindingTriage(finding)
 
@@ -381,6 +399,19 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
                   needs verification
                 </span>
               )}
+              {freshness.badge && (
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${freshnessTone}`}>
+                  {freshness.badge}
+                </span>
+              )}
+              {finding.last_verification_verdict && (
+                <span
+                  className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs"
+                  title="The most recent retest verdict. A verdict does not change the finding's triage status on its own."
+                >
+                  retest: {String(finding.last_verification_verdict).replaceAll('_', ' ')}
+                </span>
+              )}
               {triage?.precision_policy?.severity_downgraded && triage?.precision_policy?.original_severity && (
                 <span
                   className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs"
@@ -392,6 +423,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
                 </span>
               )}
             </div>
+            <div className="mb-3 text-xs text-gray-500">{freshness.detail}</div>
             {(triage?.verification_reason || triage?.precision_policy?.confidence_cap_reason) && (
               <div className="mb-3 rounded border border-gray-800 bg-gray-950/60 p-2 text-xs text-gray-300">
                 {triage.verification_reason && (

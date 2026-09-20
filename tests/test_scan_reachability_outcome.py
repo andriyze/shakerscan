@@ -46,7 +46,11 @@ def test_an_observed_http_response_is_reachable_even_when_not_successful(status)
     report = finalize_scan_report(plan=plan, target_url="https://app.example.test",
         action_results=results, observations=observations)
     assert "error" not in report
-    assert report["result"]["score"] is not None
+    assert report["reachability"]["status"] == "reachable"
+    if report["result"]["risk_assessment_state"] == "not_examined":
+        assert report["result"]["score"] is None
+    else:
+        assert report["result"]["score"] is not None
 
 
 @pytest.mark.parametrize("positive", [

@@ -858,6 +858,258 @@ def absent_receipt_summary(
     return summary
 
 
+DISCOVERY_NETWORK_ACTION_IDS: tuple[str, ...] = (
+    "discover.ports",
+    "discover.services",
+)
+SUBDOMAIN_DISCOVERY_ACTION_ID = "discover.subdomains"
+
+_RECEIPT_STATUS_TO_STAGE_STATUS: Mapping[str, str] = MappingProxyType({
+    "succeeded": "success",
+    "success": "success",
+    "partial": "partial",
+    "timed_out": "timed_out",
+    "timeout": "timed_out",
+    "blocked": "blocked",
+    "cancelled": "cancelled",
+    "skipped": "skipped",
+})
+
+
+def _stage_status(receipt: Mapping[str, Any]) -> str:
+    raw = str(receipt.get("status") or "failed").strip().lower()
+    if raw != "cancelled" and receipt.get("timed_out") is True:
+        return "timed_out"
+    if raw in {"success", "succeeded"} and receipt.get("partial") is True:
+        return "partial"
+    return _RECEIPT_STATUS_TO_STAGE_STATUS.get(raw, "failed")
+
+
+def _receipt_observations(
+    receipt: Mapping[str, Any], *, kinds: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in receipt.get("observations") or []
+        if isinstance(item, Mapping)
+        and (kinds is None or str(item.get("kind") or "") in kinds)
+    ]
+
+
+async def load_discovery_shard_capability_receipts(
+    conn: Any, *, scan_id: str, action_ids: Sequence[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Read one placed discovery shard's durable capability receipts.
+
+    The receipt is the canonical record of what a discovery capability actually
+    did. Reading it keeps the parent's discovery summary on the same evidence
+    the shard's own action list renders, instead of a report section a canonical
+    shard never writes.
+    """
+    receipts: dict[str, Mapping[str, Any]] = {}
+    for row in await conn.fetch(
+        """SELECT action_id, status, receipt_json FROM scan_capability_actions
+           WHERE scan_id=$1 AND action_id = ANY($2::text[])""",
+        uuid.UUID(str(scan_id)), list(action_ids),
+    ):
+        try:
+            raw = row["receipt_json"]
+        except (KeyError, IndexError, TypeError):
+            # A narrower projection is not execution evidence either; fall
+            # through to the missing-receipt record below.
+            raw = None
+        try:
+            decoded = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        except (ValueError, UnicodeError):
+            decoded = None
+        receipt = dict(decoded) if isinstance(decoded, Mapping) else {}
+        if not receipt:
+            # A terminal action row without its receipt is not execution evidence.
+            receipt = {"status": "failed", "errors": ["capability_receipt_unavailable"]}
+        else:
+            receipt.setdefault("status", str(row["status"] or ""))
+        receipts[str(row["action_id"])] = receipt
+    return receipts
+
+
+async def placed_discovery_stage_receipts(
+    conn: Any,
+    *,
+    scan_id: str,
+    root_domain: str | None,
+    addresses: Sequence[str],
+    subdomain_enabled: bool,
+    network_enabled: bool,
+    legacy_result: Mapping[str, Any] | None = None,
+    error: Any = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve both placed discovery stage summaries from durable shard evidence.
+
+    Canonical first, exactly as the endpoint worklist: a V2 discovery shard
+    records its subdomain and network stages as capability receipts and never
+    writes the V1 report sections. Reading only the report reported every
+    executed placed producer as silent, so a parent whose shard resolved seven
+    subdomains still recorded ``status: failed`` with "placed discovery returned
+    no canonical subdomain receipt" and marked its own coverage partial. The
+    legacy report shape stays as the fallback, and a stage that truly produced
+    nothing still keeps the honest failure record.
+    """
+    legacy = dict(legacy_result or {})
+    receipts = await load_discovery_shard_capability_receipts(
+        conn,
+        scan_id=scan_id,
+        action_ids=(SUBDOMAIN_DISCOVERY_ACTION_ID, *DISCOVERY_NETWORK_ACTION_IDS),
+    )
+    subdomain = absent_receipt_summary(
+        subdomain_receipt_from_capability_receipts(receipts, root_domain=root_domain)
+        or legacy.get("subdomain_discovery"),
+        kind="subdomain",
+        enabled=subdomain_enabled,
+        root_domain=root_domain,
+        error=error,
+    )
+    network = absent_receipt_summary(
+        (network_receipt_from_capability_receipts(receipts, addresses=addresses)
+         or legacy.get("network_discovery")) if network_enabled else None,
+        kind="network",
+        enabled=network_enabled,
+        error=error,
+    )
+    return subdomain, network
+
+
+def subdomain_receipt_from_capability_receipts(
+    receipts: Mapping[str, Mapping[str, Any]], *, root_domain: str | None,
+) -> dict[str, Any] | None:
+    """Render the canonical subdomain receipt from a shard's stored receipt.
+
+    Returns None when the shard never recorded the action, so the caller can
+    fall back to a legacy report shape before declaring the producer silent.
+    """
+    receipt = receipts.get(SUBDOMAIN_DISCOVERY_ACTION_ID)
+    if not isinstance(receipt, Mapping) or not receipt:
+        return None
+    observations = _receipt_observations(receipt, kinds=frozenset({"subdomain"}))
+    return {
+        **_ABSENT_RECEIPT_SHAPES["subdomain"],
+        "enabled": True,
+        "status": _stage_status(receipt),
+        "root_domain": root_domain,
+        "observations": observations[:5000],
+        "observation_count": len(observations),
+        "observations_truncated": len(observations) > 5000,
+        "partial": bool(receipt.get("partial")),
+        "timed_out": bool(receipt.get("timed_out")),
+        "errors": [str(item) for item in receipt.get("errors") or []][:20],
+        "budget_consumed": dict(receipt.get("budget_consumed") or {}),
+        "durable_budget_settled": bool(receipt.get("budget_consumed") is not None),
+    }
+
+
+def network_receipt_from_capability_receipts(
+    receipts: Mapping[str, Mapping[str, Any]], *, addresses: Sequence[str],
+    expected_action_ids: Sequence[str] = DISCOVERY_NETWORK_ACTION_IDS,
+) -> dict[str, Any] | None:
+    """Summarize expected enabled actions, not just the actions that succeeded."""
+    expected = tuple(dict.fromkeys(expected_action_ids))
+    if set(expected) - set(DISCOVERY_NETWORK_ACTION_IDS):
+        raise ValueError("unknown expected network discovery action")
+    present = [
+        (action_id, receipts[action_id])
+        for action_id in expected
+        if isinstance(receipts.get(action_id), Mapping) and receipts[action_id]
+    ]
+    if not present:
+        return None
+    actions: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    consumed: dict[str, int] = {}
+    errors: list[str] = []
+    missing = set(expected) - {action_id for action_id, _ in present}
+    for action_id in expected:
+        if action_id in missing:
+            present.append((action_id, {
+                "status": "failed", "errors": [f"missing_capability_receipt:{action_id}"],
+            }))
+    for action_id, receipt in present:
+        rows = _receipt_observations(receipt)
+        observations.extend(rows)
+        for name, amount in dict(receipt.get("budget_consumed") or {}).items():
+            consumed[str(name)] = consumed.get(str(name), 0) + int(amount)
+        action_errors = [str(item) for item in receipt.get("errors") or []]
+        errors.extend(action_errors)
+        actions.append({
+            "action_id": action_id,
+            "capability_name": str(receipt.get("capability_name") or ""),
+            "status": _stage_status(receipt),
+            "partial": bool(receipt.get("partial")),
+            "timed_out": bool(receipt.get("timed_out")),
+            "errors": action_errors,
+            "observations": rows,
+            "budget_consumed": dict(receipt.get("budget_consumed") or {}),
+            "reason_code": str(receipt.get("reason_code") or (action_errors[0] if action_errors else "")),
+        })
+    open_ports: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for item in observations:
+        if str(item.get("kind") or "") != "open_port":
+            continue
+        identity = (
+            str(item.get("address") or ""),
+            int(item.get("port") or 0),
+            str(item.get("transport") or "tcp"),
+        )
+        if identity not in seen:
+            seen.add(identity)
+            open_ports.append(item)
+    services = [item for item in observations if str(item.get("kind") or "") == "service"]
+    # Only a completed port search with no open ports justifies not fingerprinting
+    # anything. Budget, authority, placement and missing-receipt gaps stay incomplete.
+    ports = next((action for action in actions if action["action_id"] == "discover.ports"), {})
+    no_ports = ports.get("status") == "success" and not open_ports
+    benign_skips = {
+        action["action_id"] for action in actions
+        if action["action_id"] == "discover.services" and action["status"] == "skipped"
+        and action["reason_code"] == "not_applicable" and no_ports
+    }
+    statuses = {action["status"] for action in actions if action["action_id"] not in benign_skips}
+    all_inapplicable = bool(actions) and all(
+        action["status"] == "skipped" and action["reason_code"] == "not_applicable"
+        for action in actions
+    )
+    if "cancelled" in statuses:
+        status = "cancelled"
+    elif all_inapplicable:
+        # Every recorded action self-skipped: the stage produced nothing, and
+        # calling that success would launder an unexamined surface.
+        status = "skipped"
+    elif statuses & {"failed", "blocked", "partial", "timed_out", "skipped"}:
+        status = "partial" if observations else (
+            "blocked" if statuses == {"blocked"} else "failed"
+        )
+    else:
+        status = "success"
+    return {
+        **_ABSENT_RECEIPT_SHAPES["network"],
+        "enabled": True,
+        "status": status,
+        "addresses": list(addresses),
+        "actions": actions,
+        "observations": observations[:5000],
+        "open_ports": open_ports[:5000],
+        "services": services[:5000],
+        "observation_count": len(observations),
+        "observations_truncated": len(observations) > 5000,
+        "partial": status == "partial",
+        "timed_out": any(action["timed_out"] or action["status"] == "timed_out" for action in actions),
+        "errors": errors[:20],
+        "budget_consumed": consumed,
+        "durable_budget_settled": not missing and all(
+            receipt.get("budget_consumed") is not None for _, receipt in present
+        ),
+    }
+
+
 async def load_discovery_shard_receipts(
     conn: Any, *, scan_id: str,
 ) -> tuple[dict[str, str], dict[str, list[Mapping[str, Any]]]]:
@@ -1093,8 +1345,14 @@ __all__ = [
     "ScanContinuationError",
     "ScanPlanRevision",
     "amended_scan_plan_revision",
+    "DISCOVERY_NETWORK_ACTION_IDS",
+    "SUBDOMAIN_DISCOVERY_ACTION_ID",
     "build_discovery_continuation_manifests",
     "continuation_manifest_offsets",
+    "load_discovery_shard_capability_receipts",
+    "network_receipt_from_capability_receipts",
+    "placed_discovery_stage_receipts",
+    "subdomain_receipt_from_capability_receipts",
     "merge_scan_action_continuation",
     "root_scan_plan_revision",
     "scan_discovery_result_digest",

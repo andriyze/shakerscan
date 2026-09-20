@@ -51,6 +51,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
+from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -11654,7 +11655,7 @@ async def list_scans(
                    s.shard_index, s.shard_count
         """
         query = f"""
-            SELECT {scan_columns},
+            SELECT {scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
                    COALESCE(t.name, ait.name) as target_name,
                    t.root_domain,
                    ait.target_type as ai_target_type
@@ -11741,7 +11742,7 @@ async def list_scans(
 
     scans = []
     for row in rows:
-        scan = dict(row)
+        scan = project_scan_assessment_row(dict(row))
         if scan.get("options") is not None:
             scan["options"] = (
                 _sanitize_scan_options(scan["options"])
@@ -12281,7 +12282,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         lines = []
     # When the displayed row is a parallel parent, its children own execution
     # and therefore own the raw log keys. Aggregate their bounded feeds so the
-    # parent page does not misleadingly show "No logs yet" while shards run.
+    # parent page does not misleadingly show "No logs yet" while children run.
+    # The discovery child runs first and alone, often for minutes on a thorough
+    # profile, so it must be part of the feed or the page stays blank exactly
+    # when the operator is watching most closely.
     # Model Intake activity is content-free and also stored in the durable scan
     # result. Use it when Redis live logs have expired or when an older worker
     # failed before it could emit live lines, so the UI does not become blank.
@@ -12306,9 +12310,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
                     if row and str(row.get("scan_role") or "") == "parent":
                         shard_rows = await conn.fetch(
                             """
-                            SELECT id, shard_index, status, current_phase
+                            SELECT id, shard_index, scan_role, status, current_phase
                             FROM scans
-                            WHERE parent_scan_id=$1 AND scan_role='shard'
+                            WHERE parent_scan_id=$1
+                              AND scan_role IN ('parallel_discovery', 'shard')
                             ORDER BY shard_index ASC NULLS LAST, created_at ASC
                             """,
                             scan_uuid,

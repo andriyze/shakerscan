@@ -22,6 +22,8 @@ from api.scan.continuation import (
     continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     endpoint_worklist_from_manifest_entries,
+    network_receipt_from_capability_receipts,
+    subdomain_receipt_from_capability_receipts,
     merge_scan_action_continuation,
 )
 from api.scan.capability_result import CapabilityResultStatus
@@ -1113,3 +1115,121 @@ def test_continuation_ceiling_subtracts_cumulative_work_round_usage():
         name: max(0, amount - int(work_action.requested_budget.get(name, 0)))
         for name, amount in reclaimed.items()
     }
+
+
+def _subdomain_receipt(hosts):
+    return {
+        "status": "success",
+        "partial": False,
+        "timed_out": False,
+        "errors": [],
+        "capability_name": "subdomains.discover",
+        "budget_consumed": {"hosts_attempted": 1, "tool_wall_seconds": 11},
+        "observations": [
+            {"kind": "subdomain", "host": host, "root_domain": "example.test"}
+            for host in hosts
+        ],
+    }
+
+
+def test_canonical_subdomain_receipt_is_read_from_the_shard_capability_receipt():
+    """A placed producer that ran is not a producer that returned nothing.
+
+    A V2 discovery shard records its stages as durable capability receipts and
+    never writes the V1 ``subdomain_discovery`` report section. Sourcing the
+    parent's stage summary from the report alone reported every executed placed
+    stage as failed ("placed discovery returned no canonical subdomain
+    receipt"), which then marked the parent's coverage partial with
+    ``subdomain_discovery_failed``.
+    """
+    receipts = {
+        "discover.subdomains": _subdomain_receipt(["a.example.test", "b.example.test"]),
+    }
+    summary = subdomain_receipt_from_capability_receipts(
+        receipts, root_domain="example.test",
+    )
+
+    assert summary is not None
+    assert summary["status"] == "success"
+    assert summary["enabled"] is True
+    assert summary["root_domain"] == "example.test"
+    assert summary["observation_count"] == 2
+    assert summary["schema_version"] == "canonical-scan-subdomain-discovery/v1"
+    # The record the merge keeps must not be the "silent producer" failure.
+    kept = absent_receipt_summary(
+        summary, kind="subdomain", enabled=True, root_domain="example.test",
+    )
+    assert kept["status"] == "success"
+    assert kept["errors"] == []
+
+
+def test_absent_subdomain_capability_receipt_still_falls_back_and_then_fails():
+    """No receipt at all keeps the honest failure record, never a clean skip."""
+    assert subdomain_receipt_from_capability_receipts({}, root_domain="example.test") is None
+    failed = absent_receipt_summary(
+        None, kind="subdomain", enabled=True, root_domain="example.test",
+    )
+    assert failed["status"] == "failed"
+    assert failed["errors"] == [
+        "placed discovery returned no canonical subdomain receipt"
+    ]
+
+
+def test_canonical_network_receipt_reports_open_ports_from_shard_receipts():
+    receipts = {
+        "discover.ports": {
+            "status": "success",
+            "capability_name": "ports.discover",
+            "errors": [],
+            "budget_consumed": {"tcp_ports_attempted": 92, "hosts_attempted": 4},
+            "observations": [
+                {"kind": "open_port", "address": "192.0.2.10", "port": 443, "transport": "tcp"},
+                {"kind": "open_port", "address": "192.0.2.10", "port": 443, "transport": "tcp"},
+                {"kind": "open_port", "address": "192.0.2.11", "port": 80, "transport": "tcp"},
+            ],
+        },
+        "discover.services": {
+            "status": "success",
+            "capability_name": "service.fingerprint",
+            "errors": [],
+            "budget_consumed": {"tcp_ports_attempted": 8},
+            "observations": [
+                {"kind": "service", "address": "192.0.2.10", "port": 443, "name": "https"},
+            ],
+        },
+    }
+    summary = network_receipt_from_capability_receipts(
+        receipts, addresses=("192.0.2.10", "192.0.2.11"),
+    )
+
+    assert summary is not None
+    assert summary["status"] == "success"
+    assert summary["schema_version"] == "canonical-scan-network-discovery/v1"
+    assert len(summary["open_ports"]) == 2  # deduplicated by address/port/transport
+    assert len(summary["services"]) == 1
+    assert summary["addresses"] == ["192.0.2.10", "192.0.2.11"]
+    assert summary["budget_consumed"]["tcp_ports_attempted"] == 100
+
+
+def test_network_receipt_of_only_skipped_actions_is_not_reported_as_success():
+    """Skipped producers examined nothing; success would launder that."""
+    receipts = {
+        "discover.ports": {
+            "status": "skipped",
+            "capability_name": "ports.discover",
+            "errors": ["not_applicable"],
+            "observations": [],
+            "budget_consumed": {},
+        },
+    }
+    summary = network_receipt_from_capability_receipts(
+        receipts, addresses=(), expected_action_ids=("discover.ports",),
+    )
+
+    assert summary is not None
+    assert summary["status"] == "skipped"
+    assert summary["open_ports"] == []
+
+
+def test_network_receipt_is_absent_when_the_shard_recorded_no_network_action():
+    assert network_receipt_from_capability_receipts({}, addresses=()) is None

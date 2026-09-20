@@ -236,6 +236,25 @@ export default function NewScanPage() {
     ))
   }
 
+  // A conclusion page can send the operator here with the fix already chosen
+  // ("re-run with the standard active preset", "scan the serving origin").
+  useEffect(() => {
+    let params: URLSearchParams
+    try {
+      params = new URLSearchParams(window.location.search)
+    } catch {
+      return
+    }
+    const presetParam = params.get('preset')
+    const targetParam = params.get('target')
+    if (targetParam) setTarget(targetParam)
+    if (presetParam === 'standard_active') {
+      setActiveTesting(true)
+      setFamilyPreset('standard_active')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   function handleActiveTestingChange(enabled: boolean) {
     setActiveTesting(enabled)
     if (enabled) {

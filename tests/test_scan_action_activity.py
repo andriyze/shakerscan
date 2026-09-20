@@ -180,6 +180,27 @@ def test_parallel_scan_activity_combines_child_logs_and_status_fallbacks():
     ]
 
 
+def test_parallel_scan_activity_names_the_discovery_child_and_orders_it_first():
+    """A thorough parent runs its discovery child alone for minutes before any
+    shard exists. The feed must carry that child, labelled for what it is
+    rather than as "Shard 0"."""
+    lines = parallel_scan_activity_lines(
+        shards=(
+            {"id": "disc", "shard_index": -1, "scan_role": "parallel_discovery",
+             "status": "running", "current_phase": "discover.web_content"},
+            {"id": "shard-a", "shard_index": 0, "scan_role": "shard",
+             "status": "queued", "current_phase": "queued"},
+        ),
+        child_logs={"disc": ("[scan] Started Discover Web Content \u00b7 35%",)},
+        limit=10,
+    )
+
+    assert lines == [
+        "[Discovery] [scan] Started Discover Web Content \u00b7 35%",
+        "[Shard 1] queued \u00b7 Queued",
+    ]
+
+
 def test_parallel_scan_activity_is_bounded_to_the_requested_tail():
     lines = parallel_scan_activity_lines(
         shards=({"id": "shard-a", "shard_index": 2, "status": "running"},),

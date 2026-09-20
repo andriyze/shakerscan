@@ -52,6 +52,9 @@ function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: bool
   if (scan.status !== 'completed') {
     return <span className="text-gray-500">Not available</span>
   }
+  if (scan.risk_assessment_state === 'not_examined' || scan.application_observed === false) {
+    return <span className="text-amber-200">Application not examined</span>
+  }
   if (!scan.grade) {
     return <span className="text-gray-500">No observed posture</span>
   }

@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.request_shape import public_request_body_shape
+from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
@@ -234,6 +235,11 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 # The reviewed katana crawl rate. The argv template documents 5 requests per
 # second; the enforced plan may go up to it but never past the reservation.
 _KATANA_MAX_RATE_PER_SECOND = 5
+# The time box a crawl may hold when its reservation funds one. The rate ceiling
+# above is the politeness control; this is only how long that polite rate runs,
+# and every run stays bounded by the reservation the operator authorized.
+_KATANA_MAX_CRAWL_SECONDS = 600
+_BROWSER_MAX_CRAWL_SECONDS = 900
 
 # The image's own Chromium. Katana downloads its own browser when this is absent,
 # which a worker with no general egress cannot do: it then reports a completed
@@ -247,6 +253,27 @@ _BROWSER_MAX_REQUESTS_PER_SECOND = 10
 # Both crawl tools are the same binary with the same compact output, so every
 # branch that parses, meters, or pins katana must cover the headless variant.
 KATANA_TOOLS = frozenset({"katana", "katana_headless"})
+
+# One retained crawl record (URL, method, status, source) is a few hundred bytes
+# of JSONL even with raw request and body omitted. A flat 80 KB cap therefore
+# ended every crawl that used more than ~300 of the 1,500 requests a thorough
+# profile reserves, and ended it as a failure that discarded the records it
+# had. The cap follows the reservation the operator already paid for.
+AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST = 512
+AGENT_TOOL_OUTPUT_BYTES_CEILING = 8_000_000
+
+
+def agent_tool_output_bytes(reserved_budget: Mapping[str, Any] | None, *, floor: int) -> int:
+    """Bytes of tool output to retain for a reservation, never below ``floor``."""
+    try:
+        requests = int((reserved_budget or {}).get("http_requests") or 0)
+    except (TypeError, ValueError):
+        requests = 0
+    return max(
+        int(floor),
+        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST),
+    )
+
 
 # Compact tool output is one short record per line, not katana's JSONL mode with
 # embedded request/response bodies, so these bounds cost little memory. They must
@@ -1033,11 +1060,20 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "katana requires two reserved wall-clock seconds"
             )
-        desired_duration = min(30, max(0, http - 1))
-        duration = min(desired_duration, wall - 1)
+        # A flat 30-second box spent 150 of a thorough Scan's 60,000 authorized
+        # requests and returned one route from a real site. The reservation is
+        # already the ceiling -- rate is derived from it below -- so the crawl
+        # runs for the wall time it actually holds. More budget buys a longer
+        # look at the same polite rate, never a louder one.
+        # Reserve the teardown window first. Sizing the crawl to the whole wall
+        # and taking the grace from what is left gives the crawler and its
+        # supervisor the same deadline, which is the race this grace exists to
+        # avoid; a longer crawl must not buy itself a shorter shutdown.
+        shutdown_grace = min(5, max(1, wall // 10))
+        desired_duration = min(_KATANA_MAX_CRAWL_SECONDS, max(0, http - 1))
+        duration = min(desired_duration, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError("katana requires two reserved HTTP requests")
-        shutdown_grace = min(5, wall - duration)
         # Spend the reserved request budget instead of throttling to one request
         # per second and discarding it. A crawl that reserves 150 requests but
         # emits ~31 cannot enumerate a real application's surface: against an
@@ -1100,7 +1136,7 @@ def build_enforced_scanner_plan(
         # Deriving the duration from the reservation keeps the ceiling inside it:
         # rate_per_second * duration + 1 <= reserved http_requests.
         affordable = (http - 1) // _BROWSER_MAX_REQUESTS_PER_SECOND
-        duration = min(60, affordable, wall - shutdown_grace)
+        duration = min(_BROWSER_MAX_CRAWL_SECONDS, affordable, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
@@ -1730,6 +1766,30 @@ def wire_evidence_settlement(settlement: Mapping[str, Any], pinned_proxy: Any) -
             "source": "proxy_request_lines"}
 
 
+def _redirect_preserves_request_target(raw_url: Any, raw_location: Any) -> bool | None:
+    """Whether a redirect changed only the origin, judged before redaction.
+
+    Returns None when either side is missing or unparsable, so a caller can tell
+    "not a pure origin move" apart from "could not be determined".
+    """
+    request = str(raw_url or "").strip()
+    location = str(raw_location or "").strip()
+    if not request or not location:
+        return None
+    try:
+        probed = urllib.parse.urlsplit(request)
+        moved = urllib.parse.urlsplit(urllib.parse.urljoin(request, location))
+    except ValueError:
+        return None
+    if not moved.netloc or not probed.netloc:
+        return None
+    return (
+        (moved.path or "/") == (probed.path or "/")
+        and moved.query == probed.query
+        and moved.fragment == probed.fragment
+    )
+
+
 def _public_observed_url(value: Any) -> str | None:
     """Retain route shape while removing secrets from untrusted scanner output."""
     text = str(value or "").strip()
@@ -1850,12 +1910,29 @@ def parse_scanner_output(
                 })
             records.append(record)
         elif scanner == "ffuf":
+            observed = _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url"))
             records.append({
                 "kind": "content_discovery",
-                "url": _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url")),
+                "url": observed,
                 "status": item.get("status"),
                 "length": item.get("length"),
                 "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+                # Whether the redirect only moved the origin, decided on the raw
+                # pair before redaction. Redaction is not injective -- it strips
+                # the fragment outright and collapses every query value and
+                # secret-shaped path segment to one marker -- so this fact cannot
+                # be recovered downstream. One boolean carries it and leaks
+                # nothing: a route-specific redirect stays distinguishable from a
+                # blanket origin rewrite.
+                "redirect_preserves_request_target": _redirect_preserves_request_target(
+                    item.get("url") or (item.get("input", {}) or {}).get("FUZZ")
+                    if isinstance(item.get("input"), dict) else item.get("url"),
+                    item.get("redirectlocation") or item.get("redirect_location"),
+                ),
+                # How this host answers a path that cannot exist. Retained as an
+                # observation so the calibration is evidence in the receipt, not a
+                # filter applied out of band.
+                **({"negative_control": True} if is_negative_control_url(observed) else {}),
             })
         elif scanner == "httpx":
             technologies = item.get("tech") or item.get("technologies") or []

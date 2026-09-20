@@ -114,7 +114,7 @@ export default function ScanCoverageSection({ coverage }: Props) {
             {!endpointTelemetryUnavailable && <Progress value={coverage.endpoints.coverage} className="bg-blue-500" />}
             <p className="text-xs text-gray-500">
               {endpointTelemetryUnavailable
-                ? `Attempt telemetry unavailable · ${coverage.endpoints.discovered || 0} ${coverage.endpoints.basis === 'assigned_custom_endpoints' ? 'assigned' : 'discovered'}`
+                ? `${coverage.endpoints.discovered || 0} ${coverage.endpoints.basis === 'assigned_custom_endpoints' ? 'assigned' : 'discovered'} · how many were attempted was not reported`
                 : `${coverage.endpoints.tested || 0} tested / ${coverage.endpoints.discovered || 0} discovered`}
             </p>
           </div>

@@ -148,6 +148,66 @@ const COVERAGE_REASON_LABELS = {
   authentication_uncertain: 'Credential authority could not be confirmed',
 }
 
+// Why no application response was observed. The finalizer records the cause as a coverage
+// reason; the HTTP status is the fallback. Saying "authentication challenge" for a bound
+// origin that only redirects elsewhere sent operators to look for a login that does not exist.
+export function notExaminedExplanation(report) {
+  const reasons = new Set((Array.isArray(record(report.coverage).reasons) ? record(report.coverage).reasons : [])
+    .concat(Array.isArray(record(record(report.coverage).grade_reliability).reasons) ? record(record(report.coverage).grade_reliability).reasons : [])
+    .map((reason) => String(reason || '')))
+  if (reasons.has('bound_origin_redirects_off_origin')) {
+    return 'The bound origin answered every request with a redirect to another origin, so no application response was observed here. Scan the origin that serves the application (for example its www host) to examine it.'
+  }
+  const status = Number(record(report.http).status)
+  if ([401, 403, 407].includes(status)) {
+    return 'The scanner reached an authentication challenge that did not expose application content.'
+  }
+  return 'The responses observed on the bound origin did not expose application content.'
+}
+
+const ACTIVE_FAMILIES = new Set(['xss', 'sqli', 'nuclei_active', 'bola', 'sensitive_exposure', 'nosqli', 'authz_surface'])
+const ACTIVE_FAMILY_LABELS = {
+  xss: 'XSS', sqli: 'SQLi', nuclei_active: 'active templates', bola: 'BOLA',
+  sensitive_exposure: 'exposure', nosqli: 'NoSQLi', authz_surface: 'authz',
+}
+
+// The one thing to do next, derived from what limited this run. A page that lists every gap
+// but never says what to do about it leaves the operator to reverse-engineer the fix.
+export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http, authenticated, authenticationRequested, notExamined }) {
+  const steps = []
+  const target = String(targetUrl || '')
+  const encodedTarget = encodeURIComponent(target)
+  if (coverageReasons.includes('bound_origin_redirects_off_origin')) {
+    const destination = String(http.redirect_origin || http.redirect_location || http.location || '')
+    let origin = ''
+    try {
+      origin = destination ? new URL(destination, target || undefined).origin : ''
+    } catch {
+      origin = ''
+    }
+    steps.push({
+      key: 'serving-origin',
+      label: origin ? `Scan ${origin.replace(/^https?:\/\//, '')} instead` : 'Scan the origin that serves the application',
+      href: `/scan/new?target=${encodeURIComponent(origin || target)}`,
+    })
+  }
+  if (testingWarning) {
+    steps.push({
+      key: 'standard-active',
+      label: 'Re-run with the standard active preset',
+      href: `/scan/new?target=${encodedTarget}&preset=standard_active`,
+    })
+  }
+  if (!notExamined && !authenticated && !authenticationRequested) {
+    steps.push({
+      key: 'credentials',
+      label: 'Add credentials to examine the authenticated surface',
+      href: '/credentials',
+    })
+  }
+  return steps
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -161,7 +221,7 @@ export function scanResultPresentation(scan, assurance) {
   const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
   const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
   const weakExamination = ['none', 'weak', 'limited'].includes(assuranceBand)
-  const notExamined = result.risk_assessment_state === 'not_examined'
+  const notExamined = result.risk_assessment_state === 'not_examined' || result.application_observed === false
 
   let headline = 'No material vulnerability confirmed in this run'
   let explanation = findings.length
@@ -170,7 +230,7 @@ export function scanResultPresentation(scan, assurance) {
   let tone = 'caution'
   if (notExamined) {
     headline = 'Application was not examined'
-    explanation = 'The scanner reached an authentication challenge or another response that did not expose application content.'
+    explanation = notExaminedExplanation(report)
     tone = 'warning'
   } else if (confirmed.length) {
     headline = `${confirmed.length} confirmed material ${confirmed.length === 1 ? 'issue requires' : 'issues require'} action`
@@ -188,6 +248,18 @@ export function scanResultPresentation(scan, assurance) {
   const resolvedFamilies = Array.isArray(plan.resolved_families) ? plan.resolved_families : []
   const budgetProfile = String(plan.budget_profile || options.budget_profile || 'unknown')
   const activeTesting = policy.active_testing === true
+  // What "active" bought. Permission alone ran nothing: a run allowed active testing under the
+  // passive preset and the tile said "Active allowed" over a report with no active family in it.
+  const activeFamilies = resolvedFamilies.filter((family) => ACTIVE_FAMILIES.has(String(family)))
+  const activeFamiliesLabel = activeFamilies.map((family) => ACTIVE_FAMILY_LABELS[family] || String(family).replaceAll('_', ' ')).join(', ')
+  const testingSummary = !activeTesting
+    ? 'Passive only'
+    : activeFamilies.length
+      ? `Active · ${activeFamiliesLabel}`
+      : 'Active allowed · none selected'
+  const testingWarning = activeTesting && !activeFamilies.length
+    ? 'Active testing was allowed but the passive preset ran no active family. Re-run with the standard active preset to test XSS and SQLi.'
+    : null
   const smartCoverage = record(report.smart_coverage)
   const authStates = Array.isArray(smartCoverage.auth_states_tested) ? smartCoverage.auth_states_tested : []
   const authenticated = authStates.some((state) => String(state).toLowerCase() !== 'anonymous')
@@ -237,9 +309,19 @@ export function scanResultPresentation(scan, assurance) {
       ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
       : `${assuranceLabel} supports this run-level conclusion.`
   const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
+  const nextSteps = nextStepsFor({
+    targetUrl: String(scanRecord.target_url || scanRecord.target || ''),
+    testingWarning,
+    coverageReasons: coverageReasons.map((reason) => String(reason || '')),
+    http: record(report.http),
+    authenticated,
+    authenticationRequested,
+    notExamined,
+  })
 
   return {
     headline,
+    nextSteps,
     explanation,
     tone,
     confidence,
@@ -248,14 +330,17 @@ export function scanResultPresentation(scan, assurance) {
     coverageGapReasons,
     incompleteFamilies,
     observedCount: findings.length,
-    observedRiskScore: finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
-    observedRiskGrade: String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
+    observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
+    observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),
     budgetProfile,
     activeTesting,
     authenticated,
     authenticationRequested,
     authenticationAssurance,
     resolvedFamilies,
+    activeFamilies,
+    testingSummary,
+    testingWarning,
     requestCount: finiteNumber(budgetUsed.http_requests, null),
     missingHeaders,
     posturePenalty,

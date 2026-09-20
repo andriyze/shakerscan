@@ -189,6 +189,11 @@ def test_standard_active_and_custom_presets_resolve_once():
         "recon", "nuclei_passive", "xss", "sqli",
     )
     assert standard.policy.include_families == standard.execution_plan.resolved_families
+    # Permission alone is not a family selection: without a preset the run is
+    # passive, and the report says so rather than implying active work ran.
+    implied = resolve_scan_contract(policy={"active_testing": True})
+    assert implied.execution_plan.family_preset == "passive"
+    assert implied.execution_plan.resolved_families == ("recon", "nuclei_passive")
 
     custom = resolve_scan_contract(policy={
         "preset": "custom",

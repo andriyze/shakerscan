@@ -98,9 +98,21 @@ def templated_finding_identity(finding: dict) -> str | None:
             params.add(v.strip())
 
     method = str(evidence.get("method") or finding.get("method") or "GET").upper()
-    # vuln class: CWE is the stable discriminator; fall back to tool so distinct
-    # detectors don't collapse when CWE is absent.
-    vuln = str(finding.get("cwe") or "").strip() or str(finding.get("tool") or "").strip() or "generic"
+    # vuln class: CWE is the stable discriminator. Without one, the check that
+    # fired is the class: a template id plus the matcher that hit, or failing
+    # that the title. Falling back to the bare tool name keyed every CWE-less
+    # nuclei match on a route to one identity, so ten missing-header findings
+    # on "/" persisted as a single row whose title flipped on every scan.
+    template_id = str(evidence.get("template_id") or "").strip()
+    matcher_name = str(evidence.get("matcher_name") or "").strip()
+    check = template_id + (f"#{matcher_name}" if template_id and matcher_name else "")
+    vuln = (
+        str(finding.get("cwe") or "").strip()
+        or check
+        or str(finding.get("title") or "").strip().lower()
+        or str(finding.get("tool") or "").strip()
+        or "generic"
+    )
     return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
 
 

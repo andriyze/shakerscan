@@ -3,6 +3,7 @@ function record(value) {
 }
 
 function finiteScore(value) {
+  if (value === null || value === undefined || value === '') return null
   const score = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(score) ? score : null
 }
@@ -39,13 +40,18 @@ export function deviceScorePresentation(scan) {
     : (resultSummary.risk_score ?? resultSummary.score ?? scanRecord.score))
 
   if (!isDevice) {
-    if (resultSummary.risk_assessment_state === 'not_examined') {
+    if (resultSummary.risk_assessment_state === 'not_examined' || resultSummary.application_observed === false
+      || scanRecord.risk_assessment_state === 'not_examined' || scanRecord.application_observed === false) {
+      const reasons = new Set((Array.isArray(record(scanResult.coverage).reasons) ? record(scanResult.coverage).reasons : [])
+        .map((reason) => String(reason || '')))
       return {
         isDevice: false,
         status: 'not_examined',
         grade: null,
         score: null,
-        note: 'The scanner reached an authentication challenge or other non-application response, so no clean risk grade is available.',
+        note: reasons.has('bound_origin_redirects_off_origin')
+          ? 'The bound origin only redirected to another origin, so no application response was observed and no clean risk grade is available.'
+          : 'No application response was observed on the bound origin, so no clean risk grade is available.',
       }
     }
     const coverage = record(scanResult.coverage)

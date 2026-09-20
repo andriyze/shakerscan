@@ -2374,6 +2374,46 @@ show_status() {
         fi
     fi
 
+    # The UI is baked into its image while the API and workers run mounted
+    # source, so a rebuild that recreates the services still leaves the UI on
+    # whatever artifact was last built. Worker staleness has always been
+    # reported here; UI staleness was not, and a UI serving hours-old code
+    # reads to an operator as a flaky page rather than a stale build.
+    local ui_json ui_revision local_revision ui_expected_api api_fingerprint
+    ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+    ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
+    ui_expected_api="$(printf '%s' "$ui_json" | jq -r '.expected_api_build_fingerprint // empty' 2>/dev/null || true)"
+    api_fingerprint="$(curl -fsS "$api_url/health" 2>/dev/null | jq -r '.build_fingerprint // empty' 2>/dev/null || true)"
+    local_revision="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
+    if [ -n "$ui_revision" ]; then
+        echo ""
+        echo -e "${BLUE}UI Build:${NC}"
+        echo "  Serving:  $ui_revision"
+        # The same comparison the shell itself shows the operator, so the banner in
+        # the sidebar and this line can never disagree about one release identity.
+        if [ -n "$ui_expected_api" ] && [ "$ui_expected_api" != "unknown" ] \
+            && [ -n "$api_fingerprint" ] && [ "$ui_expected_api" != "$api_fingerprint" ]; then
+            echo -e "  API pair: ${RED}built against $ui_expected_api, API runs $api_fingerprint${NC}"
+            echo -e "            ${YELLOW}run './scanner.sh rebuild' to restore one release identity${NC}"
+        elif [ -n "$api_fingerprint" ]; then
+            echo -e "  API pair: ${GREEN}matches the running API ($api_fingerprint)${NC}"
+        fi
+        if [ -z "$local_revision" ]; then
+            echo "  Checkout: unknown (not a git checkout)"
+        elif build_versions_match "$local_revision" "$ui_revision"; then
+            echo -e "  Checkout: ${GREEN}$local_revision — UI matches this checkout${NC}"
+        elif git -C "$SCRIPT_DIR" cat-file -e "${ui_revision}^{commit}" 2>/dev/null \
+            && git -C "$SCRIPT_DIR" diff --quiet "$ui_revision" HEAD -- ui/ 2>/dev/null; then
+            # Built from an earlier commit, but nothing under ui/ has changed
+            # since. Saying STALE here would cry wolf on every backend commit and
+            # teach the operator to ignore the one that matters.
+            echo -e "  Checkout: ${GREEN}$local_revision — no UI changes since $ui_revision${NC}"
+        else
+            echo -e "  Checkout: ${RED}$local_revision — UI is STALE${NC}"
+            echo -e "            ${YELLOW}run './scanner.sh rebuild ui' before trusting the pages${NC}"
+        fi
+    fi
+
     echo ""
     echo -e "${BLUE}Access:${NC}"
     echo "  UI:  $(ui_base_url)"

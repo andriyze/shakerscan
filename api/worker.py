@@ -172,7 +172,7 @@ from scan.parallel_outcome import (
     mark_parallel_parent_coverage_incomplete as _mark_parallel_parent_coverage_incomplete,
     mark_parallel_parent_degraded as _mark_parallel_parent_degraded,
 )
-from scan.reachability import fail_unreachable_parallel_report
+from scan.assessment import finalize_parallel_assessment
 from scan.capability_execution import (
     ScanCapabilityContractError,
     fit_prepared_scan_capability,
@@ -231,12 +231,12 @@ from scan.continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     amended_scan_plan_revision,
-    absent_receipt_summary,
     build_discovery_continuation_manifests,
     continuation_manifest_offsets,
     discovery_shard_endpoint_worklist,
     load_discovery_shard_receipts,
     merge_scan_action_continuation,
+    placed_discovery_stage_receipts,
 )
 from scan.manifest_store import PostgresScanManifestStore
 from scan.continuation_rounds import (
@@ -292,6 +292,7 @@ from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
+from scan.negative_control import with_negative_controls
 from scan.surface_manifest import build_scan_surface_manifest
 from scan.placement_transport import write_private_placement_bundle
 from scan.private_state import (
@@ -15536,22 +15537,22 @@ async def process_scan_plan_job(job_data: dict):
             return
         recon_result = _as_report_dict(discovery.get('result')) or {}
         discovery_status = str(discovery.get('status') or '')
-        placed_subdomain_summary = absent_receipt_summary(
-            recon_result.get('subdomain_discovery'),
-            kind="subdomain",
-            enabled=canonical_subdomain_discovery,
-            root_domain=(
-                canonical_parent_job.target.allowed_root_domains[0]
-                if canonical_parent_job.target.allowed_root_domains else None
-            ),
-            error=discovery.get('error_message'),
-        ) or placed_subdomain_summary
-        placed_network_summary = absent_receipt_summary(
-            recon_result.get('network_discovery'),
-            kind="network",
-            enabled=canonical_network_discovery,
-            error=discovery.get('error_message'),
-        ) or placed_network_summary
+        async with db_pool.acquire() as conn:
+            placed_subdomain, placed_network = await placed_discovery_stage_receipts(
+                conn,
+                scan_id=discovery_scan_id,
+                root_domain=(
+                    canonical_parent_job.target.allowed_root_domains[0]
+                    if canonical_parent_job.target.allowed_root_domains else None
+                ),
+                addresses=canonical_parent_job.target.allowed_addresses,
+                subdomain_enabled=canonical_subdomain_discovery,
+                network_enabled=canonical_network_discovery,
+                legacy_result=recon_result,
+                error=discovery.get('error_message'),
+            )
+        placed_subdomain_summary = placed_subdomain or placed_subdomain_summary
+        placed_network_summary = placed_network or placed_network_summary
         if discovery_status == 'failed':
             # A failed producer may still have durable, trustworthy partial output. Harvest it
             # and continue; coverage truth is reported separately from the parent run status.
@@ -17023,11 +17024,10 @@ async def process_scan_merge_job(job_data: dict):
     scan_scoring.recompute_parallel_parent_assurance(
         merged, completed_count=completed_n, total_count=len(children),
     )
-    preflight_failed = fail_unreachable_parallel_report(
+    preflight_failed = finalize_parallel_assessment(
         merged, [_as_report_dict(child.get('result')) or {} for child in children],
     )
-    if preflight_failed:
-        agg_score = agg_grade = None
+    agg_score, agg_grade = merged['result'].get('score'), merged['result'].get('grade')
 
     # Correct the report's target identity to the actual scanned target (guards
     # against any stale per-shard input drift). `input` is a top-level section.
@@ -18783,6 +18783,7 @@ def _materialize_bounded_ffuf_wordlist(
             break
     if not selected:
         raise agent_tools.AgentToolError("ffuf bundled wordlist has no safe entries")
+    selected = with_negative_controls(selected, request_limit=request_limit, seed=scratch_dir)
     destination = Path(scratch_dir) / "bounded-wordlist.txt"
     descriptor = os.open(
         destination,
@@ -18995,7 +18996,7 @@ async def _execute_agent_scanner_process(
         read_streams = asyncio.create_task(
             _read_agent_tool_streams(
                 proc,
-                max_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES),
                 overflow=overflow,
             )
         )
@@ -19012,7 +19013,8 @@ async def _execute_agent_scanner_process(
                 _terminate_agent_tool_process_group(proc)
                 break
             if overflow.is_set():
-                status, error = "failed", "output_limit_exceeded"
+                # The retained records are trustworthy; only what followed is lost.
+                status, error = "success", "output_truncated"
                 _terminate_agent_tool_process_group(proc)
                 break
             proxy_limit = getattr(pinned_proxy, "limit_exceeded", None)
@@ -19044,11 +19046,9 @@ async def _execute_agent_scanner_process(
         )
         stdout = stdout.replace(pinned_origin, original_origin)
         if overflow.is_set() and status not in {"cancelled", "timeout"}:
-            status, error = "failed", "output_limit_exceeded"
-        if status not in {"cancelled", "timeout"}:
-            if error == "output_limit_exceeded":
-                status = "failed"
-            elif returncode not in (0, None) and not stdout.strip():
+            status, error = "success", "output_truncated"
+        if status not in {"cancelled", "timeout"} and error != "output_truncated":
+            if returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = (
                     "crawler_memory_bound_exceeded"
@@ -19193,7 +19193,7 @@ async def _execute_agent_scanner_process(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
-        "partial": (status == "timeout" and record_count > 0) or abnormal_exit,
+        "partial": (status == "timeout" and record_count > 0) or abnormal_exit or error == "output_truncated",
         "timed_out": status == "timeout",
         "output_lines": safe_lines,
         "line_count": record_count,

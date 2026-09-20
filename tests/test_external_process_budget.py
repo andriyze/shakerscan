@@ -63,16 +63,22 @@ def test_katana_supervisor_deadline_includes_bounded_shutdown_grace():
     crawl_seconds = int(
         plan.argv[plan.argv.index("-crawl-duration") + 1].removesuffix("s")
     )
-    assert crawl_seconds == 30
-    assert plan.timeout_ms == 35_000
+    # The crawl runs for the wall time it reserved, less the teardown window.
+    # A flat 30-second box left most of every reservation unspent: a thorough
+    # Scan authorizing 60,000 requests emitted 1,778 of them and a real site's
+    # crawl returned one route.
+    assert crawl_seconds == 70
+    # The supervisor still outlives the crawler, and the grace is reserved up
+    # front rather than taken from whatever the crawl did not use.
+    assert plan.timeout_ms == 75_000
+    assert 1 <= (plan.timeout_ms // 1_000) - crawl_seconds <= 5
     rate = plan.budget_proof["inputs"]["rate_per_second"]
     assert plan.hard_budget_dict == {
         "http_requests": rate * crawl_seconds + 1,
-        "tool_wall_seconds": 35,
+        "tool_wall_seconds": 75,
     }
-    # A 150-request reservation must fund a materially larger crawl than the
-    # one-request-per-second floor it used to be pinned to.
-    assert plan.hard_budget_dict["http_requests"] >= 75
+    # And the reservation is now substantially spent rather than abandoned.
+    assert plan.hard_budget_dict["http_requests"] >= 140
     assert plan.budget_proof["inputs"]["shutdown_grace_seconds"] == 5
 
 
@@ -397,3 +403,63 @@ def test_nuclei_pacing_never_raises_the_rate_above_the_existing_ceiling():
     # ...and the paced rate still fits the hold across the whole wall.
     hard = dict(plan.hard_budget)
     assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]
+
+
+def test_a_reserved_browser_dimension_is_actually_charged_on_success():
+    """Reserving a dimension and settling it at zero is not accounting.
+
+    web.browser_crawl now holds a browser reservation, but normal successful
+    settlement populated only wall time, HTTP requests and mutations. Every
+    Scan therefore still reported browser actions 0 of the profile's ceiling
+    while a real Chromium was driving the crawl.
+    """
+    import asyncio
+
+    from capabilities.scanner import ScannerExecutionAdapter
+    from runtime.capability_registry import CAPABILITY_REGISTRY as REGISTRY
+
+    reserved = {"http_requests": 600, "tool_wall_seconds": 150, "browser_actions": 60}
+
+    async def runner(payload, *, heartbeat):
+        del payload
+        await heartbeat()
+        return {
+            "status": "success",
+            "typed_output": {"records": []},
+            "settlement": {"mode": "exact", "actual": 2},
+            "elapsed_seconds": 3,
+            # A complete enforcement receipt, so the run settles on the ordinary
+            # success path. An incomplete one settles as execution-uncertain,
+            # which charges the whole reservation for every dimension and would
+            # make this test pass whether or not the browser dimension is
+            # accounted for at all.
+            "process_enforcement": {
+                "schema_version": "external-process-enforcement/v1",
+                "tool_name": "katana_headless",
+                "process_plan_digest": "b" * 64,
+                "hard_budget": dict(reserved),
+                "accounting_mode": "conservative",
+                "proof_method": "fixed_conservative_profile",
+                "parser_version": REGISTRY.require("web.browser_crawl").output_schema,
+            },
+        }
+
+    adapter = ScannerExecutionAdapter(
+        specification=REGISTRY.require("web.browser_crawl"),
+        process_payload={"tool_name": "katana_headless"},
+        process_runner=runner,
+        requested_budget=reserved,
+        redacted_execution={"capability_name": "web.browser_crawl"},
+    )
+
+    async def _heartbeat() -> None:
+        return None
+
+    result = asyncio.run(adapter.execute(heartbeat=_heartbeat, cancelled=lambda: False))
+    assert result.status == "success", "the test must exercise ordinary settlement"
+    charged = dict(result.actual_budget)
+
+    assert charged.get("browser_actions") == 60, (
+        "a browser reservation must settle against the browser ceiling"
+    )
+    assert charged["browser_actions"] <= reserved["browser_actions"]

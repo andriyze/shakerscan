@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import json
 import re
+from types import MappingProxyType
 from typing import Any, Mapping
 import urllib.parse
 
@@ -105,6 +106,92 @@ def scan_network_capability_allocation(
     return result
 
 
+# Discovery is what decides whether anything else has work. Its reservations were
+# fixed constants sized for the smallest profile and applied to every profile, so
+# a thorough Scan authorizing 60,000 requests spent 1,778 of them -- 3% -- and a
+# real site's crawl returned a single route. Each producer keeps its old constant
+# as the floor and scales toward a reviewed ceiling with the authority the
+# operator actually granted. Throughput is unchanged: the tools derive their rate
+# from the reservation, so a larger grant buys a longer look, not a louder one.
+SCAN_DISCOVERY_CAPABILITY_SCALING: Mapping[str, Mapping[str, tuple[int, int]]] = (
+    MappingProxyType({
+        "web.crawl": MappingProxyType({
+            # dimension: (ceiling, divisor of the matching Scan ceiling)
+            # The divisor is the backbone share these producers have always
+            # taken; only the ceiling moved. The request ceiling tracks what the
+            # unchanged polite crawl rate can emit in the wall time it holds.
+            "http_requests": (1_500, 10),
+            "tool_wall_seconds": (300, 10),
+        }),
+        "web.browser_crawl": MappingProxyType({
+            "http_requests": (2_400, 10),
+            "tool_wall_seconds": (400, 10),
+            # A browser crawl that reserves no browser actions cannot be metered
+            # against the browser ceiling at all: every Scan measured browser
+            # actions 0 of 3,000 while the crawl was driving a real Chromium.
+            "browser_actions": (400, 10),
+        }),
+        "web.content_discover": MappingProxyType({
+            "http_requests": (6_000, 10),
+            "tool_wall_seconds": (450, 10),
+        }),
+    })
+)
+_SCAN_CEILING_FOR_DIMENSION: Mapping[str, str] = MappingProxyType({
+    "http_requests": "max_http_requests",
+    "tool_wall_seconds": "max_tool_wall_seconds",
+    "browser_actions": "max_browser_actions",
+})
+
+
+def scan_discovery_reservation(
+    budget: Mapping[str, Any] | Any,
+    capability_name: str,
+    *,
+    registry_cost: Mapping[str, int],
+) -> dict[str, int] | None:
+    """Raise a discovery producer's fixed reservation toward the granted authority.
+
+    Never below the constant the capability has always reserved, so a small Scan
+    plans exactly as it did, and never above the reviewed ceiling.
+    """
+    scaled = scan_discovery_capability_allocation(budget, capability_name)
+    if scaled is None:
+        return None
+    merged = dict(registry_cost)
+    for dimension, amount in scaled.items():
+        merged[dimension] = max(int(merged.get(dimension, 0)), int(amount))
+    return merged
+
+
+def scan_discovery_capability_allocation(
+    budget: Mapping[str, Any] | Any, capability_name: str,
+) -> dict[str, int] | None:
+    """Scale one discovery producer's reservation with the granted authority.
+
+    Accepts either the ``max_*`` mapping the V1 allocators are given or a typed
+    ``ScanBudget``, so both engines read one scaling table.
+    """
+    scaling = SCAN_DISCOVERY_CAPABILITY_SCALING.get(str(capability_name))
+    if not scaling:
+        return None
+    if not isinstance(budget, Mapping):
+        budget = {
+            name: getattr(budget, name)
+            for name in _SCAN_CEILING_FOR_DIMENSION.values()
+            if hasattr(budget, name)
+        }
+    allocation: dict[str, int] = {}
+    for dimension, (ceiling, divisor) in scaling.items():
+        granted = _budget_integer(
+            budget, _SCAN_CEILING_FOR_DIMENSION[dimension], allow_zero=True,
+        )
+        # The same share of the grant as before, so a small Scan still keeps its
+        # backbone; the ceiling is what rose, so a large one is actually spent.
+        allocation[dimension] = min(ceiling, max(1, granted // divisor)) if granted else 0
+    return allocation
+
+
 def scan_template_capability_allocation(
     budget: Mapping[str, Any],
 ) -> dict[str, int] | None:
@@ -174,10 +261,7 @@ def scan_web_crawl_capability_allocation(
     wall = _budget_integer(budget, "max_tool_wall_seconds")
     if http < 4 or wall < 4:
         return None
-    return {
-        "http_requests": min(150, max(1, http // 10)),
-        "tool_wall_seconds": min(75, max(1, wall // 10)),
-    }
+    return scan_discovery_capability_allocation(budget, "web.crawl")
 
 
 def scan_content_discovery_capability_allocation(
@@ -188,10 +272,7 @@ def scan_content_discovery_capability_allocation(
     wall = _budget_integer(budget, "max_tool_wall_seconds")
     if http < 4 or wall < 4:
         return None
-    return {
-        "http_requests": min(220, max(1, http // 10)),
-        "tool_wall_seconds": min(75, max(1, wall // 10)),
-    }
+    return scan_discovery_capability_allocation(budget, "web.content_discover")
 
 
 def scan_tls_capability_allocation(

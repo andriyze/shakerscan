@@ -3036,7 +3036,7 @@ def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
                     WHERE s.target_id = t.id AND a.status = 'active'
                       AND a.approved_by IS NOT NULL
                       AND a.risk_tier = ANY(ARRAY['active', 'intrusive'])
-                      AND (a.action_name IS NULL OR a.action_name = 'target.authorization')
+                      AND a.action_name = 'target.authorization'
                       AND (a.expires_at IS NULL OR a.expires_at > NOW())
                       AND COALESCE(s.verdict, '') <> 'blocked'
                       AND (

@@ -70,8 +70,11 @@ through `shakerscan api`, `shakerscan scan`, `shakerscan hunt` and the MCP tools
 connected person's identity and role; a route the instance keeps closed answers with a refusal
 that names what is missing, so report it and choose another path rather than retrying.
 
-If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. Never invent removed wrapper
-commands; inspect `shakerscan --help` or `./scanner.sh help`.
+If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. The hosted SaaS client is
+also named `shakerscan` (Homebrew installs it at `/opt/homebrew/bin/shakerscan`) and has no `api`,
+`hunt` or `connect` subcommand; if `shakerscan api` answers `Unknown command`, you are running
+that client, not this launcher. Never invent removed wrapper commands; inspect
+`shakerscan --help` or `./scanner.sh help`.
 
 ## Default agent behavior
 
@@ -140,7 +143,10 @@ shakerscan api POST /scans '{"target":"https://example.com","budget_profile":"ba
 ```
 
 For active work, first establish explicit authorization (authorize the target once, or provide a
-bounded approval receipt) and the policy. Never silently upgrade a passive request.
+bounded approval receipt) and the policy. Never silently upgrade a passive request. Permission is
+not a family selection: `active_testing: true` without `"preset": "standard_active"` (or explicit
+`include_families`) runs only the passive families, and the scan page says so. Read
+`resolved_families` on the result, not the permission.
 
 ### Build freshness and repeatability
 

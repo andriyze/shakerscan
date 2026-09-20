@@ -364,6 +364,10 @@ async def list_findings(
     research_campaign_id: Optional[str] = None,
     search: Optional[str] = None,
     seen_within_days: Optional[int] = Query(None, ge=1),
+    # The complement of seen_within_days. A finding's status answers whether
+    # someone triaged it, not whether it is still there, so a list needs to be
+    # able to ask for the ones no recent scan observed.
+    not_seen_within_days: Optional[int] = Query(None, ge=1),
     first_seen_within_days: Optional[int] = Query(None, ge=1),
     resolved_within_days: Optional[int] = Query(None, ge=1),
     sort_by: Optional[str] = Query(None, pattern="^(severity|first_seen|last_seen|cvss)$"),
@@ -386,7 +390,7 @@ async def list_findings(
         "severity", "status", "source_type", "target_id", "ai_target_id", "device_target_id",
         "scan_id", "root_domain", "verification_verdict", "verification_mode",
         "verified_only", "driven_by", "research_campaign_id", "search",
-        "seen_within_days", "first_seen_within_days",
+        "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
         "include_candidates", "include_details", "limit", "offset",
     }
@@ -521,6 +525,10 @@ async def list_findings(
         if seen_within_days:
             query += f" AND f.last_seen_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
             params.append(seen_within_days)
+            param_idx += 1
+        if not_seen_within_days:
+            query += f" AND f.last_seen_at < NOW() - INTERVAL '1 day' * ${param_idx}"
+            params.append(not_seen_within_days)
             param_idx += 1
 
         if first_seen_within_days:

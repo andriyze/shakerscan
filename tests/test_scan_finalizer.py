@@ -307,7 +307,7 @@ def test_finalizer_does_not_grade_headers_from_an_auth_challenge():
     assert report["result"]["posture_penalty"] == 0
     assert report["result"]["risk_assessment_state"] == "not_examined"
     assert report["result"]["grade_reliable"] is False
-    assert report["result"]["grade"].endswith("*")
+    assert report["result"]["grade"] is None
     assert report["coverage"]["grade_reliability"] == {
         "reliable": False,
         "reasons": ["application_not_observed"],
@@ -1096,3 +1096,131 @@ def test_xss_execution_preserves_distinct_existing_impact_assessments():
         assert finding["evidence"]["cvss"] == assessment
         assert finding["proof_state"] == "verified"
         assert finding["evidence"]["execution_sink"]["signal"] == "dialog"
+
+
+def _apex_redirect_report(*, status: int = 301, location: str = "https://www.app.example.test/"):
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "http_observation",
+        "request": {
+            "origin": "https://app.example.test",
+            "pinned_address": "192.0.2.10",
+        },
+        "response": {
+            "status": status,
+            "location": location,
+            "bytes_observed": 0,
+            "security_headers": {
+                "content-security-policy": "default-src 'self'",
+                "referrer-policy": "strict-origin-when-cross-origin",
+                "permissions-policy": "camera=()",
+                "strict-transport-security": "max-age=31536000",
+            },
+        },
+    },)}
+    return finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+
+def test_an_origin_that_only_forwards_elsewhere_did_not_observe_the_application():
+    """A thorough Scan of an apex that 301s everywhere examined nothing.
+
+    Measured on a real static site: every path under the bound origin
+    permanently redirected to its www origin, so the only body the run ever
+    retrieved was empty -- and it still reported grade A*, "0 issue(s) found"
+    and application_observed true. The redirect's own headers are real posture
+    and stay reported; the application behind it was never reached.
+    """
+    report = _apex_redirect_report()
+
+    assert report["http"]["application_origin_redirect"] == "https://www.app.example.test"
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["application_observed"] is False
+    assert report["result"]["grade_reliable"] is False
+    assert "bound_origin_redirects_off_origin" in report["coverage"]["reasons"]
+    assert "bound_origin_redirects_off_origin" in (
+        report["coverage"]["grade_reliability"]["reasons"]
+    )
+    # Header posture observed on the redirect is still published, not discarded.
+    assert report["http"]["observed_headers"]["referrer-policy"]
+
+
+def test_a_same_host_redirect_is_not_a_forwarded_origin():
+    """A relative/same-origin move is not an off-origin redirect."""
+    report = _apex_redirect_report(location="https://app.example.test/home")
+
+    assert "application_origin_redirect" not in report["http"]
+    assert "bound_origin_redirects_off_origin" not in report["coverage"]["reasons"]
+
+
+def test_the_report_keeps_which_tls_versions_the_server_accepts():
+    """The probe handshakes every version; the report kept one of them.
+
+    tls.inspect records supported_protocols and a per-protocol attempt table, so
+    a report can say whether a deprecated version is still enabled and which
+    cipher the server chose for each. The projection kept eight fields and threw
+    the rest away, so the report could no longer answer either question and the
+    UI's protocol panel rendered nothing.
+    """
+    baseline = _action("baseline.tls", 0, capability_name="tls.inspect")
+    final = _action("finalize.report", 1, dependencies=(baseline.action_id,))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID,
+        execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(baseline, final),
+    )
+    results = {baseline.action_id: _result_with_observation_count(baseline, 1)}
+    observations = {baseline.action_id: ({
+        "kind": "tls_protocol",
+        "status": "success",
+        "origin": "https://app.example.test/",
+        "port": 443,
+        "protocol": "TLSv1.2",
+        "cipher": "ECDHE-RSA-AES128-GCM-SHA256",
+        "cipher_bits": 128,
+        "supported_protocols": ["TLSv1.2", "TLSv1.3"],
+        "protocol_attempts": [
+            {"protocol": "TLSv1.2", "supported": True, "cipher": "ECDHE-RSA-AES128-GCM-SHA256",
+             "cipher_bits": 128, "alpn_protocol": "h2"},
+            {"protocol": "TLSv1.3", "supported": True, "cipher": "TLS_AES_128_GCM_SHA256",
+             "cipher_bits": 128, "alpn_protocol": "h2"},
+            {"protocol": "TLSv1.0", "supported": False},
+        ],
+        "legacy_protocol_negotiated": False,
+        "certificate_subject": "CN=app.example.test",
+        "certificate_public_key_bits": 2048,
+        "certificate_public_key_type": "RSAPublicKey",
+        "certificate_signature_hash": "sha256",
+        "certificate_signature_algorithm": "sha256WithRSAEncryption",
+    },)}
+
+    report = finalize_scan_report(
+        plan=plan,
+        target_url="https://app.example.test",
+        action_results=results,
+        observations=observations,
+    )
+
+    tls = report["tls"]
+    assert tls["supported_protocols"] == ["TLSv1.2", "TLSv1.3"]
+    assert [item["protocol"] for item in tls["protocol_attempts"]] == [
+        "TLSv1.2", "TLSv1.3", "TLSv1.0",
+    ]
+    assert tls["legacy_protocol_negotiated"] is False
+    # The certificate detail the same panel reads keeps its report-facing names.
+    assert tls["certificate"]["key_size"] == 2048
+    assert tls["certificate"]["key_algo"] == "RSAPublicKey"
+    assert tls["certificate"]["sig_algo"] == "sha256"

@@ -37,7 +37,8 @@ class ScanFamilyPreviewRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    preset: Literal["passive", "standard_active", "custom"] = "passive"
+    # None resolves exactly as a submission does: the passive preset.
+    preset: Literal["passive", "standard_active", "custom"] | None = None
     budget_profile: Literal["fast", "balanced", "thorough", "deep"] = "balanced"
     include_families: list[str] = Field(default_factory=list, max_length=100)
     exclude_families: list[str] = Field(default_factory=list, max_length=100)

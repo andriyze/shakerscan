@@ -101,3 +101,36 @@ def test_non_endpoint_finding_returns_none():
 def test_evidence_url_used_when_top_level_url_absent():
     f = {"cwe": "CWE-639", "evidence": {"url": "http://h/orders/7"}}
     assert templated_finding_identity(f) == fid("http://h/orders/99")
+
+
+# ---- CWE-less checks keep their own identity ---------------------------------
+
+def _header_finding(header):
+    return {
+        "url": "http://crapi-web/", "tool": "nuclei", "cwe": None,
+        "title": f"Missing HTTP response header: {header}",
+        "evidence": {"template_id": "http-missing-security-headers", "matcher_name": header.lower()},
+    }
+
+
+def test_cwe_less_template_matches_on_one_route_do_not_merge():
+    """Ten missing-header findings on "/" have no CWE. Keying them on the tool
+    name gave every one the same identity, so a scan that observed ten
+    persisted one row and dropped nine. Every target scanned since carried
+    exactly one header finding whose title changed from scan to scan."""
+    headers = ("Content-Security-Policy", "X-Frame-Options", "Referrer-Policy",
+               "Strict-Transport-Security", "X-Content-Type-Options")
+    identities = {templated_finding_identity(_header_finding(h)) for h in headers}
+    assert len(identities) == len(headers)
+
+
+def test_the_same_cwe_less_check_still_collapses_across_payloads():
+    a = templated_finding_identity({**_header_finding("X-Frame-Options"), "url": "http://crapi-web/?v=1"})
+    b = templated_finding_identity({**_header_finding("X-Frame-Options"), "url": "http://crapi-web/?v=2"})
+    assert a == b
+
+
+def test_a_cwe_less_finding_without_a_template_falls_back_to_its_title():
+    a = templated_finding_identity({"url": "http://h/", "tool": "custom", "title": "Directory listing enabled"})
+    b = templated_finding_identity({"url": "http://h/", "tool": "custom", "title": "Server banner disclosed"})
+    assert a != b

@@ -42,11 +42,17 @@ NETWORK_CALLS = frozenset({
 })
 REVIEWED_IMPORTS = {
     "api/capabilities/http.py": frozenset({"httpx"}),
+    # DNS-over-HTTPS fallback for record types a limited forwarder drops. It is
+    # a resolver query, never target traffic: the destination is a fixed public
+    # resolver URL, the payload is a DNS question for a public name, and the
+    # seam refuses internal names and private addresses before it is reached.
+    "api/capabilities/dns.py": frozenset({"httpx"}),
     "api/runtime/pinned_http_replay.py": frozenset({"aiohttp", "socket"}),
     "api/runtime/target_bound_socket.py": frozenset({"socket"}),
 }
 REVIEWED_CALLS = {
     "api/capabilities/http.py": frozenset({"httpx.AsyncClient"}),
+    "api/capabilities/dns.py": frozenset({"httpx.AsyncClient"}),
     "api/capabilities/tls.py": frozenset({"asyncio.open_connection"}),
     "api/runtime/pinned_http_replay.py": frozenset({
         "aiohttp.ClientSession", "aiohttp.TCPConnector",
@@ -80,9 +86,11 @@ NON_TARGET_EGRESS_ALLOWLIST = (
     ("api/fleet_agent.py", "api_request", "control_plane"),
     ("api/model_intake_admission_webhook.py", "_verify", "control_plane"),
     ("api/model_intake_firecracker_runner.py", "_unix_http", "local_ipc"),
+    ("api/capabilities/dns.py", "_doh_query", "resolver"),
 )
 NON_TARGET_EGRESS_CLASSES = frozenset({
     "ai_provider", "control_plane", "object_storage", "package_update", "local_ipc",
+    "resolver",
 })
 REQUIRED_TARGET_TRANSPORT_ANCHORS = {
     "api/agent_tools.py": (
