@@ -18996,7 +18996,7 @@ async def _execute_agent_scanner_process(
         read_streams = asyncio.create_task(
             _read_agent_tool_streams(
                 proc,
-                max_bytes=_AGENT_TOOL_OUTPUT_BYTES,
+                max_bytes=agent_tools.agent_tool_output_bytes(reserved_budget, floor=_AGENT_TOOL_OUTPUT_BYTES),
                 overflow=overflow,
             )
         )
@@ -19013,7 +19013,8 @@ async def _execute_agent_scanner_process(
                 _terminate_agent_tool_process_group(proc)
                 break
             if overflow.is_set():
-                status, error = "failed", "output_limit_exceeded"
+                # The retained records are trustworthy; only what followed is lost.
+                status, error = "success", "output_truncated"
                 _terminate_agent_tool_process_group(proc)
                 break
             proxy_limit = getattr(pinned_proxy, "limit_exceeded", None)
@@ -19045,11 +19046,9 @@ async def _execute_agent_scanner_process(
         )
         stdout = stdout.replace(pinned_origin, original_origin)
         if overflow.is_set() and status not in {"cancelled", "timeout"}:
-            status, error = "failed", "output_limit_exceeded"
-        if status not in {"cancelled", "timeout"}:
-            if error == "output_limit_exceeded":
-                status = "failed"
-            elif returncode not in (0, None) and not stdout.strip():
+            status, error = "success", "output_truncated"
+        if status not in {"cancelled", "timeout"} and error != "output_truncated":
+            if returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = (
                     "crawler_memory_bound_exceeded"
@@ -19194,7 +19193,7 @@ async def _execute_agent_scanner_process(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_seconds": max(0, int(time.monotonic() - monotonic_started + 0.999)),
-        "partial": (status == "timeout" and record_count > 0) or abnormal_exit,
+        "partial": (status == "timeout" and record_count > 0) or abnormal_exit or error == "output_truncated",
         "timed_out": status == "timeout",
         "output_lines": safe_lines,
         "line_count": record_count,

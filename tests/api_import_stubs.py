@@ -34,6 +34,9 @@ def install_fastapi_exception_stubs() -> None:
 
         get = post = patch = put = delete = _decorator
 
+        def include_router(self, *args, **kwargs):
+            return None
+
     class Response:
         def __init__(self, content=None, status_code=200, headers=None, media_type=None):
             self.content = content

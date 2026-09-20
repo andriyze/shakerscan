@@ -87,6 +87,21 @@ test('an unobservable application leads with not examined instead of clean', () 
   assert.equal(result.notExamined, true)
 })
 
+test('a bound origin that only redirects is explained as a redirect, not a login wall', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: { risk_assessment_state: 'not_examined', application_observed: false },
+      http: { status: 301, posture_observed: false, missing_security_headers: [] },
+      coverage: { reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+
+  assert.equal(result.headline, 'Application was not examined')
+  assert.match(result.explanation, /redirect to another origin/)
+  assert.doesNotMatch(result.explanation, /authentication challenge/)
+})
+
 test('confirmed and candidate material findings get distinct conclusions', () => {
   const confirmed = scanResultPresentation({
     result: { findings: [{ severity: 'high', verified: true, proof_state: 'verified' }] },

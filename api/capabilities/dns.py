@@ -268,10 +268,23 @@ async def inspect_dns_posture(
         "query_count": len(query_plan),
         "errors": errors[:20],
     }
+    # State why the result is partial ahead of the per-query errors. The receipt
+    # takes the first recognised reason code; without one, a partial result was
+    # explained as "the bounded output limit was reached", which was false: the
+    # queries that are missing timed out or failed at the resolver, nothing was
+    # cut off.
+    stated: list[str] = []
+    if errors:
+        stated.append(
+            "timed_out"
+            if all("Timeout" in item.split(":", 1)[-1] for item in errors)
+            else "adapter_failed"
+        )
     return {
         "ok": True,
         "status": "partial" if errors else "success",
         "partial": bool(errors),
+        "errors": [*stated, *errors[:20]],
         "observation": observation,
         "budget_consumed": {
             "hosts_attempted": len({name for _label, name, _type in query_plan}),

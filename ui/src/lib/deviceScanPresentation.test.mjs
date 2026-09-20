@@ -172,7 +172,23 @@ test('a DAST run that only reached an auth challenge withholds the clean grade',
   assert.equal(presentation.status, 'not_examined')
   assert.equal(presentation.grade, null)
   assert.equal(presentation.score, null)
-  assert.match(presentation.note, /authentication challenge/)
+  assert.match(presentation.note, /No application response was observed/)
+})
+
+
+test('a web scan whose bound origin only redirects says so instead of blaming a login', () => {
+  const presentation = deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A*',
+    score: 100,
+    result: {
+      result: { risk_score: 100, risk_grade: 'A', risk_assessment_state: 'not_examined', application_observed: false },
+      coverage: { status: 'partial', reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  })
+
+  assert.equal(presentation.status, 'not_examined')
+  assert.match(presentation.note, /only redirected to another origin/)
 })
 
 

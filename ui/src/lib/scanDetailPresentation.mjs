@@ -148,6 +148,23 @@ const COVERAGE_REASON_LABELS = {
   authentication_uncertain: 'Credential authority could not be confirmed',
 }
 
+// Why no application response was observed. The finalizer records the cause as a coverage
+// reason; the HTTP status is the fallback. Saying "authentication challenge" for a bound
+// origin that only redirects elsewhere sent operators to look for a login that does not exist.
+export function notExaminedExplanation(report) {
+  const reasons = new Set((Array.isArray(record(report.coverage).reasons) ? record(report.coverage).reasons : [])
+    .concat(Array.isArray(record(record(report.coverage).grade_reliability).reasons) ? record(record(report.coverage).grade_reliability).reasons : [])
+    .map((reason) => String(reason || '')))
+  if (reasons.has('bound_origin_redirects_off_origin')) {
+    return 'The bound origin answered every request with a redirect to another origin, so no application response was observed here. Scan the origin that serves the application (for example its www host) to examine it.'
+  }
+  const status = Number(record(report.http).status)
+  if ([401, 403, 407].includes(status)) {
+    return 'The scanner reached an authentication challenge that did not expose application content.'
+  }
+  return 'The responses observed on the bound origin did not expose application content.'
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
@@ -170,7 +187,7 @@ export function scanResultPresentation(scan, assurance) {
   let tone = 'caution'
   if (notExamined) {
     headline = 'Application was not examined'
-    explanation = 'The scanner reached an authentication challenge or another response that did not expose application content.'
+    explanation = notExaminedExplanation(report)
     tone = 'warning'
   } else if (confirmed.length) {
     headline = `${confirmed.length} confirmed material ${confirmed.length === 1 ? 'issue requires' : 'issues require'} action`

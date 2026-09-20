@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import asyncio
 
+from dataclasses import replace
+
 import pytest
 
 from api.scan import finalizer
+from api.scan.capability_result import CapabilityResultReason, CapabilityResultStatus
 from api.scan.continuation import network_receipt_from_capability_receipts
 from api.scan.surface_manifest import build_scan_surface_manifest, wildcard_redirect_urls
 from scanner.manifests import normalize_endpoint
 from tests.test_scan_finalizer import _result_with_observation_count
-from tests.test_scan_orchestrator import SCAN_ID, _action
+from tests.test_scan_orchestrator import SCAN_ID, _action, _result
 from tests.test_scan_surface_manifest import TARGET, _summary
 from api.scan.action_plan import ScanActionPlan
 
@@ -268,3 +271,36 @@ def test_redirect_query_changes_are_not_blanket_origin_rewrites():
     for row in rows:
         row["redirect_location"] += "?token=some-value"
     assert wildcard_redirect_urls(stamp_producer_flag(rows)) == frozenset()
+
+
+def test_a_family_with_no_candidate_is_complete_not_unfinished():
+    """crAPI offers xss and sqli no parameterised route. Their verifiers settled
+    skipped/not_applicable over an empty slice and the finalizer called the family
+    partial (`action_incomplete`), so every shard and the parent grade read
+    unreliable and the page said "2 selected check families did not finish"."""
+    baseline = _action("baseline.http", 0, capability_name="http.request")
+    verify = _action("verify.xss.r01", 1, capability_name="xss.verify_batch", dependencies=(baseline.action_id,))
+    verify = replace(verify, capability_args={"slice": {"count": 0}, "manifest_entries": 0}, action_digest=None)
+    prove = _action("prove.xss.r01", 2, capability_name="xss.browser_prove_batch", dependencies=(verify.action_id,))
+    prove = replace(prove, capability_args={"slice": {"count": 0}}, action_digest=None)
+    actions = (baseline, verify, prove,
+               _action("finalize.report", 3, dependencies=(baseline.action_id, verify.action_id, prove.action_id)))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                         target_binding_digest="a" * 64, actions=actions)
+    results = {
+        baseline.action_id: _result_with_observation_count(baseline, 1),
+        verify.action_id: _result(verify, status=CapabilityResultStatus.SKIPPED, reason=CapabilityResultReason.NOT_APPLICABLE),
+        prove.action_id: _result(prove, status=CapabilityResultStatus.SKIPPED, reason=CapabilityResultReason.NOT_APPLICABLE),
+    }
+    observations = {baseline.action_id: [{
+        "kind": "http_observation", "request": {"origin": "https://app.example.test", "pinned_address": "192.0.2.10"},
+        "response": {"status": 200, "bytes_observed": 10, "security_headers": dict(HEADERS), "selected_headers": dict(HEADERS)},
+    }]}
+    report = finalizer.finalize_scan_report(plan=plan, target_url="https://app.example.test",
+                                            action_results=results, observations=observations)
+    xss = next(row for row in report["coverage"]["family_coverage"] if row["family"] == "xss")
+    assert xss["coverage_status"] == "complete"
+    assert xss["reason"] == "no_candidates"
+    assert xss["proof_escalation"]["status"] == "not_applicable"
+    assert report["coverage"]["selected_family_gaps"] == []
+    assert "dependency_failed" not in report["coverage"]["reasons"]

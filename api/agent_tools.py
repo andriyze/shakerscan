@@ -254,6 +254,27 @@ _BROWSER_MAX_REQUESTS_PER_SECOND = 10
 # branch that parses, meters, or pins katana must cover the headless variant.
 KATANA_TOOLS = frozenset({"katana", "katana_headless"})
 
+# One retained crawl record (URL, method, status, source) is a few hundred bytes
+# of JSONL even with raw request and body omitted. A flat 80 KB cap therefore
+# ended every crawl that used more than ~300 of the 1,500 requests a thorough
+# profile reserves, and ended it as a failure that discarded the records it
+# had. The cap follows the reservation the operator already paid for.
+AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST = 512
+AGENT_TOOL_OUTPUT_BYTES_CEILING = 8_000_000
+
+
+def agent_tool_output_bytes(reserved_budget: Mapping[str, Any] | None, *, floor: int) -> int:
+    """Bytes of tool output to retain for a reservation, never below ``floor``."""
+    try:
+        requests = int((reserved_budget or {}).get("http_requests") or 0)
+    except (TypeError, ValueError):
+        requests = 0
+    return max(
+        int(floor),
+        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST),
+    )
+
+
 # Compact tool output is one short record per line, not katana's JSONL mode with
 # embedded request/response bodies, so these bounds cost little memory. They must
 # stay above a real application's emitted surface: katana fetches static assets

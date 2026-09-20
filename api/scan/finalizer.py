@@ -1565,7 +1565,7 @@ def finalize_scan_report(
             "family": family, "selected": True, "required": False,
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
-            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [],
+            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [], "_reasons": [],
             # Per-capability manifest size vs what the plan actually scheduled. A capability whose
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
@@ -1590,6 +1590,7 @@ def finalize_scan_report(
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
+            row["_reasons"].append(result.reason_code.value if result.reason_code is not None else "")
             declared = action.capability_args.get("manifest_entries")
             if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
                 # Every slice of one capability declares the same manifest size.
@@ -1619,6 +1620,7 @@ def finalize_scan_report(
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
+        batch_reasons = row.pop("_reasons")
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -1670,6 +1672,16 @@ def finalize_scan_report(
         zero_attempts = (
             row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
         )
+        # Every verifier settled skipped/not_applicable over an empty candidate set.
+        # The family ran against a surface that offered it nothing; that is a
+        # complete examination with no work, not one that failed to finish.
+        no_candidates = (
+            row["batch_actions"] > 0
+            and row["planned_candidates"] == 0
+            and row["unscheduled_candidates"] == 0
+            and all(status == "skipped" for status in statuses)
+            and all(reason == "not_applicable" for reason in batch_reasons)
+        )
         if row["batch_actions"] == 0:
             # Only escalation was planned for this family, so nothing established
             # its execution coverage. Reporting it complete would overstate work
@@ -1678,7 +1690,7 @@ def finalize_scan_report(
             row["reason"] = "no_verifier_action"
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif action_incomplete or zero_attempts:
+        elif (action_incomplete or zero_attempts) and not no_candidates:
             row["coverage_status"] = "partial"
             row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
             if row["required"]:
@@ -1699,7 +1711,7 @@ def finalize_scan_report(
                 selected_family_gaps.append(family)
         else:
             row["coverage_status"] = "complete"
-            row["reason"] = None
+            row["reason"] = "no_candidates" if no_candidates else None
     selected_family_gaps.sort()
 
     coverage_actions = [

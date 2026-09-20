@@ -73,7 +73,7 @@ def scan_action_activity_event(
 _DIAGNOSTIC_ERROR_CLASSES = frozenset({
     "timed_out", "timeout", "connection_limit_exceeded",
     "external_process_contract", "scanner_not_available",
-    "cancelled_before_execution", "output_limit_exceeded",
+    "cancelled_before_execution", "output_limit_exceeded", "output_truncated",
 })
 # Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
 # only when nothing more specific follows, so the scan must look past them.
@@ -226,11 +226,16 @@ def parallel_scan_activity_lines(
     lines: list[str] = []
     for position, shard in enumerate(shards, start=1):
         shard_id = str(shard.get("id") or "")
-        try:
-            index = int(shard.get("shard_index")) + 1
-        except (TypeError, ValueError):
-            index = position
-        prefix = f"[Shard {index}]"
+        if str(shard.get("scan_role") or "") == "parallel_discovery":
+            # The discovery child is not one of the numbered shards: it runs
+            # before them and feeds them, so name it for what it does.
+            prefix = "[Discovery]"
+        else:
+            try:
+                index = int(shard.get("shard_index")) + 1
+            except (TypeError, ValueError):
+                index = position
+            prefix = f"[Shard {index}]"
         raw_lines = list(child_logs.get(shard_id) or ())
         if raw_lines:
             for raw_line in raw_lines:

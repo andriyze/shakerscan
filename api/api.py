@@ -12282,7 +12282,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         lines = []
     # When the displayed row is a parallel parent, its children own execution
     # and therefore own the raw log keys. Aggregate their bounded feeds so the
-    # parent page does not misleadingly show "No logs yet" while shards run.
+    # parent page does not misleadingly show "No logs yet" while children run.
+    # The discovery child runs first and alone, often for minutes on a thorough
+    # profile, so it must be part of the feed or the page stays blank exactly
+    # when the operator is watching most closely.
     # Model Intake activity is content-free and also stored in the durable scan
     # result. Use it when Redis live logs have expired or when an older worker
     # failed before it could emit live lines, so the UI does not become blank.
@@ -12307,9 +12310,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
                     if row and str(row.get("scan_role") or "") == "parent":
                         shard_rows = await conn.fetch(
                             """
-                            SELECT id, shard_index, status, current_phase
+                            SELECT id, shard_index, scan_role, status, current_phase
                             FROM scans
-                            WHERE parent_scan_id=$1 AND scan_role='shard'
+                            WHERE parent_scan_id=$1
+                              AND scan_role IN ('parallel_discovery', 'shard')
                             ORDER BY shard_index ASC NULLS LAST, created_at ASC
                             """,
                             scan_uuid,

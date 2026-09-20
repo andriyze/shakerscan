@@ -4519,7 +4519,10 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
     }
 
 
-def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch):
+def test_agent_scanner_tool_keeps_retained_output_and_says_partial_at_the_cap(monkeypatch):
+    """A thorough crawl of a small marketing site produced more JSONL than the
+    flat cap, and the runner ended it as `failed` with every retained record
+    discarded. What was read is trustworthy; only the rest is missing."""
     class _PinnedProxy:
         def __init__(self, **_kwargs):
             self.limit_exceeded = asyncio.Event()
@@ -4555,7 +4558,7 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
             self.returncode = 0
             self.stdout = asyncio.StreamReader()
             self.stderr = asyncio.StreamReader()
-            self.stdout.feed_data(b"X" * 4096)
+            self.stdout.feed_data(b'{"url":"https://example.test/p"}\n' * 400)
             self.stdout.feed_eof()
             self.stderr.feed_eof()
 
@@ -4567,6 +4570,7 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
     redis = _Redis()
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
     monkeypatch.setattr(worker, "_AGENT_TOOL_OUTPUT_BYTES", 128)
+    monkeypatch.setattr(worker.agent_tools, "AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST", 128)
     monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
     asyncio.run(worker.process_agent_scanner_tool_job({
         "job_id": "agent-job-output-limit",
@@ -4582,9 +4586,19 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
     }))
 
     result = json.loads(redis.values["agent_tool_result:agent-job-output-limit"])
-    assert result["status"] == "failed"
-    assert result["error"] == "output_limit_exceeded"
-    assert sum(len(line) for line in result["output_lines"]) <= 128
+    assert result["status"] == "success"
+    assert result["partial"] is True
+    assert result["error"] == "output_truncated"
+    # Some records were kept, and not all 400: the cap ended the read, not the run.
+    assert 0 < result["line_count"] < 400
+
+
+def test_agent_tool_output_cap_follows_the_request_reservation():
+    tools = worker.agent_tools
+    assert tools.agent_tool_output_bytes({"http_requests": 1}, floor=80_000) == 80_000
+    assert tools.agent_tool_output_bytes(None, floor=80_000) == 80_000
+    assert tools.agent_tool_output_bytes({"http_requests": 1500}, floor=80_000) == 1500 * tools.AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST
+    assert tools.agent_tool_output_bytes({"http_requests": 10**9}, floor=80_000) == tools.AGENT_TOOL_OUTPUT_BYTES_CEILING
 
 
 class _CandidateProofConn:

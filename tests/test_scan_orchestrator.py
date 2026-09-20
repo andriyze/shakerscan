@@ -214,9 +214,11 @@ class FakeBackend:
 
 
 class FakeExecutor:
-    def __init__(self, *, fail_action: str | None = None, lose_action: str | None = None):
+    def __init__(self, *, fail_action: str | None = None, lose_action: str | None = None,
+                 inapplicable_action: str | None = None):
         self.fail_action = fail_action
         self.lose_action = lose_action
+        self.inapplicable_action = inapplicable_action
         self.executed: list[str] = []
         self.synthetic: list[tuple[str, str, bool]] = []
 
@@ -231,6 +233,12 @@ class FakeExecutor:
                 status=CapabilityResultStatus.FAILED,
                 reason=CapabilityResultReason.ADAPTER_FAILED,
                 charge_full=True,
+            )
+        if action.action_id == self.inapplicable_action:
+            return _result(
+                action,
+                status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.NOT_APPLICABLE,
             )
         return _result(action, status=CapabilityResultStatus.SUCCESS)
 
@@ -365,6 +373,26 @@ def test_failed_dependency_is_blocked_but_receipt_driven_finalizer_still_runs():
     }
     assert executor.executed == ["baseline.http", "finalize.report"]
     assert ("baseline.security_txt", "blocked", False) in executor.synthetic
+
+
+def test_a_prerequisite_with_nothing_to_do_leaves_its_dependent_nothing_to_do():
+    """A verify batch with no candidate settles skipped/not_applicable. The prove
+    step that depends on it was then blocked as `dependency_failed`, which put a
+    false failure on every family, shard and grade for a target with no
+    parameterised route: crAPI reported 3 of 4 shards partial over it."""
+    plan = _plan()
+    backend = FakeBackend(plan, "local")
+    executor = FakeExecutor(inapplicable_action="baseline.http")
+
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    assert report.status_matrix == {
+        "baseline.http": "skipped",
+        "baseline.security_txt": "skipped",
+        "finalize.report": "success",
+    }
+    assert ("baseline.security_txt", "skipped", False) in executor.synthetic
+    assert report.action_results["baseline.security_txt"].reason_code is CapabilityResultReason.NOT_APPLICABLE
 
 
 @pytest.mark.parametrize("status", [CapabilityResultStatus.PARTIAL, CapabilityResultStatus.TIMED_OUT])

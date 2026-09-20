@@ -255,6 +255,22 @@ def test_the_action_deadline_keeps_the_answers_that_already_arrived():
     assert answered, "a crossed deadline discarded records that had already arrived"
     for label, meta in observation["record_metadata"].items():
         assert len(observation["records"][label]) == meta["answer_count"], label
-    # The run is honest about the part that did not finish.
+    # The run is honest about the part that did not finish, and states the
+    # reason the receipt will carry: the queries timed out. Nothing was cut off,
+    # so the action must not be explained as a bounded-output truncation.
     assert result["partial"] is True
     assert any(item.startswith("dns_inspection:Timeout") for item in observation["errors"])
+    assert result["errors"][0] == "timed_out"
+
+
+def test_a_resolver_failure_is_not_reported_as_truncated_output():
+    class _Failing(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if query_type == "CAA":
+                raise RuntimeError("NoNameservers")
+            return await super().resolve(name, query_type, **kwargs)
+
+    result = asyncio.run(inspect_dns_posture(_target(), timeout_seconds=5, resolver=_Failing()))
+    assert result["partial"] is True
+    assert result["errors"][0] == "adapter_failed"
+    assert any(item.endswith(":RuntimeError") for item in result["errors"][1:])

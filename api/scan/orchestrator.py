@@ -298,20 +298,38 @@ class ScanOrchestrator:
                         status=CapabilityResultStatus.BLOCKED,
                         reason=CapabilityResultReason.DEPENDENCY_PRIVATE_STATE_UNAVAILABLE,
                     )
-                elif (
-                    action.action_id != "finalize.report"
-                    and any(
+                elif action.action_id != "finalize.report" and (unmet := [
+                    (dependency_id, item)
+                    for dependency_id, item in zip(action.dependencies, dependencies)
+                    if item is not None and (
                         item.status not in _DEPENDENCY_SATISFIED or (
-                            dependency_id in health_actions and item.status != CapabilityResultStatus.SUCCESS)
-                        for dependency_id, item in zip(action.dependencies, dependencies)
-                        if item is not None
+                            dependency_id in health_actions
+                            and item.status != CapabilityResultStatus.SUCCESS
+                        )
                     )
-                ):
+                ]):
+                    # A verifier that had no candidate settles skipped and not
+                    # applicable. Its escalation then has nothing to prove: that
+                    # is the same clean outcome, not a failed prerequisite. Calling
+                    # it dependency_failed marked every family, shard and grade
+                    # unreliable on any target without a parameterised route.
+                    nothing_to_do = all(
+                        dependency_id not in health_actions
+                        and item.status is CapabilityResultStatus.SKIPPED
+                        and item.reason_code is CapabilityResultReason.NOT_APPLICABLE
+                        for dependency_id, item in unmet
+                    )
                     result = await self._settle_without_execution(
                         plan=plan,
                         action=action,
-                        status=CapabilityResultStatus.BLOCKED,
-                        reason=CapabilityResultReason.DEPENDENCY_FAILED,
+                        status=(
+                            CapabilityResultStatus.SKIPPED if nothing_to_do
+                            else CapabilityResultStatus.BLOCKED
+                        ),
+                        reason=(
+                            CapabilityResultReason.NOT_APPLICABLE if nothing_to_do
+                            else CapabilityResultReason.DEPENDENCY_FAILED
+                        ),
                     )
                 else:
                     result = await self._execute_action(
