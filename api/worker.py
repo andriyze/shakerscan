@@ -292,6 +292,7 @@ from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
 from scan.executor import build_native_scan_execution
 from scan.stage_store import PostgresScanStageCheckpointStore
+from scan.negative_control import with_negative_controls
 from scan.surface_manifest import build_scan_surface_manifest
 from scan.placement_transport import write_private_placement_bundle
 from scan.private_state import (
@@ -18783,6 +18784,7 @@ def _materialize_bounded_ffuf_wordlist(
             break
     if not selected:
         raise agent_tools.AgentToolError("ffuf bundled wordlist has no safe entries")
+    selected = with_negative_controls(selected, request_limit=request_limit, seed=scratch_dir)
     destination = Path(scratch_dir) / "bounded-wordlist.txt"
     descriptor = os.open(
         destination,

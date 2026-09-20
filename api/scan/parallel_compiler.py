@@ -20,6 +20,7 @@ except ImportError:  # package import in host-side tests
     from ..runtime.capability_registry import CAPABILITY_REGISTRY
 
 from .action_plan import ScanActionPlan
+from .capability_execution import scan_discovery_reservation
 from .continuation import ScanContinuationAllocation
 from .execution import ScanExecutionPlan
 from .jobs import ScanShardBudget
@@ -944,7 +945,12 @@ class ParallelActionPlanCompiler:
         return "coverage" if execution_plan.policy.active_testing else "family"
 
     @staticmethod
-    def discovery_stage_cost(*, include_network: bool, include_subdomains: bool) -> dict[str, int]:
+    def discovery_stage_cost(
+        *,
+        include_network: bool,
+        include_subdomains: bool,
+        budget: Any = None,
+    ) -> dict[str, int]:
         """Sum the registry cost of every capability the discovery stage can plan.
 
         Derived from the registry rather than written down here, so adding a
@@ -965,7 +971,17 @@ class ParallelActionPlanCompiler:
                 specification = CAPABILITY_REGISTRY.require(name)
             except Exception:  # an unregistered capability simply cannot be planned
                 continue
-            for dimension, amount in dict(specification.budget_cost).items():
+            # The stage must be able to fund what its actions will actually
+            # request. The discovery producers scale their reservation with the
+            # granted authority, so summing the registry constant would size the
+            # shard below its own plan and drop the very actions it exists for.
+            scaled = (
+                scan_discovery_reservation(
+                    budget, name, registry_cost=specification.budget_cost,
+                )
+                if budget is not None else None
+            )
+            for dimension, amount in dict(scaled or specification.budget_cost).items():
                 totals[str(dimension)] = totals.get(str(dimension), 0) + int(amount)
         return totals
 
@@ -993,6 +1009,7 @@ class ParallelActionPlanCompiler:
         cost = ParallelActionPlanCompiler.discovery_stage_cost(
             include_network=include_network,
             include_subdomains=bool(execution_plan.policy.subdomain_discovery),
+            budget=parent,
         )
         # Headroom for per-action reservation rounding; never above the parent.
         wall = min(parent.max_tool_wall_seconds, max(180, int(cost.get("tool_wall_seconds", 0) * 1.2)))
@@ -1001,7 +1018,9 @@ class ParallelActionPlanCompiler:
             max_duration_seconds=min(parent.max_duration_seconds, max(180, wall)),
             max_http_requests=http,
             max_endpoints=endpoints,
-            max_browser_actions=min(parent.max_browser_actions, cost.get("browser_actions", 0)),
+            max_browser_actions=min(
+                parent.max_browser_actions, int(cost.get("browser_actions", 0) * 1.2),
+            ),
             max_tcp_ports=parent.max_tcp_ports if include_network else 0,
             max_tool_wall_seconds=wall,
             max_workers=1,

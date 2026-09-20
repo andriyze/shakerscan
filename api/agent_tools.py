@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.request_shape import public_request_body_shape
+from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
@@ -234,6 +235,11 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 # The reviewed katana crawl rate. The argv template documents 5 requests per
 # second; the enforced plan may go up to it but never past the reservation.
 _KATANA_MAX_RATE_PER_SECOND = 5
+# The time box a crawl may hold when its reservation funds one. The rate ceiling
+# above is the politeness control; this is only how long that polite rate runs,
+# and every run stays bounded by the reservation the operator authorized.
+_KATANA_MAX_CRAWL_SECONDS = 600
+_BROWSER_MAX_CRAWL_SECONDS = 900
 
 # The image's own Chromium. Katana downloads its own browser when this is absent,
 # which a worker with no general egress cannot do: it then reports a completed
@@ -1033,11 +1039,20 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "katana requires two reserved wall-clock seconds"
             )
-        desired_duration = min(30, max(0, http - 1))
-        duration = min(desired_duration, wall - 1)
+        # A flat 30-second box spent 150 of a thorough Scan's 60,000 authorized
+        # requests and returned one route from a real site. The reservation is
+        # already the ceiling -- rate is derived from it below -- so the crawl
+        # runs for the wall time it actually holds. More budget buys a longer
+        # look at the same polite rate, never a louder one.
+        # Reserve the teardown window first. Sizing the crawl to the whole wall
+        # and taking the grace from what is left gives the crawler and its
+        # supervisor the same deadline, which is the race this grace exists to
+        # avoid; a longer crawl must not buy itself a shorter shutdown.
+        shutdown_grace = min(5, max(1, wall // 10))
+        desired_duration = min(_KATANA_MAX_CRAWL_SECONDS, max(0, http - 1))
+        duration = min(desired_duration, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError("katana requires two reserved HTTP requests")
-        shutdown_grace = min(5, wall - duration)
         # Spend the reserved request budget instead of throttling to one request
         # per second and discarding it. A crawl that reserves 150 requests but
         # emits ~31 cannot enumerate a real application's surface: against an
@@ -1100,7 +1115,7 @@ def build_enforced_scanner_plan(
         # Deriving the duration from the reservation keeps the ceiling inside it:
         # rate_per_second * duration + 1 <= reserved http_requests.
         affordable = (http - 1) // _BROWSER_MAX_REQUESTS_PER_SECOND
-        duration = min(60, affordable, wall - shutdown_grace)
+        duration = min(_BROWSER_MAX_CRAWL_SECONDS, affordable, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
@@ -1850,12 +1865,17 @@ def parse_scanner_output(
                 })
             records.append(record)
         elif scanner == "ffuf":
+            observed = _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url"))
             records.append({
                 "kind": "content_discovery",
-                "url": _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url")),
+                "url": observed,
                 "status": item.get("status"),
                 "length": item.get("length"),
                 "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+                # How this host answers a path that cannot exist. Retained as an
+                # observation so the calibration is evidence in the receipt, not a
+                # filter applied out of band.
+                **({"negative_control": True} if is_negative_control_url(observed) else {}),
             })
         elif scanner == "httpx":
             technologies = item.get("tech") or item.get("technologies") or []

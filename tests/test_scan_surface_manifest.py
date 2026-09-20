@@ -319,3 +319,103 @@ def test_unexpanded_client_template_routes_are_not_discovered_surface():
     assert crawled == {"/tools/tax.html", "/api/v1/tax"}
     # Dropped, and counted rather than silently absent.
     assert "invalid_observations:2" in manifest["producers"]["web.crawl"]["reason"]
+
+
+def _redirect_row(path, *, host="apex.example.test", to="www.apex.example.test", status=301):
+    return {
+        "kind": "content_discovery",
+        "url": f"https://{host}{path}",
+        "status": status,
+        "length": 0,
+        "redirect_location": f"https://{to}{path}",
+    }
+
+
+APEX = TargetBinding(
+    target_id="target-2",
+    target_kind="web",
+    canonical_host="apex.example.test",
+    allowed_origins=("https://apex.example.test",),
+    allowed_addresses=("192.0.2.10",),
+    allowed_root_domains=("example.test",),
+)
+
+
+def _apex_surface(observations):
+    return build_scan_surface_manifest(
+        target_url="https://apex.example.test",
+        target=APEX,
+        options={},
+        collection_replay=_summary("skipped"),
+        probe=_summary("success"),
+        crawl=_summary("success"),
+        browser=_summary("skipped"),
+        content=_summary("success", observations),
+        spec=_summary("skipped"),
+        subdomains=_summary("skipped"),
+        max_endpoints=200,
+    )
+
+
+def _content_paths(manifest):
+    return sorted(
+        entry["concrete_path"] for entry in manifest["endpoints"]
+        if entry.get("source") == "web.content_discover"
+    )
+
+
+def test_a_measured_absent_path_disproves_the_hits_that_look_like_it():
+    """The control probe is the proof the inference alone could not supply.
+
+    Measured on a real apex that 301s its whole path space to its www origin:
+    content discovery reported 108 endpoints, none of which existed, and every
+    one was persisted into the ASM inventory as attack surface.
+    """
+    from api.scan.negative_control import negative_control_entries
+
+    wordlist = ["/admin", "/graphql", "/api-docs", "/coupon", "/login", "/.env"]
+    controls = negative_control_entries(3, seed="surface-test")
+    manifest = _apex_surface(
+        [_redirect_row(path) for path in wordlist]
+        + [_redirect_row(f"/{entry}") for entry in controls]
+    )
+
+    assert _content_paths(manifest) == []
+    reason = manifest["producers"]["web.content_discover"]["reason"]
+    assert f"indistinguishable_from_absent:{len(wordlist)}" in reason
+    # The control probes are the measurement; they are never surface themselves,
+    # and they do not inflate the suspected-rewrite count.
+    assert "unverified_redirect_observations" not in reason
+
+
+def test_real_content_survives_the_calibration_that_drops_its_neighbours():
+    from api.scan.negative_control import negative_control_entries
+
+    controls = negative_control_entries(3, seed="surface-test")
+    real = {
+        "kind": "content_discovery",
+        "url": "https://apex.example.test/robots.txt",
+        "status": 200,
+        "length": 843,
+        "redirect_location": None,
+    }
+    moved = _redirect_row("/admin", to="apex.example.test/admin/login")
+    moved["redirect_location"] = "https://apex.example.test/admin/login"
+    manifest = _apex_surface(
+        [_redirect_row(p) for p in ["/graphql", "/coupon", "/.env"]]
+        + [_redirect_row(f"/{entry}") for entry in controls]
+        + [real, moved]
+    )
+
+    assert _content_paths(manifest) == ["/admin", "/robots.txt"]
+
+
+def test_without_a_control_probe_nothing_is_claimed_absent():
+    """No measurement, no claim: observations are retained as uncertain."""
+    wordlist = ["/admin", "/graphql", "/api-docs", "/coupon", "/login", "/.env"]
+    manifest = _apex_surface([_redirect_row(path) for path in wordlist])
+
+    assert _content_paths(manifest) == sorted(wordlist)
+    reason = manifest["producers"]["web.content_discover"]["reason"]
+    assert f"unverified_redirect_observations:{len(wordlist)}" in reason
+    assert "indistinguishable_from_absent" not in reason

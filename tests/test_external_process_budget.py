@@ -63,16 +63,22 @@ def test_katana_supervisor_deadline_includes_bounded_shutdown_grace():
     crawl_seconds = int(
         plan.argv[plan.argv.index("-crawl-duration") + 1].removesuffix("s")
     )
-    assert crawl_seconds == 30
-    assert plan.timeout_ms == 35_000
+    # The crawl runs for the wall time it reserved, less the teardown window.
+    # A flat 30-second box left most of every reservation unspent: a thorough
+    # Scan authorizing 60,000 requests emitted 1,778 of them and a real site's
+    # crawl returned one route.
+    assert crawl_seconds == 70
+    # The supervisor still outlives the crawler, and the grace is reserved up
+    # front rather than taken from whatever the crawl did not use.
+    assert plan.timeout_ms == 75_000
+    assert 1 <= (plan.timeout_ms // 1_000) - crawl_seconds <= 5
     rate = plan.budget_proof["inputs"]["rate_per_second"]
     assert plan.hard_budget_dict == {
         "http_requests": rate * crawl_seconds + 1,
-        "tool_wall_seconds": 35,
+        "tool_wall_seconds": 75,
     }
-    # A 150-request reservation must fund a materially larger crawl than the
-    # one-request-per-second floor it used to be pinned to.
-    assert plan.hard_budget_dict["http_requests"] >= 75
+    # And the reservation is now substantially spent rather than abandoned.
+    assert plan.hard_budget_dict["http_requests"] >= 140
     assert plan.budget_proof["inputs"]["shutdown_grace_seconds"] == 5
 
 

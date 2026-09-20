@@ -2660,7 +2660,11 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     }
     assert discovery_job.shard.sub_budget.max_state_changing_requests == 0
-    assert discovery_job.shard.sub_budget.max_browser_actions == 0
+    # The discovery stage drives a real Chromium, so it holds a browser
+    # reservation. While web.browser_crawl declared no browser cost the stage
+    # was granted zero, and every Scan reported browser actions 0 of the
+    # profile's ceiling while the crawl was running a browser.
+    assert discovery_job.shard.sub_budget.max_browser_actions > 0
     assert any(
         worker.parallel_scan.PARALLEL_DISCOVERY_ROLE in args
         for query, args in conn.executions if "INSERT INTO scans" in query

@@ -912,7 +912,12 @@ async def load_discovery_shard_capability_receipts(
            WHERE scan_id=$1 AND action_id = ANY($2::text[])""",
         uuid.UUID(str(scan_id)), list(action_ids),
     ):
-        raw = row["receipt_json"]
+        try:
+            raw = row["receipt_json"]
+        except (KeyError, IndexError, TypeError):
+            # A narrower projection is not execution evidence either; fall
+            # through to the missing-receipt record below.
+            raw = None
         try:
             decoded = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         except (ValueError, UnicodeError):

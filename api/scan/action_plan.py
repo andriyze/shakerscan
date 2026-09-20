@@ -33,6 +33,7 @@ try:
     from runtime.browser_login_contract import browser_login_action_arguments
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
+from .capability_execution import scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
@@ -1342,7 +1343,14 @@ class ScanActionPlanCompiler:
                     budget.pop("state_changing_requests", None)
                 return budget
             specification = self._registry.require(blueprint.capability_name)
-            requested = dict(specification.budget_cost)
+            # Discovery decides whether every later family has work, so its
+            # reservation scales with the authority the operator granted instead
+            # of staying at the constant sized for the smallest profile.
+            scaled_discovery = scan_discovery_reservation(
+                execution_plan.budget, blueprint.capability_name,
+                registry_cost=specification.budget_cost,
+            )
+            requested = dict(scaled_discovery or specification.budget_cost)
             if (
                 blueprint.capability_name == "http.request"
                 and blueprint.action_id == "baseline.http_redirect"

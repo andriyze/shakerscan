@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
+from .negative_control import indistinguishable_from_absent, is_negative_control_url
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 
 try:
@@ -41,6 +42,8 @@ def wildcard_redirect_urls(
     for item in observations:
         if not isinstance(item, Mapping) or item.get("kind") != "content_discovery":
             continue
+        if is_negative_control_url(item.get("url")):
+            continue  # the calibration probe is the measurement, not a suspected hit
         status = item.get("status")
         url = str(item.get("url") or "")
         location = str(item.get("redirect_location") or "")
@@ -391,18 +394,26 @@ def build_scan_surface_manifest(
         summary=browser,
     )
     content_observations = list(content.get("observations") or ())
-    blanket_redirects = wildcard_redirect_urls(content_observations)
+    # Measured first: a path whose response is identical to a path that cannot
+    # exist is not discovered content, and the control probe is the proof. Only
+    # where a run carried no control does the suspected-rewrite count stand on
+    # its own, and there the observations are retained as uncertain.
+    absent = indistinguishable_from_absent(content_observations)
+    blanket_redirects = wildcard_redirect_urls(content_observations) - absent
     collect(
         "web.content_discover",
         (
             ("GET", item.get("url"))
             for item in content_observations
             if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
+            and not is_negative_control_url(item.get("url"))
+            and str(item.get("url") or "") not in absent
         ),
         summary=content,
         extra_reasons=(
-            (f"unverified_redirect_observations:{len(blanket_redirects)}",)
-            if blanket_redirects else ()
+            *((f"indistinguishable_from_absent:{len(absent)}",) if absent else ()),
+            *((f"unverified_redirect_observations:{len(blanket_redirects)}",)
+              if blanket_redirects else ()),
         ),
     )
     collect(

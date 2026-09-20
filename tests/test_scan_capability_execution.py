@@ -198,11 +198,16 @@ def test_web_crawl_allocation_preserves_the_scan_backbone():
         "http_requests": 10,
         "tool_wall_seconds": 6,
     }
+    # A larger grant buys a larger look. The share of the budget is unchanged --
+    # that is what preserves the backbone above -- but the ceiling it may reach
+    # is no longer the constant sized for the smallest profile: pinned at 150
+    # requests and 75 seconds, a thorough Scan authorizing 60,000 requests spent
+    # 1,778 of them and a real site's crawl returned one route.
     assert scan_web_crawl_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
-        "http_requests": 150,
-        "tool_wall_seconds": 75,
+        "http_requests": 1_500,
+        "tool_wall_seconds": 270,
     }
     assert scan_web_crawl_capability_allocation(
         _budget(max_http_requests=3)
@@ -214,11 +219,14 @@ def test_content_discovery_allocation_preserves_the_scan_backbone():
         "http_requests": 10,
         "tool_wall_seconds": 6,
     }
+    # Same rule: the share is unchanged, the ceiling scales. A 220-entry
+    # wordlist is not content discovery on a target the operator authorized
+    # 20,000 requests against.
     assert scan_content_discovery_capability_allocation(
         _budget(max_http_requests=20_000, max_tool_wall_seconds=2_700)
     ) == {
-        "http_requests": 220,
-        "tool_wall_seconds": 75,
+        "http_requests": 2_000,
+        "tool_wall_seconds": 270,
     }
     assert scan_content_discovery_capability_allocation(
         _budget(max_tool_wall_seconds=3)
@@ -588,3 +596,48 @@ def test_shared_terminalizer_binds_scan_receipt_and_partial_observations():
     assert receipt.hunt_id is None
     assert receipt.partial is True and receipt.timed_out is True
     assert receipt.public_dict()["observations"][0]["host"] == "api.example.test"
+
+
+def test_discovery_reservations_scale_with_the_authority_the_operator_granted():
+    """Measured: a thorough Scan authorizing 60,000 requests spent 1,778.
+
+    Discovery decides whether any later family has work. Its reservations were
+    fixed constants sized for the smallest profile and applied to every profile,
+    so the crawl of a real site returned a single route, the ffuf wordlist was
+    truncated to 220 entries, and browser actions read 0 of the 3,000 the
+    profile granted while a real Chromium was driving the crawl.
+    """
+    from api.scan.capability_execution import scan_discovery_reservation
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
+
+    small = _budget(max_http_requests=1_000, max_tool_wall_seconds=600)
+    large = _budget(
+        max_http_requests=60_000,
+        max_tool_wall_seconds=10_800,
+        max_browser_actions=3_000,
+    )
+    for name in ("web.crawl", "web.browser_crawl", "web.content_discover"):
+        cost = dict(CAPABILITY_REGISTRY.require(name).budget_cost)
+        modest = scan_discovery_reservation(small, name, registry_cost=cost)
+        ample = scan_discovery_reservation(large, name, registry_cost=cost)
+
+        # Never below the constant this producer has always reserved, so a small
+        # Scan plans exactly as it did before.
+        for dimension, amount in cost.items():
+            assert modest[dimension] >= amount, (name, dimension)
+        # And a large grant is materially spent rather than abandoned.
+        assert ample["http_requests"] > cost.get("http_requests", 0) * 2, name
+        assert ample["http_requests"] <= 60_000
+        assert ample["tool_wall_seconds"] <= 10_800
+
+    # The browser crawl must hold a browser reservation at all: with none
+    # declared it could never be metered against the profile's browser ceiling.
+    browser = scan_discovery_reservation(
+        large, "web.browser_crawl",
+        registry_cost=dict(CAPABILITY_REGISTRY.require("web.browser_crawl").budget_cost),
+    )
+    assert browser["browser_actions"] > 0
+    assert browser["browser_actions"] <= 3_000
+
+    # A capability outside the discovery set keeps its fixed registry profile.
+    assert scan_discovery_reservation(large, "tls.inspect", registry_cost={}) is None
