@@ -52,6 +52,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
+from scan.carried_over import gate_findings_from_rows, load_target_history, summarize_carried_over
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -8032,6 +8033,7 @@ def build_deployment_decision(
     db_policy_profiles: dict[str, dict[str, Any]] | None = None,
     db_exceptions: list[dict[str, Any]] | None = None,
     target_active_findings: list[dict[str, Any]] | None = None,
+    target_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -8165,6 +8167,9 @@ def build_deployment_decision(
         "exception_summary": exception_summary,
         "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
         "required_evidence_missing": missing,
+        # The target's unresolved findings this run did not observe, over all severities:
+        # the one definition the scan page renders, computed next to the gate that uses it.
+        "carried_over": summarize_carried_over(scan.get("id"), findings, target_history) if product == "dast" else None,
         "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),
         "grade": scan.get("grade") or (result.get("result") or {}).get("grade") if isinstance(result, dict) else scan.get("grade"),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=int(policy_profile.get("expires_days") or 30))).isoformat(),
@@ -11942,16 +11947,9 @@ async def get_scan_deployment_decision(scan_id: str):
               AND severity IN ('critical', 'high')
             LIMIT 200
         """, sibling_ids) if sibling_ids else []
+        target_history = await load_target_history(conn, sibling_ids)
 
-    target_active_findings = [{
-        "id": str(r["id"]),
-        "fingerprint": r["fingerprint"],
-        "title": r["title"],
-        "severity": r["severity"],
-        "tool": r["tool"],
-        "url": r["url"],
-        "source": "target_active",
-    } for r in taf_rows]
+    target_active_findings = gate_findings_from_rows(taf_rows)
 
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
@@ -11988,6 +11986,7 @@ async def get_scan_deployment_decision(scan_id: str):
         db_policy_profiles=db_policy_profiles,
         db_exceptions=db_exceptions,
         target_active_findings=target_active_findings,
+        target_history=target_history,
     )
 
 

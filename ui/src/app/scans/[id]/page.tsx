@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -159,7 +159,10 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
     resultPresentation.authenticationRequested ? 'identity unverified' : 'anonymous',
   ].filter(Boolean).join(' · ')
-  const carried = carriedOverSummary(scan, targetFindings, historyState)
+  // The deployment decision carries the server's carried-over summary, computed next to the
+  // gate over the target's complete active set. The client computation is the fallback for
+  // an API that does not send one yet.
+  const carried = carriedOverFromDecision(decision) ?? carriedOverSummary(scan, targetFindings, historyState)
   const release = releaseLine(decision, scan?.id, resultPresentation.confirmedCount)
   const releaseClass = release?.tone === 'block'
     ? 'bg-red-900/50 text-red-200'

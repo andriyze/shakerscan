@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -296,4 +296,18 @@ test('a parallel child prefix stays visible as the entry origin instead of being
   const shard = scanLogEntry('[Shard 3] [scan] Finished Verify XSS · timed_out · 44%')
   assert.equal(shard.child, 'Shard 3')
   assert.equal(scanLogEntry('[scan] plain line').child, '')
+})
+
+
+test('the server summary from the decision wins over the client fallback', () => {
+  assert.deepEqual(
+    carriedOverFromDecision({ carried_over: { count: 3, material: 2, highest: 'High', complete: true } }),
+    { state: 'ready', count: 3, material: 2, highest: 'high', complete: true, source: 'server' },
+  )
+  const partial = carriedOverFromDecision({ carried_over: { count: 0, complete: false, unloaded_active: 40 } })
+  assert.equal(partial.state, 'partial')
+  assert.equal(partial.complete, false)
+  assert.equal(carriedOverFromDecision({ carried_over: null }), null)
+  assert.equal(carriedOverFromDecision({}), null)
+  assert.equal(carriedOverFromDecision(null), null)
 })

@@ -226,6 +226,25 @@ export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http,
 // What earlier scans found that this run did not observe. Only active rows count, and a row
 // counts as observed here when this scan wrote it, last saw it, or reported the same finding.
 // Subtracting list lengths counted resolved and false-positive rows as "unresolved".
+/** The server's carried-over summary from the deployment decision, or null when the
+ *  decision does not carry one (an older API). The server computes it next to the gate over
+ *  the target's complete active set, so it is the number the page renders whenever present;
+ *  the client computation below is only the fallback. */
+export function carriedOverFromDecision(decision) {
+  const item = record(decision)
+  const summary = item.carried_over
+  if (!summary || typeof summary !== 'object' || !Number.isFinite(Number(summary.count))) return null
+  const complete = summary.complete !== false
+  return {
+    state: complete ? 'ready' : 'partial',
+    count: Math.max(0, Number(summary.count)),
+    material: Math.max(0, Number(summary.material) || 0),
+    highest: summary.highest ? String(summary.highest).toLowerCase() : null,
+    complete,
+    source: 'server',
+  }
+}
+
 /** Unresolved findings on the target that this run did not observe.
  *
  *  A row counts as observed by this run only through persisted linkage (written or last seen
