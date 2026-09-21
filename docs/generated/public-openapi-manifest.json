@@ -184,9 +184,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "57b4c89c8ea7f50509ad87e2c5bd497413db1c5c3cf4db7da9193730b5381921",
+  "contract_sha256": "31161ea1d045d1d0bfb99a576f67d9aba89e9b961c1c162ccb5cd8b9dc3330b3",
   "openapi": "3.1.0",
-  "operation_count": 416,
+  "operation_count": 417,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -401,6 +401,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "DELETE /request-collections/{collection_id}": {
+      "deprecated": false,
+      "operation_id": "deactivate_request_collection_request_collections__collection_id__delete",
+      "parameters_sha256": "2d41452c5c7c5a461f6ac146d1c10af0a0066ed5780477410508fd6803a3b19e",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "collections",
+      "tags": [
+        "request-collections"
+      ]
     },
     "DELETE /request-collections/{collection_id}/environments/{environment_id}": {
       "deprecated": false,
@@ -5650,6 +5665,7 @@
   "schema_version": "shakerscan-public-openapi-manifest/v1",
   "surfaces": {
     "collections": [
+      "DELETE /request-collections/{collection_id}",
       "DELETE /request-collections/{collection_id}/environments/{environment_id}",
       "DELETE /request-collections/{collection_id}/selections/{selection_id}",
       "GET /request-collections",

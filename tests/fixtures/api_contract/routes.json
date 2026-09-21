@@ -2120,6 +2120,13 @@
   {
     "path": "/request-collections/{collection_id}",
     "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_request_collection"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
+    "methods": [
       "GET"
     ],
     "name": "get_request_collection"

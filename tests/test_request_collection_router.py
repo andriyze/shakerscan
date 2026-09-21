@@ -25,6 +25,7 @@ def test_request_collection_routes_are_owned_by_extracted_router():
         ("GET", "/request-collections/{collection_id}/requests"),
         ("POST", "/request-collections/{collection_id}/select"),
         ("GET", "/request-collections/{collection_id}"),
+        ("DELETE", "/request-collections/{collection_id}"),
         ("POST", "/request-collections/{collection_id}/environments"),
         ("DELETE", "/request-collections/{collection_id}/environments/{environment_id}"),
         ("POST", "/request-collections/{collection_id}/bindings"),

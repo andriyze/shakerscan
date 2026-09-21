@@ -158,6 +158,14 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return item
 
 
+def _command_count(tag: Any) -> int:
+    """Rows touched, from an asyncpg command tag such as 'UPDATE 3'."""
+    try:
+        return int(str(tag or "").rsplit(" ", 1)[-1])
+    except ValueError:
+        return 0
+
+
 def _public_request_collection(row: Any) -> dict[str, Any]:
     item = _row_to_dict(row)
     item.pop("encrypted_payload", None)
@@ -682,6 +690,48 @@ async def get_request_collection(collection_id: str):
             _public_request_collection_selection(row) for row in selections
         ],
         "secret_values_visible": False,
+    }
+
+
+@router.delete("/request-collections/{collection_id}")
+async def deactivate_request_collection(collection_id: str):
+    """Retire a collection: hide it, revoke its selections, and stop new Scan/Hunt use.
+
+    Rows stay for historical scan evidence that cites immutable selection digests; the
+    encrypted document is erased when the owning target's records are deleted.
+    """
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    async with _pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE request_collections SET is_active=false, updated_at=NOW()
+                   WHERE id=$1 AND is_active=true RETURNING *""",
+                collection_uuid,
+            )
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail="Request collection not found",
+                )
+            revoked = await conn.execute(
+                """UPDATE request_collection_selections
+                   SET is_active=false, revoked_at=COALESCE(revoked_at, NOW()), updated_at=NOW()
+                   WHERE collection_id=$1 AND is_active=true""",
+                collection_uuid,
+            )
+            await conn.execute(
+                """UPDATE request_collection_bindings SET is_active=false, updated_at=NOW()
+                   WHERE collection_id=$1 AND is_active=true""",
+                collection_uuid,
+            )
+            await conn.execute(
+                """UPDATE request_collection_environments SET is_active=false, updated_at=NOW()
+                   WHERE collection_id=$1 AND is_active=true""",
+                collection_uuid,
+            )
+    return {
+        "status": "deactivated",
+        "collection": _public_request_collection(row),
+        "revoked_selections": _command_count(revoked),
     }
 
 
