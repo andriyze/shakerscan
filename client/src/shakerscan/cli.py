@@ -71,19 +71,27 @@ def profile(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return {k: str(v) for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
 
 
-def save_profile(url: str, token: str, environ: Mapping[str, str] | None = None) -> Path:
-    """Write the token (owner-only) and the instance address; return the config directory."""
+def save_profile(url: str, token: str | None, environ: Mapping[str, str] | None = None) -> Path:
+    """Write the instance address and, when there is one, the token (owner-only).
+
+    ``token=None`` saves an open-source engine reached by address (``shakerscan start --lan``
+    on the server): no credential, so any token file from an earlier connection is removed
+    rather than left to be sent to an engine that never issued it.
+    """
     directory = config_dir(environ)
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     token_path = directory / "token"
-    fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
-    os.chmod(token_path, 0o600)
-    (directory / "config.json").write_text(
-        json.dumps({"url": url, "token_file": str(token_path)}, indent=2) + "\n", encoding="utf-8"
-    )
+    record: dict[str, str] = {"url": url}
+    if token is None:
+        token_path.unlink(missing_ok=True)
+    else:
+        fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+        os.chmod(token_path, 0o600)
+        record["token_file"] = str(token_path)
+    (directory / "config.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return directory
 
 
@@ -313,23 +321,41 @@ def register_claude_code() -> int:
 
 
 def cmd_connect(args: argparse.Namespace) -> int:
-    """Save an instance and its token from a one-time link (or a prompt), then check it."""
+    """Save an instance, then check it.
+
+    Three shapes: an Enterprise connect link (token claimed once, over https); an https address
+    with a token from a prompt or stdin; or an open-source engine's address with no token. A
+    plain-http address is always the last kind, since a bearer token is never sent over http;
+    an https engine without a login needs ``--no-token`` said explicitly.
+    """
     target = str(args.target).strip()
+    token: str | None
     if CONNECT_PATH in target:
         claimed = fetch_connect_link(target, timeout=float(args.timeout or 20.0))
         url, token = claimed["url"], claimed["token"]
         who = f" ({claimed.get('role', '?')} token '{claimed.get('label', '')}')"
     else:
         parts = urllib.parse.urlsplit(target)
-        if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/"):
-            raise ClientError("give the instance address as https://scanner.example.com, or a connect link")
-        url = target.rstrip("/")
-        token = sys.stdin.readline().strip() if args.token_stdin else getpass.getpass("Service token: ").strip()
-        if not token:
-            raise ClientError("no token given")
-        who = ""
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.path not in ("", "/") \
+                or parts.query or parts.fragment or "@" in parts.netloc:
+            raise ClientError(
+                "give the instance address as https://scanner.example.com (Enterprise, a token is "
+                "asked for), http://192.168.1.50:8080 (an open-source engine, no token), or a connect link"
+            )
+        url = f"{parts.scheme}://{parts.netloc}"
+        if parts.scheme == "http" or args.no_token:
+            token = None
+            who = " (open-source engine reached by address; no token, no per-person identity)"
+        else:
+            token = sys.stdin.readline().strip() if args.token_stdin else getpass.getpass("Service token: ").strip()
+            if not token:
+                raise ClientError("no token given (an open-source engine over https needs --no-token)")
+            who = ""
     directory = save_profile(url, token)
-    print(f"saved:     {url}{who}\n           token in {directory / 'token'} (owner-only), address in {directory / 'config.json'}")
+    if token is None:
+        print(f"saved:     {url}{who}\n           address in {directory / 'config.json'}; no token file")
+    else:
+        print(f"saved:     {url}{who}\n           token in {directory / 'token'} (owner-only), address in {directory / 'config.json'}")
     for key in (ENV_URL, ENV_TOKEN, ENV_TOKEN_FILE, ENV_ALLOW_REMOTE):
         os.environ.pop(key, None)
     code = cmd_doctor(argparse.Namespace(url=None, token_file=None, timeout=args.timeout))
@@ -490,13 +516,18 @@ def resolve_agent_instance(args: argparse.Namespace, environ: Mapping[str, str] 
     """
     environ = os.environ if environ is None else environ
     saved = profile(environ)
+    engine = "an open-source engine reached by address; no credential, no per-person identity"
     if getattr(args, "url", None):
         url = agent_origin(args.url)
         if saved.get("url") and saved.get("token_file") and same_origin(url, saved["url"]):
             return saved["url"], saved["token_file"], "the connected person's identity and role"
-        return url, None, "an open-source engine reached by address; no credential, no per-person identity"
-    if saved.get("url") and saved.get("token_file"):
-        return saved["url"], saved["token_file"], "the connected person's identity and role"
+        return url, None, engine
+    if saved.get("url"):
+        # `shakerscan connect`: an Enterprise instance with its token, or an open-source engine
+        # saved by address with none.
+        if saved.get("token_file"):
+            return saved["url"], saved["token_file"], "the connected person's identity and role"
+        return agent_origin(saved["url"]), None, engine
     if environ.get(ENV_URL):
         url = agent_origin(environ[ENV_URL])
         return url, None, "an open-source engine reached by address; no credential, no per-person identity"
@@ -811,11 +842,23 @@ def build_parser() -> argparse.ArgumentParser:
     connect = commands.add_parser(
         "connect",
         help=(
-            "save an instance and its token from the one-time link the Enterprise console shows "
-            "(or from a prompt), check the connection, optionally register Claude Code"
+            "save the instance every command then uses: an Enterprise connect link (or address "
+            "plus token), or an open-source engine's address with no token; then check it"
         ),
     )
-    connect.add_argument("target", help="the connect link, or the instance address to be prompted for a token")
+    connect.add_argument(
+        "target",
+        help=(
+            "the connect link; an https instance address, to be prompted for a token; or an "
+            "open-source engine's address such as http://192.168.1.50:8080 (as printed by "
+            "`shakerscan start --lan`), saved with no token"
+        ),
+    )
+    connect.add_argument(
+        "--no-token",
+        action="store_true",
+        help="the address is an open-source engine without a login (implied for http://)",
+    )
     connect.add_argument("--claude", action="store_true", help="also register `shakerscan mcp` in Claude Code (user scope)")
     connect.add_argument("--token-stdin", action="store_true", help="read the token from standard input instead of a prompt")
     connect.add_argument("--timeout", type=float, help="seconds per request (default 20)")

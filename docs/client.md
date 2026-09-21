@@ -109,6 +109,11 @@ need no options. `shakerscan connect https://scanner.example.com` prompts for a 
 (never on the command line); `shakerscan disconnect` forgets the instance and deletes the token
 file; `SHAKERSCAN_CONFIG_DIR` relocates the files.
 
+An open-source engine on a trusted LAN (`shakerscan start --lan` on the server) has no console
+and no token: `shakerscan connect http://192.168.1.50:8080` saves its address with no token file,
+and `mcp`, `hunt`, `api`, `scan`, `doctor` and `agent` then use it. A plain-http address is always
+saved this way; an https engine without a login needs `--no-token`. See `docs/lan-access.md`.
+
 Explicit options and the environment still win over the saved profile:
 
 - `--url` (or `SHAKERSCAN_API_URL`): the API origin. The default is `http://127.0.0.1:8080`, a

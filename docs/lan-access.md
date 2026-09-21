@@ -25,20 +25,36 @@ The launcher prints the actual API/UI addresses and laptop commands, using custo
 
 ## Laptop: install only the lightweight client
 
-The laptop does not need Docker or a local scanning engine:
+The laptop does not need Docker or a local scanning engine. Install the client and save the
+engine's address once; every command then uses it, with no options and no environment variables:
 
 ```bash
 pipx install shakerscan
 # macOS alternative:
 # brew install andriyze/shakerscan/shakerscan
 
-shakerscan doctor --url http://192.168.1.50:8080
-shakerscan api --url http://192.168.1.50:8080 GET /health
-shakerscan api --url http://192.168.1.50:8080 GET /findings
-shakerscan mcp --url http://192.168.1.50:8080
+shakerscan connect http://192.168.1.50:8080     # the address the server printed
+shakerscan doctor
+shakerscan api GET /health
+shakerscan api GET /findings
+shakerscan hunt list
+shakerscan agent opencode                       # or claude, codex: the full agent workspace
+shakerscan mcp
 ```
 
-`mcp` is a stdio server: normally an MCP-capable client launches it rather than a person interacting with it in a terminal. Register it in a client, for example:
+`connect` with a plain-http address saves the engine with no token (a bearer token is never sent
+over http anyway); an https engine without a login needs `shakerscan connect https://… --no-token`.
+The address lives in `~/.config/shakerscan/config.json`; `shakerscan disconnect` forgets it and
+`shakerscan doctor` shows which instance is in use. An explicit `--url` on a command still wins
+over the saved address, and `--url` alone works without saving anything:
+
+```bash
+shakerscan doctor --url http://192.168.1.50:8080
+shakerscan api --url http://192.168.1.50:8080 GET /health
+shakerscan agent opencode --url http://192.168.1.50:8080
+```
+
+`mcp` is a stdio server: normally an MCP-capable client launches it rather than a person interacting with it in a terminal. `shakerscan agent` registers it for the workspace it prepares; to register it in a client by hand, for example:
 
 ```json
 {
@@ -51,18 +67,7 @@ shakerscan mcp --url http://192.168.1.50:8080
 }
 ```
 
-To use the LAN instance by default for the current shell:
-
-```bash
-export SHAKERSCAN_API_URL=http://192.168.1.50:8080
-export SHAKERSCAN_MCP_ALLOW_REMOTE_API=true
-
-shakerscan api GET /findings
-shakerscan hunt list
-shakerscan mcp
-```
-
-Set the same two variables in an MCP client's environment if its subprocess does not inherit your shell. An explicit `--url` already authorizes that origin and needs no extra environment flag.
+After `shakerscan connect`, `["mcp"]` alone is enough: the saved address is used. `SHAKERSCAN_API_URL` (with `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true` for `mcp`) remains available for scripts and CI that prefer the environment over a saved profile.
 
 API reads/writes and the instance's available MCP/Hunt capabilities run on the server; existing target authorization, budgets, credential admission and protected administrative endpoints still apply. This is not unrestricted remote shell access, and it does not add remote Docker start/stop/update commands. Those lifecycle commands still run on the server. `shakerscan agent` also works against the LAN engine: `shakerscan agent opencode --url http://192.168.1.50:8080` (or `claude`, `codex`) prepares the full agent workspace (the operating guide, the skills and the `/scan`, `/findings`, `/deep-hunt` commands) on the laptop, registers the MCP server with that address, and starts the agent. The workspace note says the engine has no login and no per-person identity. The saved, authenticated `shakerscan connect` flow is unchanged and still wins for an Enterprise instance.
 
