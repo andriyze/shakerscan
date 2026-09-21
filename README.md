@@ -44,7 +44,7 @@ shakerscan mcp --url http://192.168.1.50:8080
 
 LAN mode is explicit, IPv4-only, and for trusted networks: reachable users can operate the OSS
 instance. It does not add authentication or encryption. Fresh installs remain localhost-only;
-see [LAN access](docs/lan-access.md) for firewall guidance and setup details.
+see [LAN access](https://github.com/andriyze/shakerscan/blob/main/docs/lan-access.md) for firewall guidance and setup details.
 
 ## Install and start
 
