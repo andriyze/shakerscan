@@ -1,0 +1,73 @@
+name: Release SBOM contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-sbom.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish-client.yml'
+      - 'scripts/release_sbom.py'
+      - 'tests/test_release_sbom.py'
+      - 'install/release-images.json'
+      - 'client/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Offline contracts
+        run: python -m unittest discover -s tests -p test_release_sbom.py -v
+      - name: Build and inventory real client archives
+        run: |
+          python -m pip install --disable-pip-version-check 'build==1.2.2.post1'
+          python -m build --outdir dist client
+          version="$(awk -F '\"' '/^__version__ = / {print $2}' client/src/shakerscan/__init__.py)"
+          python scripts/release_sbom.py client --dist dist --version "$version" \
+            --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY" --output client-sbom-smoke
+          python scripts/release_sbom.py verify --directory client-sbom-smoke --dist dist
+
+  # Read only: export a known existing release, without running its containers or
+  # publishing anything. This catches real Buildx/SPDX shape drift as well as the fixtures.
+  registry-smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Download immutable smoke fixture metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2.4.0 --repo "$GITHUB_REPOSITORY" \
+            --pattern release-candidate-receipt.json --dir fixture
+          git fetch --depth=1 origin tag v2.4.0
+          git show 'v2.4.0:install/release-images.json' > fixture/release-images.json
+      - name: Export existing amd64 and arm64 image SBOMs
+        run: |
+          python3 scripts/release_sbom.py engine \
+            --receipt fixture/release-candidate-receipt.json --inventory fixture/release-images.json \
+            --version 2.4.0 --source-sha "$(git rev-parse 'v2.4.0^{commit}')" \
+            --generator-source-sha "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY" --output engine-sbom-smoke
+          python3 scripts/release_sbom.py verify --directory engine-sbom-smoke
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: unsigned-engine-sbom-smoke
+          path: engine-sbom-smoke/
+          if-no-files-found: error
+          retention-days: 7

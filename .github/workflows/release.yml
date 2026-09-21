@@ -19,6 +19,7 @@ concurrency:
 
 permissions:
   contents: write
+  attestations: read
 
 env:
   SCANNER_IMAGE: shakerscan/shakerscan-scanner
@@ -35,7 +36,8 @@ jobs:
       contents: write
       actions: read
       packages: write
-      attestations: read
+      attestations: write
+      id-token: write
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -88,13 +90,14 @@ jobs:
       - name: Reverify signed candidate provenance
         env:
           GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         shell: bash
         run: |
           verify_provenance() {
             image="$1"
             key="$2"
             digest="$(jq -r ".images.${key}" release-candidate-receipt.json)"
-            gh attestation verify "oci://docker.io/${image}@${digest}" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "oci://docker.io/${image}@${digest}" --repo "$GITHUB_REPOSITORY" --source-digest "$CANDIDATE_SHA"
           }
           verify_provenance "$SCANNER_IMAGE" scanner
           verify_provenance "$API_IMAGE" api
@@ -110,6 +113,37 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Export by the certified digests before publishing any version tag. This consumes
+      # either build-on-main's reusable images or the candidate's fallback build unchanged.
+      - name: Export and validate release SBOMs
+        env:
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          python3 scripts/release_sbom.py engine \
+            --receipt release-candidate-receipt.json --inventory install/release-images.json \
+            --version "$VERSION" --source-sha "$CANDIDATE_SHA" \
+            --generator-source-sha "$(git rev-parse HEAD)" \
+            --repository "$GITHUB_REPOSITORY" --output release-sbom
+          python3 scripts/release_sbom.py verify --directory release-sbom
+
+      - name: Attest release SBOM index
+        id: sbom_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: release-sbom/sbom-index.json
+          create-storage-record: false
+
+      - name: Preserve and verify SBOM signature bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SBOM_BUNDLE: ${{ steps.sbom_attestation.outputs.bundle-path }}
+        run: |
+          cp "$SBOM_BUNDLE" release-sbom/sbom-index.sigstore.json
+          gh attestation verify release-sbom/sbom-index.json --repo "$GITHUB_REPOSITORY" \
+            --bundle release-sbom/sbom-index.sigstore.json \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
 
       - name: Verify registry digests and publish immutable version tags
         env:
@@ -188,6 +222,7 @@ jobs:
           - Candidate workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}
           - Runtime manifest: \`$(jq -r '.runtime_manifest_sha256' release-candidate-receipt.json)\`
           - Certified receipt: attached as \`release-candidate-receipt.json\`
+          - SBOMs: per-image/per-platform SPDX files, \`sbom-index.json\`, checksums and signature bundle attached. Scope and verification: \`docs/sbom.md\`.
           - Stable installer and \`latest\` are promoted separately after public smoke.
           EOF
           # The certified receipt is attached so the evidence hashes outlive the 30-day
@@ -196,4 +231,4 @@ jobs:
           # candidate SHA as the release's target commit (promote-stable reads it back).
           gh release create "v${VERSION}" --verify-tag --target "$CANDIDATE_SHA" \
             --title "ShakerScan v${VERSION}" --notes-file release-notes.md \
-            release-image-lock.env release-candidate-receipt.json
+            release-image-lock.env release-candidate-receipt.json release-sbom/*
