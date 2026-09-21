@@ -1595,7 +1595,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
-| Canonical slash commands | 13 | `.claude/commands/` |
+| Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
 | Durable tables | 100 | `db/init.sql` + migrations |
@@ -2788,6 +2788,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/ai-security-session` | Interactive Testing | Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
 | `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
 | `/deep-hunt` | Hunt compatibility command | Run an authorized, AI-driven Hunt against the supplied target. | `.claude/commands/deep-hunt.md` |
+| `/delete-target` | Archive or Delete a Target | Archive a target (hide it, pause its schedules, keep its history) or permanently delete it with | `.claude/commands/delete-target.md` |
 | `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
 | `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
 | `/research` | Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |

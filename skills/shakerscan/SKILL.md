@@ -40,6 +40,7 @@ target binding, approvals, budgets, evidence, and finding proof.
 | Continuous endpoint coverage | `/targets/{id}/asm/*` |
 | Connected-device inventory, policy, credentials, and posture | `/devices*`, `/device-policies*` |
 | Findings, cleanup, triage, or retest | `/findings*`, `/retests*` |
+| Archive or permanently delete a target | `/delete-target`: `POST /targets/{id}/archive` (reversible), or preview → dangerous approval → `POST /data-deletion/execute`, only on the user's explicit request |
 | Finding exceptions and deployment policies | `/finding-exceptions*`, `/policy-profiles*` |
 | AI chat, RAG, agent, MCP, or widget testing | `/ai/targets*` |
 | Model artifact intake | `/model-intake/*` |
