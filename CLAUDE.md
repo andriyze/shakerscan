@@ -21,6 +21,7 @@ Project-local commands under `.claude/commands/` cover:
 - `/status`, `/workers`, `/subdomains`, and `/findings`
 - `/ai-gate`, `/ai-security-session`, `/deep-hunt`, and `/save-finding`
 - `/js-analyze` and `/content-discovery`
+- `/delete-target` for archiving or, after a preview and the user's confirmation, deleting a target
 - `/research` (compatibility) and `/review-skills`
 
 Reusable task instructions live under `skills/`. Use `skills/shakerscan/SKILL.md` for the general

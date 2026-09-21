@@ -14,18 +14,22 @@ interface Props {
   subject: string
   onDeleted: (result: DeletionResult) => void
   onArchived?: () => void
+  /** Already archived: the dialog offers delete only. */
+  archived?: boolean
   disabled?: boolean
   /** Visual weight only; the preview/approval flow is identical. Defaults to the danger button. */
   variant?: ButtonVariant
   className?: string
 }
 
-export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived }: {
+export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onArchived, archived = false }: {
   preview: DeletionPreview | null
   subject: string
   onClose: () => void
   onDeleted: (result: DeletionResult) => void
   onArchived?: () => void
+  /** The target is already archived, so "archive instead" is not an alternative to offer. */
+  archived?: boolean
 }) {
   const toast = useToast()
   const [busy, setBusy] = useState(false)
@@ -93,7 +97,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
       {preview.retained.map(text => <p key={text}>{text}</p>)}
       <p>Only the selected IDs are affected. Subdomains and sibling targets are not recursively deleted.</p>
       {preview.blockers.map(text => <p role="alert" key={text} className="text-amber-300">{text}</p>)}
-      {preview.kind === 'target' && preview.root_ids.length === 1 && onArchived && (
+      {preview.kind === 'target' && preview.root_ids.length === 1 && onArchived && !archived && (
         <Button disabled={busy} onClick={() => { setArchiveMode(true); setError(null) }}>Archive target instead</Button>
       )}
       {error && <p role="alert" className="text-red-300">{error} Close and preview again for changed or expired records.</p>}
@@ -101,7 +105,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
   />
 }
 
-export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, disabled, variant = 'danger', className }: Props) {
+export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDeleted, onArchived, archived = false, disabled, variant = 'danger', className }: Props) {
   const toast = useToast()
   const [preview, setPreview] = useState<DeletionPreview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -149,6 +153,6 @@ export function DeleteRecordsButton({ selection, label = 'Delete', subject, onDe
     <Button variant={variant} className={className} disabled={disabled || loading} onClick={open} aria-label={`Delete ${subject}`}>
       {loading ? 'Previewing…' : label}
     </Button>
-    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} />
+    <RecordDeletionDialog preview={preview} subject={subject} onClose={() => { previewKey.current = null; setPreview(null) }} onDeleted={onDeleted} onArchived={onArchived} archived={archived} />
   </span>
 }
