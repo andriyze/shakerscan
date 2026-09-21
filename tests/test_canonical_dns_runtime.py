@@ -498,3 +498,28 @@ def test_an_invalid_doh_answer_keeps_the_timeout_as_the_stated_reason():
     assert any(item == "host_caa:doh:DohAnswerInvalid:rcode:SERVFAIL" for item in result["errors"])
     assert result["observation"]["records"]["host_caa"] == []
     assert result["observation"]["doh_fallback_queries"] == []
+
+
+def test_a_stub_resolver_servfail_is_recovered_over_https_like_a_timeout():
+    """systemd-resolved on Ubuntu 24.04 answered DS and DNSKEY with SERVFAIL (NoNameservers);
+    the fallback only covered timeouts, so a fresh Linux install reported DNS posture partial
+    on every scan and never asked a resolver that could answer."""
+    class _Servfail(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if query_type in {"DS", "DNSKEY"}:
+                raise type("NoNameservers", (Exception,), {})("All nameservers failed to answer the query")
+            return await super().resolve(name, query_type, **kwargs)
+
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append(query_type)
+        return _doh_answers(name, query_type)
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_Servfail(), doh_query=doh,
+    ))
+    assert result["status"] == "success" and not result["observation"]["errors"]
+    assert sorted(calls) == ["DNSKEY", "DS"]
+    assert result["observation"]["records"]["host_dnskey"]
+    assert set(result["observation"]["doh_fallback_queries"]) == {"root_ds", "host_dnskey"}

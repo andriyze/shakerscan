@@ -457,6 +457,30 @@ def test_hint_files_declare_the_paths_a_crawl_cannot_reach():
     assert issues == []
 
 
+def test_hint_routes_keep_query_names_and_never_their_values():
+    """A declared query becomes a shape: names, order and multiplicity, no values.
+
+    Ordinary values (`code`, `customer_id`) and percent-encoded names (`%74oken`) both
+    slipped past the receipt scrubber, which only recognises secret-looking names.
+    """
+    from api.capabilities.hint_files import ingest_hint_documents
+
+    routes = ingest_hint_documents(
+        [(
+            "http://app.example.test/llms.txt",
+            b"Try http://app.example.test/callback?token=Ab9cD27e&code=Ab9cD27e"
+            b" and /orders?customer_id=41&customer_id=42&%74oken=Ab9cD27e&flag\n",
+            "text/plain",
+        )],
+        origin="http://app.example.test",
+    )
+
+    urls = [route["url"] for route in routes]
+    assert "http://app.example.test/callback?token=&code=" in urls
+    assert "http://app.example.test/orders?customer_id=&customer_id=&token=&flag=" in urls
+    assert not any("Ab9cD27e" in url or "=41" in url or "=42" in url for url in urls)
+
+
 def test_a_single_page_shell_is_not_a_published_hint_document():
     """A 200 for /llms.txt is usually the SPA catch-all, not a description.
 
@@ -498,7 +522,7 @@ def test_hint_documents_never_declare_another_origin():
 
     urls = {route["url"] for route in routes}
     assert "https://app.example.test/tools/" in urls
-    assert "https://app.example.test/api/v1/tax?country=US" in urls
+    assert "https://app.example.test/api/v1/tax?country=" in urls
     assert not any("github.example" in url or "evil.example" in url for url in urls)
 
 
@@ -613,7 +637,7 @@ def test_one_malformed_hint_reference_does_not_end_the_ingestion():
     )
 
     assert [route["url"] for route in routes] == [
-        "https://app.example.test/api/orders?id=123",
+        "https://app.example.test/api/orders?id=",
     ]
     assert issues == ["hint_reference_unparsable:llms.txt:2"]
     # The diagnostic is a bounded class and a count; it never quotes the document.

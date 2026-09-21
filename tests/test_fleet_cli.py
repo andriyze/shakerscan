@@ -20,6 +20,16 @@ NODE_ID = "11111111-1111-4111-8111-111111111111"
 IMAGE = "registry.example/shakerscan@sha256:" + "a" * 64
 
 
+_REAL_CONTROL_PLANE_RUNNING = fleet_cli._control_plane_running
+
+
+@pytest.fixture(autouse=True)
+def _stopped_control_plane(monkeypatch):
+    """Most tests describe a host without a running standalone stack; the running-work guard
+    then has nothing to ask. Tests about the guard set the state they need explicitly."""
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: False)
+
+
 def test_duration_and_endpoint_validation():
     assert fleet_cli.parse_duration("24h") == 86400
     assert fleet_cli.parse_duration("60") == 60
@@ -1536,3 +1546,203 @@ def test_port_and_overlay_collision_detection(monkeypatch):
             fleet_cli.ip_network("10.77.0.0/24"),
             existing_fleet=False,
         )
+
+
+def _broker_preflight_args(**overrides):
+    values = dict(
+        network="broker",
+        public_url="https://fleet.example.test",
+        ca_cert=None,
+        skip_public_check=False,
+        https_mode="auto",
+        worker_image=IMAGE,
+        workers=1,
+    )
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def _patch_broker_preflight_host(monkeypatch):
+    monkeypatch.setattr(fleet_cli, "_require_linux", lambda: None)
+    monkeypatch.setattr(fleet_cli, "_require_commands", lambda _names: None)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(
+        fleet_cli,
+        "_require_healthy_api",
+        lambda *_args: (_ for _ in ()).throw(fleet_cli.FleetCLIError("connection refused")),
+    )
+    monkeypatch.setattr(fleet_cli, "_resolved_public_addresses", lambda _url: ["203.0.113.8"])
+    monkeypatch.setattr(fleet_cli, "_assert_port_available", lambda *_args, **_kwargs: None)
+
+
+def test_init_preflight_refuses_while_scans_are_queued_or_running(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: True)
+    seen = []
+
+    def fake_api(_base, _method, path, **_kwargs):
+        seen.append(path)
+        if "status=running" in path:
+            return {"scans": [{"id": "s1"}], "total": 1}
+        return {"scans": [], "total": 0}
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    with pytest.raises(fleet_cli.FleetCLIError, match="preflight failed"):
+        fleet_cli.run_init_preflight(paths, _broker_preflight_args())
+    output = capsys.readouterr().out
+    assert "[FAIL] Queued or running scans: 1 running scan(s) would be interrupted" in output
+    assert "--allow-running-work" in output
+    # The census must not be the presentation list: hidden rows are work too.
+    for flag in ("include_shards=true", "include_internal=true", "include_model_intake=true", "include_devices=true"):
+        assert all(flag in path for path in seen)
+
+
+def test_init_preflight_accepts_running_work_only_when_the_operator_says_so(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: True)
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_a, **_k: {"scans": [{"id": "s1"}], "total": 1})
+    prepared = fleet_cli.run_init_preflight(paths, _broker_preflight_args(allow_running_work=True))
+    assert prepared["https_mode"] == "managed"
+    output = capsys.readouterr().out
+    assert "[WARN] Queued or running scans: operator accepted" in output
+
+
+def test_init_preflight_treats_a_stopped_control_plane_as_nothing_to_interrupt(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: False)
+
+    def never(*_a, **_k):
+        raise AssertionError("a stopped stack must not be asked")
+
+    monkeypatch.setattr(fleet_cli, "api_json", never)
+    fleet_cli.run_init_preflight(paths, _broker_preflight_args())
+    output = capsys.readouterr().out
+    assert "[PASS] Queued or running scans: none would be interrupted" in output
+
+
+@pytest.mark.parametrize(
+    ("running_state", "answers", "expected"),
+    [
+        # A positive count already seen is never discarded because the next request failed.
+        (True, [{"scans": [{"id": "s1"}], "total": 1}, fleet_cli.FleetCLIError("HTTP 500")],
+         "could not list pending scans (HTTP 500); already saw 1 running"),
+        # An API that times out says nothing about the workers.
+        (True, [fleet_cli.FleetCLIError("timed out")], "could not list running scans (timed out)"),
+        # A body without a total is not a count of zero.
+        (True, [{"status": "healthy"}], "the running scan list did not report a total"),
+        (True, [{"scans": [], "total": True}], "the running scan list did not report a total"),
+        # Compose could not say whether the stack runs and the API is unreachable: refuse.
+        (None, [fleet_cli.FleetCLIError("connection refused")], "could not list running scans"),
+    ],
+)
+def test_init_preflight_refuses_when_it_cannot_establish_the_answer(
+    tmp_path, monkeypatch, capsys, running_state, answers, expected,
+):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: running_state)
+    queue = iter(answers)
+
+    def fake_api(*_a, **_k):
+        answer = next(queue)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(fleet_cli, "api_json", fake_api)
+    with pytest.raises(fleet_cli.FleetCLIError, match="preflight failed"):
+        fleet_cli.run_init_preflight(paths, _broker_preflight_args())
+    output = capsys.readouterr().out
+    assert "[FAIL] Queued or running scans: cannot confirm the control plane is idle: " + expected in output
+
+
+def test_init_preflight_passes_when_the_api_confirms_zero_work_even_if_compose_cannot_say(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "_control_plane_running", lambda _paths: None)
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_a, **_k: {"scans": [], "total": 0})
+    fleet_cli.run_init_preflight(paths, _broker_preflight_args())
+    assert "[PASS] Queued or running scans" in capsys.readouterr().out
+
+
+def test_control_plane_running_reads_the_api_container_and_admits_not_knowing(monkeypatch, tmp_path):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    monkeypatch.setattr(fleet_cli, "_docker_compose_command", lambda: ["docker", "compose"])
+    monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="abc123\n"))
+    assert _REAL_CONTROL_PLANE_RUNNING(paths) is True
+    monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=""))
+    assert _REAL_CONTROL_PLANE_RUNNING(paths) is False
+    monkeypatch.setattr(fleet_cli, "_run", lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=""))
+    assert _REAL_CONTROL_PLANE_RUNNING(paths) is None
+
+
+def test_managed_preflight_names_the_cloud_firewall_it_cannot_check(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_a, **_k: {"scans": [], "total": 0})
+    fleet_cli.run_init_preflight(paths, _broker_preflight_args())
+    output = capsys.readouterr().out
+    assert "needs inbound TCP 80 and 443 open at the cloud firewall" in output
+    assert "[PASS] HTTP port 80: free on this host" in output
+    assert "[WARN] Inbound firewall: cannot be verified from this host" in output
+    assert "TCP 80 and 443 on 203.0.113.8" in output
+
+
+def test_broker_init_rollback_removes_generated_dirs_and_explains_the_firewall(tmp_path, monkeypatch, capsys):
+    paths = fleet_cli.RuntimePaths(tmp_path)
+    scanner = tmp_path / "scanner.sh"
+    scanner.write_text("#!/bin/sh\n", encoding="utf-8")
+    scanner.chmod(0o755)
+    paths.dotenv.write_text("AI_MODEL=test\n", encoding="utf-8")
+    _patch_broker_preflight_host(monkeypatch)
+    monkeypatch.setattr(fleet_cli, "api_json", lambda *_a, **_k: {"scans": [], "total": 0})
+    commands = []
+
+    def fake_run(argv, **_kwargs):
+        commands.append(list(argv))
+        if argv[-3:] == ["ps", "-q", "postgres"]:
+            return types.SimpleNamespace(returncode=0, stdout="postgres-container\n")
+        if "logs" in argv:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout="gateway | acme: challenge failed: timeout during connect (likely firewall problem)\n",
+            )
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(fleet_cli, "_run", fake_run)
+    monkeypatch.setattr(
+        fleet_cli,
+        "_wait_for_healthy_api",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            fleet_cli.FleetCLIError("public HTTPS did not become healthy within 120s: timed out")
+        ),
+    )
+
+    with pytest.raises(fleet_cli.FleetCLIError) as excinfo:
+        fleet_cli.command_init(paths, _broker_preflight_args(workers=2))
+
+    message = str(excinfo.value)
+    assert "rolled back to the previous configuration" in message
+    assert "inbound TCP 80 and 443" in message
+    assert "likely firewall problem" in message
+    assert "pre-conversion backup under backups/ is kept" in message
+    assert [str(scanner), "backup"] in commands
+    assert not paths.control.exists()
+    assert not paths.fleet.exists()
+    assert paths.dotenv.read_text(encoding="utf-8") == "AI_MODEL=test\n"
+
+
+def test_run_flushes_buffered_output_before_handing_the_terminal_to_a_child(monkeypatch):
+    flushed = []
+    monkeypatch.setattr(fleet_cli.sys.stdout, "flush", lambda: flushed.append("out"))
+    monkeypatch.setattr(fleet_cli.sys.stderr, "flush", lambda: flushed.append("err"))
+    monkeypatch.setattr(
+        fleet_cli.subprocess,
+        "run",
+        lambda *_a, **_k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    fleet_cli._run(["true"], capture=False)
+    assert flushed == ["out", "err"]

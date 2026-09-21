@@ -68,4 +68,19 @@ def test_worker_pool_summaries_fail_closed_when_specialized_readiness_raises():
         "pending": 0,
         "status": "not_ready",
         "reason": "worker_readiness_unavailable",
+        "remedy": None,
     }
+
+
+def test_worker_pool_summaries_carry_the_operator_remedy():
+    readiness = _readiness(status="not_ready", count=0, current=0, reason="no_fresh_device_worker")
+    readiness["remedy"] = "Start it with: shakerscan devices start"
+    pools = worker_pool_summaries(
+        {"count": 1, "current_count": 1},
+        agent_tool=lambda: _readiness(),
+        device=lambda: readiness,
+        model_intake=lambda: _readiness(),
+    )
+
+    assert pools["device"]["remedy"] == "Start it with: shakerscan devices start"
+    assert pools["agent_tool"]["remedy"] is None

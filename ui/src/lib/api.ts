@@ -2455,6 +2455,7 @@ export interface WorkerPoolSummary {
   pending: number
   status: 'ready' | 'not_ready' | 'disabled'
   reason?: string | null
+  remedy?: string | null
 }
 
 export interface WorkerStats {
@@ -5991,6 +5992,15 @@ export interface DeploymentDecision {
     signature_trusted_root?: boolean | null
     signature_verification_status?: string | null
   }>
+  /** The target's unresolved findings this scan did not observe, computed next to the gate. */
+  carried_over?: {
+    count?: number
+    material?: number
+    highest?: string | null
+    complete?: boolean
+    total_active?: number
+    unloaded_active?: number
+  } | null
   expires_at?: string
   [key: string]: unknown
 }

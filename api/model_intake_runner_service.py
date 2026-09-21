@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import sys
+import time
 from pathlib import Path
 import queue
 import secrets
@@ -35,6 +38,40 @@ except ModuleNotFoundError:  # pragma: no cover
     from api.model_intake_runner_controller import runner_memory_admission
     from api.model_intake_runner_inputs import normalize_known_answer_inputs
     from api.model_intake_runner_storage import cleanup_candidates, cleanup_storage, storage_report
+
+
+LOGGER = logging.getLogger("shakerscan.model_intake_runner")
+
+
+def _job_outcome_line(job: dict[str, Any]) -> str:
+    """One content-minimal line: the receipt verdict and the first phase failure, or the error."""
+    if job.get("state") == "failed":
+        error = job.get("error") if isinstance(job.get("error"), dict) else {}
+        return f"error {error.get('code')}: {str(error.get('message') or '')[:300]}"
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
+    line = f"receipt status={payload.get('status') or 'unknown'}"
+    errors = observations.get("errors") if isinstance(observations.get("errors"), list) else []
+    first = next((item for item in errors if isinstance(item, dict)), None)
+    if first:
+        line += f"; phase {first.get('phase')} {first.get('type')}: {str(first.get('message') or '')[:300]}"
+    return line
+
+
+def _ensure_journal_logging() -> None:
+    """Make job lines reach the service's stdout/stderr (journald under systemd).
+
+    uvicorn configures only its own loggers, so without this the journal shows startup and
+    nothing else, and a run cannot be reconstructed after its scratch directory is cleaned.
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(handler)
+    if root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
 
 
 class RunnerJobRequest(BaseModel):
@@ -171,6 +208,12 @@ class DurableRunnerQueue:
                 job["state"] = "running"
                 job["started_at"] = _now()
                 self._write(job)
+                request = job["request"] if isinstance(job.get("request"), dict) else {}
+                LOGGER.info(
+                    "job %s started: mode=%s submission=%s environment=%s",
+                    job_id, request.get("mode"), request.get("submission_id"), request.get("environment"),
+                )
+                started = time.monotonic()
                 try:
                     current_storage = self.runner.plan_storage(job["request"])
                     job.setdefault("resource_plan", {})["storage"] = current_storage
@@ -186,6 +229,10 @@ class DurableRunnerQueue:
                     job["error"] = {"code": type(exc).__name__, "message": str(exc)[:4000]}
                 job["finished_at"] = _now()
                 self._write(job)
+                LOGGER.info(
+                    "job %s %s in %.1fs: %s",
+                    job_id, job["state"], time.monotonic() - started, _job_outcome_line(job),
+                )
                 if os.getenv("MODEL_INTAKE_RUNNER_AUTO_CLEANUP", "true").lower() == "true":
                     self.cleanup(dry_run=False, force_inactive_scratch=False)
             finally:
@@ -234,6 +281,7 @@ jobs: DurableRunnerQueue | None = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global jobs
+    _ensure_journal_logging()
     if len(os.getenv("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN", "")) < 32:
         raise RuntimeError("MODEL_INTAKE_RUNNER_INTERNAL_TOKEN must contain at least 32 characters")
     jobs = DurableRunnerQueue()

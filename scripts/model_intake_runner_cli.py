@@ -369,6 +369,7 @@ def host_facts(runtime: Path) -> dict:
         # Readable without root and written by a completed install, so it
         # corroborates an unreadable runner env file.
         "api_wired_to_runner": _runtime_runner_url(runtime),
+        "api_runner_readiness": _api_runner_readiness(runtime),
         "service_state": (unit.stdout or "unknown").strip(),
         "host_tools": tools,
         "missing_host_tools": sorted(name for name, present in tools.items() if not present),
@@ -424,7 +425,8 @@ def cmd_status(args, runtime: Path) -> int:
         f"{name}={'yes' if present is True else 'no' if present is False else 'unreadable'}"
         for name, present in facts["installed"].items()))
     print(f"  systemd service : {facts['service_state']}")
-    print(f"  api wired       : {'yes' if facts['api_wired_to_runner'] else 'no'}")
+    print(f"  api wired       : {'yes' if facts['api_wired_to_runner'] else 'no'} (.env)")
+    print(f"  api sees runner : {facts.get('api_runner_readiness', 'unknown')}")
     print()
     if complete and facts["service_state"] == "active":
         print("Installed and running.")
@@ -517,22 +519,62 @@ def _api_request(url: str, token: str, method: str = "GET",
     return decoded
 
 
+def _compose_file_args(runtime: Path) -> list[str]:
+    """The Compose file the runtime actually runs on.
+
+    A source checkout has docker-compose.yml; an installed runtime ships only
+    docker-compose.release.yml, and a bare `docker compose up` there answers
+    "no configuration file provided" -- which left the API wired to the runner
+    in .env but never recreated, and the trust anchor never registered.
+    """
+    if (runtime / "docker-compose.yml").is_file():
+        return []
+    release = runtime / "docker-compose.release.yml"
+    return ["-f", str(release)] if release.is_file() else []
+
+
+def _runtime_api_base(dotenv: dict[str, str]) -> str:
+    """The API origin this host's runtime publishes, as the launcher wrote it to .env."""
+    public_api = dotenv.get("SHAKERSCAN_PUBLIC_API_URL", "").rstrip("/")
+    if public_api.startswith("https://"):
+        return public_api
+    bind_host = dotenv.get("SHAKERSCAN_BIND_HOST", "127.0.0.1")
+    if bind_host in {"0.0.0.0", "::", ""}:
+        bind_host = "127.0.0.1"
+    if ":" in bind_host and not bind_host.startswith("["):
+        bind_host = f"[{bind_host}]"
+    api_port = dotenv.get("SHAKERSCAN_API_PORT", "8080")
+    return f"http://{bind_host}:{api_port}"
+
+
+def _api_runner_readiness(runtime: Path) -> str:
+    """What the running API says about the runner: the check `.env` alone cannot make.
+
+    `.env` being wired proves only that the installer wrote it. The API container reads
+    `.env` when it is (re)created, so a failed recreate leaves it answering readiness from
+    its own container while status says "wired".
+    """
+    try:
+        base = _runtime_api_base(_read_dotenv_values(runtime / ".env"))
+        with urllib.request.urlopen(f"{base}/model-intake/runners/readiness", timeout=5) as response:
+            body = json.loads(response.read(64 * 1024).decode("utf-8", errors="replace"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return f"unreachable ({type(exc).__name__})"
+    if not isinstance(body, dict):
+        return "unreadable"
+    status = str(body.get("status") or ("READY" if body.get("ready") else "NOT_READY"))
+    reason = body.get("reason")
+    if body.get("ready") is True:
+        return "ready"
+    return f"{status.lower()}{f' ({reason})' if reason else ''}"
+
+
 def _register_runner_trust_anchors(runtime: Path, signer: str, builder_id: str) -> None:
     dotenv = _read_dotenv_values(runtime / ".env")
     token = dotenv.get("MODEL_INTAKE_OPERATOR_TOKEN", "")
     if len(token) < 32:
         raise RuntimeError("MODEL_INTAKE_OPERATOR_TOKEN is unavailable in the runtime .env")
-    public_api = dotenv.get("SHAKERSCAN_PUBLIC_API_URL", "").rstrip("/")
-    if public_api.startswith("https://"):
-        base = public_api
-    else:
-        bind_host = dotenv.get("SHAKERSCAN_BIND_HOST", "127.0.0.1")
-        if bind_host in {"0.0.0.0", "::", ""}:
-            bind_host = "127.0.0.1"
-        if ":" in bind_host and not bind_host.startswith("["):
-            bind_host = f"[{bind_host}]"
-        api_port = dotenv.get("SHAKERSCAN_API_PORT", "8080")
-        base = f"http://{bind_host}:{api_port}"
+    base = _runtime_api_base(dotenv)
     last_error: Exception | None = None
     for _ in range(30):
         try:
@@ -745,6 +787,9 @@ def cmd_install(args, runtime: Path) -> int:
         # Compose bind-mounts <runtime>/results at /results. Firecracker runs
         # on the host, so both sides must name that same physical directory.
         "MODEL_INTAKE_RUNNER_SHARED_RESULTS_ROOT": str(shared_results_root),
+        # This installer enables the unit and wires the API itself; the script must not
+        # tell the operator to do that by hand.
+        "MODEL_INTAKE_RUNNER_MANAGED_INSTALL": "1",
     }
     provisioned = _run(
         [str(runtime / "scripts/provision-model-intake-firecracker.sh")], env=provision_env
@@ -795,9 +840,12 @@ def cmd_install(args, runtime: Path) -> int:
     # `docker compose restart` reuses the existing container and never re-reads
     # .env, so the API would keep an empty MODEL_INTAKE_RUNNER_URL and go on
     # answering readiness from its own container instead of the runner.
-    recreated = _run(["docker", "compose", "up", "-d", "api"], cwd=str(runtime))
+    recreated = _run(["docker", "compose", *_compose_file_args(runtime), "up", "-d", "api"], cwd=str(runtime))
     if recreated.returncode != 0:
-        print("Could not recreate the api container; run 'docker compose up -d api' by hand.",
+        print("Could not recreate the api container; run "
+              f"'docker compose {' '.join(_compose_file_args(runtime))} up -d api' by hand, then run "
+              "this installer again: the runner trust anchors are not registered yet, so the API "
+              "will not accept the runner's receipts until that step completes.",
               file=sys.stderr)
         return recreated.returncode
 

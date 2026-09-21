@@ -60,6 +60,11 @@ _DOH_RESOLVERS = tuple(
     if item.strip().startswith("https://")
 )
 _TIMEOUT_CLASSES = frozenset({"LifetimeTimeout", "Timeout", "TimeoutError"})
+# A stub resolver that cannot answer a type says so with SERVFAIL, which dnspython
+# raises as NoNameservers: systemd-resolved on a stock Ubuntu 24.04 host did that
+# for every DS and DNSKEY query. That is the same "this forwarder cannot answer"
+# outcome as a timeout, and the fallback must cover it.
+_FALLBACK_CLASSES = _TIMEOUT_CLASSES | frozenset({"NoNameservers"})
 _PRIVATE_NAME_SUFFIXES = (
     ".local", ".localhost", ".internal", ".test", ".example", ".invalid", ".home.arpa", ".lan",
 )
@@ -305,7 +310,7 @@ async def inspect_dns_posture(
             class_name = type(exc).__name__
             if class_name in {"NXDOMAIN", "NoAnswer"}:
                 return label, []
-            if use_doh and class_name in _TIMEOUT_CLASSES:
+            if use_doh and class_name in _FALLBACK_CLASSES:
                 recovered = await over_https(label, name, query_type)
                 if recovered is not None:
                     return recovered

@@ -2530,7 +2530,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |

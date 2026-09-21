@@ -382,3 +382,26 @@ def test_local_quarantine_deduplicates_and_revalidates_existing_object(tmp_path)
         acquisition.quarantine_local_file(
             source, quarantine, inspection_bytes=32, max_artifact_bytes=10_000
         )
+
+
+def test_quarantine_read_group_follows_the_configured_sandbox_gid(monkeypatch):
+    """A non-root Linux install runs the sandbox and the API as the host account and records it
+    as MODEL_INTAKE_SANDBOX_GID; granting the image's scanner group instead left every quarantined
+    artifact unreadable to both."""
+    from scanner.scanner_tools import model_intake_acquisition as acquisition
+
+    monkeypatch.setenv("MODEL_INTAKE_SANDBOX_GID", "1000")
+    assert acquisition.sandbox_read_gid() == 1000
+    monkeypatch.setenv("MODEL_INTAKE_SANDBOX_GID", "")
+
+    class _Account:
+        pw_gid = 10001
+
+    monkeypatch.setattr(acquisition.pwd, "getpwnam", lambda name: _Account())
+    assert acquisition.sandbox_read_gid() == 10001
+
+    def missing(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr(acquisition.pwd, "getpwnam", missing)
+    assert acquisition.sandbox_read_gid() is None
