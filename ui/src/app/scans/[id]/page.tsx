@@ -118,9 +118,12 @@ function scanLogBadgeTone(kind: string): string {
   }
 }
 
+// Active rows loaded for the carried-over summary. Past this, history is reported partial.
+const HISTORY_ROW_CAP = 5000
+
 function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], historyState = 'ready' }: {
   scan: any; buildVersion?: string | null; buildFingerprint?: string | null
-  decision?: DeploymentDecision | null; targetFindings?: any[]; historyState?: 'loading' | 'error' | 'ready'
+  decision?: DeploymentDecision | null; targetFindings?: any[]; historyState?: 'loading' | 'error' | 'ready' | 'partial'
 }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
@@ -263,7 +266,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             {severityEntries.length > 0 ? severityEntries.map(([severity, count]) => (
               <Link
                 key={severity}
-                href={`/findings?scan_id=${scan.id}&severity=${severity}`}
+                href={`/findings?scan_id=${scan.id}&severity=${severity}&freshness=all`}
                 title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} from this scan`}
                 className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
@@ -288,18 +291,20 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             <p className="mt-2 text-sm text-gray-500">Loading target history…</p>
           ) : carried.state === 'error' ? (
             <p className="mt-2 text-sm text-amber-300">Target history unavailable; earlier findings were not checked.</p>
-          ) : carried.count > 0 ? (
+          ) : carried.count > 0 || !carried.complete ? (
             <>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <Link
-                  href={`/findings?target_id=${scan.target_id}&status=active`}
+                  href={`/findings?target_id=${scan.target_id}&status=active&freshness=all`}
                   className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest as SeverityLevel] : 'bg-gray-800 text-gray-300'}`}
                 >
-                  {carried.count} unresolved{carried.highest ? ` · up to ${carried.highest}` : ''}
+                  {carried.complete ? '' : 'at least '}{carried.count} unresolved{carried.highest ? ` · up to ${carried.highest}` : ''}
                 </Link>
               </div>
               <p className="mt-2 text-xs leading-5 text-gray-500">
-                Found by earlier scans and still open; this run did not observe them. They count toward the release decision.
+                {carried.complete
+                  ? 'Found by earlier scans and still open; this run did not observe them. They count toward the release decision.'
+                  : 'Target history is incomplete: not every active finding could be loaded, so this is a lower bound and not an all-clear.'}
               </p>
             </>
           ) : (
@@ -716,7 +721,7 @@ function ScanFindingContextCard({
             This run's observations are kept separate from findings that were not observed in this run.
           </p>
         </div>
-        <Link href={`/findings?target_id=${scan.target_id}`} className="text-xs text-blue-300 hover:text-blue-200">
+        <Link href={`/findings?target_id=${scan.target_id}&freshness=all`} className="text-xs text-blue-300 hover:text-blue-200">
           Open all target findings
         </Link>
       </div>
@@ -1830,6 +1835,7 @@ function ScanDetailContent() {
   const [deploymentDecisionLoading, setDeploymentDecisionLoading] = useState(false)
   const [targetFindings, setTargetFindings] = useState<Finding[]>([])
   const [targetFindingsTotal, setTargetFindingsTotal] = useState(0)
+  const [targetFindingsPartial, setTargetFindingsPartial] = useState(false)
   const [targetFindingsLoading, setTargetFindingsLoading] = useState(false)
   const [targetFindingsError, setTargetFindingsError] = useState<string | null>(null)
   const [targetPosture, setTargetPosture] = useState<TargetPosture | null>(null)
@@ -1891,15 +1897,29 @@ function ScanDetailContent() {
         if (data?.target_id && ['completed', 'failed'].includes(String(data?.status))) {
           setTargetFindingsLoading(true)
           try {
-            const findingData = await getFindings({
-              target_id: data.target_id,
-              status: 'active',
-              limit: 100,
-              sort_by: 'severity',
-              sort_order: 'desc',
-            })
-            setTargetFindings(findingData.findings || [])
-            setTargetFindingsTotal(findingData.total || 0)
+            // The carried-over summary is only true over the complete set of active rows.
+            // Page through all of them; a cap that cannot be reached is reported as a
+            // partial history, never as an all-clear.
+            const pageSize = 200
+            const rows: Finding[] = []
+            let total = 0
+            for (let offset = 0; offset < HISTORY_ROW_CAP; offset += pageSize) {
+              const page = await getFindings({
+                target_id: data.target_id,
+                status: 'active',
+                limit: pageSize,
+                offset,
+                sort_by: 'severity',
+                sort_order: 'desc',
+              })
+              const batch = page.findings || []
+              rows.push(...batch)
+              total = Math.max(Number(page.total || 0), rows.length)
+              if (batch.length < pageSize || rows.length >= total) break
+            }
+            setTargetFindings(rows)
+            setTargetFindingsTotal(total)
+            setTargetFindingsPartial(rows.length < total)
             setTargetFindingsError(null)
           } catch {
             setTargetFindingsError('Could not load earlier findings for this target.')
@@ -2317,7 +2337,7 @@ function ScanDetailContent() {
           buildFingerprint={buildFingerprint}
           decision={deploymentDecision}
           targetFindings={targetFindings}
-          historyState={targetFindingsLoading ? 'loading' : targetFindingsError ? 'error' : 'ready'}
+          historyState={targetFindingsLoading ? 'loading' : targetFindingsError ? 'error' : targetFindingsPartial ? 'partial' : 'ready'}
         />
       )}
       {scan.status === 'completed' && scan.target_id && (

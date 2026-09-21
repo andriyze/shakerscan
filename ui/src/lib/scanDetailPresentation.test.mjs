@@ -150,6 +150,17 @@ test('raw and persisted forms of the same scan finding share one UI identity', (
   assert.equal(scanFindingIdentity(raw), scanFindingIdentity(persistedSummary))
 })
 
+test('finding identity is the persisted fingerprint when there is one, and paths keep their case', () => {
+  const a = { fingerprint: 'fp-a', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }
+  const b = { fingerprint: 'fp-b', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }
+  assert.notEqual(scanFindingIdentity(a), scanFindingIdentity(b))
+  assert.equal(scanFindingIdentity(a), scanFindingIdentity({ fingerprint: 'fp-a', title: 'renamed' }))
+  assert.notEqual(
+    scanFindingIdentity({ title: 'Exposed panel', url: 'http://app/Admin', tool: 'probe' }),
+    scanFindingIdentity({ title: 'Exposed panel', url: 'http://app/admin', tool: 'probe' }),
+  )
+})
+
 test('requested coverage failures are promoted into the result summary', () => {
   const result = scanResultPresentation({
     result: {
@@ -219,19 +230,40 @@ test('the conclusion names the next step for each limit it reports', () => {
 })
 
 
-test('carried over counts only active rows this run neither wrote, last saw, nor reported', () => {
-  const scan = { id: 'scan-2', result: { findings: [{ title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' }] } }
+test('carried over counts only active rows this run neither wrote, last saw, nor reported by fingerprint', () => {
+  const scan = { id: 'scan-2', result: { findings: [{ fingerprint: 'fp-xfo', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' }] } }
   const rows = [
     { severity: 'high', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Sensitive exposure: environment secret file', url: 'http://app/.env', tool: 'probe' },
     { severity: 'high', status: 'resolved', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Old thing', url: 'http://app/x', tool: 't' },
     { severity: 'medium', status: 'false_positive', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'FP', url: 'http://app/y', tool: 't' },
-    { severity: 'info', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-3', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' },
+    // Same fingerprint as a reported finding: observed by this run even though linkage lags.
+    { severity: 'info', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-3', fingerprint: 'fp-xfo', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' },
     { severity: 'info', status: 'active', scan_id: 'scan-2', last_seen_scan_id: 'scan-2', title: 'Seen here', url: 'http://app/z', tool: 't' },
   ]
   const summary = carriedOverSummary(scan, rows)
-  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, highest: 'high' })
+  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, highest: 'high', complete: true })
   assert.equal(carriedOverSummary(scan, [], 'loading').state, 'loading')
   assert.equal(carriedOverSummary(scan, [], 'error').count, 0)
+})
+
+test('a distinct fingerprint with the same display strings stays carried over', () => {
+  // The old display-string key collapsed these two and dropped an unresolved finding.
+  const scan = { id: 'scan-2', result: { findings: [{ fingerprint: 'fp-new', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss', template_id: 'xss-002' }] } }
+  const rows = [
+    { severity: 'high', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', fingerprint: 'fp-old', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss', template_id: 'xss-001' },
+  ]
+  assert.equal(carriedOverSummary(scan, rows).count, 1)
+  // No fingerprint and no linkage is uncertainty, never proof of re-observation.
+  const unlinked = [{ severity: 'medium', status: 'active', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }]
+  assert.equal(carriedOverSummary(scan, unlinked).count, 1)
+})
+
+test('a partial history never reads as an all-clear', () => {
+  const scan = { id: 'scan-2', result: { findings: [] } }
+  const summary = carriedOverSummary(scan, [], 'partial')
+  assert.equal(summary.state, 'partial')
+  assert.equal(summary.complete, false)
+  assert.equal(summary.count, 0)
 })
 
 test('the release line claims an earlier-scan origin only when the decision says so', () => {

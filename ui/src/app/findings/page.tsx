@@ -165,7 +165,9 @@ function FindingsContent() {
   // months ago, indistinguishable. Default to what a recent scan observed, and
   // say plainly how many older ones that leaves out. An explicit Last seen
   // choice is more specific, so it wins.
-  const freshnessFilter = lastSeenFilter ? 'all' : (filters.freshness || 'current')
+  // A scan-scoped view is that scan's evidence, however old, so it defaults to all
+  // rows; an explicit freshness choice still wins.
+  const freshnessFilter = lastSeenFilter ? 'all' : (filters.freshness || (scanIdFilter ? 'all' : 'current'))
   const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
   const resolvedWithinFilter = filters.resolved_within ? Number(filters.resolved_within) : 0
   const verificationVerdictFilter = filters.verification_verdict || ''

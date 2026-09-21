@@ -10,7 +10,11 @@ const detail = readFileSync(path.join(root, 'src/app/scans/[id]/page.tsx'), 'utf
 test('scan result fetches durable finding history for its exact target', () => {
   assert.match(detail, /getFindings\(\{/)
   assert.match(detail, /target_id: data\.target_id/)
-  assert.match(detail, /limit: 100/)
+  // Every active row is paged in; a cap that cannot be reached is a partial history, not an all-clear.
+  assert.match(detail, /limit: pageSize/)
+  assert.match(detail, /offset < HISTORY_ROW_CAP/)
+  assert.match(detail, /setTargetFindingsPartial\(rows\.length < total\)/)
+  assert.match(detail, /not an all-clear/)
 })
 
 test('scan result reconciles report evidence with durable IDs from the scan payload', () => {

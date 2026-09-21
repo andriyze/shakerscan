@@ -96,8 +96,27 @@ def _same_origin_path(value: str, *, origin: str) -> str | None:
     path = path.rstrip()
     if not path.startswith("/") or path == "/":
         return None
-    query = f"?{parsed.query}" if parsed.query else ""
-    return f"{path}{query}"
+    return f"{path}{_value_free_query(parsed.query)}"
+
+
+def _value_free_query(query: str) -> str:
+    """Keep the shape of a declared query (names, order, multiplicity) and drop every value.
+
+    A declared route is worth more than its bare path because candidates are made from its
+    parameter names. The values are the target's own, can be credentials or identifiers, and
+    were reaching capability receipts, where a pattern-based scrubber only catches what it
+    recognises (a percent-encoded name defeats it). The observation is value-free by
+    construction now, not by redaction after the fact.
+    """
+    if not query:
+        return ""
+    names = [
+        name for name, _value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+        if name
+    ]
+    if not names:
+        return ""
+    return "?" + "&".join(f"{urllib.parse.quote(name, safe='')}=" for name in names)
 
 
 def _robots_references(text: str) -> list[str]:

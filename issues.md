@@ -35,14 +35,14 @@ Status column: `open`, `fixed` (on this branch, verified), `fixed-unverified`, `
 | F7 | Audit of PR #176: the running-work guard failed open (an unreachable API, an error on the second request, or a body without a total all counted as "nothing to interrupt", and a positive count already seen was discarded) and censused only the presentation scan list, which hides shards, internal, Model Intake and device rows. | `scripts/fleet_cli.py` | fixed (fail closed unless `--allow-running-work`; a stopped stack is recognised by the absence of the api container; census includes the hidden rows; new submissions are still not paused, which the hint says) |
 | F6 | Broker worker join not yet tested: blocked on inbound 80/443 for `m2.shakerscan.com`. | — | blocked |
 
-## Already merged before this branch (from the PR #176 audit, confirmed in source, not fixed here)
+## Already merged before this branch (from the PR #176 audit, confirmed in source, fixed on this branch)
 
 | # | Finding | Where | Status |
 |---|---|---|---|
-| A2 | Hint ingestion keeps declared query values (`_same_origin_path` appends `parsed.query`) and the receipt redactor is pattern-based, so ordinary or percent-encoded parameter values survive into receipts. | `api/capabilities/hint_files.py`, `api/runtime/receipts.py` | open (PR #170) |
-| A3 | The scan page's carried-over summary is computed from the first 100 active target findings and can declare "Nothing unresolved from earlier scans" on a target with more. | `ui/src/app/scans/[id]/page.tsx`, `carriedOverSummary` | open (PR #173) |
-| A4 | `scanFindingIdentity` is title+URL+tool lowercased, so distinct fingerprints/templates with the same display strings collapse and a still-unresolved finding drops out of the carried-over set. | `ui/src/lib/scanDetailPresentation.mjs` | open (PR #173) |
-| A5 | Finding drill-down links from a scan carry no `freshness`, so the Findings page applies its 14-day default and an older scan's count does not match the linked list. | `ui/src/app/scans/[id]/page.tsx`, `ui/src/app/findings/page.tsx` | open (PR #170) |
+| A2 | Hint ingestion keeps declared query values (`_same_origin_path` appends `parsed.query`) and the receipt redactor is pattern-based, so ordinary or percent-encoded parameter values survive into receipts. | `api/capabilities/hint_files.py`, `api/runtime/receipts.py` | fixed (declared queries keep parameter names, order and multiplicity with empty values; value-free by construction, tested with ordinary and percent-encoded names) |
+| A3 | The scan page's carried-over summary is computed from the first 100 active target findings and can declare "Nothing unresolved from earlier scans" on a target with more. | `ui/src/app/scans/[id]/page.tsx`, `carriedOverSummary` | fixed (the scan page pages through every active row up to 5,000; beyond that the card says 'at least N unresolved' and 'history is incomplete', never an all-clear) |
+| A4 | `scanFindingIdentity` is title+URL+tool lowercased, so distinct fingerprints/templates with the same display strings collapse and a still-unresolved finding drops out of the carried-over set. | `ui/src/lib/scanDetailPresentation.mjs` | fixed (identity is the persisted fingerprint when present; a row counts as observed only through scan linkage or a reported fingerprint; URL case is kept; display strings are a fallback for rows without a fingerprint) |
+| A5 | Finding drill-down links from a scan carry no `freshness`, so the Findings page applies its 14-day default and an older scan's count does not match the linked list. | `ui/src/app/scans/[id]/page.tsx`, `ui/src/app/findings/page.tsx` | fixed (scan-scoped and carried-over drill-downs pass freshness=all; a scan_id view defaults to all rows; an explicit freshness choice still wins) |
 
 ## Model Intake (least)
 
