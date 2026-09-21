@@ -389,6 +389,14 @@ def verify_bundle(directory: Path, dist: Path | None = None) -> dict:
                 require(sha256(path.read_bytes()) == artifact.get("sha256"), "client artifact hash mismatch")
         require(subject not in subjects, "duplicate artifact subject")
         subjects.add(subject)
+    if index.get("coverage", {}).get("stage") == 2:
+        root = str(Path(__file__).resolve().parents[1])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from scripts.release_sbom_stage2 import verify_extension
+        sboms |= verify_extension(directory, index)
+    else:
+        require("extension" not in index, "stage-two evidence without stage-two coverage")
     require(sboms == {n for n in files if n.endswith(".spdx.json")}, "unindexed SBOM")
     if index["kind"] == "client":
         require(subjects == {"wheel", "sdist"}, "missing client distribution")

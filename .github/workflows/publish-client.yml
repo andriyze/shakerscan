@@ -96,6 +96,15 @@ jobs:
             --repository "$GITHUB_REPOSITORY" --output release-sbom
           python scripts/release_sbom.py verify --directory release-sbom --dist dist
       # Keep non-distribution files out of dist/: PyPI must receive only wheel/sdist files.
+      - uses: ./.github/actions/sbom-tools
+      - name: Validate expanded runtime and build-input SBOM coverage
+        run: |
+          python3 scripts/release_sbom_stage2.py --directory release-sbom \
+            --source-root . --tools "$SHAKERSCAN_SBOM_TOOLS" --output release-sbom-expanded
+          rm -rf release-sbom
+          mv release-sbom-expanded release-sbom
+          python3 scripts/release_sbom.py verify --directory release-sbom
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: client-sbom

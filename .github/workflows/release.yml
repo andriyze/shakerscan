@@ -128,6 +128,15 @@ jobs:
             --repository "$GITHUB_REPOSITORY" --output release-sbom
           python3 scripts/release_sbom.py verify --directory release-sbom
 
+      - uses: ./.github/actions/sbom-tools
+      - name: Validate expanded runtime and build-input SBOM coverage
+        run: |
+          python3 scripts/release_sbom_stage2.py --directory release-sbom \
+            --source-root . --tools "$SHAKERSCAN_SBOM_TOOLS" --output release-sbom-expanded
+          rm -rf release-sbom
+          mv release-sbom-expanded release-sbom
+          python3 scripts/release_sbom.py verify --directory release-sbom
+
       - name: Attest release SBOM index
         id: sbom_attestation
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6

@@ -33,6 +33,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
+      - uses: ./.github/actions/sbom-tools
       - name: Offline contracts
         run: python -m unittest discover -s tests -p 'test_release_sbom*.py' -v
       - name: Build and inventory real client archives
@@ -44,6 +45,24 @@ jobs:
             --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
             --repository "$GITHUB_REPOSITORY" --output client-sbom-smoke
           python scripts/release_sbom.py verify --directory client-sbom-smoke --dist dist
+      - name: Validate real client formats
+        run: |
+          python3 scripts/release_sbom_stage2.py --directory client-sbom-smoke \
+            --source-root . --tools "$SHAKERSCAN_SBOM_TOOLS" --output client-sbom-expanded
+          python3 scripts/release_sbom.py verify --directory client-sbom-expanded --dist dist
+          python3 -m unittest discover -s tests -p test_release_sbom_stage2.py -v
+      - name: Preserve pinned validation toolchain
+        if: always()
+        run: |
+          test -n "$SHAKERSCAN_SBOM_TOOLS"
+          tar -czf sbom-toolchain.tar.gz -C "$SHAKERSCAN_SBOM_TOOLS" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pinned-sbom-validation-toolchain
+          path: sbom-toolchain.tar.gz
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve exact validation source inputs
         if: always()
         run: |
@@ -65,7 +84,7 @@ jobs:
   registry-smoke:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -87,9 +106,17 @@ jobs:
             --generator-source-sha "$(git rev-parse HEAD)" \
             --repository "$GITHUB_REPOSITORY" --output engine-sbom-smoke
           python3 scripts/release_sbom.py verify --directory engine-sbom-smoke
+      - uses: ./.github/actions/sbom-tools
+      - name: Independent catalogs, supporting services and coverage checks
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/sbom-release-source" 'v2.4.0^{commit}'
+          python3 scripts/release_sbom_stage2.py --directory engine-sbom-smoke \
+            --source-root "$RUNNER_TEMP/sbom-release-source" --tools "$SHAKERSCAN_SBOM_TOOLS" \
+            --output engine-sbom-expanded
+          python3 scripts/release_sbom.py verify --directory engine-sbom-expanded
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: unsigned-engine-sbom-smoke
-          path: engine-sbom-smoke/
+          path: engine-sbom-expanded/
           if-no-files-found: error
           retention-days: 7

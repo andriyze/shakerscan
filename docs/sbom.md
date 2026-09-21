@@ -1,159 +1,167 @@
-# Release SBOMs (stage one)
+# Release SBOMs
 
-**Status:** Maintained release guide; stage-one publication is implemented. Historical releases are not automatically backfilled.
-**Reconciled:** 2026-09-21
+**Status:** Implemented release tooling, stages one and two. Coverage remains explicitly partial.
+**Updated:** 2026-09-21.
 
-Official engine and client publishing pipelines produce downloadable, artifact-specific
-SBOMs. This is a scoped first stage, **not a claim that every library or build input has
-been identified**. An SBOM is an inventory, not a vulnerability scan or a security verdict.
+Official publishing pipelines attach artifact-specific inventories and a signed index.
+An SBOM is a contents inventory, not a vulnerability scan, certification or assurance
+that every statically linked/minified library has been attributed.
 
-## Published files
+## What is published
 
-Engine releases publish one existing BuildKit SPDX catalog per first-party image and
-platform. `install/release-images.json` in the certified source tree drives the image list:
-scanner, API, UI, Model Intake signer and Model Intake, each for `linux/amd64` and
-`linux/arm64` (ten documents). API and scanner are separate artifacts even when components
-overlap. No images are rebuilt, executed or pulled into the Docker daemon by the exporter.
+Engine release bundles retain the ten original BuildKit SPDX catalogs: scanner, API, UI,
+Model Intake signer and Model Intake, each for linux/amd64 and linux/arm64. The certified
+receipt and `install/release-images.json` select immutable image subjects, not `latest`.
 
-Example filename: `shakerscan-2.4.0-scanner-linux-amd64.spdx.json`.
+Stage two independently catalogs each of those ten platform manifests with pinned Syft,
+and catalogs the checked-in default supporting-service images on both architectures.
+The current release Compose has five distinct supporting images: PostgreSQL, Redis,
+MinIO, MinIO client and Caddy. The signer database shares the PostgreSQL image, so its
+service use is retained without duplicating the catalog. Optional profile names and
+image override variables are recorded. Customer environment overrides are never read.
 
-Client releases use the client's independent version. Each exact wheel and source archive
-gets an SPDX 2.3 inventory, including SHA-256 file hashes for the packaged CLI/MCP modules
-and agent kit. Example filenames:
+Each independent runtime catalog has SPDX 2.3 and CycloneDX 1.6 representations.
+A separate pair describes the exact resolutions in UI, scanner, signer, Model Intake
+and guest dependency locks. These are **source/build inputs, not an assertion that all
+listed packages execute or ship in the final application**. A lock-file hash identifies
+the input file; it is never substituted for a package distribution's hash.
 
-- `shakerscan-0.6.0-py3-none-any.whl.spdx.json`
-- `shakerscan-0.6.0.tar.gz.spdx.json`
-
-Both release types also publish:
+Client releases retain actual wheel and sdist SPDX file inventories and add CycloneDX
+representations. The current client has no declared third-party runtime dependencies;
+a future nonempty `Requires-Dist` fails generation until dependency resolution is
+implemented. The CLI/MCP copies and agent kit are included in archive file inventories.
+Python, its standard library, pip/pipx/uv/Homebrew and external agents are not bundled.
+The client version and source commit are independent of the engine release.
 
 | File | Purpose |
 | --- | --- |
-| `sbom-index.json` | Release version/tag, artifact source commit, exporter source commit, artifact identities, platform/image digests or client archive hashes, SBOM hashes, original generator identities and coverage notes. |
-| `sbom-SHA256SUMS` | Checksums of the SPDX documents, scope README and index. |
-| `sbom-index.sigstore.json` | Detached GitHub Actions attestation bundle for the index. |
-| `sbom-README.md` | Scope and verification reminder, usable without this repository. |
+| `*.spdx.json`, `*.cdx.json` | Artifact catalogs, with build inputs distinguished by name and scope. |
+| `sbom-index.json` | Artifact identities, source/exporter commits, document hashes, generator identity and coverage. |
+| `sbom-source-inputs.json` | Source lock hashes, image inventory and supporting-service defaults/profile mapping. |
+| `sbom-coverage.json` | Coverage checks, catalog differences, limitations and validation method. |
+| `sbom-SHA256SUMS` | Hashes of catalogs, evidence, README and index. |
+| `sbom-index.sigstore.json` | Detached attestation of the final index; not self-included in the checksum list. |
+| `sbom-README.md` | Scope and verification instructions carried with downloads. |
 
-The index's signed hash list connects each SBOM to its subject. The detached signature
-bundle is intentionally outside the checksum manifest; it is verified cryptographically.
-The signature establishes which workflow published this inventory, not completeness of
-component discovery. Original image build provenance remains separately verifiable.
+## Coverage checks and limitations
 
-## Coverage and deliberate exclusions
+The independent runtime scan uses the exact per-platform manifest and verifies the
+returned manifest digest, OS and architecture. Images are downloaded for cataloging,
+not run or rebuilt. Sequential temporary workspaces are removed after each image.
+BuildKit and independent inventories are preserved separately; their package-identity
+differences are evidence, not automatically suppressed false positives.
 
-**Engine:** export the existing final-image BuildKit catalogs, preserving package versions,
-identifiers, relationships, original generator metadata and unknown versions as reported.
-Never filter out packages because of vulnerability waivers, severity or perceived relevance.
-The exporter verifies image inventory/receipt correspondence, certified source binding,
-both platforms, platform-bound attestation descriptors and release-critical SPDX structure.
-This structural validation is not a full validation of every optional SPDX schema field.
+Checks require OS package metadata, scanner/API/signer installed Python versions,
+isolated Model Intake tool environments, compiled Go metadata at expected shipped
+binary paths, and Next.js/React/React DOM metadata matching the source lock. Source
+requirements files inside an image cannot substitute for installed Python metadata.
+Go records include the actual compiled dependency versions and toolchain metadata,
+which matters because ShakerScan rebuilds upstream tools with dependency adjustments.
 
-Build-stage dependencies, bundled/minified JavaScript, static/native or vendored dependencies,
-Nuclei templates, wordlists and vulnerability databases can be incomplete in these catalogs.
-Supporting-service images (PostgreSQL, Redis, MinIO and Caddy), the Firecracker guest and
-host-installed software are outside stage one. Do not label this the complete deployment SBOM.
+Syft is also the family of cataloger used by BuildKit: these are independent catalog
+runs against final bytes, **not two unrelated detection engines**. Passing these targeted
+checks does not prove completeness for arbitrary native libraries, vendored code or
+minified JavaScript. Unattributed UI lock entries are explicitly reported as unresolved;
+they can be development-only, platform-conditional or bundled, not necessarily absent.
+Templates, wordlists and vulnerability database snapshots can still be under-attributed.
+Host software, remote services and customer volumes are outside the public release BOM.
 
-**Client:** inventory the actual archives without installing or executing them. Wheel and
-sdist packaged modules/kit must match. The current client declares no third-party runtime
-dependencies. A future nonempty `Requires-Dist` fails generation rather than publishing a
-misleading dependency-free inventory; extend the dependency resolution before that release.
-The host's Python requirement is recorded without inventing an exact interpreter version.
-Python/stdlib, pip, uv, pipx, Homebrew, Hatchling/build tools and externally invoked agent
-programs are not bundled client dependencies. File inventory does not recursively identify
-libraries that might later be embedded in copied source.
+All generated catalog representations pass the official, content-pinned SPDX 2.2/2.3
+or CycloneDX 1.6 JSON schemas with offline reference resolution. Additional semantic
+checks reject dangling/duplicate references and conversion loss of package identifiers.
+Schema validity is not completeness, correctness of an upstream license assertion or
+proof of vulnerability applicability. Inventory is never filtered by severity or waiver.
 
-SBOMs describe shipped artifacts, **not a customer's live environment**. Never generate these
-release files from a customer volume or expose an unauthenticated live-dependency endpoint.
+`release_sbom_toolchain.py` pins Syft 1.52.0 Linux archive SHA-256s and official schema
+Git blob identities. The bootstrap records resolved binary/schema SHA-256s in the
+index. Release-only jsonschema/PyYAML tooling is version-pinned in the composite action;
+its full transitive Python environment is not currently hash-locked or claimed reproducible.
+No cataloger is added to normal product runtime images for this release work.
 
-## Verify a downloaded release
+## Locally built Firecracker guest: remaining runtime scope
 
-Download all its SBOM assets into one fresh directory. Use a trusted checkout of this script
-and a current GitHub CLI. For an engine release:
+The guest root filesystem is built locally rather than distributed as a single global
+release artifact. Stage two includes its dependency lock as a **source input only**.
+It does not publish a runtime guest SBOM or change guest installation. A future guest
+inventory must be generated from the actual built filesystem and bound to its ext4
+hash, architecture, Docker image ID and kernel/VMM context; rebuilding a similarly named
+image is not a valid substitute. This remains an explicit runtime coverage gap.
+
+## Verification
+
+Download catalogs and all `sbom-*` assets of the desired release into one new directory.
+Example commands below require a release produced by these workflows; historical
+v2.4.0/client-v0.6.0 assets are not silently backfilled by this PR.
 
 ```sh
-gh release download v2.4.0 --repo andriyze/shakerscan \
-  --pattern '*spdx.json' --pattern 'sbom-*' --dir release-sbom
+gh release download vX.Y.Z --repo andriyze/shakerscan \
+  --pattern '*.spdx.json' --pattern '*.cdx.json' --pattern 'sbom-*' --dir release-sbom
 
-gh attestation verify release-sbom/sbom-index.json \
-  --repo andriyze/shakerscan \
+gh attestation verify release-sbom/sbom-index.json --repo andriyze/shakerscan \
   --signer-workflow andriyze/shakerscan/.github/workflows/release.yml \
   --bundle release-sbom/sbom-index.sigstore.json
 
 python3 scripts/release_sbom.py verify --directory release-sbom
 ```
 
-Use the release you are inspecting; these example versions do not imply that an already
-published release has been backfilled. For client releases, use `client-vX.Y.Z` and signer
-workflow `andriyze/shakerscan/.github/workflows/publish-client.yml`. Add `--dist path/to/dist`
-to `verify` to compare downloaded wheel/sdist hashes against the signed inventory as well.
-Check the index's `release_tag`, `source_sha`, and subject digests against the release/artifact
-you intended to inspect; authenticity alone does not select the desired version for you.
+For a client tag use `client-vX.Y.Z` and signer workflow
+`andriyze/shakerscan/.github/workflows/publish-client.yml`; pass `--dist downloaded-dist`
+to the integrity verifier to compare actual distribution hashes. Independently check
+the desired version, source commit and artifact digest; authenticity alone does not
+choose the version you intended. `verify` checks bundle hashes, relationships, coverage
+and subjects, **not signatures or a repeat of complete JSON-schema validation**.
+A detached bundle may also need a separately trusted Sigstore root for offline use.
 
-`verify` checks file hashes against the index, structural SPDX validity, artifact coverage
-and checksum-manifest consistency. It does **not** verify signatures by itself. A checksum
-manifest downloaded beside a file is not independent proof of authenticity.
-For offline verification, also retain a trusted Sigstore root as described by GitHub CLI;
-a detached bundle alone does not guarantee verification without network access.
+## Release integration and local generation
 
-## Release integration
+Engine publication re-verifies existing candidate provenance, exports the BuildKit
+catalogs, generates stage-two evidence, validates and signs the final index, then publishes
+version tags and GitHub assets. Both candidate build paths are covered without rebuilding
+images during promotion. A catalog/schema/coverage failure stops publication.
 
-`release.yml` re-verifies candidate image provenance against the certified commit, exports
-SBOMs by the immutable receipt digests, signs/verifies the index, and only then promotes
-image version tags and creates the GitHub release with all files attached. This handles
-both the reusable build-on-main images and the candidate fallback without changing either
-build. Missing catalogs fail before version publication; they are never replaced by a
-new scan of a rebuilt image with the same tag.
+The client build inventories the exact wheel/sdist, validates the expanded bundle and
+uploads it separately as `client-sbom`; the publish job verifies artifact hashes and signs
+before PyPI publication. Only `dist/` is sent to PyPI. All SBOMs go to GitHub release assets.
+Manual non-publishing builds retain unsigned workflow artifacts; use tagged releases for
+long-lived public assets. This work does not bump either product version.
 
-`publish-client.yml` inventories the exact built distributions after smoke tests and keeps
-SBOMs in a separate `client-sbom` workflow artifact. The publish job checks distribution
-hashes and signs/verifies the index before PyPI publication. Only `dist/` reaches PyPI;
-SBOMs and signatures are attached to the GitHub client release. No client or engine
-version is bumped by adding this release infrastructure.
-
-A non-publishing manual client build retains its unsigned SBOM workflow artifact. The
-existing manual PyPI publish mode still does not create a GitHub release unless triggered
-by a client tag; use tagged releases for durable public SBOM downloads.
-
-## Existing releases and local generation
-
-This PR does not modify historical releases. To inventory one, obtain the **existing**
-release receipt and image inventory from its exact source commit, independently verify
-its build provenance, and run the exporter from a trusted checkout:
+To expand an unsigned stage-one bundle using a clean checkout at its exact source commit:
 
 ```sh
-python3 scripts/release_sbom.py engine \
-  --receipt release-candidate-receipt.json --inventory released-image-inventory.json \
-  --version 2.4.0 --source-sha RELEASE_COMMIT_40_HEX \
-  --generator-source-sha "$(git rev-parse HEAD)" --output sbom-backfill
-
-python3 scripts/release_sbom.py client --dist downloaded-client-archives \
-  --version 0.6.0 --source-sha CLIENT_RELEASE_COMMIT_40_HEX \
-  --generator-source-sha "$(git rev-parse HEAD)" --output client-sbom-backfill
+python3 scripts/release_sbom_toolchain.py --output /tmp/sbom-tools
+python3 scripts/release_sbom_stage2.py --directory stage-one-bundle \
+  --source-root /path/to/exact-release-checkout --tools /tmp/sbom-tools \
+  --output expanded-bundle
+python3 scripts/release_sbom.py verify --directory expanded-bundle
 ```
 
-The engine command needs Docker Buildx and registry access; it invokes only
-`buildx imagetools inspect` and never sources the release `.env` lock. Registry operations
-have bounded retries/timeouts. The client command needs only Python 3.10+. Both refuse an
-existing output directory. Locally generated results are unsigned; publish them only via
-an explicitly approved signing/backfill process, never silently overwrite prior SBOMs.
+Install the release-only dependencies shown in `.github/actions/sbom-tools/action.yml`.
+Docker Buildx and registry access are needed for engine export. Output directories must
+be new; signed or already expanded input bundles are refused. Locally generated results
+are unsigned until an authorized publisher attests them. Never substitute a fresh rebuild
+for the historical digest or replace previously published SBOMs without an explicit process.
 
-## Tests and next stage
+## Tests and remaining work
 
 ```sh
-python3 -m unittest discover -s tests -p test_release_sbom.py -v
+python3 -m unittest discover -s tests -p 'test_release_sbom*.py' -v
 ```
 
-`Release SBOM contracts` also builds real client distributions and, on same-repository PRs,
-exports the existing v2.4.0 image catalogs in a read-only registry smoke job. It publishes
-no release assets and signs nothing. The fixed historical fixture makes format failures
-reproducible; registry outages or rate limits can still affect that integration check.
+The CI workflow exercises actual client archives, schema validation and a read-only
+catalog of the existing v2.4.0 engine/supporting defaults. It retains source/tool inputs
+for reproducibility. Registry availability/rate limits can affect the integration gate.
+Guest filesystem inventory and KVM boot acceptance remain outside this implementation.
 
-Later stages: supporting services/guest inventory, independent native/Go and bundled UI
-coverage checks, separately scoped build-input SBOMs, pinned generator images at build
-time, richer schema validation, CycloneDX export and vulnerability/VEX lifecycle management.
-Do not extend the completeness claim until those coverage checks exist.
+Further work: local guest artifact inventory, exact bundled-JavaScript attribution, comprehensive static/native library
+coverage, explicit template/database contents, kernel/VMM inventories, build-environment
+attestations and an ongoing advisory/VEX lifecycle. VEX must be a separately reviewed
+statement of applicability with justification, scope and review dates, never an excuse to
+remove a shipped component. No automatic “not affected” claims are generated here.
 
 ## References
 
-- Docker BuildKit SBOM scope and multi-platform extraction: https://docs.docker.com/build/metadata/attestations/sbom/
-- GitHub artifact attestations: https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
-- GitHub CLI verification and offline options: https://cli.github.com/manual/gh_attestation_verify
+- Docker SBOM scope: https://docs.docker.com/build/metadata/attestations/sbom/
+- Syft source and formats: https://github.com/anchore/syft
+- SPDX 2.3 schema: https://github.com/spdx/spdx-spec/blob/v2.3/schemas/spdx-schema.json
+- CycloneDX 1.6 schemas: https://github.com/CycloneDX/specification/tree/1.6/schema
+- GitHub verification: https://cli.github.com/manual/gh_attestation_verify
