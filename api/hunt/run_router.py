@@ -15,7 +15,13 @@ from .run_service import HuntRunService
 from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
+    MAX_CAPABILITIES,
+    MAX_COLLECTIONS,
+    MAX_CREDENTIAL_REFS,
+    MAX_DIRECT_ORIGIN_ADDRESSES,
+    MAX_GOAL_CHARS,
     MAX_HUNT_BODY_BYTES,
+    MAX_SKILLS,
     HuntStartContract,
     HuntStartContractError,
     hunt_start_public_contract,
@@ -43,17 +49,27 @@ class HuntStartV2Request(BaseModel):
     schema_version: Literal["hunt-start/v2"] = HUNT_START_SCHEMA
     target_id: str = Field(min_length=1, max_length=256)
     target_kind: Literal["web", "api", "device", "network"]
-    goal: str | None = Field(default=None, max_length=20_000)
-    objective: str | None = Field(default=None, max_length=20_000)
+    # Every bound below is the authority constant itself, never a copy of its value. A literal
+    # here silently became the real limit: the request model rejected a fifth skill and a ninth
+    # direct-origin address before the contract that owns those limits ever saw the request, so
+    # raising them in one place changed nothing a caller could observe.
+    goal: str | None = Field(default=None, max_length=MAX_GOAL_CHARS)
+    objective: str | None = Field(default=None, max_length=MAX_GOAL_CHARS)
     budget_profile: Literal["fast", "balanced", "thorough"] | None = None
     policy_profile: Literal["fast", "balanced", "thorough"] | None = None
     budgets: dict[str, int] = Field(default_factory=dict, max_length=32)
     policy: HuntStartV2PolicyRequest
-    credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
-    capabilities: list[str] = Field(default_factory=list, max_length=128)
-    request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
-    skill_ids: list[str] = Field(default_factory=list, max_length=4)
-    direct_origin_addresses: list[str] = Field(default_factory=list, max_length=8)
+    credential_refs: dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_CREDENTIAL_REFS,
+    )
+    capabilities: list[str] = Field(default_factory=list, max_length=MAX_CAPABILITIES)
+    request_collection_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_COLLECTIONS,
+    )
+    skill_ids: list[str] = Field(default_factory=list, max_length=MAX_SKILLS)
+    direct_origin_addresses: list[str] = Field(
+        default_factory=list, max_length=MAX_DIRECT_ORIGIN_ADDRESSES,
+    )
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
 
