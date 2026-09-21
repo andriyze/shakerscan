@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -93,6 +94,39 @@ def bootstrap(directory: Path) -> None:
     (directory / "toolchain.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
 
+def bind_container_identity(native: dict, spdx: dict, cdx: dict) -> dict:
+    """Fill Syft's omitted CycloneDX image PURL only after matching source evidence.
+
+    Syft 1.52 emits an OCI PURL for the SPDX document root but omits it from
+    CycloneDX metadata.component. Do not discard that identity to make the
+    format-parity check pass, or copy arbitrary missing dependency identities.
+    """
+    if native.get("source", {}).get("type") != "image":
+        return cdx
+    described = {r.get("relatedSpdxElement") for r in spdx.get("relationships", [])
+                 if r.get("spdxElementId") == "SPDXRef-DOCUMENT" and r.get("relationshipType") == "DESCRIBES"}
+    roots = [p for p in spdx.get("packages", []) if p.get("SPDXID") in described]
+    if len(roots) != 1 or roots[0].get("primaryPackagePurpose") != "CONTAINER":
+        raise ValueError("expected exactly one described SPDX container root")
+    root = roots[0]
+    component = cdx.get("metadata", {}).get("component", {})
+    image_id = native["source"].get("metadata", {}).get("manifestDigest")
+    if (component.get("type") != "container" or component.get("name") != root.get("name")
+            or not image_id or root.get("versionInfo") != image_id or component.get("version") != image_id):
+        raise ValueError("SPDX/CycloneDX container identity differs from scanned image")
+    purls = {r.get("referenceLocator") for r in root.get("externalRefs", []) if r.get("referenceType") == "purl"}
+    if len(purls) != 1 or not isinstance(next(iter(purls)), str) or not next(iter(purls)).startswith("pkg:oci/"):
+        raise ValueError("missing/unexpected SPDX container PURL")
+    purl = next(iter(purls))
+    if component.get("purl") not in (None, purl):
+        raise ValueError("conflicting CycloneDX container PURL")
+    result = copy.deepcopy(cdx)
+    result["metadata"]["component"]["purl"] = purl
+    result["metadata"]["component"].setdefault("properties", []).append({
+        "name": "shakerscan:container-purl-source", "value": "matched SPDX document root and Syft manifest digest"})
+    return result
+
+
 class Toolchain:
     def __init__(self, directory: Path):
         self.directory = directory.resolve()
@@ -130,7 +164,8 @@ class Toolchain:
                   "-o", f"syft-json={work / 'native.json'}",
                   "-o", f"spdx-json@2.3={work / 'spdx.json'}",
                   "-o", f"cyclonedx-json@1.6={work / 'cdx.json'}"])
-        return tuple(json.loads((work / name).read_bytes()) for name in ("native.json", "spdx.json", "cdx.json"))
+        native, spdx, cdx = (json.loads((work / name).read_bytes()) for name in ("native.json", "spdx.json", "cdx.json"))
+        return native, spdx, bind_container_identity(native, spdx, cdx)
 
     def convert(self, source: Path) -> dict:
         return json.loads(self.run(["convert", str(source), "-o", "cyclonedx-json@1.6"]))
