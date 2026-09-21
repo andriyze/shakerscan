@@ -998,31 +998,58 @@ def _validated_range(value: int, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def _queued_or_running_scans(paths: RuntimePaths) -> dict[str, int] | None:
-    """Count scans the local control plane is running or holding in its queue.
+def _control_plane_running(paths: RuntimePaths) -> bool | None:
+    """Whether the standalone api container exists; None when Compose cannot say."""
+    try:
+        compose = _docker_compose_command()
+        result = _run([*compose, "ps", "-q", "api"], check=False)
+    except FleetCLIError:
+        return None
+    if result.returncode != 0:
+        return None
+    return bool((result.stdout or "").strip())
 
-    Returns ``None`` when the standalone API is not reachable: a stopped stack has nothing to
-    interrupt, and fleet conversion must not fail because there is nothing to ask.
+
+# The normal scan list is a presentation view: it hides child shards, internal ASM rows,
+# Model Intake evidence scans and device scans. All of them are work a restart would kill.
+_ACTIVE_SCAN_QUERY = (
+    "include_shards=true&include_internal=true&include_model_intake=true&include_devices=true&limit=1"
+)
+
+
+def _queued_or_running_scans(paths: RuntimePaths) -> dict[str, int]:
+    """Count scans the control plane is running or holding in its queue.
+
+    Raises FleetCLIError whenever the answer cannot be established: an unreachable API, an
+    error on the second request, or a body without a total. A guard that treated any of those
+    as "nothing to interrupt" let the conversion restart the stack under running work.
     """
     base = local_api_url(paths)
     counts: dict[str, int] = {}
     for status in ("running", "pending"):
         try:
-            result = api_json(base, "GET", f"/scans?status={status}&limit=1", timeout=10.0)
-        except FleetCLIError:
-            return None
-        total = result.get("total")
-        if not isinstance(total, int):
-            rows = result.get("scans")
-            total = len(rows) if isinstance(rows, list) else 0
-        counts[status] = max(0, total)
+            result = api_json(base, "GET", f"/scans?status={status}&{_ACTIVE_SCAN_QUERY}", timeout=10.0)
+        except FleetCLIError as exc:
+            known = ", ".join(f"{count} {name}" for name, count in counts.items() if count)
+            raise FleetCLIError(
+                f"could not list {status} scans ({exc})"
+                + (f"; already saw {known}" if known else "")
+            ) from exc
+        total = result.get("total") if isinstance(result, dict) else None
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise FleetCLIError(f"the {status} scan list did not report a total")
+        counts[status] = total
     return counts
 
 
 def _require_no_active_scans(paths: RuntimePaths) -> None:
-    counts = _queued_or_running_scans(paths)
-    if counts is None:
+    if _control_plane_running(paths) is False:
+        # No api container: a stopped installation has nothing to interrupt.
         return
+    try:
+        counts = _queued_or_running_scans(paths)
+    except FleetCLIError as exc:
+        raise FleetCLIError(f"cannot confirm the control plane is idle: {exc}") from exc
     busy = {status: count for status, count in counts.items() if count > 0}
     if busy:
         detail = ", ".join(f"{count} {status}" for status, count in busy.items())
@@ -1101,7 +1128,8 @@ def run_init_preflight(paths: RuntimePaths, args: argparse.Namespace) -> dict[st
             success="none would be interrupted by the conversion restart",
             hint=(
                 "Fleet conversion restarts the whole stack. Wait for the scans to finish or cancel "
-                "them, or pass --allow-running-work to accept the interruption."
+                "them, stop the stack, or pass --allow-running-work to accept the interruption. "
+                "New submissions are not paused during the conversion."
             ),
         )
     public_url = _run_check(

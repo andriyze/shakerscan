@@ -583,8 +583,11 @@ and run `shakerscan join` again. Do not weaken the delivery gate or copy a share
 
 `fleet init` first runs the same aggregated checks exposed by read-only `fleet preflight`: Linux and
 host dependencies, Docker Compose, queued or running scans (the conversion restarts the whole
-stack, so init refuses while work is in flight unless `--allow-running-work` accepts the
-interruption), public HTTPS or managed-gateway prerequisites, worker tag-to-digest resolution,
+stack, so init refuses while work is in flight, and also when it cannot establish the answer
+because the API is unreachable or its list is malformed, unless `--allow-running-work` accepts
+the interruption; a stopped installation with no api container has nothing to interrupt; the
+census includes shards, internal, Model Intake and device rows but does not pause new
+submissions), public HTTPS or managed-gateway prerequisites, worker tag-to-digest resolution,
 requested port availability, overlay route collisions, enrollment policy, and reconciliation
 support. A running standalone deployment is backed up before the first fleet mutation, and that
 backup is kept even when init rolls back. It then persists the control keypair, fleet CA, server certificate, private connection-bundle

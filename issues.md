@@ -32,7 +32,17 @@ Status column: `open`, `fixed` (on this branch, verified), `fixed-unverified`, `
 | F3 | Rollback leaves `.shakerscan-fleet/control/` (generated control identity/CA) and `backups/` behind while `/health.fleet` reports "not initialized". | `scripts/fleet_cli.py` | fixed-unverified (unit-tested rollback removes generated dirs and names the kept backup; a live init still needs ports 80/443 open) |
 | F4 | The rollback restart changed the worker count (9 before init, 8 after). Unconfirmed cause. | `scanner.sh` capacity derivation | fixed-unverified (cause found: host RAM rounded up, Docker MemTotal down; both round down now; unit-tested) |
 | F5 | Init output ordering: the normal "Services started… UI: http://localhost:3000" banner prints after the failure, then `fleet error:`, then the preflight table again. | `scripts/fleet_cli.py` | fixed-unverified (line-buffered output, flushed before child processes; unit-tested) |
+| F7 | Audit of PR #176: the running-work guard failed open (an unreachable API, an error on the second request, or a body without a total all counted as "nothing to interrupt", and a positive count already seen was discarded) and censused only the presentation scan list, which hides shards, internal, Model Intake and device rows. | `scripts/fleet_cli.py` | fixed (fail closed unless `--allow-running-work`; a stopped stack is recognised by the absence of the api container; census includes the hidden rows; new submissions are still not paused, which the hint says) |
 | F6 | Broker worker join not yet tested: blocked on inbound 80/443 for `m2.shakerscan.com`. | — | blocked |
+
+## Already merged before this branch (from the PR #176 audit, confirmed in source, not fixed here)
+
+| # | Finding | Where | Status |
+|---|---|---|---|
+| A2 | Hint ingestion keeps declared query values (`_same_origin_path` appends `parsed.query`) and the receipt redactor is pattern-based, so ordinary or percent-encoded parameter values survive into receipts. | `api/capabilities/hint_files.py`, `api/runtime/receipts.py` | open (PR #170) |
+| A3 | The scan page's carried-over summary is computed from the first 100 active target findings and can declare "Nothing unresolved from earlier scans" on a target with more. | `ui/src/app/scans/[id]/page.tsx`, `carriedOverSummary` | open (PR #173) |
+| A4 | `scanFindingIdentity` is title+URL+tool lowercased, so distinct fingerprints/templates with the same display strings collapse and a still-unresolved finding drops out of the carried-over set. | `ui/src/lib/scanDetailPresentation.mjs` | open (PR #173) |
+| A5 | Finding drill-down links from a scan carry no `freshness`, so the Findings page applies its 14-day default and an older scan's count does not match the linked list. | `ui/src/app/scans/[id]/page.tsx`, `ui/src/app/findings/page.tsx` | open (PR #170) |
 
 ## Model Intake (least)
 
