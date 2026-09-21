@@ -25,6 +25,8 @@ The launcher prints the actual API/UI addresses and laptop commands, using custo
 
 ## Laptop: install only the lightweight client
 
+The two ways to connect a client (this unencrypted, token-less LAN engine, and an encrypted Enterprise instance with a token) are compared side by side in [docs/client.md](client.md#connect-the-client-to-a-server).
+
 The laptop does not need Docker or a local scanning engine. Install the client and save the
 engine's address once; every command then uses it, with no options and no environment variables:
 
