@@ -52,36 +52,51 @@ class PublicClientTests(unittest.TestCase):
         self.assertEqual(opener.request.full_url, "https://pub.shakerscan.com/v1/check")
         self.assertNotIn("Authorization", dict(opener.request.header_items()))
 
-    def test_mcp_public_drops_private_credentials(self):
+    def test_mcp_defaults_to_public_without_instance(self):
         fake = mock.Mock()
         fake.main.return_value = 0
-        args = argparse.Namespace(public=True, url=None, token_file=None, timeout=None)
-        env = {
-            cli.ENV_URL: "https://private.example.com",
-            cli.ENV_TOKEN: "secret-token",
-            cli.ENV_TOKEN_FILE: "/tmp/private-token",
-        }
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(cli, "load", return_value=fake):
+        args = argparse.Namespace(url=None, token_file=None, timeout=None)
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(cli, "profile", return_value={}), \
+             mock.patch.object(cli, "engine_launcher", return_value=None), \
+             mock.patch.object(cli, "load", return_value=fake):
             self.assertEqual(cli.cmd_mcp(args), 0)
             self.assertEqual(os.environ[cli.ENV_URL], cli.PUBLIC_API_URL)
             self.assertNotIn(cli.ENV_TOKEN, os.environ)
-            self.assertNotIn(cli.ENV_TOKEN_FILE, os.environ)
 
-    def test_check_does_not_read_saved_profile(self):
-        with tempfile.TemporaryDirectory() as td:
-            config = Path(td)
-            (config / "config.json").write_text(
-                json.dumps({"url": "https://private.example.com", "token_file": str(config / "token")})
-            )
-            (config / "token").write_text("secret-token")
-            args = argparse.Namespace(target="example.com", json=True, timeout=None)
-            with mock.patch.dict(os.environ, {cli.ENV_CONFIG_DIR: td}, clear=True), \
-                 mock.patch.object(cli, "public_request_json", return_value={"summary": "ok"}) as public:
-                stdout = io.StringIO()
-                with mock.patch("sys.stdout", stdout):
-                    self.assertEqual(cli.cmd_check(args), 0)
-                public.assert_called_once_with("/v1/check", {"target": "example.com"}, timeout=20.0)
-                self.assertNotIn("secret-token", stdout.getvalue())
+    def test_mcp_prefers_configured_instance_and_never_public(self):
+        fake = mock.Mock()
+        fake.main.return_value = 0
+        args = argparse.Namespace(url=None, token_file=None, timeout=None)
+        env = {cli.ENV_URL: "https://private.example.com", cli.ENV_TOKEN: "secret-token"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(cli, "load", return_value=fake):
+            self.assertEqual(cli.cmd_mcp(args), 0)
+            self.assertEqual(os.environ[cli.ENV_URL], "https://private.example.com")
+            self.assertEqual(os.environ[cli.ENV_TOKEN], "secret-token")
+
+    def test_check_uses_public_without_instance(self):
+        args = argparse.Namespace(target="example.com", json=True, timeout=None)
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(cli, "profile", return_value={}), \
+             mock.patch.object(cli, "engine_launcher", return_value=None), \
+             mock.patch.object(cli, "public_request_json", return_value={"summary": "ok"}) as public:
+            stdout = io.StringIO()
+            with mock.patch("sys.stdout", stdout):
+                self.assertEqual(cli.cmd_check(args), 0)
+            public.assert_called_once_with("/v1/check", {"target": "example.com"}, timeout=20.0)
+
+    def test_check_uses_configured_instance_not_public(self):
+        fake_api = mock.Mock()
+        fake_api.main.return_value = 0
+        args = argparse.Namespace(target="example.com", json=True, timeout=None)
+        env = {cli.ENV_URL: "https://private.example.com", cli.ENV_TOKEN: "secret-token"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(cli, "load", return_value=fake_api), \
+             mock.patch.object(cli, "public_request_json") as public:
+            self.assertEqual(cli.cmd_check(args), 0)
+            public.assert_not_called()
+            call = fake_api.main.call_args.args[0]
+            self.assertEqual(call[:4], ["--api-url", "https://private.example.com", "POST", "/public/check"])
 
 
 if __name__ == "__main__":
