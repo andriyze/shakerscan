@@ -1,3 +1,3 @@
 """ShakerScan client: the MCP adapter and Hunt CLI for a ShakerScan instance, without the engine."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
