@@ -5,7 +5,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, createTarget, scanTarget, discoverSubdomains, dedupeTargets, authorizeTarget, revokeTargetAuthorization, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, restoreTarget, createTarget, scanTarget, discoverSubdomains, dedupeTargets, authorizeTarget, revokeTargetAuthorization, type Target, type GroupedDomain } from '@/lib/api'
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
@@ -120,6 +120,9 @@ function TargetsContent() {
   const discoverySourceFilter = filters.discovery_source || ''
   const gradeFilter = filters.grade || ''
   const hasFindingsFilter = filters.has_findings || ''
+  // Archived targets leave the default inventory (is_active=false). Without this they could
+  // neither be deleted nor restored from the UI: the group row hid every root-level control.
+  const archivedFilter = filters.archived === 'true'
   const sortBy = filters.sort_by || 'root_domain'
   const sortOrder = (filters.sort_order || 'asc') as SortOrder
 
@@ -177,6 +180,7 @@ function TargetsContent() {
     try {
       const hasFindingsBool = hasFindingsFilter === 'true' ? true : hasFindingsFilter === 'false' ? false : undefined
       const data = await getTargetsGrouped({
+        includeInactive: archivedFilter,
         search: searchQuery || undefined,
         discovery_source: discoverySourceFilter || undefined,
         grade: gradeFilter || undefined,
@@ -199,7 +203,7 @@ function TargetsContent() {
     } finally {
       setLoading(false)
     }
-  }, [searchQuery, discoverySourceFilter, gradeFilter, hasFindingsFilter, sortBy, sortOrder])
+  }, [searchQuery, discoverySourceFilter, gradeFilter, hasFindingsFilter, archivedFilter, sortBy, sortOrder])
 
   useEffect(() => {
     fetchTargets()
@@ -218,6 +222,19 @@ function TargetsContent() {
       fetchTargets()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to authorize target')
+    } finally {
+      setAuthorizingTargetId(null)
+    }
+  }
+
+  async function handleRestore(targetId: string) {
+    setAuthorizingTargetId(targetId)
+    try {
+      await restoreTarget(targetId)
+      toast.success('Target restored to the inventory')
+      fetchTargets()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to restore target')
     } finally {
       setAuthorizingTargetId(null)
     }
@@ -553,6 +570,17 @@ function TargetsContent() {
           </Select>
         </div>
 
+        {/* Archived */}
+        <label htmlFor="targets-archived-filter" className="flex items-center gap-2 text-sm text-gray-400">
+          <input
+            id="targets-archived-filter"
+            type="checkbox"
+            checked={archivedFilter}
+            onChange={(e) => setFilter('archived', e.target.checked ? 'true' : undefined)}
+          />
+          Show archived
+        </label>
+
         {/* Sort By */}
         <div className="flex items-center gap-3">
           <label htmlFor="targets-sort-filter" className="text-sm text-gray-400">Sort:</label>
@@ -632,6 +660,9 @@ function TargetsContent() {
                     identity.internal ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-400'
                   }`}>{identity.label}</span>
                   <span className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-300">{domain.root_target?.cohort || domain.subdomains[0]?.cohort || 'unclassified'}</span>
+                  {domain.root_target && !domain.root_target.is_active && (
+                    <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
+                  )}
                   {domain.subdomain_count > 0 && (
                     <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
@@ -786,7 +817,13 @@ function TargetsContent() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                     </Link>
-                    <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }}
+                    {!domain.root_target!.is_active && (
+                      <Button variant="secondary" size="sm" disabled={authorizingTargetId === domain.root_target!.id}
+                        onClick={(e) => { e.stopPropagation(); void handleRestore(domain.root_target!.id) }} aria-label={`Restore ${domain.root_target!.url}`}>
+                        Restore
+                      </Button>
+                    )}
+                    <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }} archived={!domain.root_target!.is_active}
                       subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                     {/* Scan Menu */}
                     <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-[100]' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
@@ -933,6 +970,9 @@ function TargetsContent() {
                           <span className={`px-1.5 py-0.5 text-xs rounded ${getSourceBadge(subdomain.discovery_source)}`}>
                             {subdomain.discovery_source}
                           </span>
+                          {!subdomain.is_active && (
+                            <span className="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
+                          )}
                         </div>
                       </div>
 
@@ -1008,7 +1048,13 @@ function TargetsContent() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                       </Link>
-                      <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }}
+                      {!subdomain.is_active && (
+                        <Button variant="secondary" size="sm" disabled={authorizingTargetId === subdomain.id}
+                          onClick={(e) => { e.stopPropagation(); void handleRestore(subdomain.id) }} aria-label={`Restore ${subdomain.url}`}>
+                          Restore
+                        </Button>
+                      )}
+                      <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }} archived={!subdomain.is_active}
                         subject={subdomain.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                       {/* Scan Menu for Subdomain */}
                       <div className={`relative ${openScanMenu === subdomain.id ? 'z-[100]' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>

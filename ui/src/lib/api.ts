@@ -4111,6 +4111,17 @@ export async function updateTargetMetadata(
   return res.json()
 }
 
+/** Bring an archived target back into the inventory; its history was never removed. */
+export async function restoreTarget(targetId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_active: true }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to restore target'))
+  return res.json()
+}
+
 export async function getExposureChanges(params?: {
   root_domain?: string
   since?: string
