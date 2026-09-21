@@ -494,6 +494,14 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
         },
         "policy": {
             "type": "object",
+            "description": (
+                "Explicit permissions for this Hunt. Passive is the default. Active, state-changing, "
+                "network-discovery, OOB and credential work need active_testing=true (mutation and "
+                "network discovery additionally name their own flag), authorization_confirmed=true, "
+                "and a target authorized once with POST /targets/{target_id}/authorization; that "
+                "standing authorization is resolved automatically, and a Hunt asked to run without "
+                "it is refused with a 422 that names this, never quietly downgraded."
+            ),
             "properties": policy_properties,
             "additionalProperties": False,
         },
