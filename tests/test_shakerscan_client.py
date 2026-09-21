@@ -440,6 +440,57 @@ def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch
     assert cli.ENV_TOKEN not in env, "the token stays in its file, never in the agent's environment"
 
 
+def test_agent_works_against_an_open_source_engine_named_by_url(monkeypatch, tmp_path, capsys, clean_environ):
+    """A LAN engine (`shakerscan start --lan`) has no console and no connect link; --url is the way in."""
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "opencode", "--url", "http://192.168.1.50:8080/", "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert "instance:  http://192.168.1.50:8080 (an open-source engine reached by address" in out
+    assert f"cd {workspace} && {cli.ENV_URL}=http://192.168.1.50:8080 {cli.ENV_ALLOW_REMOTE}=true opencode" in out
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        text = (workspace / name).read_text(encoding="utf-8")
+        assert text.startswith("# Remote ShakerScan engine") and "no credential and no per-person identity" in text
+    # The full operating guide follows the note; CLAUDE.md imports it rather than repeating it.
+    assert "## Authoritative references" in (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert "@AGENTS.md" in (workspace / "CLAUDE.md").read_text(encoding="utf-8")
+    assert (workspace / "skills" / "shakerscan" / "SKILL.md").is_file()
+    # The registrations carry the address so the agent's own MCP subprocess needs no environment.
+    mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+    assert mcp["mcpServers"]["shakerscan"]["args"] == ["mcp", "--url", "http://192.168.1.50:8080"]
+    opencode = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+    assert opencode["mcp"]["shakerscan"]["command"][-3:] == ["mcp", "--url", "http://192.168.1.50:8080"]
+    env = cli.agent_environment("http://192.168.1.50:8080", None, "opencode", environ={"HOME": "/h", cli.ENV_TOKEN_FILE: "/stale/token", cli.ENV_TOKEN: "leak"})
+    assert env["SHAKERSCAN_API_URL"] == "http://192.168.1.50:8080" and env["SHAKERSCAN_MANAGED_INSTANCE"] == "1"
+    assert cli.ENV_TOKEN_FILE not in env and cli.ENV_TOKEN not in env, "no credential follows the agent to an engine that issued none"
+
+
+def test_agent_url_that_names_the_saved_connection_keeps_its_token(monkeypatch, tmp_path, capsys, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    cli.save_profile("https://scanner.example.com", SECRET)
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "claude", "--url", "https://scanner.example.com:443", "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert "the connected person's identity and role" in out
+    assert json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["shakerscan"]["args"] == ["mcp"]
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8").startswith("# Connected ShakerScan instance")
+
+
+def test_agent_rejects_a_url_that_is_not_an_origin_and_reads_the_environment(monkeypatch, tmp_path, capsys, clean_environ):
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    for bad in ("192.168.1.50:8080", "http://user:pw@host:8080", "http://host:8080/api", "ftp://host"):
+        assert cli.main(["agent", "--url", bad, "--no-launch"]) == 2, bad
+        assert "API origin" in capsys.readouterr().err
+    monkeypatch.setenv(cli.ENV_URL, "http://10.0.0.7:8080")
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "claude", "--workspace", str(workspace), "--no-launch"]) == 0
+    assert "http://10.0.0.7:8080 (an open-source engine" in capsys.readouterr().out
+    monkeypatch.delenv(cli.ENV_URL)
+    assert cli.main(["agent", "--no-launch"]) == 2
+    err = capsys.readouterr().err
+    assert "shakerscan connect" in err and "--url http://<server>:8080" in err
+
+
 def test_api_and_scan_forward_to_the_runtime_clis_with_the_connection(monkeypatch, tmp_path, clean_environ):
     monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
     cli.save_profile("https://scanner.example.com", SECRET)
