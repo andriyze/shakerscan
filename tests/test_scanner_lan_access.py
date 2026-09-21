@@ -27,7 +27,8 @@ def _env() -> dict[str, str]:
 
 def _run(code: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", _functions() + "\nSCRIPT_DIR=" + shlex.quote(str(tmp_path)) + "\n" + code],
+        ["bash", "-s"],
+        input=_functions() + "\nSCRIPT_DIR=" + shlex.quote(str(tmp_path)) + "\n" + code,
         cwd=ROOT, env=_env(), text=True, capture_output=True, timeout=10,
     )
 

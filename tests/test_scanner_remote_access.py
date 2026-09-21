@@ -17,7 +17,8 @@ configure_access_mode >/dev/null
 printf '%s\n' "$SHAKERSCAN_BIND_HOST" "$SHAKERSCAN_PUBLIC_HOST" "$(api_probe_url)"
 """
     result = subprocess.run(
-        ["bash", "-c", command],
+        ["bash", "-s"],
+        input=command,
         check=True,
         capture_output=True,
         text=True,
@@ -63,7 +64,8 @@ start_agent codex
         "CAPTURE": str(capture),
     }
     result = subprocess.run(
-        ["bash", "-c", command],
+        ["bash", "-s"],
+        input=command,
         env=env,
         capture_output=True,
         text=True,
@@ -80,7 +82,8 @@ start_agent codex
 def test_agent_launcher_has_non_mutating_help():
     functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
     result = subprocess.run(
-        ["bash", "-c", functions + "\nstart_agent --help\n"],
+        ["bash", "-s"],
+        input=functions + "\nstart_agent --help\n",
         capture_output=True,
         text=True,
         timeout=10,
@@ -114,7 +117,8 @@ SHAKERSCAN_PUBLIC_HOST=scanner.example.test
 show_env_help
 """
     result = subprocess.run(
-        ["bash", "-c", command],
+        ["bash", "-s"],
+        input=command,
         capture_output=True,
         text=True,
         timeout=10,

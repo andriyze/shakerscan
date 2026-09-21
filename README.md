@@ -31,6 +31,21 @@ ShakerScan covers:
 > Only scan systems you own or are explicitly authorized to test. Active testing can change
 > application state, trigger alerts, and create significant traffic.
 
+## Control an OSS server from a laptop on your LAN
+
+On the machine with the full engine, run `shakerscan start --lan`. On the laptop, install
+only the pipx/Homebrew client, then point API/MCP commands at the address the server prints:
+
+```bash
+pipx install shakerscan
+shakerscan api --url http://192.168.1.50:8080 GET /health
+shakerscan mcp --url http://192.168.1.50:8080
+```
+
+LAN mode is explicit, IPv4-only, and for trusted networks: reachable users can operate the OSS
+instance. It does not add authentication or encryption. Fresh installs remain localhost-only;
+see [LAN access](docs/lan-access.md) for firewall guidance and setup details.
+
 ## Install and start
 
 The supported first-run path installs ShakerScan to `~/.shakerscan`, creates the `shakerscan`
