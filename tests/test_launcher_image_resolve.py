@@ -28,6 +28,7 @@ def _run_resolve(tmp_path: Path, *, fail_first: int, attempts: int) -> subproces
     (fake_bin / "docker").chmod(0o755)
     script = (
         'RED=""; NC="";'
+        f'source <(sed -n "/^docker_cli()/,/^}}$/p" {ROOT}/scanner.sh); '
         f'source <(sed -n "/^resolve_built_image_id()/,/^}}$/p" {ROOT}/scanner.sh); '
         "resolve_built_image_id shakerscan-worker:local"
     )
@@ -50,3 +51,26 @@ def test_a_tag_that_never_appears_fails_with_the_daemon_error(tmp_path):
     assert result.stdout.strip() == ""
     assert "not resolvable after 2 attempts" in result.stderr
     assert "No such image" in result.stderr
+
+
+def test_resolve_goes_through_sudo_when_compose_had_to(tmp_path):
+    """Right after install-deps the shell has not joined the docker group: Compose ran through
+    sudo, but the plain inspect was refused at the socket and the build failed anyway."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text("#!/bin/sh\necho 'permission denied while trying to connect to the docker API' >&2; exit 1\n")
+    (fake_bin / "sudo").write_text(f"#!/bin/sh\n[ \"$1\" = docker ] || exit 9; echo '{IMAGE_ID}'\n")
+    for name in ("docker", "sudo"):
+        (fake_bin / name).chmod(0o755)
+    script = (
+        'RED=""; NC=""; DOCKER_COMPOSE_CMD=(sudo docker compose); '
+        f'source <(sed -n "/^docker_cli()/,/^}}$/p" {ROOT}/scanner.sh); '
+        f'source <(sed -n "/^resolve_built_image_id()/,/^}}$/p" {ROOT}/scanner.sh); '
+        "resolve_built_image_id shakerscan-worker:local"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "SHAKERSCAN_IMAGE_RESOLVE_ATTEMPTS": "2"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == IMAGE_ID

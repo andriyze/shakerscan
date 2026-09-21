@@ -20,6 +20,14 @@ MAX_RECORDS = 10000
 EXECUTION_TABLES = ('scans', 'hunt_runs', 'agent_hunt_runs', 'device_agent_runs',
                     'research_episodes', 'campaigns', 'scan_campaigns', 'finding_verifications')
 PROTECTED = ('legal_hold', 'audit')
+# Unfinished rows that were never picked up can be cancelled by an approved deletion; so can
+# rows nothing has touched for this long (a crashed or abandoned run). A row a worker is
+# actively updating blocks, and the blocker names it so the operator can cancel it.
+QUEUED_STATUSES = ('pending', 'queued', 'created', 'scheduled')
+ABANDONED_AFTER_MINUTES = 15
+# Scans have no activity timestamp a worker keeps fresh; the stale-scan checker reaps a dead
+# running scan on its own, so a running scan is always treated as live here.
+NO_ACTIVITY_CLOCK = ('scans',)
 RETAINED = [
     'Historical scan reports and scan artifacts are retained; their target link is detached.',
     'External evidence files and their storage index are retained, not erased.',
@@ -176,25 +184,104 @@ async def owner_context(conn, kind, roots):
     return owners
 
 
-async def blockers(conn, columns, owners, kind, roots):
-    issues = []
+def _owner_clauses(table, columns, owners):
+    clauses, params = [], []
+    for column, values in owners.items():
+        if values and column in columns[table]:
+            params.append([UUID(v) for v in values])
+            clauses.append(f'{ident(column)}=ANY(${len(params)}::uuid[])')
+    if table == 'scans' and owners['scan_id']:
+        params.append([UUID(v) for v in owners['scan_id']])
+        clauses.append(f'id=ANY(${len(params)}::uuid[])')
+    return clauses, params
+
+
+def _abandoned_predicate(table, columns, params):
+    """SQL for a non-terminal row an approved deletion may cancel instead of waiting for."""
+    params.append(list(QUEUED_STATUSES))
+    parts = [f'status=ANY(${len(params)}::text[])']
+    if table not in NO_ACTIVITY_CLOCK:
+        clock = next((c for c in ('updated_at', 'started_at', 'created_at') if c in columns[table]), None)
+        if clock:
+            parts.append(f"{ident(clock)} < NOW() - INTERVAL '{ABANDONED_AFTER_MINUTES} minutes'")
+    return '(' + ' OR '.join(parts) + ')'
+
+
+async def unfinished(conn, columns, owners):
+    """Non-terminal execution rows per table: those still live, and those abandoned."""
+    found = {}
     for table in EXECUTION_TABLES:
         if table not in columns or 'status' not in columns[table]:
             continue
-        clauses, params = [], []
-        for column, values in owners.items():
-            if values and column in columns[table]:
-                params.append([UUID(v) for v in values])
-                clauses.append(f'{ident(column)}=ANY(${len(params)}::uuid[])')
-        if table == 'scans' and owners['scan_id']:
-            params.append([UUID(v) for v in owners['scan_id']])
-            clauses.append(f'id=ANY(${len(params)}::uuid[])')
-        if clauses:
-            params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
-            active = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} WHERE '
-                f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))', *params)
-            if active:
-                issues.append(f'{table}: {active} active or unfinished record(s); finish or cancel them first')
+        clauses, params = _owner_clauses(table, columns, owners)
+        if not clauses:
+            continue
+        params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
+        nonterminal = f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))'
+        abandoned = _abandoned_predicate(table, columns, params)
+        rows = await conn.fetch(
+            f'SELECT id::text AS id, {abandoned} AS abandoned FROM public.{ident(table)} '
+            f'WHERE {nonterminal} ORDER BY id', *params)
+        if rows:
+            found[table] = {
+                'live': [r['id'] for r in rows if not r['abandoned']],
+                'abandoned': sum(1 for r in rows if r['abandoned']),
+            }
+    return found
+
+
+async def cancel_abandoned(conn, columns, owners):
+    """Cancel abandoned rows under an approved deletion; return counts per table."""
+    cancelled = {}
+    for table in EXECUTION_TABLES:
+        if table not in columns or 'status' not in columns[table]:
+            continue
+        clauses, params = _owner_clauses(table, columns, owners)
+        if not clauses:
+            continue
+        params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
+        nonterminal = f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))'
+        abandoned = _abandoned_predicate(table, columns, params)
+        touches = ["status='cancelled'"]
+        for column in ('updated_at', 'completed_at'):
+            if column in columns[table]:
+                touches.append(f'{ident(column)}=NOW()')
+        rows = await conn.fetch(
+            f'UPDATE public.{ident(table)} SET {", ".join(touches)} WHERE {nonterminal} AND {abandoned} RETURNING id',
+            *params)
+        if rows:
+            cancelled[table] = len(rows)
+    return cancelled
+
+
+async def quiesce_targets(conn, columns, roots):
+    """Stop automatic work on the targets being deleted before the final inventory."""
+    if 'targets' in columns:
+        touches = ['is_active=false']
+        if 'asm_enabled' in columns['targets']:
+            touches.append('asm_enabled=false')
+        if 'updated_at' in columns['targets']:
+            touches.append('updated_at=NOW()')
+        await conn.execute(f'UPDATE targets SET {", ".join(touches)} WHERE id=ANY($1::uuid[])', roots)
+    if 'schedules' in columns and {'target_id', 'is_active'} <= columns['schedules']:
+        touches = ['is_active=false']
+        if 'next_run_at' in columns['schedules']:
+            touches.append('next_run_at=NULL')
+        await conn.execute(f'UPDATE schedules SET {", ".join(touches)} WHERE target_id=ANY($1::uuid[])', roots)
+
+
+def hashable(manifest):
+    """The part of a manifest a preview hash binds; abandoned rows are reported, then cancelled."""
+    return {k: v for k, v in manifest.items() if k != 'abandoned'}
+
+
+async def blockers(conn, columns, owners, kind, roots):
+    issues = []
+    for table, state in (await unfinished(conn, columns, owners)).items():
+        if state['live']:
+            shown = ', '.join(state['live'][:5]) + (', …' if len(state['live']) > 5 else '')
+            issues.append(f'{table}: {len(state["live"])} running record(s) ({shown}); cancel them '
+                          f'(for a scan: POST /scans/{{id}}/cancel) or wait for them to finish')
     for key, table in (('target_id', 'targets'), ('device_target_id', 'device_targets'), ('ai_target_id', 'ai_targets')):
         if owners[key] and table in columns:
             held = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE id=ANY($1::uuid[]) AND {hold_predicate()}', [UUID(v) for v in owners[key]])
@@ -214,6 +301,8 @@ async def inventory(conn, selection, roots, columns, edges):
     plan = cascade_plan(kind, edges, columns)
     owners = await owner_context(conn, kind, roots)
     issues = await blockers(conn, columns, owners, kind, roots)
+    abandoned = {table: state['abandoned'] for table, state in (await unfinished(conn, columns, owners)).items()
+                 if state['abandoned']}
     groups = {}
     for name, predicates in zip(('delete', 'detach', 'retain', 'restrict'), plan):
         group = {}
@@ -252,7 +341,7 @@ async def inventory(conn, selection, roots, columns, edges):
             issues.append('Finding evidence has pending retention deletion')
     return {'schema': 'shakerscan.record-deletion/v1', 'kind': kind,
             'root_ids': [str(v) for v in roots], 'owners': owners, 'records': groups,
-            'blockers': sorted(set(issues)), 'retained': RETAINED, 'external_files_deleted': False}, plan
+            'blockers': sorted(set(issues)), 'abandoned': abandoned, 'retained': RETAINED, 'external_files_deleted': False}, plan
 
 
 async def lock_inventory(conn, columns, plan):

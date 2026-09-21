@@ -133,7 +133,12 @@ def test_execution_and_holds_block_preview_and_execution(blocker):
             elif blocker=='evidence_hold': await c.execute("UPDATE evidence_objects SET retention_class='legal_hold' WHERE id=$1",e)
             else: await c.execute('UPDATE evidence_objects SET retention_delete_pending_at=NOW() WHERE id=$1',e)
         newer = await service.preview(pool,{'kind':'target','target_id':str(t)})
-        assert newer['blockers']
+        if blocker == 'retest':
+            # A queued verification nothing has picked up is cancelled by an approved deletion,
+            # not a reason to refuse it; the stale preview below still fails on drift.
+            assert not newer['blockers'] and newer['abandoned'] == {'finding_verifications': 1}
+        else:
+            assert newer['blockers']
         with pytest.raises(HTTPException) as error: await service.execute(pool,preview['preview_id'],receipt)
         assert error.value.status_code==409
         async with pool.acquire() as c: assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1',t)==1
@@ -317,4 +322,49 @@ def test_archived_managed_occurrence_only_reconciles_existing_receipt():
             assert receipt['state'] == 'accepted' and receipt['scan_id'] == scan
             row = await conn.fetchrow('SELECT is_active,next_run_at FROM schedules WHERE id=$1', schedule)
             assert not row['is_active'] and row['next_run_at'] is None
+    run(scenario)
+
+
+def test_abandoned_unfinished_rows_are_cancelled_by_an_approved_deletion():
+    """A Hunt row left 'active' by a crashed session and a queued scan nothing picked up must
+    not make a target undeletable; the approved deletion cancels them and proceeds."""
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            hunt = await c.fetchval("""INSERT INTO hunt_runs(target_kind,target_id,status,updated_at)
+                VALUES('web',$1,'active',NOW() - INTERVAL '1 hour') RETURNING id""", t)
+            queued = await c.fetchval("""INSERT INTO scans(target_id,target_url,status)
+                VALUES($1,$2,'pending') RETURNING id""", t, f'https://{t}.example.invalid')
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['abandoned'] == {'hunt_runs': 1, 'scans': 1}
+        result = await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert result['cancelled_unfinished'] == {'hunt_runs': 1, 'scans': 1}
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', t) == 0
+            assert await c.fetchval('SELECT status FROM scans WHERE id=$1', queued) == 'cancelled'
+    run(scenario)
+
+
+def test_a_running_scan_still_blocks_and_is_named():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            running = await c.fetchval("""INSERT INTO scans(target_id,target_url,status)
+                VALUES($1,$2,'running') RETURNING id""", t, f'https://{t}.example.invalid')
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('scans: 1 running record(s)' in item and str(running) in item and 'POST /scans/{id}/cancel' in item
+                   for item in preview['blockers']), preview['blockers']
+        assert preview['abandoned'] == {}
+    run(scenario)
+
+
+def test_a_recently_active_hunt_blocks_but_an_old_one_is_abandoned():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            live = await c.fetchval("""INSERT INTO hunt_runs(target_kind,target_id,status,updated_at)
+                VALUES('web',$1,'active',NOW()) RETURNING id""", t)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('hunt_runs: 1 running record(s)' in item and str(live) in item for item in preview['blockers'])
     run(scenario)

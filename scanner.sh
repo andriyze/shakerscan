@@ -2830,6 +2830,17 @@ run_build_step() {
 # store the tag is not queryable for a moment after `compose build` returns (the build
 # printed "Built" and a clean install still failed with "could not resolve the newly
 # built worker image"), so this asks again for a bounded time before giving up.
+# Run the Docker CLI the way this session's Compose runs: when Compose had to go through
+# sudo (the operator was just added to the docker group and the shell has not picked it
+# up), a plain `docker` call would still be refused at the socket.
+docker_cli() {
+    if [ "${DOCKER_COMPOSE_CMD[0]:-}" = "sudo" ]; then
+        sudo docker "$@"
+    else
+        docker "$@"
+    fi
+}
+
 resolve_built_image_id() {
     local image="$1"
     local attempts="${SHAKERSCAN_IMAGE_RESOLVE_ATTEMPTS:-15}"
@@ -2837,7 +2848,7 @@ resolve_built_image_id() {
     local attempt=1
     while [ "$attempt" -le "$attempts" ]; do
         error=""
-        image_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/tmp/.shakerscan-inspect.$$ || true)"
+        image_id="$(docker_cli image inspect --format '{{.Id}}' "$image" 2>/tmp/.shakerscan-inspect.$$ || true)"
         error="$(cat /tmp/.shakerscan-inspect.$$ 2>/dev/null || true)"
         rm -f /tmp/.shakerscan-inspect.$$
         if [[ "$image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
