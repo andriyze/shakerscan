@@ -89,7 +89,49 @@ def service_platforms(document: dict) -> dict[str, str]:
     return platforms
 
 
-def python_pins(path: Path) -> dict[str, str]:
+def marker_environment(native: dict, prefix: str = "") -> dict[str, str]:
+    """Known facts for the release's Linux/CPython images, never the build host."""
+    env = {"sys_platform": "linux", "os_name": "posix", "platform_system": "Linux",
+           "platform_python_implementation": "CPython", "implementation_name": "cpython"}
+    architecture = native.get("source", {}).get("metadata", {}).get("architecture")
+    if architecture in ("amd64", "arm64"):
+        env["platform_machine"] = {"amd64": "x86_64", "arm64": "aarch64"}[architecture]
+    families = {m[1] for package in native.get("artifacts", []) if package.get("type") == "python"
+                for location in package.get("locations", [])
+                if (path := location.get("path", "")).startswith(prefix)
+                if (m := re.search(r"/python([0-9]+\.[0-9]+)/(?:site|dist)-packages/", path))}
+    if len(families) == 1:
+        env["python_version"] = next(iter(families))
+    return env
+
+
+def applies_to_image(marker: str, environment: dict[str, str]) -> bool:
+    from packaging.markers import Marker
+    parsed = Marker(marker)
+    # Ignore quoted literal values while finding referenced variables. Unknown target
+    # facts fail rather than inheriting Marker.evaluate()'s host-environment defaults.
+    unquoted = re.sub(r"\"[^\"]*\"|'[^']*'", "", marker)
+    variables = set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", unquoted)) - {"and", "or", "in", "not"}
+    env = dict(environment)
+    full_fields = variables & {"python_full_version", "implementation_version"}
+    require(variables - full_fields <= set(env), "marker requires unknown target environment facts")
+    if full_fields:
+        require("python_version" in env, "marker needs observed target Python metadata")
+        # Installed metadata usually identifies the interpreter family, not its patch.
+        # Accept only comparisons invariant across that family's patch releases.
+        low = {**env, **{field: env["python_version"] + ".0" for field in full_fields}}
+        high = {**env, **{field: env["python_version"] + ".999999999" for field in full_fields}}
+        # Restrict interval reasoning to a single ordered comparison; arbitrary Boolean
+        # expressions can have interior transitions even when endpoints agree.
+        require(re.fullmatch(r"(?:python_full_version|implementation_version)\s*(?:<|<=|>|>=)\s*['\"][0-9]+(?:\.[0-9]+){1,2}['\"]", marker),
+                "patch-sensitive/complex full-version marker needs exact interpreter evidence")
+        lower, upper = parsed.evaluate(environment=low), parsed.evaluate(environment=high)
+        require(lower == upper, "patch-sensitive marker needs exact interpreter evidence")
+        return lower
+    return parsed.evaluate(environment=env)
+
+
+def python_pins(path: Path, environment: dict[str, str] | None = None, skipped: dict | None = None) -> dict[str, str]:
     pins = {}
     text = path.read_text().replace("\\\n", " ")
     for raw in text.splitlines():
@@ -110,6 +152,12 @@ def python_pins(path: Path) -> dict[str, str]:
         else:
             name = re.sub(r"[-_.]+", "-", match[1]).lower()
             version = match[2]
+        if environment is not None and ";" in line:
+            marker = line.split(";", 1)[1].split("--hash", 1)[0].strip()
+            if not applies_to_image(marker, environment):
+                if skipped is not None:
+                    skipped[name + "==" + version] = marker
+                continue
         require(name not in pins or pins[name] == version, "conflicting requirement pins")
         pins[name] = version
     require(pins, "empty Python lock")
@@ -154,7 +202,9 @@ def coverage_report(image: str, native: dict, root: Path) -> dict:
     report["checks"].append("OS package catalog present")
     if image in ("scanner", "api", "model_intake", "signer"):
         lock = root / ("api/model_intake_signer.requirements.lock" if image == "signer" else "scanner/requirements.lock")
-        expected = python_pins(lock)
+        excluded = {}
+        expected = python_pins(lock, marker_environment(native), excluded)
+        report.setdefault("conditional_inputs_not_required", {})[str(lock.relative_to(root))] = excluded
         actual = {(re.sub(r"[-_.]+", "-", p["name"]).lower(), p.get("version")) for p in packages
                   if p.get("type") == "python" and any("site-packages/" in path or "dist-packages/" in path for path in _paths(p))}
         missing = sorted(f"{n}=={v}" for n, v in expected.items() if (n, v) not in actual)
@@ -165,7 +215,10 @@ def coverage_report(image: str, native: dict, root: Path) -> dict:
             prefix = "/opt/model-intake-tools/" + lock.stem + "/"
             actual = {(re.sub(r"[-_.]+", "-", p["name"]).lower(), p.get("version")) for p in packages
                       if p.get("type") == "python" and any(path.startswith(prefix) and "site-packages/" in path for path in _paths(p))}
-            missing = sorted(f"{n}=={v}" for n, v in python_pins(lock).items() if (n, v) not in actual)
+            excluded = {}
+            expected = python_pins(lock, marker_environment(native, prefix), excluded)
+            report.setdefault("conditional_inputs_not_required", {})[str(lock.relative_to(root))] = excluded
+            missing = sorted(f"{n}=={v}" for n, v in expected.items() if (n, v) not in actual)
             require(not missing, f"{lock.stem}: isolated tool environment coverage missing: {', '.join(missing[:12])}")
             report["checks"].append(f"{lock.stem} isolated environment pins observed")
     if image in ("scanner", "model_intake", "api"):

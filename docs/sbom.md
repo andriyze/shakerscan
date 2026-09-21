@@ -55,6 +55,10 @@ Checks require OS package metadata, scanner/API/signer installed Python versions
 isolated Model Intake tool environments, compiled Go metadata at expected shipped
 binary paths, and Next.js/React/React DOM metadata matching the source lock. Source
 requirements files inside an image cannot substitute for installed Python metadata.
+Universal-lock markers are evaluated against the target Linux/CPython image, not the CI
+host. Inapplicable Windows dependencies remain in source-input catalogs and are recorded
+as conditional inputs, not required installed packages. Python patch-dependent markers
+fail unless their result is invariant across the observed interpreter family.
 Go records include the actual compiled dependency versions and toolchain metadata,
 which matters because ShakerScan rebuilds upstream tools with dependency adjustments.
 
@@ -67,7 +71,10 @@ Templates, wordlists and vulnerability database snapshots can still be under-att
 Host software, remote services and customer volumes are outside the public release BOM.
 
 All generated catalog representations pass the official, content-pinned SPDX 2.2/2.3
-or CycloneDX 1.6 JSON schemas with offline reference resolution. Additional semantic
+or CycloneDX 1.6 JSON schemas with offline reference resolution. The separately versioned
+license enumeration is pinned to the official SPDX 3.29 list, preserving newer valid
+identifiers such as SMAIL-GPL rather than deleting or relabeling license evidence.
+Additional semantic
 checks reject dangling/duplicate references and conversion loss of package identifiers.
 Schema validity is not completeness, correctness of an upstream license assertion or
 proof of vulnerability applicability. Inventory is never filtered by severity or waiver.
@@ -75,7 +82,7 @@ proof of vulnerability applicability. Inventory is never filtered by severity or
 `release_sbom_toolchain.py` pins Syft 1.52.0 Linux archive SHA-256s and official schema
 Git blob identities. The bootstrap records resolved binary/schema SHA-256s in the
 index. Release-only jsonschema/PyYAML tooling is version-pinned in the composite action;
-its full transitive Python environment is not currently hash-locked or claimed reproducible.
+packaging is pinned for target-environment marker evaluation; its full transitive Python environment is not currently hash-locked or claimed reproducible.
 No cataloger is added to normal product runtime images for this release work.
 
 ## Locally built Firecracker guest: remaining runtime scope

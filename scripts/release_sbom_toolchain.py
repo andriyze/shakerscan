@@ -26,7 +26,9 @@ SCHEMAS = {
     "spdx-2.2.json": ("spdx/spdx-spec/v2.2.2/schemas/spdx-schema.json", "9abf467472aff22ffe75cff75f6421527df98942"),
     "spdx-2.3.json": ("spdx/spdx-spec/v2.3/schemas/spdx-schema.json", "ee61e6686e885f8139c132647fd0b4f483b8fb81"),
     "bom-1.6.schema.json": ("CycloneDX/specification/1.6/schema/bom-1.6.schema.json", "d52d4631b42c3c6370bc545e369611327ff6e1c8"),
-    "spdx.schema.json": ("CycloneDX/specification/1.6/schema/spdx.schema.json", "d081ef979232166476cb25eb4e33edb1f6ba83da"),
+    # License identifiers evolve independently of the BOM format; pin the official
+    # SPDX 3.29 enumeration, not the stale license list shipped with the 1.6 tag.
+    "spdx.schema.json": ("CycloneDX/specification/db25df607d029f886f1006496392e7b2c7f28f05/schema/spdx.schema.json", "566c4a32518c60778e55a56ccf71bf781320b279"),
     "jsf-0.82.schema.json": ("CycloneDX/specification/1.6/schema/jsf-0.82.schema.json", "f46bfb1e52731ad1280123ff3e2bd29bd18d4bc2"),
 }
 
