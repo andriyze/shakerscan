@@ -3851,9 +3851,11 @@ def test_reconcile_stale_unconfirmed_handoff_fails_scan_and_owned_campaign():
         "options->>'queue_handoff_confirmed'='false'" in query
         for query, _args in conn.executions
     )
+    # The campaign is settled through the shared helper: keyed by the failed scan, and only
+    # when no scan of that campaign is still unfinished (a cancelled scan uses the same path).
     campaign_update = next(item for item in conn.executions if "UPDATE scan_campaigns" in item[0])
-    assert campaign_update[1] == (campaign_id, scan_id)
-    assert "other.campaign_id=campaign.id AND other.id<>$2" in campaign_update[0]
+    assert campaign_update[1] == (scan_id, "failed")
+    assert "other.status IN ('pending', 'queued', 'running', 'cancelling')" in campaign_update[0]
 
 
 def _due_schedule():
