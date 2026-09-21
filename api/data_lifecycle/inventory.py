@@ -19,7 +19,7 @@ from .statuses import TERMINAL_BY_TABLE
 MAX_RECORDS = 10000
 EXECUTION_TABLES = ('scans', 'hunt_runs', 'agent_hunt_runs', 'device_agent_runs',
                     'research_episodes', 'campaigns', 'scan_campaigns', 'finding_verifications')
-PROTECTED = ('legal_hold', 'audit', 'sensitive')
+PROTECTED = ('legal_hold', 'audit')
 RETAINED = [
     'Historical scan reports and scan artifacts are retained; their target link is detached.',
     'External evidence files and their storage index are retained, not erased.',
@@ -106,10 +106,13 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
 
 def hold_predicate(alias='r', *, preserving=False) -> str:
     j = f'to_jsonb({alias})'
-    # Sensitive is a content classification, not itself a legal hold. It still
-    # blocks erasure, but not preservation with an exact ownership snapshot.
-    # Audit/legal holds block both erasure and detachment of original links.
-    classes = "'legal_hold','audit'" if preserving else "'legal_hold','audit','sensitive'"
+    # Sensitive is a content classification, not a hold. Every recorded HTTP transaction
+    # carries it by default, so treating it as one made any target that had ever been
+    # scanned or hunted undeletable ("archive the target instead"). An operator-approved,
+    # dangerous-tier deletion erases the target's own sensitive rows; only an explicit
+    # legal/audit class or hold flag blocks erasure and detachment.
+    del preserving  # the same holds apply to erasure and to preservation
+    classes = "'legal_hold','audit'"
     checks = [f"COALESCE({j}->>'{field}', '') IN ({classes})"
               for field in ('retention_class', 'retention_policy')]
     for key in ('legal_hold', 'operational_hold'):

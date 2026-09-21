@@ -62,8 +62,12 @@ DECLARE
     raw TEXT;
     authority TEXT;
     host_part TEXT;
+    port_part TEXT;
+    scheme_part TEXT;
 BEGIN
-    raw := regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', '');
+    raw := lower(btrim(COALESCE(NEW.url, '')));
+    scheme_part := substring(raw FROM '^(https?)://');
+    raw := regexp_replace(raw, '^https?://', '');
     IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
         NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
     ELSE
@@ -71,10 +75,21 @@ BEGIN
         authority := regexp_replace(authority, '^.*@', '');
         IF authority ~ '^\[[^]]+\]' THEN
             host_part := substring(authority FROM '^\[([^]]+)\]');
+            port_part := substring(authority FROM '^\[[^]]+\]:([0-9]+)$');
         ELSE
             host_part := regexp_replace(authority, ':[0-9]+$', '');
+            port_part := substring(authority FROM ':([0-9]+)$');
         END IF;
-        NEW.canonical_key := 'web:' || rtrim(host_part, '.');
+        -- A port that is not the scheme's default is part of the asset: a service on
+        -- https://host:8443 is not the application behind https://host.
+        IF port_part IS NULL
+           OR (scheme_part = 'https' AND port_part = '443')
+           OR (scheme_part = 'http' AND port_part = '80')
+           OR (scheme_part IS NULL AND port_part IN ('80', '443')) THEN
+            port_part := NULL;
+        END IF;
+        NEW.canonical_key := 'web:' || rtrim(host_part, '.')
+            || COALESCE(':' || port_part, '');
     END IF;
     RETURN NEW;
 END;

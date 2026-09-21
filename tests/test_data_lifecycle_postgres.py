@@ -197,7 +197,10 @@ def test_retained_sensitive_scan_archive_keeps_original_ownership_in_receipt():
     run(scenario)
 
 
-def test_cascading_sensitive_hunt_archive_still_requires_archive_instead_of_erasure():
+def test_cascading_sensitive_hunt_archive_is_erased_with_its_target():
+    """Every recorded transaction is classified sensitive by default; treating that as a hold
+    made any target that had ever been hunted undeletable ("archive the target instead").
+    An operator-approved, dangerous-tier deletion erases the target's own archive."""
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
         async with pool.acquire() as c:
@@ -205,16 +208,17 @@ def test_cascading_sensitive_hunt_archive_still_requires_archive_instead_of_eras
             await c.execute("""INSERT INTO http_transactions(plane,hunt_run_id,target_id,method,url)
                 VALUES('hunt',$1,$2,'GET','https://example.invalid/synthetic')""", hunt, t)
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
-        assert any('http_transactions' in item and 'archive' in item for item in preview['blockers'])
-        with pytest.raises(HTTPException):
-            await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert not preview['blockers'], preview['blockers']
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
         async with pool.acquire() as c:
-            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 1
+            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 0
     run(scenario)
 
 
 @pytest.mark.parametrize('hold', ['legal_hold', 'audit', 'explicit'])
 def test_retained_http_history_still_honors_actual_holds(hold):
+    # 'explicit' is a sensitive row with legal_hold=true in its metadata: the flag holds it,
+    # the classification alone does not.
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
         async with pool.acquire() as c:
