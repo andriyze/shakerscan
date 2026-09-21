@@ -22,6 +22,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | Document | Purpose |
 |---|---|
 | [`proposed-next-steps.md`](proposed-next-steps.md) | Short future-only roadmap; completed plans move to the archive |
+| [`sbom.md`](sbom.md) | Signed release SBOMs, runtime/source-input coverage, SPDX/CycloneDX formats and verification |
 | [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
 | [`release-process.md`](release-process.md) | Enforced candidate, required exact-SHA physical gates, digest promotion, public smoke, and stable-channel sequence |
 | [`release-2.3.0-plan.md`](release-2.3.0-plan.md) | 2.3.0 plan and current Hunt-assisted investigation milestone; DAST holds its measured 4/9 baseline while Hunt efficacy remains release-gated |

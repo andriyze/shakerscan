@@ -1,0 +1,32 @@
+name: SBOM toolchain validation
+on:
+  pull_request:
+    paths:
+      - 'scripts/release_sbom_toolchain.py'
+      - '.github/actions/sbom-tools/**'
+      - '.github/workflows/sbom-toolchain.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: ./.github/actions/sbom-tools
+      - name: Validate the pinned executable and preserve offline schemas
+        run: |
+          python3 -c 'from pathlib import Path; import os; from scripts.release_sbom_toolchain import Toolchain; Toolchain(Path(os.environ["SHAKERSCAN_SBOM_TOOLS"]))'
+          tar -czf sbom-toolchain.tar.gz -C "$SHAKERSCAN_SBOM_TOOLS" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pinned-sbom-validation-toolchain
+          path: sbom-toolchain.tar.gz
+          if-no-files-found: error
+          retention-days: 7
