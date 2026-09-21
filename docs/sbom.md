@@ -1,5 +1,8 @@
 # Release SBOMs (stage one)
 
+**Status:** Maintained release guide; stage-one publication is implemented. Historical releases are not automatically backfilled.
+**Reconciled:** 2026-09-21
+
 Official engine and client publishing pipelines produce downloadable, artifact-specific
 SBOMs. This is a scoped first stage, **not a claim that every library or build input has
 been identified**. An SBOM is an inventory, not a vulnerability scan or a security verdict.
