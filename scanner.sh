@@ -2826,6 +2826,31 @@ run_build_step() {
     fi
 }
 
+# Print the ID of an image that was just built. On Docker 29 with the containerd image
+# store the tag is not queryable for a moment after `compose build` returns (the build
+# printed "Built" and a clean install still failed with "could not resolve the newly
+# built worker image"), so this asks again for a bounded time before giving up.
+resolve_built_image_id() {
+    local image="$1"
+    local attempts="${SHAKERSCAN_IMAGE_RESOLVE_ATTEMPTS:-15}"
+    local image_id error
+    local attempt=1
+    while [ "$attempt" -le "$attempts" ]; do
+        error=""
+        image_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/tmp/.shakerscan-inspect.$$ || true)"
+        error="$(cat /tmp/.shakerscan-inspect.$$ 2>/dev/null || true)"
+        rm -f /tmp/.shakerscan-inspect.$$
+        if [[ "$image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "$image_id"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    echo -e "${RED}Image ${image} is not resolvable after ${attempts} attempts: ${error:-no image ID returned}${NC}" >&2
+    return 1
+}
+
 build_local_scanner_family() {
     local no_cache="${1:-}"
     local worker_image_id
@@ -2837,8 +2862,7 @@ build_local_scanner_family() {
     run_build_step scanner_runtime compose build $no_cache worker
     # The source Compose service builds and tags this exact explicit image.
     # Querying a running worker here can return the retired pre-build ID.
-    worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null || true)"
-    if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+    if ! worker_image_id="$(resolve_built_image_id "$worker_image")"; then
         fail_build 1 "could not resolve the newly built worker image"
         return 1
     fi

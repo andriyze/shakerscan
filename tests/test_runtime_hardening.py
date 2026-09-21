@@ -516,7 +516,12 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
     # the API is a thin Docker-client derivative. None of them rebuilds the scanner base.
     assert "compose build $no_cache worker" in helper
     assert 'worker_image="${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}"' in helper
-    assert "docker image inspect --format '{{.Id}}' \"$worker_image\"" in helper
+    # The fresh tag is resolved with a bounded retry: on Docker 29 with the containerd image
+    # store it can be unqueryable for a moment after compose reports it built.
+    assert 'resolve_built_image_id "$worker_image"' in helper
+    resolver = script.split("resolve_built_image_id() {", 1)[1].split("\n}", 1)[0]
+    assert "docker image inspect --format '{{.Id}}' \"$image\"" in resolver
+    assert "SHAKERSCAN_IMAGE_RESOLVE_ATTEMPTS" in resolver
     assert "compose images -q worker" not in helper
     assert "-f scanner/Dockerfile.model-intake -t \"$sandbox_image\"" in helper
     assert 'SCANNER_RUNTIME_IMAGE=${worker_image}' in helper
@@ -534,6 +539,7 @@ def test_scanner_sh_builds_shared_worker_and_intake_sandbox_image_once():
 def test_scanner_sh_retags_the_fresh_build_not_a_running_workers_retired_image():
     script = (ROOT / "scanner.sh").read_text()
     helper = script.split("build_local_scanner_family() {", 1)[1].split("\n}", 1)[0]
+    resolver = script.split("resolve_built_image_id() {", 1)[1].split("\n}", 1)[0]
     image_id = "sha256:" + ("a" * 64)
     harness = f"""
 set -eu
@@ -541,6 +547,10 @@ RED=''
 NC=''
 compose() {{ printf 'compose:%s\\n' "$*"; }}
 run_build_step() {{ shift; "$@"; }}
+fail_build() {{ printf 'fail_build:%s\\n' "$2" >&2; return "$1"; }}
+resolve_built_image_id() {{
+{resolver}
+}}
 docker() {{
   if [ "$1 $2" = 'image inspect' ]; then
     [ "${{@: -1}}" = 'release-candidate-worker:latest' ] || return 91
