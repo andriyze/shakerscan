@@ -1486,6 +1486,11 @@
   },
   {
     "path": "/request-collections/{collection_id}",
+    "method": "delete",
+    "operation_id": "deactivate_request_collection_request_collections__collection_id__delete"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
     "method": "get",
     "operation_id": "get_request_collection_request_collections__collection_id__get"
   },

@@ -212,6 +212,14 @@ export async function upsertRequestCollectionSelection(
   return response.json()
 }
 
+export async function deactivateRequestCollection(
+  collectionId: string,
+): Promise<{ status: 'deactivated'; collection: SharedRequestCollection; revoked_selections: number }> {
+  const response = await fetch(`${API_URL}/request-collections/${encodeURIComponent(collectionId)}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to delete request collection'))
+  return response.json()
+}
+
 export async function deactivateRequestCollectionSelection(
   collectionId: string,
   selectionId: string,

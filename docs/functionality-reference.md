@@ -1580,7 +1580,7 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 426 | `api/**/*.py` FastAPI decorators |
+| Public REST operations | 427 | `api/**/*.py` FastAPI decorators |
 | Unique REST paths | 357 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
@@ -1910,6 +1910,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
 | `POST` | `/request-collections` | `create_request_collection` |
+| `DELETE` | `/request-collections/{collection_id}` | `deactivate_request_collection` |
 | `GET` | `/request-collections/{collection_id}` | `get_request_collection` |
 | `POST` | `/request-collections/{collection_id}/bindings` | `upsert_request_collection_binding` |
 | `POST` | `/request-collections/{collection_id}/environments` | `upsert_request_collection_environment` |
