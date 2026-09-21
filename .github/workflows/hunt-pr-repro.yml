@@ -1,6 +1,7 @@
 name: Hunt review source snapshot
 
 # Temporary, read-only review aid. Archive tracked source only, never credentials or runner state.
+# Refresh the snapshot after concurrent PR changes; this helper is removed by the repair commit.
 on:
   push:
     branches: [feat/hunt-fewer-refusals]
