@@ -142,7 +142,13 @@ the connected instance:
 
 ```bash
 shakerscan agent claude        # or codex, opencode; the first one installed when omitted
+shakerscan agent opencode --url http://192.168.1.50:8080   # an open-source engine on a trusted LAN
 ```
+
+`--url` is for an open-source engine reached by address (the server printed it after
+`shakerscan start --lan`; see `docs/lan-access.md`): there is no token and no per-person identity,
+the workspace note says so, and the MCP registrations carry the address. Without `--url` the
+saved `shakerscan connect` instance is used, then `SHAKERSCAN_API_URL`.
 
 It materializes that kit (vendored into the package at build time) into a workspace
 (`~/.config/shakerscan/agent`, or `--here` for the current directory, or `--workspace DIR`),

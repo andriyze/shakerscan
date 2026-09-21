@@ -370,6 +370,32 @@ choose another path. Kit version: ShakerScan {kit_version}.
 
 """
 
+ENGINE_NOTE = """# Remote ShakerScan engine
+
+This workspace was prepared by `shakerscan agent --url` for **{url}** ({who}). There is no local
+engine here: `./scanner.sh start`, `stop`, `scale`, `docker compose` and `/queue` do not apply;
+lifecycle commands run on the server. Talk to the engine with `shakerscan api METHOD PATH [JSON]`,
+`shakerscan scan …`, `shakerscan hunt …` and the MCP tools (server `shakerscan`). The engine has
+no login: there is no credential and no per-person identity, so it must only be reachable on a
+network whose users you trust (`shakerscan start --lan` on the server). Target authorization,
+budgets, credential admission and the deterministic proof rules still apply on the server, and a
+closed route answers with a refusal that names what is missing. Kit version: ShakerScan
+{kit_version}.
+
+"""
+
+
+def agent_origin(url: str) -> str:
+    """A validated API origin for ``agent --url``: http(s), a host, no path or credentials."""
+    candidate = str(url or "").strip().rstrip("/")
+    parts = urllib.parse.urlsplit(candidate)
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.path not in {"", "/"} \
+            or parts.query or parts.fragment or "@" in parts.netloc:
+        raise ClientError(
+            f"--url must be the engine's API origin such as http://192.168.1.50:8080, not {url!r}"
+        )
+    return f"{parts.scheme}://{parts.netloc}"
+
 
 def _copy_tree(source: Path, target: Path) -> None:
     if target.exists():
@@ -377,9 +403,18 @@ def _copy_tree(source: Path, target: Path) -> None:
     shutil.copytree(source, target)
 
 
-def prepare_workspace(workspace: Path, url: str, who: str, executable: str) -> list[str]:
-    """Materialize the agent kit against the connected instance; return what was written."""
+def prepare_workspace(
+    workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
+) -> list[str]:
+    """Materialize the agent kit against the instance; return what was written.
+
+    ``authenticated`` is the saved Enterprise connection (token in its file, per-person
+    identity). Otherwise the workspace addresses an open-source engine by URL: the MCP
+    registrations carry ``--url`` so the agent's own subprocesses reach it without any
+    environment, and the note says what that means.
+    """
     sources = kit_sources()
+    mcp_args = ["mcp"] if authenticated else ["mcp", "--url", url]
     workspace.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     _copy_tree(sources["skills"], workspace / "skills")
@@ -392,12 +427,13 @@ def prepare_workspace(workspace: Path, url: str, who: str, executable: str) -> l
     version_file = sources["AGENTS.md"].parent / "VERSION"
     if version_file.is_file():
         kit_version = version_file.read_text(encoding="utf-8").strip() or kit_version
-    note = INSTANCE_NOTE.format(url=url, who=who, kit_version=kit_version)
+    template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
+    note = template.format(url=url, who=who, kit_version=kit_version)
     for name in ("AGENTS.md", "CLAUDE.md"):
         (workspace / name).write_text(note + sources[name].read_text(encoding="utf-8"), encoding="utf-8")
         written.append(name)
     (workspace / ".mcp.json").write_text(
-        json.dumps({"mcpServers": {"shakerscan": {"command": executable, "args": ["mcp"]}}}, indent=2) + "\n",
+        json.dumps({"mcpServers": {"shakerscan": {"command": executable, "args": mcp_args}}}, indent=2) + "\n",
         encoding="utf-8",
     )
     written.append(".mcp.json")
@@ -405,7 +441,7 @@ def prepare_workspace(workspace: Path, url: str, who: str, executable: str) -> l
         json.dumps(
             {
                 "$schema": "https://opencode.ai/config.json",
-                "mcp": {"shakerscan": {"type": "local", "command": [executable, "mcp"], "enabled": True}},
+                "mcp": {"shakerscan": {"type": "local", "command": [executable, *mcp_args], "enabled": True}},
             },
             indent=2,
         )
@@ -416,29 +452,64 @@ def prepare_workspace(workspace: Path, url: str, who: str, executable: str) -> l
     return written
 
 
-def agent_environment(url: str, token_file: str, agent: str, environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """What the launcher exports, plus the connection: the token stays in its file."""
+def agent_environment(
+    url: str, token_file: str | None, agent: str, environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """What the launcher exports, plus the connection: the token stays in its file.
+
+    Without a token file (an open-source engine addressed by URL) no credential variable is
+    set at all, so a stale ``SHAKERSCAN_API_TOKEN_FILE`` cannot follow the agent to an engine
+    that never issued it.
+    """
     env = dict(os.environ if environ is None else environ)
     env.pop(ENV_TOKEN, None)
+    env.pop(ENV_TOKEN_FILE, None)
     env.update(
         {
             "SHAKERSCAN_API_BASE": url,
             "SHAKERSCAN_API_URL": url,
             "SHAKERSCAN_UI_BASE": url,
-            ENV_TOKEN_FILE: token_file,
             ENV_ALLOW_REMOTE: "true",
             "SHAKERSCAN_MANAGED_INSTANCE": "1",
             "SHAKERSCAN_AGENT_NAME": agent,
             "SHAKERSCAN_RESEARCH_PLANNER_MODE": "agent",
         }
     )
+    if token_file:
+        env[ENV_TOKEN_FILE] = token_file
     return env
 
 
+def resolve_agent_instance(args: argparse.Namespace, environ: Mapping[str, str] | None = None) -> tuple[str, str | None, str]:
+    """Where ``shakerscan agent`` works: (url, token file or None, how to describe it).
+
+    An explicit ``--url`` is an open-source engine reached by address (``shakerscan start
+    --lan`` on the server), with no credential, unless it names the saved connection, which
+    keeps its token. Otherwise the saved Enterprise connection, then ``SHAKERSCAN_API_URL`` from
+    the environment as another unauthenticated engine.
+    """
+    environ = os.environ if environ is None else environ
+    saved = profile(environ)
+    if getattr(args, "url", None):
+        url = agent_origin(args.url)
+        if saved.get("url") and saved.get("token_file") and same_origin(url, saved["url"]):
+            return saved["url"], saved["token_file"], "the connected person's identity and role"
+        return url, None, "an open-source engine reached by address; no credential, no per-person identity"
+    if saved.get("url") and saved.get("token_file"):
+        return saved["url"], saved["token_file"], "the connected person's identity and role"
+    if environ.get(ENV_URL):
+        url = agent_origin(environ[ENV_URL])
+        return url, None, "an open-source engine reached by address; no credential, no per-person identity"
+    raise ClientError(
+        "no instance to work against: run `shakerscan connect <link>` for an Enterprise instance "
+        "(the console shows the link), or pass `--url http://<server>:8080` for an open-source "
+        "engine started with `shakerscan start --lan`"
+    )
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
-    saved = profile()
-    if not saved.get("url") or not saved.get("token_file"):
-        raise ClientError("no connected instance; run `shakerscan connect <link>` first (the console shows the link)")
+    url, token_file, who = resolve_agent_instance(args)
+    authenticated = token_file is not None
     agents = [args.agent] if args.agent else [a for a in AGENTS if shutil.which(a)]
     if args.agent and args.agent not in AGENTS:
         raise ClientError(f"unsupported agent '{args.agent}'; use one of {', '.join(AGENTS)}")
@@ -447,12 +518,13 @@ def cmd_agent(args: argparse.Namespace) -> int:
     agent = agents[0] if agents else "claude"
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
     executable = client_executable()
-    written = prepare_workspace(workspace, saved["url"], "the connected person's identity and role", executable)
-    print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {saved['url']}")
+    written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated)
+    print(f"workspace: {workspace} ({', '.join(written)})\ninstance:  {url} ({who})")
     if agent == "codex" and shutil.which("codex"):
         # Codex keeps MCP servers in its own configuration, not in the workspace.
+        mcp_args = ["mcp"] if authenticated else ["mcp", "--url", url]
         result = subprocess.run(
-            ["codex", "mcp", "add", "shakerscan", "--", executable, "mcp"],
+            ["codex", "mcp", "add", "shakerscan", "--", executable, *mcp_args],
             capture_output=True, text=True, timeout=120, check=False,
         )
         if result.returncode == 0:
@@ -461,11 +533,16 @@ def cmd_agent(args: argparse.Namespace) -> int:
             detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or ["no output"]
             print(f"codex:     MCP registration skipped ({detail[0]})")
     if args.no_launch:
-        print(f"launch:    cd {workspace} && {agent}")
+        if authenticated:
+            print(f"launch:    cd {workspace} && {agent}")
+        else:
+            # The kit's `shakerscan api` calls need the engine's address; the MCP registration
+            # already carries it.
+            print(f"launch:    cd {workspace} && {ENV_URL}={url} {ENV_ALLOW_REMOTE}=true {agent}")
         return 0
     if not shutil.which(agent):
         raise ClientError(f"{agent} is not on this PATH")
-    env = agent_environment(saved["url"], saved["token_file"], agent)
+    env = agent_environment(url, token_file, agent)
     print(f"starting:  {agent} in {workspace}")
     sys.stdout.flush()
     os.chdir(workspace)
@@ -745,9 +822,20 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("disconnect", help="forget the saved instance and delete its token file")
     agent = commands.add_parser(
         "agent",
-        help="start Claude Code, Codex or OpenCode in the ShakerScan agent workspace, against the connected instance",
+        help=(
+            "start Claude Code, Codex or OpenCode in the ShakerScan agent workspace, against the "
+            "connected instance or an open-source engine named with --url"
+        ),
     )
     agent.add_argument("agent", nargs="?", choices=AGENTS, help="which agent (default: the first one installed)")
+    agent.add_argument(
+        "--url",
+        help=(
+            "an open-source engine's API origin, e.g. http://192.168.1.50:8080 as printed by "
+            f"`shakerscan start --lan` on the server (default: the saved connection, else ${ENV_URL}); "
+            "no token and no per-person identity, so only on a trusted network"
+        ),
+    )
     agent.add_argument("--workspace", help="workspace directory (default: ~/.config/shakerscan/agent)")
     agent.add_argument("--here", action="store_true", help="use the current directory as the workspace")
     agent.add_argument("--no-launch", action="store_true", help="prepare the workspace and print how to start")
