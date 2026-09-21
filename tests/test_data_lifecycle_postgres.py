@@ -368,3 +368,26 @@ def test_a_recently_active_hunt_blocks_but_an_old_one_is_abandoned():
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
         assert any('hunt_runs: 1 running record(s)' in item and str(live) in item for item in preview['blockers'])
     run(scenario)
+
+
+def test_a_campaign_whose_scans_were_all_cancelled_is_abandoned_and_settled():
+    """Cancelling a scan left its campaign 'active' forever and the target undeletable."""
+    from api.asm_inventory import settle_campaign_after_scan
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            campaign = await c.fetchval("INSERT INTO scan_campaigns(target_id,mode,status) VALUES($1,'continuous_asm','active') RETURNING id", t)
+            cancelled = await c.fetchval("""INSERT INTO scans(target_id,target_url,status,campaign_id)
+                VALUES($1,$2,'cancelled',$3) RETURNING id""", t, f'https://{t}.example.invalid', campaign)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['abandoned'] == {'scan_campaigns': 1}
+        async with pool.acquire() as c:
+            assert await settle_campaign_after_scan(c, cancelled) == 1
+            assert await c.fetchval('SELECT status FROM scan_campaigns WHERE id=$1', campaign) == 'cancelled'
+            # A campaign with another scan still running is left alone.
+            live = await c.fetchval("INSERT INTO scan_campaigns(target_id,mode,status) VALUES($1,'continuous_asm','active') RETURNING id", t)
+            await c.execute("INSERT INTO scans(target_id,target_url,status,campaign_id) VALUES($1,$2,'running',$3)", t, f'https://{t}.example.invalid', live)
+            done = await c.fetchval("INSERT INTO scans(target_id,target_url,status,campaign_id) VALUES($1,$2,'cancelled',$3) RETURNING id", t, f'https://{t}.example.invalid', live)
+            assert await settle_campaign_after_scan(c, done) == 0
+    run(scenario)

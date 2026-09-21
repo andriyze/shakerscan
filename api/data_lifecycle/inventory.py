@@ -189,21 +189,27 @@ def _owner_clauses(table, columns, owners):
     for column, values in owners.items():
         if values and column in columns[table]:
             params.append([UUID(v) for v in values])
-            clauses.append(f'{ident(column)}=ANY(${len(params)}::uuid[])')
+            clauses.append(f'r.{ident(column)}=ANY(${len(params)}::uuid[])')
     if table == 'scans' and owners['scan_id']:
         params.append([UUID(v) for v in owners['scan_id']])
-        clauses.append(f'id=ANY(${len(params)}::uuid[])')
+        clauses.append(f'r.id=ANY(${len(params)}::uuid[])')
     return clauses, params
 
 
 def _abandoned_predicate(table, columns, params):
     """SQL for a non-terminal row an approved deletion may cancel instead of waiting for."""
     params.append(list(QUEUED_STATUSES))
-    parts = [f'status=ANY(${len(params)}::text[])']
+    parts = [f'r.status=ANY(${len(params)}::text[])']
     if table not in NO_ACTIVITY_CLOCK:
         clock = next((c for c in ('updated_at', 'started_at', 'created_at') if c in columns[table]), None)
         if clock:
-            parts.append(f"{ident(clock)} < NOW() - INTERVAL '{ABANDONED_AFTER_MINUTES} minutes'")
+            parts.append(f"r.{ident(clock)} < NOW() - INTERVAL '{ABANDONED_AFTER_MINUTES} minutes'")
+    if table == 'scan_campaigns' and 'scans' in columns and 'campaign_id' in columns['scans']:
+        # A campaign is only as live as its scans: one whose scans have all finished or were
+        # cancelled is done, whatever its own status row says.
+        params.append(sorted(TERMINAL_BY_TABLE.get('scans', ())))
+        parts.append(f'NOT EXISTS (SELECT 1 FROM public.scans s WHERE s.campaign_id=r.id '
+                     f'AND (s.status IS NULL OR NOT s.status=ANY(${len(params)}::text[])))')
     return '(' + ' OR '.join(parts) + ')'
 
 
@@ -217,11 +223,11 @@ async def unfinished(conn, columns, owners):
         if not clauses:
             continue
         params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
-        nonterminal = f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))'
+        nonterminal = f'({" OR ".join(clauses)}) AND (r.status IS NULL OR NOT r.status=ANY(${len(params)}::text[]))'
         abandoned = _abandoned_predicate(table, columns, params)
         rows = await conn.fetch(
-            f'SELECT id::text AS id, {abandoned} AS abandoned FROM public.{ident(table)} '
-            f'WHERE {nonterminal} ORDER BY id', *params)
+            f'SELECT r.id::text AS id, {abandoned} AS abandoned FROM public.{ident(table)} r '
+            f'WHERE {nonterminal} ORDER BY r.id', *params)
         if rows:
             found[table] = {
                 'live': [r['id'] for r in rows if not r['abandoned']],
@@ -240,14 +246,14 @@ async def cancel_abandoned(conn, columns, owners):
         if not clauses:
             continue
         params.append(sorted(TERMINAL_BY_TABLE.get(table, ())))
-        nonterminal = f'({" OR ".join(clauses)}) AND (status IS NULL OR NOT status=ANY(${len(params)}::text[]))'
+        nonterminal = f'({" OR ".join(clauses)}) AND (r.status IS NULL OR NOT r.status=ANY(${len(params)}::text[]))'
         abandoned = _abandoned_predicate(table, columns, params)
         touches = ["status='cancelled'"]
         for column in ('updated_at', 'completed_at'):
             if column in columns[table]:
                 touches.append(f'{ident(column)}=NOW()')
         rows = await conn.fetch(
-            f'UPDATE public.{ident(table)} SET {", ".join(touches)} WHERE {nonterminal} AND {abandoned} RETURNING id',
+            f'UPDATE public.{ident(table)} r SET {", ".join(touches)} WHERE {nonterminal} AND {abandoned} RETURNING r.id',
             *params)
         if rows:
             cancelled[table] = len(rows)
