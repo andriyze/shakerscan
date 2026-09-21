@@ -6,10 +6,17 @@ on:
       - '.github/workflows/release-sbom.yml'
       - '.github/workflows/release.yml'
       - '.github/workflows/publish-client.yml'
-      - 'scripts/release_sbom.py'
-      - 'tests/test_release_sbom.py'
+      - '.github/actions/sbom-tools/**'
+      - 'scripts/release_sbom*.py'
+      - 'scripts/build-model-intake-guest-rootfs.sh'
+      - 'tests/test_release_sbom*.py'
       - 'install/release-images.json'
+      - 'docker-compose.release.yml'
+      - 'security/sbom/**'
+      - 'runner/guest/**'
       - 'client/**'
+      - 'ui/package*.json'
+      - 'scanner/Dockerfile*'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +34,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Offline contracts
-        run: python -m unittest discover -s tests -p test_release_sbom.py -v
+        run: python -m unittest discover -s tests -p 'test_release_sbom*.py' -v
       - name: Build and inventory real client archives
         run: |
           python -m pip install --disable-pip-version-check 'build==1.2.2.post1'
@@ -37,6 +44,21 @@ jobs:
             --source-sha "$(git rev-parse HEAD)" --generator-source-sha "$(git rev-parse HEAD)" \
             --repository "$GITHUB_REPOSITORY" --output client-sbom-smoke
           python scripts/release_sbom.py verify --directory client-sbom-smoke --dist dist
+      - name: Preserve exact validation source inputs
+        if: always()
+        run: |
+          mkdir -p sbom-validation-inputs
+          git rev-parse HEAD > sbom-validation-inputs/SOURCE_COMMIT
+          git ls-tree -r HEAD > sbom-validation-inputs/source-tree.txt
+          git archive --format=tar HEAD | gzip -n > sbom-validation-inputs/source.tar.gz
+          (cd sbom-validation-inputs && sha256sum SOURCE_COMMIT source-tree.txt source.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: unsigned-sbom-validation-inputs
+          path: sbom-validation-inputs/
+          if-no-files-found: error
+          retention-days: 7
 
   # Read only: export a known existing release, without running its containers or
   # publishing anything. This catches real Buildx/SPDX shape drift as well as the fixtures.
