@@ -16,15 +16,23 @@ from targets import router as targets_router_module  # noqa: E402
 import target_dedupe  # noqa: E402
 
 
-def test_canonical_web_key_is_scheme_port_slash_case_insensitive():
-    k = api._canonical_target_key
+def test_canonical_web_key_is_scheme_slash_case_insensitive_and_keeps_a_non_default_port():
+    k = target_dedupe.canonical_target_key
     assert k("https://Example.com/") == "web:example.com"
     assert k("http://example.com") == "web:example.com"
-    assert k("http://example.com:8080") == "web:example.com"
-    assert k("https://example.com:9090") == "web:example.com"
-    assert k("example.com") == "web:example.com"
+    # The scheme's default port is the same asset as no port at all.
+    assert k("https://example.com:443") == "web:example.com"
+    assert k("http://example.com:80") == "web:example.com"
+    # A service on another port is its own target: creating https://host:8443 used to dedupe
+    # into https://host, and scans and Hunts then went to the closed default port.
+    assert k("http://example.com:8080") == "web:example.com:8080"
+    assert k("https://example.com:9090") == "web:example.com:9090"
+    assert k("https://example.com:9090") != k("http://example.com:8080")
+    assert k("example.com:8443") == "web:example.com:8443"
+    assert k("https://10.0.0.5:8443/app") == "web:10.0.0.5:8443"
+    assert k("http://[::1]:8080/x") == "web:::1:8080"
     assert k("https://example.com///", "manual") == "web:example.com"
-    assert k("HTTP://Host.Docker.Internal:3001/") == "web:host.docker.internal"
+    assert k("https://user:pw@example.com:8443/") == "web:example.com:8443"
     assert k("  https://example.com  ") == "web:example.com"
 
 

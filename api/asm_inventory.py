@@ -1612,6 +1612,41 @@ async def create_campaign(
     return str(campaign_id)
 
 
+async def settle_campaign_after_scan(conn, scan_id, *, status: str = "cancelled") -> int:
+    """Settle the campaign that owns a scan once none of its scans is still unfinished.
+
+    A cancelled scan left its campaign 'active' forever: nothing else ever finished it, the
+    target read as having running work, and it could not be deleted. Called after a scan
+    reaches a terminal state; a campaign with another scan still pending, queued or running
+    is left alone.
+    """
+    import uuid as _uuid
+
+    try:
+        scan_uuid = _uuid.UUID(str(scan_id))
+    except ValueError:
+        return 0
+    result = await conn.execute(
+        """
+        UPDATE scan_campaigns campaign
+        SET status = $2, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+        WHERE campaign.status = 'active'
+          AND campaign.id = (SELECT owner.campaign_id FROM scans owner WHERE owner.id = $1)
+          AND NOT EXISTS (
+              SELECT 1 FROM scans other
+              WHERE other.campaign_id = campaign.id
+                AND other.status IN ('pending', 'queued', 'running', 'cancelling')
+          )
+        """,
+        scan_uuid,
+        status,
+    )
+    try:
+        return int(str(result).rsplit(" ", 1)[-1])
+    except ValueError:
+        return 0
+
+
 async def finish_campaign(conn, campaign_id: str | None, *, status: str = "completed") -> int:
     """Mark a campaign terminal. Missing campaign_id is a no-op for compatibility."""
     if not campaign_id:

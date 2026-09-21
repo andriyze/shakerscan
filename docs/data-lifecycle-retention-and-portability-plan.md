@@ -111,9 +111,12 @@ alone does not prevent preserving a row; original links of retained and detached
 bound into the preview and kept in the durable operation receipt. Explicit legal/operational
 holds and protected audit records still block even an ownership detachment.
 
-Hunt HTTP archives have a cascading relationship with their Hunt: deleting a target that would
-erase sensitive Hunt history remains blocked. Use archive to hide inventory without erasing that
-history. A `sensitive` classification is not generally removed from destructive protections.
+Hunt HTTP archives have a cascading relationship with their Hunt: deleting a target erases its
+own Hunt and scan transaction archives with it under the dangerous-tier approval. A `sensitive`
+classification is a content label, not a hold: every recorded transaction carries it by default,
+and treating it as a hold made any target that had ever been scanned or hunted undeletable. Only
+an explicit `legal_hold` or `audit` class, or a `legal_hold`/`operational_hold` flag, blocks
+erasure. Use archive to hide inventory without erasing history.
 Finding-linked `evidence_objects` are detached before
 the finding FK cascade, preserving their storage index instead of silently orphaning blobs.
 A report may therefore still contain a historical copy of a deleted finding. Run the dedicated

@@ -133,7 +133,12 @@ def test_execution_and_holds_block_preview_and_execution(blocker):
             elif blocker=='evidence_hold': await c.execute("UPDATE evidence_objects SET retention_class='legal_hold' WHERE id=$1",e)
             else: await c.execute('UPDATE evidence_objects SET retention_delete_pending_at=NOW() WHERE id=$1',e)
         newer = await service.preview(pool,{'kind':'target','target_id':str(t)})
-        assert newer['blockers']
+        if blocker == 'retest':
+            # A queued verification nothing has picked up is cancelled by an approved deletion,
+            # not a reason to refuse it; the stale preview below still fails on drift.
+            assert not newer['blockers'] and newer['abandoned'] == {'finding_verifications': 1}
+        else:
+            assert newer['blockers']
         with pytest.raises(HTTPException) as error: await service.execute(pool,preview['preview_id'],receipt)
         assert error.value.status_code==409
         async with pool.acquire() as c: assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1',t)==1
@@ -197,7 +202,10 @@ def test_retained_sensitive_scan_archive_keeps_original_ownership_in_receipt():
     run(scenario)
 
 
-def test_cascading_sensitive_hunt_archive_still_requires_archive_instead_of_erasure():
+def test_cascading_sensitive_hunt_archive_is_erased_with_its_target():
+    """Every recorded transaction is classified sensitive by default; treating that as a hold
+    made any target that had ever been hunted undeletable ("archive the target instead").
+    An operator-approved, dangerous-tier deletion erases the target's own archive."""
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
         async with pool.acquire() as c:
@@ -205,16 +213,17 @@ def test_cascading_sensitive_hunt_archive_still_requires_archive_instead_of_eras
             await c.execute("""INSERT INTO http_transactions(plane,hunt_run_id,target_id,method,url)
                 VALUES('hunt',$1,$2,'GET','https://example.invalid/synthetic')""", hunt, t)
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
-        assert any('http_transactions' in item and 'archive' in item for item in preview['blockers'])
-        with pytest.raises(HTTPException):
-            await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert not preview['blockers'], preview['blockers']
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
         async with pool.acquire() as c:
-            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 1
+            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 0
     run(scenario)
 
 
 @pytest.mark.parametrize('hold', ['legal_hold', 'audit', 'explicit'])
 def test_retained_http_history_still_honors_actual_holds(hold):
+    # 'explicit' is a sensitive row with legal_hold=true in its metadata: the flag holds it,
+    # the classification alone does not.
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
         async with pool.acquire() as c:
@@ -313,4 +322,72 @@ def test_archived_managed_occurrence_only_reconciles_existing_receipt():
             assert receipt['state'] == 'accepted' and receipt['scan_id'] == scan
             row = await conn.fetchrow('SELECT is_active,next_run_at FROM schedules WHERE id=$1', schedule)
             assert not row['is_active'] and row['next_run_at'] is None
+    run(scenario)
+
+
+def test_abandoned_unfinished_rows_are_cancelled_by_an_approved_deletion():
+    """A Hunt row left 'active' by a crashed session and a queued scan nothing picked up must
+    not make a target undeletable; the approved deletion cancels them and proceeds."""
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            hunt = await c.fetchval("""INSERT INTO hunt_runs(target_kind,target_id,status,updated_at)
+                VALUES('web',$1,'active',NOW() - INTERVAL '1 hour') RETURNING id""", t)
+            queued = await c.fetchval("""INSERT INTO scans(target_id,target_url,status)
+                VALUES($1,$2,'pending') RETURNING id""", t, f'https://{t}.example.invalid')
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['abandoned'] == {'hunt_runs': 1, 'scans': 1}
+        result = await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert result['cancelled_unfinished'] == {'hunt_runs': 1, 'scans': 1}
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', t) == 0
+            assert await c.fetchval('SELECT status FROM scans WHERE id=$1', queued) == 'cancelled'
+    run(scenario)
+
+
+def test_a_running_scan_still_blocks_and_is_named():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            running = await c.fetchval("""INSERT INTO scans(target_id,target_url,status)
+                VALUES($1,$2,'running') RETURNING id""", t, f'https://{t}.example.invalid')
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('scans: 1 running record(s)' in item and str(running) in item and 'POST /scans/{id}/cancel' in item
+                   for item in preview['blockers']), preview['blockers']
+        assert preview['abandoned'] == {}
+    run(scenario)
+
+
+def test_a_recently_active_hunt_blocks_but_an_old_one_is_abandoned():
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            live = await c.fetchval("""INSERT INTO hunt_runs(target_kind,target_id,status,updated_at)
+                VALUES('web',$1,'active',NOW()) RETURNING id""", t)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert any('hunt_runs: 1 running record(s)' in item and str(live) in item for item in preview['blockers'])
+    run(scenario)
+
+
+def test_a_campaign_whose_scans_were_all_cancelled_is_abandoned_and_settled():
+    """Cancelling a scan left its campaign 'active' forever and the target undeletable."""
+    from api.asm_inventory import settle_campaign_after_scan
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        async with pool.acquire() as c:
+            campaign = await c.fetchval("INSERT INTO scan_campaigns(target_id,mode,status) VALUES($1,'continuous_asm','active') RETURNING id", t)
+            cancelled = await c.fetchval("""INSERT INTO scans(target_id,target_url,status,campaign_id)
+                VALUES($1,$2,'cancelled',$3) RETURNING id""", t, f'https://{t}.example.invalid', campaign)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['abandoned'] == {'scan_campaigns': 1}
+        async with pool.acquire() as c:
+            assert await settle_campaign_after_scan(c, cancelled) == 1
+            assert await c.fetchval('SELECT status FROM scan_campaigns WHERE id=$1', campaign) == 'cancelled'
+            # A campaign with another scan still running is left alone.
+            live = await c.fetchval("INSERT INTO scan_campaigns(target_id,mode,status) VALUES($1,'continuous_asm','active') RETURNING id", t)
+            await c.execute("INSERT INTO scans(target_id,target_url,status,campaign_id) VALUES($1,$2,'running',$3)", t, f'https://{t}.example.invalid', live)
+            done = await c.fetchval("INSERT INTO scans(target_id,target_url,status,campaign_id) VALUES($1,$2,'cancelled',$3) RETURNING id", t, f'https://{t}.example.invalid', live)
+            assert await settle_campaign_after_scan(c, done) == 0
     run(scenario)

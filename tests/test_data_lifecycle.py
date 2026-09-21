@@ -130,11 +130,13 @@ def test_execute_request_requires_hash_and_approval():
         DeletionExecution(preview_id=uuid4(), preview_hash='not-a-digest')
 
 
-def test_preserving_sensitive_is_not_permission_to_erase_or_detach_holds():
+def test_sensitive_is_a_classification_and_only_real_holds_block():
+    """Every recorded HTTP transaction is 'sensitive' by default; treating that as a hold made
+    any target that had ever been scanned or hunted undeletable."""
     from api.data_lifecycle.inventory import hold_predicate
     destructive = hold_predicate()
     preserving = hold_predicate(preserving=True)
-    assert "'sensitive'" in destructive and "'sensitive'" not in preserving
+    assert "'sensitive'" not in destructive and "'sensitive'" not in preserving
     for predicate in (destructive, preserving):
         assert "'legal_hold'" in predicate and "'audit'" in predicate
         assert "'operational_hold'" in predicate
@@ -158,12 +160,17 @@ def test_blockers_use_the_owning_subsystem_status_set():
     from api.data_lifecycle.statuses import TERMINAL_BY_TABLE
     owners = dict(target_id=[str(uuid4())], device_target_id=[], ai_target_id=[], scan_id=[], finding_id=[])
     class Connection:
+        # `unfinished` binds the owner arrays, then the table's terminal statuses, then the
+        # queued statuses; a table whose terminal set covers 'blocked' has no unfinished row.
+        async def fetch(self, sql, *params):
+            terminal = params[-2]
+            if 'blocked' in terminal:
+                return []
+            if 'research_episodes' in sql or 'scans' in sql:
+                return [{'id': 'row-1', 'abandoned': False}]
+            return []
         async def fetchval(self, sql, *params):
-            if 'research_episodes' in sql:
-                return int('blocked' not in params[-1])
-            if 'scans' in sql:
-                return int('blocked' not in params[-1])
             return 0
     result = asyncio.run(blockers(Connection(),
         {name: {'target_id','status'} for name in ('scans','research_episodes')}, owners, 'target', []))
-    assert len(result) == 1 and result[0].startswith('scans:')
+    assert len(result) == 1 and result[0].startswith('scans: 1 running record(s) (row-1)')

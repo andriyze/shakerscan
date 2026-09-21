@@ -85,15 +85,41 @@ def canonical_web_host(url: Any) -> str:
         return host
 
 
+def canonical_web_asset(url: Any) -> str:
+    """The asset a web target names: its host, plus its port when that port is not the
+    scheme's default.
+
+    ``http://app`` and ``https://app`` are one asset (one application behind 80/443), but
+    ``https://app:8443`` is a different service on the same host: a target created for it
+    used to dedupe into the ``https://app`` row and every scan and Hunt kept going to the
+    closed 443. Path, query, fragment and credentials stay out of the identity.
+    """
+    host = canonical_web_host(url)
+    if not host:
+        return ""
+    raw = str(url or "").strip()
+    candidate = raw if "://" in raw else f"//{raw}"
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return host
+    scheme = str(parsed.scheme or "").lower()
+    default = 443 if scheme == "https" else 80 if scheme == "http" else None
+    if port is None or port == default:
+        return host
+    return f"{host}:{port}"
+
+
 def canonical_target_key(url: Any, discovery_source: Any = None) -> str:
     """Return the durable target identity key.
 
-    Web targets are host assets, not origins: all HTTP(S) schemes and ports share one
-    ``web:`` key. Model Intake rows are artifact subjects and therefore retain their
-    complete scheme-insensitive path/query identity under ``artifact:``. Callers that
-    create artifact subjects must therefore provide the ``model-intake`` discovery
-    source; ordinary DAST and Deep Hunt URLs remain web targets even when they include
-    a path.
+    Web targets are host assets keyed by host and non-default port: every HTTP(S) scheme on
+    the default ports shares one ``web:`` key, and a service on another port is its own
+    target. Model Intake rows are artifact subjects and therefore retain their complete
+    scheme-insensitive path/query identity under ``artifact:``. Callers that create
+    artifact subjects must therefore provide the ``model-intake`` discovery source;
+    ordinary DAST and Deep Hunt URLs remain web targets even when they include a path.
 
     This MUST stay equivalent to ``targets_set_canonical_key`` in ``db/init.sql`` and
     ``retest_contract.py`` for normalized stored URLs.
@@ -103,8 +129,8 @@ def canonical_target_key(url: Any, discovery_source: Any = None) -> str:
     if source == "model-intake":
         subject = re.sub(r"^https?://", "", raw).rstrip("/")
         return f"artifact:{subject}"
-    host = canonical_web_host(raw)
-    return f"web:{host}" if host else "web:"
+    asset = canonical_web_asset(raw)
+    return f"web:{asset}" if asset else "web:"
 
 
 # target_id-bearing tables with a UNIQUE(target_id, ...) constraint: reassigning a

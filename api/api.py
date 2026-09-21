@@ -6747,6 +6747,8 @@ async def cancel_scan(scan_id: str):
                 pass
         elif scan['scan_role'] == 'shard' and scan['parent_scan_id']:
             parent_to_reconcile = str(scan['parent_scan_id'])
+        # A cancelled scan must not leave its campaign 'active' forever.
+        await asm_inventory.settle_campaign_after_scan(conn, scan['id'])
 
     # Signal worker to stop via Redis (set cancel flag)
     # Workers should check this flag periodically
@@ -19535,26 +19537,8 @@ async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
         )
         if not changed:
             continue
-        campaign_id = row.get("campaign_id")
-        if campaign_id:
-            await conn.execute(
-                """
-                UPDATE scan_campaigns campaign
-                SET status='failed', completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
-                WHERE campaign.id=$1 AND campaign.status='active'
-                  AND EXISTS (
-                      SELECT 1 FROM scans owner
-                      WHERE owner.id=$2 AND owner.campaign_id=campaign.id
-                        AND owner.status='failed'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM scans other
-                      WHERE other.campaign_id=campaign.id AND other.id<>$2
-                  )
-                """,
-                campaign_id,
-                row["id"],
-            )
+        if row.get("campaign_id"):
+            await asm_inventory.settle_campaign_after_scan(conn, row["id"], status="failed")
         repaired += 1
     return repaired
 
