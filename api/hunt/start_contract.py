@@ -8,7 +8,7 @@ collections.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import ipaddress
 import re
 from typing import Any, Mapping, Sequence
@@ -22,10 +22,11 @@ MAX_CAPABILITIES = 128
 MAX_COLLECTIONS = 32
 # Kept equal to MAX_SKILLS_PER_HUNT in hunt/skills.py; asserted by the skill tests so the
 # request boundary and the library cannot drift into disagreeing about the same limit.
-MAX_SKILLS = 4
-# Enough to cover an origin's IPv4 and IPv6 addresses plus a small failover pool. A larger
-# list stops being an operator confirming specific hosts and becomes a scan range.
-MAX_DIRECT_ORIGIN_ADDRESSES = 8
+MAX_SKILLS = 12
+# Enough to cover an origin's addresses across both families plus a failover pool. This is a
+# context bound, not an authority: each address is still one the operator named, and every
+# destination is still checked against scope and the deployment's address policy.
+MAX_DIRECT_ORIGIN_ADDRESSES = 32
 MAX_CREDENTIAL_REFS = 16
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
 _CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
@@ -328,24 +329,37 @@ class HuntStartPolicy:
             or self.allow_direct_origin
         )
 
+    def implied(self) -> tuple["HuntStartPolicy", tuple[str, ...]]:
+        """Turn a sub-authority asked for without ``active_testing`` into the policy it means.
+
+        Asking for state-changing HTTP, network discovery, OOB interactions, identity-header
+        forgery or direct-origin requests is asking for active testing; refusing the request to
+        make the caller write one more boolean told the operator nothing they had not already
+        decided. The implication is recorded so the response can say what the server resolved.
+        """
+        implying = [
+            name for name, requested in (
+                ("allow_state_changing_http", self.allow_state_changing_http),
+                ("network_discovery", self.network_discovery),
+                ("allow_oob_interactions", self.allow_oob_interactions),
+                ("allow_identity_headers", self.allow_identity_headers),
+                ("allow_direct_origin", self.allow_direct_origin),
+            ) if requested
+        ]
+        if self.active_testing or not implying:
+            return self, ()
+        return (
+            replace(self, active_testing=True),
+            (
+                "active_testing was enabled because the policy asked for "
+                + ", ".join(implying),
+            ),
+        )
+
     def validate(self, *, credentials_requested: bool) -> None:
         if self.scope_receipt_id and not self.approval_receipt_id:
             raise HuntStartContractError(
                 "scope_receipt_id must come from a validated approval receipt"
-            )
-        if self.allow_state_changing_http and not self.active_testing:
-            raise HuntStartContractError("state-changing HTTP requires active_testing")
-        if self.network_discovery and not self.active_testing:
-            raise HuntStartContractError("network discovery requires active_testing")
-        if self.allow_oob_interactions and not self.active_testing:
-            raise HuntStartContractError("OOB interactions require active_testing")
-        if self.allow_identity_headers and not self.active_testing:
-            raise HuntStartContractError(
-                "identity-header forgery requires active_testing"
-            )
-        if self.allow_direct_origin and not self.active_testing:
-            raise HuntStartContractError(
-                "direct-origin requests require active_testing"
             )
         privileged = self.is_privileged(credentials_requested=credentials_requested)
         if privileged and not self.authorization_confirmed:
@@ -438,6 +452,9 @@ class HuntStartContract:
     skill_ids: Sequence[str] = ()
     direct_origin_addresses: Sequence[str] = ()
     schema_version: str = HUNT_START_SCHEMA
+    # What the server resolved rather than refused: implied authority and zeroed budget
+    # dimensions. Reported on the start response so no adjustment is silent.
+    adjustments: Sequence[str] = ()
 
     @property
     def resolved_budget(self) -> dict[str, int]:
@@ -453,6 +470,36 @@ class HuntStartContract:
     @property
     def resolved_budget_object(self) -> HuntBudget:
         return HuntBudget(**self.resolved_budget)
+
+    def resolution_adjustments(self, *, approval_validated: bool) -> list[str]:
+        """Everything the server resolved differently from the request, in one list.
+
+        A privileged policy without a validated approval is stored with every authority off.
+        That downgrade used to be invisible: the Hunt started, reported itself active and did
+        nothing active, which reads as a silent failure rather than as a refusal to obey.
+        """
+        resolved = list(self.adjustments)
+        if approval_validated:
+            return resolved
+        withdrawn = [
+            name for name, requested in (
+                ("active_testing", self.policy.active_testing),
+                ("allow_state_changing_http", self.policy.allow_state_changing_http),
+                ("network_discovery", self.policy.network_discovery),
+                ("allow_oob_interactions", self.policy.allow_oob_interactions),
+                ("allow_identity_headers", self.policy.allow_identity_headers),
+                ("allow_direct_origin", self.policy.allow_direct_origin),
+            ) if requested
+        ]
+        if withdrawn:
+            resolved.append(
+                "this Hunt runs passively: "
+                + ", ".join(withdrawn)
+                + " were not granted because no approval receipt was validated for this "
+                "target. Authorize it once with POST /targets/{target_id}/authorization "
+                '{"approved_by": "<name>", "risk_tier": "active"} and start again'
+            )
+        return resolved
 
     def persisted_policy(
         self,
@@ -517,8 +564,22 @@ class HuntStartContract:
             "request_collection_ids": list(self.request_collection_ids),
             "skill_ids": list(self.skill_ids),
             "direct_origin_addresses": list(self.direct_origin_addresses),
+            "policy_adjustments": list(self.adjustments),
             "secret_values_visible": False,
         }
+
+
+def _private_networks_allowed() -> bool:
+    """Whether this deployment admits private/loopback destinations, as target admission does."""
+    try:
+        try:
+            import deployment_policy
+        except ModuleNotFoundError:
+            from .. import deployment_policy  # type: ignore[no-redef]
+        return bool(deployment_policy.private_network_targets_allowed())
+    except Exception:
+        # An unreadable policy keeps the stricter historical behaviour.
+        return False
 
 
 def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
@@ -535,11 +596,22 @@ def _ip_addresses(value: Any, field: str) -> tuple[str, ...]:
             f"{MAX_DIRECT_ORIGIN_ADDRESSES} IP addresses"
         )
     addresses: list[str] = []
+    # Private and loopback ranges follow the deployment's own target policy. This list
+    # used to be hardcoded here, so an install that admitted 192.168.1.50 as a target
+    # refused the same address as a direct origin -- on a LAN install, which is the
+    # normal self-hosted case, the field could not be used at all.
     forbidden_networks = tuple(ipaddress.ip_network(network) for network in (
-        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-        "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
-        "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7",
-        "fe80::/10", "ff00::/8",
+        # Never routable to a real origin, under any deployment policy.
+        "0.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+        "::/128", "fe80::/10", "ff00::/8",
+        *(
+            ()
+            if _private_networks_allowed()
+            else (
+                "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12",
+                "192.168.0.0/16", "::1/128", "fc00::/7",
+            )
+        ),
     ))
     for item in value:
         try:
@@ -629,8 +701,12 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         ),
     )
     credential_refs = _credential_refs(payload.get("credential_refs"))
+    policy, adjustments = policy.implied()
     policy.validate(credentials_requested=bool(credential_refs))
     budget_overrides = _budget_overrides(payload.get("budgets"), requested_profile)
+    # A budget dimension whose authority is off resolves to zero. It used to resolve to zero
+    # silently when the caller left it out and hard-refuse when the caller wrote it down: the
+    # same request, two outcomes, decided only by whether a number was explicit.
     contradictions = sorted(
         key
         for key in policy.forbidden_budget_dimensions(
@@ -640,9 +716,12 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         if int(budget_overrides.get(key, 0)) > 0
     )
     if contradictions:
-        raise HuntStartContractError(
-            "budget fields contradict disabled Hunt authority: "
-            + ", ".join(contradictions)
+        for key in contradictions:
+            budget_overrides.pop(key, None)
+        adjustments = (
+            *adjustments,
+            "these budget dimensions resolved to 0 because their authority is not enabled: "
+            + ", ".join(contradictions),
         )
 
     direct_origin_addresses = _ip_addresses(
@@ -686,4 +765,5 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
             pattern=_SKILL_RE,
         ),
         direct_origin_addresses=direct_origin_addresses,
+        adjustments=tuple(adjustments),
     )

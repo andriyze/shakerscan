@@ -13323,6 +13323,11 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         normalized_contract = contract.public_dict()
         normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
         normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id
+        # Say what the server resolved rather than refused, and say when a privileged request
+        # was stored as passive. Both used to be invisible to the caller.
+        normalized_contract["policy_adjustments"] = contract.resolution_adjustments(
+            approval_validated=approval_validated,
+        )
         context_pack["hunt_start_contract"] = normalized_contract
         if approval_context:
             context_pack["runtime_scope_guard"] = dict(

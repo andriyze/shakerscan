@@ -7,6 +7,7 @@ planner may only choose among the ones already confirmed.
 """
 
 import asyncio
+import os
 
 import pytest
 
@@ -67,12 +68,19 @@ def test_the_authority_without_addresses_is_refused():
         _start(policy=AUTHORIZED)
 
 
-def test_direct_origin_requires_active_testing_and_an_approval_receipt():
-    with pytest.raises(HuntStartContractError, match="require active_testing"):
-        _start(
-            direct_origin_addresses=["203.0.113.10"],
-            policy={"allow_direct_origin": True},
-        )
+def test_direct_origin_implies_active_testing_and_still_needs_an_approval_receipt():
+    """Asking to reach a named origin IS asking for active testing, so the contract resolves
+    it rather than refusing. The approval receipt is the real gate and is unchanged."""
+    contract = _start(
+        direct_origin_addresses=["203.0.113.10"],
+        policy={
+            "allow_direct_origin": True,
+            "authorization_confirmed": True,
+            "approval_receipt_id": APPROVAL,
+        },
+    )
+    assert contract.policy.active_testing is True
+    assert any("active_testing was enabled" in line for line in contract.adjustments)
     with pytest.raises(HuntStartContractError, match="approval receipt"):
         _start(
             direct_origin_addresses=["203.0.113.10"],
@@ -92,13 +100,37 @@ def test_only_literal_addresses_are_accepted():
         )
 
 
+@pytest.mark.parametrize("address", ["169.254.169.254", "fe80::1", "224.0.0.1"])
+def test_never_routable_direct_origins_are_refused_under_every_deployment(address):
+    """Link-local, multicast and unspecified destinations are refused whatever the
+    deployment admits as a target."""
+    for policy in ("allow", "refuse"):
+        os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = policy
+        try:
+            with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+                _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+        finally:
+            os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
+
+
 @pytest.mark.parametrize("address", [
-    "127.0.0.1", "10.0.0.8", "169.254.169.254", "::1", "fc00::8", "fe80::1",
-    "::ffff:10.0.0.8",
+    "127.0.0.1", "10.0.0.8", "::1", "fc00::8", "::ffff:10.0.0.8",
 ])
-def test_private_and_local_direct_origins_are_refused(address):
-    with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
-        _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+def test_private_direct_origins_follow_the_deployment_target_policy(address):
+    """This list used to be hardcoded here, so a deployment that admitted 192.168.1.50 as a
+    target refused the same address as a direct origin."""
+    os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = "refuse"
+    try:
+        with pytest.raises(HuntStartContractError, match="private, local, or non-routable"):
+            _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+    finally:
+        os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
+    os.environ["SHAKERSCAN_PRIVATE_NETWORK_TARGETS"] = "allow"
+    try:
+        contract = _start(direct_origin_addresses=[address], policy=AUTHORIZED)
+        assert list(contract.direct_origin_addresses)
+    finally:
+        os.environ.pop("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", None)
 
 
 def test_both_address_families_are_accepted_and_deduplicated():

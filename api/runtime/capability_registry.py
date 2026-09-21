@@ -356,7 +356,11 @@ def _validate_schema_value(
         raise CapabilityInputContractError(f"{path} is not an allowed value")
 
 
-_HTTP_TARGETS = frozenset({"web", "api"})
+# A ``network`` Hunt resolves against the same targets table, the same URL and the same
+# context pack as ``web`` and ``api``: the kind is a label on one asset, not a different
+# runtime. Excluding it here left a network Hunt holding three capabilities -- it could find
+# an open port and then had nothing that could speak HTTP to it.
+_HTTP_TARGETS = frozenset({"web", "api", "network"})
 _NETWORK_TARGETS = frozenset({"web", "api", "network"})
 # The connection-based network capabilities slice their address list from the
 # reserved ``hosts_attempted`` grant, so a spec that omits that dimension can

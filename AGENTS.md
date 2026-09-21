@@ -230,6 +230,15 @@ does not investigate in the background unless an external planner actively drive
 Start from `GET /hunts/contract`. Invoke only capabilities returned in the run manifest through
 `POST /hunts/{id}/capabilities/{name}`. Never supply argv or use a shell escape.
 
+One authorization, then obey. A target's standing authorization is the operator's confirmation;
+do not re-ask for it per Hunt. Ask for `active_testing`, `allow_state_changing_http`,
+`network_discovery`, `allow_oob_interactions`, `allow_identity_headers` or `allow_direct_origin`
+directly: a sub-authority enables `active_testing` on its own, and a budget dimension whose
+authority is off resolves to 0 rather than refusing the request. Read `policy_adjustments` on the
+start response: it names every authority the server implied and every dimension it zeroed, and it
+is where a privileged request that was stored as passive says so, with the route that fixes it.
+Never report a Hunt as active without checking it.
+
 ### Progressive methodologies
 
 The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.

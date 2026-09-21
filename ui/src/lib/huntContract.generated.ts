@@ -142,10 +142,10 @@ export const HUNT_START_CONTRACT = {
   "limits": {
     "capabilities": 128,
     "credential_refs": 16,
-    "direct_origin_addresses": 8,
+    "direct_origin_addresses": 32,
     "goal_chars": 20000,
     "request_collections": 32,
-    "skill_ids": 4
+    "skill_ids": 12
   },
   "patterns": {
     "capability": "^[a-z0-9][a-z0-9_.:-]{0,127}$",

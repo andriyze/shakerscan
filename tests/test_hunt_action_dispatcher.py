@@ -112,12 +112,15 @@ def test_one_action_and_result_schema_covers_all_target_kinds(
 
 
 def test_registry_exposes_the_supported_cross_target_acceptance_matrix():
+    # A `network` Hunt resolves against the same targets table, URL and context pack as `web`,
+    # so the HTTP capabilities accept it too. Without that it held only the three discovery
+    # capabilities and had nothing that could speak HTTP to what they found.
     expected = {
-        "http.request": {"web", "api"},
-        "browser.navigate": {"web", "api"},
+        "http.request": {"web", "api", "network"},
+        "browser.navigate": {"web", "api", "network"},
         "ports.discover": {"web", "api", "network"},
         "collections.replay_safe": {"web", "api", "device"},
-        "auth.session.establish": {"web", "api"},
+        "auth.session.establish": {"web", "api", "network"},
         "device.http.probe": {"device"},
         "device.service.verify": {"device"},
         "device.ssh.propose": {"device"},

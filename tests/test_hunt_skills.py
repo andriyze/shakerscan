@@ -373,8 +373,11 @@ def test_forging_identity_requires_active_testing_and_an_approval_receipt():
             "target_id": "t1", "target_kind": "web", "goal": "g", "policy": policy,
         })
 
-    with pytest.raises(HuntStartContractError, match="requires active_testing"):
-        start({"allow_identity_headers": True})
+    implied = start({
+        "allow_identity_headers": True, "authorization_confirmed": True,
+        "approval_receipt_id": "approval-1",
+    })
+    assert implied.policy.active_testing is True
     with pytest.raises(HuntStartContractError, match="authorization_confirmed"):
         start({"allow_identity_headers": True, "active_testing": True})
     with pytest.raises(HuntStartContractError, match="approval receipt"):
