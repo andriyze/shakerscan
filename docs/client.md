@@ -66,12 +66,12 @@ A pipx/Homebrew client can use the bounded ShakerScan public service immediately
 ```bash
 shakerscan check example.com
 shakerscan check https://example.com --json
-shakerscan mcp --public
+shakerscan mcp
 ```
 
-Public mode is fixed to `https://pub.shakerscan.com`. It is intentionally separate from saved
-local/remote/Enterprise connections: it does not read or transmit a saved service token, and a
-failed private connection never falls back to the public service. The public backend owns the
+With no local, remote, or saved ShakerScan instance configured, the client defaults to
+`https://pub.shakerscan.com`. Once an instance is configured, `check` and `mcp` use that instance;
+a failed private connection never falls back to public. The public backend owns the
 actual DNS/TLS/HTTP posture capabilities and rate limits; the lightweight client only validates
 the target, submits the request, prints the result, or exposes the public MCP catalogue.
 
