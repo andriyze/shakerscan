@@ -44,6 +44,7 @@ Code, database schemas, runtime receipts, and tests remain authoritative when a 
 | [`hunt-investigation-evaluation.md`](hunt-investigation-evaluation.md) | Independent planner evaluation, hidden oracles, patched controls, exact-cost scoring, and limitations |
 | [`mcp.md`](mcp.md) | MCP's separate read-only Arsenal and state-changing target-bound Hunt trust levels |
 | [`client.md`](client.md) | The engine-less `shakerscan` client (pipx, uv, Homebrew): the MCP adapter and Hunt CLI, one command name with the launcher |
+| [`lan-access.md`](lan-access.md) | Trusted-LAN startup (`start --lan`, `--bind-host`): interface selection, what binds where, firewall guidance, and the laptop client commands |
 | [`compatibility.md`](compatibility.md) | Internal legacy-input/read compatibility boundary; not a second product surface |
 | [`data-lifecycle-retention-and-portability-plan.md`](data-lifecycle-retention-and-portability-plan.md) | Implemented retention/export safety boundary and genuinely remaining lifecycle work |
 

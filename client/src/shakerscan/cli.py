@@ -32,11 +32,12 @@ from . import __version__
 from ._vendored import kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
-CLIENT_COMMANDS = ("connect", "disconnect", "agent", "api", "scan", "mcp", "hunt", "doctor", "version")
+CLIENT_COMMANDS = ("connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "doctor", "version")
 AGENTS = ("claude", "codex", "opencode")
 CONNECT_PATH = "/_enterprise/connect/"
 ENV_CONFIG_DIR = "SHAKERSCAN_CONFIG_DIR"
 DEFAULT_API_URL = "http://127.0.0.1:8080"
+PUBLIC_API_URL = "https://pub.shakerscan.com"
 ENV_HOME = "SHAKERSCAN_HOME"
 ENV_URL = "SHAKERSCAN_API_URL"
 ENV_TOKEN = "SHAKERSCAN_API_TOKEN"
@@ -488,6 +489,101 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return int(load("_scan_cli").main(["--api-url", url, "--ui-url", url, *rest]))
 
 
+# --- public checks ---------------------------------------------------------------------------
+
+_PUBLIC_DOMAIN = re.compile(
+    r"(?=^.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$"
+)
+
+
+def normalize_public_target(value: str) -> str:
+    """Return a canonical public hostname for the hosted posture service."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise ClientError("give a public domain, for example: shakerscan check example.com")
+    if "://" in raw:
+        parts = urllib.parse.urlsplit(raw)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ClientError("public checks accept a domain or http(s) URL")
+        host = parts.hostname
+    else:
+        if any(ch in raw for ch in "/?#@"):
+            raise ClientError("public checks accept a domain or http(s) URL, not a path or credential")
+        host = raw
+    host = host.rstrip(".").lower()
+    if host in LOOPBACK_HOSTS or not _PUBLIC_DOMAIN.fullmatch(host):
+        raise ClientError("public checks require a public DNS hostname")
+    return host
+
+
+def public_request_json(path: str, payload: Mapping[str, object], *, timeout: float = 20.0, opener=None):
+    """Call the fixed ShakerScan public service without consulting saved/private credentials."""
+    if not path.startswith("/v1/"):
+        raise ClientError("invalid public-service path")
+    body = json.dumps(dict(payload), separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        PUBLIC_API_URL + path,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": f"shakerscan-client/{__version__}",
+        },
+    )
+    opener = opener or urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(262144)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise ClientError("public ShakerScan rate limit reached; try again later") from exc
+        raise ClientError(f"public ShakerScan answered HTTP {exc.code}") from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise ClientError(f"cannot reach {PUBLIC_API_URL}: {getattr(exc, 'reason', exc)}") from exc
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise ClientError("public ShakerScan returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise ClientError("public ShakerScan returned an unexpected response")
+    return data
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Run a bounded public posture lookup without an engine, account, or saved connection."""
+    target = normalize_public_target(args.target)
+    if has_configured_instance():
+        # A configured/local ShakerScan instance owns all requests. Never send the target to
+        # the public service once the user has chosen a private instance.
+        url = apply_connection(argparse.Namespace(url=None, token_file=None, timeout=args.timeout))
+        api = load("_api_cli")
+        payload = json.dumps({"target": target})
+        return int(api.main(["--api-url", url, "POST", "/public/check", payload]))
+    data = public_request_json("/v1/check", {"target": target}, timeout=float(args.timeout or 20.0))
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"ShakerScan Public Check\nTarget: {target}")
+    summary = data.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        print("\n" + summary.strip())
+    else:
+        checks = data.get("checks")
+        if isinstance(checks, list):
+            for item in checks:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or item.get("id") or "check")
+                status = str(item.get("status") or "unknown")
+                detail = str(item.get("detail") or item.get("message") or "").strip()
+                print(f"{name:16} {status}" + (f"  {detail}" if detail else ""))
+        else:
+            print(json.dumps(data, indent=2, sort_keys=True))
+    print(f"\nService: {PUBLIC_API_URL} (no saved ShakerScan credential is sent)")
+    return 0
+
+
 # --- client commands ------------------------------------------------------------------------
 
 
@@ -501,8 +597,29 @@ def cmd_version(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def has_configured_instance(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the client has an explicit/saved/private ShakerScan instance to prefer."""
+    environ = os.environ if environ is None else environ
+    return bool(environ.get(ENV_URL) or profile(environ).get("url") or engine_launcher())
+
+
+def apply_default_connection(args: argparse.Namespace) -> str:
+    """Use the configured/local instance when one exists; otherwise use public ShakerScan.
+
+    Public is a zero-configuration default, never an override. Once an instance is configured,
+    normal client commands stay on that instance and do not fall back to public on failure.
+    """
+    if args.url or has_configured_instance():
+        return apply_connection(args)
+    os.environ[ENV_URL] = PUBLIC_API_URL
+    os.environ[ENV_ALLOW_REMOTE] = "true"
+    os.environ.pop(ENV_TOKEN, None)
+    os.environ.pop(ENV_TOKEN_FILE, None)
+    return PUBLIC_API_URL
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
-    apply_connection(args)
+    apply_default_connection(args)
     mcp = load("_mcp")
     mcp.SERVER_VERSION = f"client-{__version__}"
     return int(mcp.main())
@@ -580,6 +697,7 @@ COMMANDS = {
     "agent": cmd_agent,
     "api": cmd_api,
     "scan": cmd_scan,
+    "check": cmd_check,
 }
 
 
@@ -639,7 +757,17 @@ def build_parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="submit and follow scans on the connected instance (the runtime's scan CLI)")
     connection(scan)
     scan.add_argument("args", nargs=argparse.REMAINDER, help="the scan CLI's arguments; nothing prints its help")
-    mcp = commands.add_parser("mcp", help="run the MCP stdio adapter (read-only Arsenal plus target-bound Hunt) for an agent")
+    check = commands.add_parser(
+        "check",
+        help="run a free bounded public posture check via https://pub.shakerscan.com (no engine or account)",
+    )
+    check.add_argument("target", help="public domain or http(s) URL, e.g. example.com")
+    check.add_argument("--json", action="store_true", help="print the public service JSON response")
+    check.add_argument("--timeout", type=float, help="seconds to wait for the public service (default 20)")
+    mcp = commands.add_parser(
+        "mcp",
+        help="run MCP against the configured/local ShakerScan instance; with none configured, use the public service",
+    )
     connection(mcp)
     hunt = commands.add_parser(
         "hunt",

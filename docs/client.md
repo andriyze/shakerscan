@@ -59,6 +59,39 @@ From a repository checkout the client runs the runtime scripts in place:
 
 Python 3.10 or newer; no third-party dependencies.
 
+## Public checks without an engine or account
+
+A pipx/Homebrew client can use the bounded ShakerScan public service immediately:
+
+```bash
+shakerscan check example.com
+shakerscan check https://example.com --json
+shakerscan mcp
+```
+
+With no local, remote, or saved ShakerScan instance configured, the client defaults to
+`https://pub.shakerscan.com`. Once an instance is configured, `check` and `mcp` use that instance;
+a failed private connection never falls back to public. The public backend owns the
+actual DNS/TLS/HTTP posture capabilities and rate limits; the lightweight client only validates
+the target, submits the request, prints the result, or exposes the public MCP catalogue.
+
+## Use an OSS server on the same LAN
+
+Run `shakerscan start --lan` on the machine with the full OSS engine. On the laptop,
+install only the pipx/Homebrew client and use the API URL printed by the server:
+
+```bash
+shakerscan doctor --url http://192.168.1.50:8080
+shakerscan api --url http://192.168.1.50:8080 GET /findings
+shakerscan mcp --url http://192.168.1.50:8080
+```
+
+An explicit `--url`, or `SHAKERSCAN_API_URL` plus `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true`,
+selects that server, with no public fallback. The laptop needs no Docker. The LAN is the
+trust boundary: this mode adds no login, encryption, or remote shell. Existing API/Hunt
+approvals remain enforced. See [LAN access](lan-access.md) for networking, multi-NIC selection,
+MCP registration, persistence, and returning to localhost-only operation.
+
 ## Connect
 
 The quickest way is the one-time link an administrator gets when creating a service token in
