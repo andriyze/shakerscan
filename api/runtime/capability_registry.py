@@ -1059,6 +1059,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
+                           "description": "HTTP(S) service on this host; additional ports use the Hunt's existing network-discovery authority."},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1562,7 +1564,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
-            "http", "passive", frozenset({"web", "api", "device"}), "collections.replay", "1", None,
+            "http", "passive", frozenset({"web", "api", "network", "device"}), "collections.replay", "1", None,
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},

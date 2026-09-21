@@ -10221,7 +10221,7 @@ async def _generic_collection_refs(
 ]:
     """Freeze exact target-bound selection refs and derive safe endpoint seeds."""
     requested: list[tuple[uuid.UUID, Mapping[str, Any]]] = []
-    for raw in list(bindings)[:16]:
+    for raw in bindings:
         # Prefer the public V2 selection identity so a complete
         # collection_id/binding_id/selection_id tuple cannot silently degrade
         # into a discovery-only collection reference.
@@ -10236,10 +10236,10 @@ async def _generic_collection_refs(
     if len({value for value, _raw in requested}) != len(requested):
         raise HTTPException(status_code=422, detail="request collection references must be unique")
     normalized_kind = str(target_kind or ("device" if device_target_id else "web")).lower()
-    if normalized_kind not in {"web", "api", "device"}:
+    if normalized_kind not in {"web", "api", "network", "device"}:
         raise HTTPException(
             status_code=422,
-            detail="request collections require a web, API, or device target",
+            detail="request collections require a web, API, network, or device target",
         )
     bound_target_id = device_target_id if normalized_kind == "device" else target_id
     if not bound_target_id:
@@ -10292,10 +10292,13 @@ async def _generic_collection_refs(
                FROM request_collection_bindings b
                LEFT JOIN request_collection_environments e
                  ON e.id=b.environment_id AND e.is_active=true
-               WHERE b.collection_id=$1 AND b.target_kind=$2 AND b.target_id=$3
-                 AND b.is_active=true
-               ORDER BY b.updated_at DESC LIMIT 1""",
+               WHERE b.collection_id=$1 AND b.target_id=$3
+                 AND (b.target_kind=$2 OR
+                      (b.target_kind IN ('web','api','network') AND $2 IN ('web','api','network')))
+                 AND b.is_active=true AND ($4::uuid IS NULL OR b.id=$4)
+               ORDER BY (b.target_kind=$2) DESC, b.updated_at DESC LIMIT 1""",
             row["id"], normalized_kind, bound_target_id,
+            row.get("selection_binding_id") or _optional_uuid(raw.get("binding_id")),
         )
         if not binding:
             raise HTTPException(
@@ -12959,14 +12962,11 @@ def _hypothesis_situation_report(
     }
 
 
-RISK_TIER_ORDER = {
-    "read_only": 0,
-    "passive": 1,
-    "active": 2,
-    "intrusive": 3,
-    "credential": 4,
-    "dangerous": 5,
-}
+try:
+    from runtime.approval_policy import RISK_TIER_ORDER, approval_covers_risk
+except ModuleNotFoundError:
+    from api.runtime.approval_policy import RISK_TIER_ORDER, approval_covers_risk
+
 
 
 FORBIDDEN_AGENT_CONTEXT_KEYS = {
@@ -13323,8 +13323,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         normalized_contract = contract.public_dict()
         normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
         normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id
-        # Say what the server resolved rather than refused, and say when a privileged request
-        # was stored as passive. Both used to be invisible to the caller.
+        # Expose actual normalization. Unauthorized privileged work was rejected above.
         normalized_contract["policy_adjustments"] = contract.resolution_adjustments(
             approval_validated=approval_validated,
         )
@@ -15183,7 +15182,7 @@ async def _validate_approval_receipt_for_action(
     if not approval.get("approved_by") or approval.get("denial_reason"):
         await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
     approved_risk = str(approval.get("risk_tier") or "active")
-    if RISK_TIER_ORDER.get(approved_risk, -1) < RISK_TIER_ORDER.get(str(risk_tier or "active"), 999):
+    if not approval_covers_risk(approval, str(risk_tier or "active")):
         await _deny(
             "approval_receipt_risk_too_low",
             "Approval receipt risk tier does not cover the requested action",

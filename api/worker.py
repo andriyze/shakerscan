@@ -1894,7 +1894,7 @@ async def _hydrate_generic_scan_credentials(
 
     target_kind = str(hydrated.get("credential_target_kind", "") or "").strip().lower()
     action_name = str(hydrated.get("credential_action_name", "") or "").strip()
-    if target_kind not in {"web", "api"} or not action_name:
+    if target_kind not in {"web", "api", "network"} or not action_name:
         raise ScanCredentialError("generic Scan credential authority is incomplete")
 
     async with db_pool.acquire() as conn:
@@ -12633,7 +12633,7 @@ async def _execute_scan_request_collections(
     if (
         str(guard.get("target_id") or "") != target_id
         or str(guard.get("canonical_host") or "").lower().rstrip(".") != canonical_host
-        or target_kind not in {"web", "api"}
+        or target_kind not in {"web", "api", "network"}
     ):
         raise ScanCollectionReplayContractError(
             "Scan replay runtime target binding is incomplete"
@@ -12732,7 +12732,8 @@ async def _execute_scan_request_collections(
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
                        WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
-                         AND b.target_id=$4 AND b.target_kind=$5
+                         AND b.target_id=$4 AND (b.target_kind=$5 OR
+                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), row["target_id"], target_kind,
@@ -19433,7 +19434,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 if not run:
                     raise ReplayExecutionError("replay Hunt does not exist")
                 target_kind = str(run["target_kind"])
-                if target_kind in {"web", "api"} and run["target_id"]:
+                if target_kind in {"web", "api", "network"} and run["target_id"]:
                     target_owner_id = run["target_id"]
                     collection_owner_column = "target_id"
                 elif target_kind == "device" and run["device_target_id"]:
@@ -19468,7 +19469,8 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         AND e.is_active=true
                        WHERE c.id=$1 AND c.{collection_owner_column}=$4
                          AND c.is_active=true
-                         AND b.target_id=$4 AND b.target_kind=$5
+                         AND b.target_id=$4 AND (b.target_kind=$5 OR
+                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), target_owner_id, target_kind,
@@ -20102,39 +20104,7 @@ def _worker_terminal_network_result(
     }
 
 
-def _worker_hunt_web_target(
-    run: Mapping[str, Any],
-    context: Mapping[str, Any],
-    policy: Mapping[str, Any],
-) -> tuple[TargetBinding, str]:
-    if str(run["target_kind"]) not in {"web", "api"} or not run["target_id"]:
-        raise CapabilityInputError("HTTP capability requires a Web or API Hunt target")
-    target_context = (
-        dict(context.get("target") or {})
-        if isinstance(context.get("target"), Mapping) else {}
-    )
-    target_url = str(target_context.get("url") or "").strip()
-    parsed = urllib.parse.urlsplit(target_url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise CapabilityInputError("persisted Hunt target URL is invalid")
-    root_domain = str(
-        target_context.get("root_domain") or parsed.hostname
-    ).lower().rstrip(".")
-    target = TargetBinding(
-        target_id=str(run["target_id"]),
-        target_kind=str(run["target_kind"]),
-        canonical_host=parsed.hostname,
-        allowed_origins=tuple(target_context.get("origins") or ()),
-        allowed_addresses=tuple(
-            str(item)
-            for item in context.get("authorized_target_addresses") or ()
-            if str(item)
-        ),
-        allowed_root_domains=(root_domain,) if root_domain else (),
-        environment=str(target_context.get("environment") or "unknown"),
-        scope_receipt_id=str(policy.get("scope_receipt_id") or "") or None,
-    )
-    return target, target_url
+from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
 
 
 async def _revalidate_hunt_action_authority(
@@ -22076,6 +22046,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 target, target_url = _worker_hunt_web_target(
                     run, context, hunt_policy,
                 )
+                if capability_name == "http.request":
+                    from capabilities.http import resolve_hunt_http_origin
+                    target = resolve_hunt_http_origin(target, capability_input.get("origin"), hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),

@@ -571,10 +571,8 @@ def public_hunt_run(
     # needs to see which methodology a hunt was run under without parsing the whole pack.
     bound_skills = (context.get("skills") or {}).get("bound")
     result["skills"] = list(bound_skills) if isinstance(bound_skills, list) else []
-    # Beside the policy rather than three levels inside the context pack. This says what the
-    # server resolved instead of refusing, and -- the case that matters -- when a privileged
-    # request was stored as passive. Buried in the pack it was reachable but unread, so a Hunt
-    # that did no active work still looked like a Hunt that found nothing.
+    # Surface actual normalization beside the effective policy, even without the context pack.
+    # Unauthorized privileged work never reaches persistence as a downgraded success.
     started = context.get("hunt_start_contract")
     adjustments = (started or {}).get("policy_adjustments") if isinstance(started, Mapping) else None
     result["policy_adjustments"] = (

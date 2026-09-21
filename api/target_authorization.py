@@ -22,8 +22,10 @@ try:
 except ModuleNotFoundError:  # package-native import layout
     from api.action_scope import evaluate_scope, receipt_to_dict
 
-STANDING_ACTION_NAME = "target.authorization"
-STANDING_RISK_TIERS = ("active", "intrusive")
+try:
+    from runtime.approval_policy import STANDING_ACTION_NAME, STANDING_RISK_TIERS
+except ModuleNotFoundError:
+    from api.runtime.approval_policy import STANDING_ACTION_NAME, STANDING_RISK_TIERS
 
 
 class TargetAuthorizationError(ValueError):

@@ -472,34 +472,10 @@ class HuntStartContract:
         return HuntBudget(**self.resolved_budget)
 
     def resolution_adjustments(self, *, approval_validated: bool) -> list[str]:
-        """Everything the server resolved differently from the request, in one list.
-
-        A privileged policy without a validated approval is stored with every authority off.
-        That downgrade used to be invisible: the Hunt started, reported itself active and did
-        nothing active, which reads as a silent failure rather than as a refusal to obey.
-        """
-        resolved = list(self.adjustments)
-        if approval_validated:
-            return resolved
-        withdrawn = [
-            name for name, requested in (
-                ("active_testing", self.policy.active_testing),
-                ("allow_state_changing_http", self.policy.allow_state_changing_http),
-                ("network_discovery", self.policy.network_discovery),
-                ("allow_oob_interactions", self.policy.allow_oob_interactions),
-                ("allow_identity_headers", self.policy.allow_identity_headers),
-                ("allow_direct_origin", self.policy.allow_direct_origin),
-            ) if requested
-        ]
-        if withdrawn:
-            resolved.append(
-                "this Hunt runs passively: "
-                + ", ".join(withdrawn)
-                + " were not granted because no approval receipt was validated for this "
-                "target. Authorize it once with POST /targets/{target_id}/authorization "
-                '{"approved_by": "<name>", "risk_tier": "active"} and start again'
-            )
-        return resolved
+        """Report actual normalization; unauthorized work is never silently downgraded."""
+        if not approval_validated and self.policy.is_privileged(credentials_requested=bool(self.credential_refs)):
+            raise HuntStartContractError("privileged Hunt requires validated authorization; it cannot run passively")
+        return list(self.adjustments)
 
     def persisted_policy(
         self,

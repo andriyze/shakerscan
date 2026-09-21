@@ -363,7 +363,7 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert route_is_declared("POST", "/request-collections")
     assert "libpcap0.8" in (ROOT / "scanner" / "Dockerfile").read_text()
     assert "allow_untrusted_tls_credentials" in api
-    assert "untrusted_tls_credentials_not_confirmed" in web
+    assert "untrusted_tls_credentials_not_confirmed" not in web
 
 
 def test_device_scan_activity_is_structured_and_user_facing():

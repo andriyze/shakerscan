@@ -256,8 +256,10 @@ header names, skipped reasons, and request-aware findings without persisting req
 
 HTTPS interfaces are assessed with a separate strict certificate handshake. Self-signed and otherwise
 untrusted device TLS does not hide the interface: non-secret checks continue and create a TLS finding.
-Web credentials and secret-bearing imported requests are withheld unless the operator separately
-permits their use over unverified TLS under `authenticated_active`; the AI cannot enable that override.
+Selected credentials and imported requests continue under the existing testing authorization;
+certificate trust adds no second confirmation or veto. The legacy `allow_untrusted_tls_credentials`
+field remains accepted but does not control execution. Credential and state-changing permissions
+remain enforced, and unverified TLS transmission is recorded as evidence, never labeled trusted.
 Response cookies, authentication challenges, URL query values, token-like path segments, and
 token-like request names are redacted before persistence.
 

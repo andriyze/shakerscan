@@ -119,7 +119,7 @@ def test_registry_exposes_the_supported_cross_target_acceptance_matrix():
         "http.request": {"web", "api", "network"},
         "browser.navigate": {"web", "api", "network"},
         "ports.discover": {"web", "api", "network"},
-        "collections.replay_safe": {"web", "api", "device"},
+        "collections.replay_safe": {"web", "api", "network", "device"},
         "auth.session.establish": {"web", "api", "network"},
         "device.http.probe": {"device"},
         "device.service.verify": {"device"},

@@ -154,15 +154,14 @@ async def apply_standing_authorization(
     Authorize once per target: when the policy asks for active, network, mutation, OOB,
     identity-header or direct-origin authority without naming a receipt, the target's standing
     authorization (recorded through the target authorization endpoint) supplies the approval
-    and scope receipt ids and stands as the confirmed authorization. Credential use keeps its
-    explicit credential-tier receipt. A policy that names its own receipt is left untouched.
+    and scope receipt ids and stands as the confirmed authorization, including credentials
+    explicitly selected for this target. A policy naming its own receipt is left untouched.
     """
     policy = payload.get("policy")
-    if resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id"):
+    if (resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id")
+            or payload.get("approval_receipt_id")):
         return payload
-    if payload.get("credential_refs"):
-        return payload
-    if not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
+    if not payload.get("credential_refs") and not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
         return payload
     target_id = str(payload.get("target_id") or "").strip()
     if not target_id:

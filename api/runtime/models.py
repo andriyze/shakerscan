@@ -10,6 +10,14 @@ from typing import Any, Mapping
 import urllib.parse
 
 
+WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
+
+
+def target_kinds_share_asset(left: str, right: str) -> bool:
+    """These kinds share one targets row. Callers must still compare the exact target UUID."""
+    return left == right or (left in WEB_ASSET_KINDS and right in WEB_ASSET_KINDS)
+
+
 @dataclass(frozen=True)
 class ScanPolicy:
     active_testing: bool = False

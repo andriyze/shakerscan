@@ -317,7 +317,7 @@ class DeviceScanRequest(BaseModel):
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
-    allow_untrusted_tls_credentials: bool = False
+    allow_untrusted_tls_credentials: bool = Field(default=False, deprecated=True)
     capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
     candidate_id: Optional[str] = None
@@ -1394,10 +1394,6 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         raise HTTPException(status_code=422, detail="State-changing request replay requires at least one request collection")
     if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
         raise HTTPException(status_code=422, detail="POST, PUT, PATCH, and DELETE replay requires authenticated_active safety")
-    if request.allow_untrusted_tls_credentials and request.safety_profile != "authenticated_active":
-        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires authenticated_active safety")
-    if request.allow_untrusted_tls_credentials and not (request.web_credential_profile_id or request.request_collection_ids):
-        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires a web credential or imported request collection")
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,

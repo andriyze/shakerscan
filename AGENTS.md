@@ -103,8 +103,8 @@ count was queued; `status: partial` means only some submissions succeeded.
 
 - Active testing requires persisted policy permission and a target-bound approval receipt. The
   receipt is normally the target's standing authorization, recorded once and resolved
-  automatically at submission; credential use keeps an explicit credential-tier receipt and the
-  dangerous tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
+  automatically at submission and covers explicitly selected target credentials. The dangerous
+  tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
   replace server checks.
 - State-changing HTTP, direct-origin access, OOB callbacks, network discovery, and device-fragility
   spend are independent permissions and budget dimensions.
@@ -235,9 +235,15 @@ do not re-ask for it per Hunt. Ask for `active_testing`, `allow_state_changing_h
 `network_discovery`, `allow_oob_interactions`, `allow_identity_headers` or `allow_direct_origin`
 directly: a sub-authority enables `active_testing` on its own, and a budget dimension whose
 authority is off resolves to 0 rather than refusing the request. Read `policy_adjustments` on the
-start response: it names every authority the server implied and every dimension it zeroed, and it
-is where a privileged request that was stored as passive says so, with the route that fixes it.
-Never report a Hunt as active without checking it.
+start response: it names every authority the server implied and every dimension it zeroed.
+Unauthorized privileged work is rejected, never secretly converted to a passive success.
+
+Certificate defects are assessment evidence, not authorization vetoes. Target requests, login,
+browser-login QA and imported replay support HTTP and untrusted HTTPS on nonstandard ports.
+Do not ask the operator again or demand a repaired certificate after testing with selected
+credentials has been authorized. Keep control-plane TLS verification separate and unchanged.
+Web, API and network are views of the same target row and reuse its credentials and collections;
+different target UUIDs and device identities remain distinct.
 
 ### Progressive methodologies
 

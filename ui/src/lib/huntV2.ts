@@ -53,6 +53,7 @@ export interface HuntV2 {
   status: 'created' | 'active' | 'awaiting_planner' | 'completed' | 'cancelled' | 'failed' | 'budget_exhausted'
   budget_profile: 'fast' | 'balanced' | 'thorough'
   policy: Record<string, unknown>
+  policy_adjustments?: string[]
   budget: Record<string, number>
   budget_used: Record<string, number>
   context_pack?: Record<string, unknown>

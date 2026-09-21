@@ -128,15 +128,15 @@ class TestTheProjectionSurfacesWhatTheServerResolved:
         }))
         stored = contract.public_dict()
         stored["policy_adjustments"] = contract.resolution_adjustments(
-            approval_validated=False,
+            approval_validated=True,
         )
         projected = public_hunt_run(hunt_row({"hunt_start_contract": stored}))
         assert projected["policy_adjustments"], projected["policy_adjustments"]
         assert any(
-            "runs passively" in line for line in projected["policy_adjustments"]
+            "active_testing was enabled" in line for line in projected["policy_adjustments"]
         )
         assert any(
-            "/targets/{target_id}/authorization" in line
+            "active_testing was enabled" in line
             for line in projected["policy_adjustments"]
         )
 
@@ -167,7 +167,7 @@ class TestTheProjectionSurfacesWhatTheServerResolved:
         }))
         stored = contract.public_dict()
         stored["policy_adjustments"] = contract.resolution_adjustments(
-            approval_validated=False,
+            approval_validated=True,
         )
         projected = public_hunt_run(
             hunt_row({"hunt_start_contract": stored}), include_context=False,
@@ -176,9 +176,8 @@ class TestTheProjectionSurfacesWhatTheServerResolved:
         assert projected["policy_adjustments"]
 
 
-def test_standing_authorization_still_does_not_cover_credential_use():
-    """Recorded as an open limitation rather than silently changed here: a target with a
-    standing authorization still refuses a credentialed Hunt."""
+def test_standing_authorization_covers_selected_target_credentials():
+    """Credential selection reuses the target authorization instead of bypassing lookup."""
     async def resolver(_target_id):
         return {"approval_receipt_id": "standing-1", "scope_receipt_id": "scope-1"}
 
@@ -187,7 +186,7 @@ def test_standing_authorization_still_does_not_cover_credential_use():
         credential_refs={"web_credential_profile_id": "profile-1"},
     )
     result = asyncio.run(apply_standing_authorization(payload, resolver))
-    assert "approval_receipt_id" not in result["policy"]
+    assert result["policy"]["approval_receipt_id"] == "standing-1"
 
 
 def test_standing_authorization_fills_a_sub_authority_request():

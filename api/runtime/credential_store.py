@@ -238,8 +238,6 @@ def _validate_kind_placement(*, auth_kind: str, target_kind: str, principal_slot
             raise CredentialStoreError("SSH credentials require a network or device target")
         if principal_slot != "ssh":
             raise CredentialStoreError("SSH credentials require principal_slot=ssh")
-    elif target_kind == "network":
-        raise CredentialStoreError("HTTP credentials cannot bind to a network target")
     elif principal_slot == "ssh":
         raise CredentialStoreError("HTTP credentials cannot use principal_slot=ssh")
 
@@ -508,7 +506,7 @@ class PostgresCredentialProfileStore:
                LEFT JOIN credential_profile_bindings b
                  ON b.profile_id=p.id AND b.binding_kind='target'
                 AND b.binding_id=p.target_id::text
-               WHERE p.target_kind=$1 AND p.target_id=$2
+               WHERE (p.target_kind=$1 OR (p.target_kind IN ('web','api','network') AND $1 IN ('web','api','network'))) AND p.target_id=$2
                  AND ($3::boolean OR p.is_active=true)
                ORDER BY p.is_active DESC, lower(p.name), p.id""",
             _target_kind(target_kind),
@@ -702,7 +700,7 @@ class PostgresCredentialProfileStore:
                JOIN credential_profile_bindings b
                  ON b.profile_id=p.id AND b.binding_kind='target'
                 AND b.binding_id=p.target_id::text AND b.is_active=true
-               WHERE p.id=$1 AND p.target_kind=$2 AND p.target_id=$3
+               WHERE p.id=$1 AND (p.target_kind=$2 OR (p.target_kind IN ('web','api','network') AND $2 IN ('web','api','network'))) AND p.target_id=$3
                  AND p.is_active=true
                  AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
             _profile_id(profile_id),

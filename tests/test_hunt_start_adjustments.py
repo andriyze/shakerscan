@@ -90,16 +90,10 @@ def test_a_funded_dimension_whose_authority_is_on_is_untouched():
     assert not [item for item in contract.adjustments if "resolved to 0" in item]
 
 
-def test_an_unvalidated_privileged_policy_reports_that_it_runs_passively():
-    """The run was stored with every authority off and said nothing, so a Hunt that did no
-    active work looked like a Hunt that found nothing."""
-    contract = start({"active_testing": True, "allow_state_changing_http": True})
-    (line,) = [
-        item for item in contract.resolution_adjustments(approval_validated=False)
-        if "runs passively" in item
-    ]
-    assert "active_testing" in line and "allow_state_changing_http" in line
-    assert "POST /targets/{target_id}/authorization" in line
+def test_unvalidated_privileged_policy_cannot_run_passively():
+    contract = start({"active_testing": True})
+    with pytest.raises(HuntStartContractError, match="cannot run passively"):
+        contract.resolution_adjustments(approval_validated=False)
 
 
 def test_a_validated_approval_reports_no_downgrade():

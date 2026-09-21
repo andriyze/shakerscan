@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .models import target_kinds_share_asset
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -608,8 +610,8 @@ def admit_scan_credential_profiles(
     if len(requested) != len(set(requested)):
         raise ScanCredentialError("Scan credential profile IDs must be distinct")
     normalized_kind = str(target_kind or "").strip().lower()
-    if normalized_kind not in {"web", "api"}:
-        raise ScanCredentialError("Scan credential target kind must be web or api")
+    if normalized_kind not in {"web", "api", "network"}:
+        raise ScanCredentialError("Scan credential target kind must be web, api, or network")
     normalized_target_id = str(target_id or "").strip()
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -629,7 +631,7 @@ def admit_scan_credential_profiles(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= current):
             raise ScanCredentialError("Scan credential profile is inactive or expired")
-        if profile.target_id != normalized_target_id or profile.target_kind != normalized_kind:
+        if profile.target_id != normalized_target_id or not target_kinds_share_asset(profile.target_kind, normalized_kind):
             raise ScanCredentialError("Scan credential profile target binding does not match")
         if profile.auth_kind not in HTTP_CREDENTIAL_KINDS:
             raise ScanCredentialError("Scan credentials must use an HTTP authentication kind")

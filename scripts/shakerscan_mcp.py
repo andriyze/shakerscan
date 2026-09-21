@@ -502,8 +502,8 @@ def _hunt_start_tool(contract: dict[str, Any]) -> HuntMCPTool:
                 "authorized once with POST /targets/{target_id}/authorization; that standing "
                 "authorization is resolved automatically, and a Hunt asked to run without it is "
                 "refused with a 422 that names this. Read policy_adjustments on the response: it "
-                "reports every authority the server implied, every budget dimension it resolved to 0, "
-                "and any privileged request that was stored as passive."
+                "reports actual policy and budget adjustments. Unauthorized work is never downgraded. "
+                "Selected target credentials reuse standing authorization; target HTTP and self-signed HTTPS are supported."
             ),
             "properties": policy_properties,
             "additionalProperties": False,
