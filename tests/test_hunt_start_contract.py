@@ -88,25 +88,20 @@ def test_active_network_and_mutation_authority_requires_confirmation_and_receipt
     assert contract.policy.allow_oob_interactions is True
 
 
-def test_network_and_state_change_cannot_be_enabled_without_active_testing():
-    with pytest.raises(HuntStartContractError, match="network discovery requires active_testing"):
-        normalize_hunt_start_payload(_payload(policy={
-            "network_discovery": True,
-            "authorization_confirmed": True,
-            "approval_receipt_id": "approval-1",
-        }))
-    with pytest.raises(HuntStartContractError, match="state-changing HTTP requires active_testing"):
-        normalize_hunt_start_payload(_payload(policy={
-            "allow_state_changing_http": True,
-            "authorization_confirmed": True,
-            "approval_receipt_id": "approval-1",
-        }))
-    with pytest.raises(HuntStartContractError, match="OOB interactions require active_testing"):
-        normalize_hunt_start_payload(_payload(policy={
-            "allow_oob_interactions": True,
-            "authorization_confirmed": True,
-            "approval_receipt_id": "approval-1",
-        }))
+@pytest.mark.parametrize("authority", [
+    "network_discovery", "allow_state_changing_http", "allow_oob_interactions",
+])
+def test_a_sub_authority_enables_active_testing_rather_than_refusing(authority):
+    """These refused with a 422 that told the operator to write one more boolean they had
+    already implied. The authorization gate below is what actually decides."""
+    contract = normalize_hunt_start_payload(_payload(policy={
+        authority: True,
+        "authorization_confirmed": True,
+        "approval_receipt_id": "approval-1",
+    }))
+    assert contract.policy.active_testing is True
+    assert getattr(contract.policy, authority) is True
+    assert any("active_testing was enabled" in line for line in contract.adjustments)
 
 
 def test_credential_references_require_explicit_authority_and_remain_opaque():
@@ -193,8 +188,14 @@ def test_budget_cannot_restore_authority_disabled_by_policy_or_target_kind():
         "max_device_fragility_points",
         "max_active_actions",
     ):
-        with pytest.raises(HuntStartContractError, match="contradict disabled Hunt authority"):
-            normalize_hunt_start_payload(_payload(budgets={dimension: 1}))
+        # Funding a dimension never grants its authority. It now resolves to zero and says
+        # so, instead of refusing the whole request only when the number was written down.
+        contract = normalize_hunt_start_payload(_payload(budgets={dimension: 1}))
+        assert contract.resolved_budget[dimension] == 0
+        assert any(
+            "resolved to 0" in line and dimension in line
+            for line in contract.adjustments
+        ), contract.adjustments
 
     active = normalize_hunt_start_payload(_payload(
         budgets={

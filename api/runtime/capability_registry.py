@@ -356,7 +356,11 @@ def _validate_schema_value(
         raise CapabilityInputContractError(f"{path} is not an allowed value")
 
 
-_HTTP_TARGETS = frozenset({"web", "api"})
+# A ``network`` Hunt resolves against the same targets table, the same URL and the same
+# context pack as ``web`` and ``api``: the kind is a label on one asset, not a different
+# runtime. Excluding it here left a network Hunt holding three capabilities -- it could find
+# an open port and then had nothing that could speak HTTP to it.
+_HTTP_TARGETS = frozenset({"web", "api", "network"})
 _NETWORK_TARGETS = frozenset({"web", "api", "network"})
 # The connection-based network capabilities slice their address list from the
 # reserved ``hosts_attempted`` grant, so a spec that omits that dimension can
@@ -1055,6 +1059,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
+                           "description": "HTTP(S) service on this host; additional ports use the Hunt's existing network-discovery authority."},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1558,7 +1564,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
-            "http", "passive", frozenset({"web", "api", "device"}), "collections.replay", "1", None,
+            "http", "passive", frozenset({"web", "api", "network", "device"}), "collections.replay", "1", None,
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},

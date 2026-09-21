@@ -101,7 +101,7 @@ class BrowserLoginRuntimeTransport:
         self.prepared, self.workflow = prepared, workflow
         self.revalidate, self.heartbeat, self.cancelled = revalidate, heartbeat, cancelled
         self.sender = sender or PinnedAiohttpReplayTransport(
-            verify_tls=True, reject_duplicate_response_headers=True,
+            verify_tls=False, reject_duplicate_response_headers=True,
         )
         parsed = urlsplit(workflow.origin)
         factory = FrozenTargetSocketFactory(

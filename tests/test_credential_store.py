@@ -421,7 +421,6 @@ def test_deactivation_revokes_profile_and_binding():
     [
         ("web", "ssh_password", "ssh", "network or device"),
         ("device", "ssh_password", "primary", "principal_slot=ssh"),
-        ("network", "bearer_token", "primary", "HTTP credentials"),
         ("api", "bearer_token", "ssh", "principal_slot=ssh"),
     ],
 )

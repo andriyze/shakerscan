@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .credential_store import CredentialProfileMetadata
+from .models import target_kinds_share_asset
 from .credentials import HTTP_CREDENTIAL_KINDS, SSH_CREDENTIAL_KINDS
 
 
@@ -122,7 +123,7 @@ def validate_generic_credential_references(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= normalized_now):
             raise CredentialReferenceError(f"{role} is inactive or expired")
-        if profile.target_kind != target_kind:
+        if not target_kinds_share_asset(profile.target_kind, target_kind):
             raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
         if not _role_compatible(role, profile):
             raise CredentialReferenceError(

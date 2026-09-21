@@ -33,7 +33,7 @@ LIBRARY_DOCUMENT_FILES = frozenset({"README.md"})
 SUPPORT_LEVELS = frozenset({"supported", "partial", "reference"})
 # Only these may be bound to a run. The others are published for reading.
 BINDABLE_SUPPORT = frozenset({"supported"})
-MAX_SKILLS_PER_HUNT = 4
+MAX_SKILLS_PER_HUNT = 12
 MAX_CONTEXT_SKILL_SUGGESTIONS = 3
 _SUGGESTION_STOP_WORDS = frozenset({
     "and", "application", "authorized", "comprehensive", "for", "from", "hunt",

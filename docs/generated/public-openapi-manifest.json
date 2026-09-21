@@ -65,7 +65,7 @@
     "DevicePolicyUpdate": "7241f69692c8510a7a9fac14b920f6cc6a7b46ca450793904160235015fe4ec9",
     "DeviceRequestCollectionCreate": "3009cf19fcbaa9e3f474f05885c01a3dd1edb31776f977f017865d1b1aa3ab72",
     "DeviceRequestCollectionUpdate": "25bb49b2f0399f599863fd16ee789f8221dd9a25f5cd52f9e47470deefb0bb2d",
-    "DeviceScanRequest": "29ebc21cbdb517dc18dddb2e815558e737796bfde16e3729a999c7525e192327",
+    "DeviceScanRequest": "95f51a4bc0a2c088b4ddf6466c5a517e3ef303a32fa8710dbdde63bc73acb9b3",
     "DeviceServiceVerifyRequest": "2c3c4c86495d95a3a250459a498449b928e44ecd6afe1e1e2fbbc287358d8fe5",
     "DeviceTargetCreate": "a9cba09797e967f36606de07aea1047860a91727ef3d9007d89e24a4980467ec",
     "DeviceTargetUpdate": "1bb3225d4fcac87d7fd6f2eb0fe28db0b6c589d9f6003d908355b86b8881561f",
@@ -184,7 +184,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "31161ea1d045d1d0bfb99a576f67d9aba89e9b961c1c162ccb5cd8b9dc3330b3",
+  "contract_sha256": "f19a971c9f0f290c2459d86a9357499f51c075ff331020b083de33df1ad3194f",
   "openapi": "3.1.0",
   "operation_count": 417,
   "operations": {
@@ -4408,7 +4408,7 @@
       "deprecated": false,
       "operation_id": "start_hunt_hunts_post",
       "parameters_sha256": "ddaf7d03a5e33d1d0116950a13b7b4a7fd3db89282553bec193c97867ef72115",
-      "request_schema_sha256": "45d62ff4b6701052535080e8c62eb67f35fa8b4109e689c6727e07462665c683",
+      "request_schema_sha256": "b16d642a6d7639f756d68fdac876d684fb7d4caeec8b37bce2ec109e19131885",
       "response_schema_sha256": {
         "200": "87f160d6eeb2c1bfa78deaf517c99df762cf0fc7ce99a07a44df48383dcf9421"
       },

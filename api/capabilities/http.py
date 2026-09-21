@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -127,6 +127,8 @@ def _origin(value: Any) -> str | None:
         return None
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     netloc = parsed.hostname.lower()
+    if ":" in netloc:
+        netloc = f"[{netloc}]"
     if port is not None and port != default_port:
         netloc = f"{netloc}:{port}"
     return f"{parsed.scheme.lower()}://{netloc}"
@@ -145,6 +147,36 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
         parsed.hostname.lower().rstrip("."),
         port or (443 if parsed.scheme.lower() == "https" else 80),
     )
+
+
+def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping[str, Any]) -> TargetBinding:
+    """Select another service on the same frozen host under existing network authority.
+
+    No new host/address is admitted, and a response redirect cannot expand scope this way.
+    Admission and the worker both validate this before credential resolution or traffic.
+    """
+    if origin is None:
+        return target
+    text = str(origin).strip()
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("HTTP service origin is invalid") from exc
+    if (any(c.isspace() or ord(c) < 32 for c in text) or "\\" in text
+            or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port == 0
+            or parsed.hostname.lower().rstrip(".") != target.canonical_host):
+        raise ValueError("HTTP service origin must be on the Hunt's exact target host")
+    candidate = _origin(text)
+    if _origin_key(candidate) in {_origin_key(value) for value in target.allowed_origins}:
+        return target
+    if not (policy.get("active_testing") is True and policy.get("network_discovery") is True
+            and policy.get("approval_receipt_id") and target.scope_receipt_id
+            and target.scope_receipt_id == policy.get("scope_receipt_id")):
+        raise ValueError("another service port requires the Hunt's network discovery authority")
+    return replace(target, allowed_origins=(*target.allowed_origins, candidate))
 
 
 def _emit_transaction(
@@ -400,6 +432,7 @@ async def execute_bound_http_request(
     request_view = {
         "method": method,
         "origin": request_origin,
+        "tls_verification": "not_enforced" if request_origin.startswith("https://") else "not_applicable",
         "path": path,
         "query_keys": sorted(query or {}),
         "as_principal": str(principal_slot or "anonymous")[:80],
@@ -437,6 +470,8 @@ async def execute_bound_http_request(
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
+            # Targets may deliberately have defective certificates. Assess TLS separately.
+            verify=False,
         ) as client:
             current_url = url
             current_method = method

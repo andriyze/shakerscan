@@ -56,6 +56,7 @@ try:
     from capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from capabilities.network import CapabilityInputError, network_capability_adapter
     from capabilities.tls import inspect_tls_origin
+    from capabilities.http import resolve_hunt_http_origin
     from http_experiment import MAX_REDIRECT_HOPS
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -74,6 +75,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from ..capabilities.network import CapabilityInputError, network_capability_adapter
     from ..capabilities.tls import inspect_tls_origin
+    from ..capabilities.http import resolve_hunt_http_origin
     from ..http_experiment import MAX_REDIRECT_HOPS
     from ..runtime.budget_reservations import DurableBudgetReservation
     from ..runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
@@ -1508,12 +1510,26 @@ async def _execute_hunt_capability_lifecycle(
             uses_direct_origin = bool(
                 str(request.input.get("via_address") or "").strip()
             )
+            uses_service_origin = False
+            if name == "http.request" and request.input.get("origin") is not None:
+                original = TargetBinding(
+                    target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
+                    canonical_host=urllib.parse.urlsplit(frozen_locator).hostname,
+                    allowed_origins=tuple(target_context.get("origins") or ()),
+                    scope_receipt_id=policy.get("scope_receipt_id"),
+                )
+                try:
+                    selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                uses_service_origin = selected.allowed_origins != original.allowed_origins
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"
                 or uses_session
                 or forges_identity
                 or uses_direct_origin
+                or uses_service_origin
             )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -1524,7 +1540,7 @@ async def _execute_hunt_capability_lifecycle(
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier=(
                         "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity or uses_direct_origin
+                        else "active" if forges_identity or uses_direct_origin or uses_service_origin
                         else str(spec.risk_tier)
                     ), always_require_receipt=True,
                     require_target_binding=True,

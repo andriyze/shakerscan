@@ -30,6 +30,7 @@ from .credentials import (
     parse_credential_secret,
 )
 from .models import TargetBinding
+from .approval_policy import approval_covers_risk, is_standing_target_authorization
 
 try:
     from secret_store import SecretStoreUnavailable, decrypt_secret
@@ -113,14 +114,18 @@ async def validate_worker_credential_authority(
     if (
         not item.get("approved_by")
         or item.get("denial_reason")
-        or str(item.get("risk_tier") or "") not in {"credential", "dangerous"}
+        or not approval_covers_risk(item, "credential")
     ):
         raise CredentialResolutionError("credential approval receipt does not authorize access")
     expires_at = item.get("expires_at")
-    if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+    standing = is_standing_target_authorization(item)
+    if expires_at is None and not standing:
         raise CredentialResolutionError("credential approval receipt requires a bounded expiry")
-    if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
-        raise CredentialResolutionError("credential approval receipt is expired")
+    if expires_at is not None:
+        if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+            raise CredentialResolutionError("credential approval receipt has an invalid expiry")
+        if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            raise CredentialResolutionError("credential approval receipt is expired")
     raw_confirmations = item.get("confirmations") or []
     if isinstance(raw_confirmations, str):
         try:
@@ -153,7 +158,7 @@ async def validate_worker_credential_authority(
     expected_action = str(action_name or "").strip()
     if not expected_action:
         raise CredentialResolutionError("credential capability action is invalid")
-    if receipt_action and receipt_action != expected_action:
+    if receipt_action and receipt_action != expected_action and not standing:
         raise CredentialResolutionError("credential approval action changed")
     return CredentialResolutionAuthority(
         owner_kind=owner_kind,

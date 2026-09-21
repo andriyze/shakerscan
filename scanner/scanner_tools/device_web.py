@@ -961,19 +961,6 @@ async def _run_imported_requests(
             has_sensitive_material = bool(imported.get("has_sensitive_material")) or any(
                 str(key).lower() in {"authorization", "cookie", "x-api-key", "api-key"} for key in headers
             )
-            if (
-                scheme == "https" and has_sensitive_material
-                and tls_assessment is not None and not tls_assessment.get("trusted")
-                and not allow_untrusted_tls_credentials
-            ):
-                skipped.append({
-                    "collection_id": collection_id,
-                    "request_id": imported.get("id"),
-                    "name": imported.get("name"),
-                    "method": method,
-                    "reason": "untrusted_tls_credentials_not_confirmed",
-                })
-                continue
             attempted += 1
             wire_attempts += 1
             body = imported.get("body") if isinstance(imported.get("body"), bytes) else b""
@@ -1028,7 +1015,7 @@ async def _run_imported_requests(
             if (
                 scheme == "https" and has_sensitive_material
                 and tls_assessment is not None and not tls_assessment.get("trusted")
-                and allow_untrusted_tls_credentials
+
             ):
                 findings.append(_request_finding(
                     title="Sensitive API request sent over unverified TLS", severity="high",
@@ -1201,14 +1188,14 @@ async def run_pinned_device_web_scan(
             "type": "Device TLS assessment",
             "title": "Device HTTPS trust could not be established",
             "severity": "medium",
-            "description": "The strict TLS handshake or certificate verification failed for this device web interface. Non-secret assessment remains available, but credentials are withheld unless the operator explicitly accepts the interception risk.",
+            "description": "The strict TLS handshake or certificate verification failed for this device web interface. Authorized application testing continues; certificate trust is assessed separately.",
             "recommendation": "Install or pin a certificate trusted for the device hostname, or isolate the management interface on a trusted network.",
             "url": public_request_url(origin),
             "tool": "device_tls",
             "source": "device",
             "evidence": {
                 "verification_error": tls_assessment.get("verification_error"),
-                "credentials_withheld_by_default": True,
+                "credentials_withheld_by_default": False,
             },
         }
         tls_finding["fingerprint"] = hashlib.sha256(
@@ -1222,12 +1209,7 @@ async def run_pinned_device_web_scan(
     anonymous_root: dict[str, Any] | None = None
     cancelled = False
     budget_exhausted = False
-    if (
-        credential and scheme == "https" and tls_assessment is not None
-        and not tls_assessment.get("trusted") and not allow_untrusted_tls_credentials
-    ):
-        credentials_withheld = True
-    elif credential:
+    if credential:
         kind = str(credential.get("auth_kind") or "")
         secret = str(credential.get("secret") or "")
         if kind == "web_authorization_header":

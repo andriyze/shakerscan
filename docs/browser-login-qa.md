@@ -37,8 +37,9 @@ owner, target, scope, approval, current profile version and capability binding.
 An inactive, expired, rotated or revoked profile fails closed without retry.
 
 Production execution requires the image's installed `/usr/bin/chromium`, a local
-credential-enabled worker, TLS verification for HTTPS, and an approved single-origin
-workflow. The explicit action reserves 128 HTTP attempts, one state-changing request,
+credential-enabled worker and an approved single-origin workflow. Target certificate defects
+are assessed separately: self-signed, expired and hostname-mismatched HTTPS remain testable.
+Control-plane certificate verification is unchanged. The explicit action reserves 128 HTTP attempts, one state-changing request,
 32 browser actions and 210 tool-wall seconds. The saved workflow may only narrow
 these limits. Use a budget with enough capacity (for example `balanced`); the Hunt
 `fast` profile's 20 browser-action ceiling cannot fund this action.
@@ -92,7 +93,8 @@ Old queued actions do not adopt the new version after rotation.
 For **Scan**, use `POST /scans` with the new `browser_login_profile_ids` array,
 separate from ordinary `credential_profile_ids`. Select one or two distinct
 profiles with different principal slots. The existing approval must be target-bound,
-credential-tier, unexpired and authorize `scan.submit`.
+credential-tier, unexpired and authorize `scan.submit`, or be the target's valid standing
+authorization. Workers still revalidate revocation and exact target scope before decryption.
 
 ```json
 {

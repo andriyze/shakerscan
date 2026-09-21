@@ -571,6 +571,13 @@ def public_hunt_run(
     # needs to see which methodology a hunt was run under without parsing the whole pack.
     bound_skills = (context.get("skills") or {}).get("bound")
     result["skills"] = list(bound_skills) if isinstance(bound_skills, list) else []
+    # Surface actual normalization beside the effective policy, even without the context pack.
+    # Unauthorized privileged work never reaches persistence as a downgraded success.
+    started = context.get("hunt_start_contract")
+    adjustments = (started or {}).get("policy_adjustments") if isinstance(started, Mapping) else None
+    result["policy_adjustments"] = (
+        [str(item) for item in adjustments] if isinstance(adjustments, list) else []
+    )
     if include_context:
         result["context_pack"] = context
     return result
