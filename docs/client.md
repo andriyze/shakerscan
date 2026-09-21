@@ -59,6 +59,22 @@ From a repository checkout the client runs the runtime scripts in place:
 
 Python 3.10 or newer; no third-party dependencies.
 
+## Public checks without an engine or account
+
+A pipx/Homebrew client can use the bounded ShakerScan public service immediately:
+
+```bash
+shakerscan check example.com
+shakerscan check https://example.com --json
+shakerscan mcp --public
+```
+
+Public mode is fixed to `https://pub.shakerscan.com`. It is intentionally separate from saved
+local/remote/Enterprise connections: it does not read or transmit a saved service token, and a
+failed private connection never falls back to the public service. The public backend owns the
+actual DNS/TLS/HTTP posture capabilities and rate limits; the lightweight client only validates
+the target, submits the request, prints the result, or exposes the public MCP catalogue.
+
 ## Connect
 
 The quickest way is the one-time link an administrator gets when creating a service token in
