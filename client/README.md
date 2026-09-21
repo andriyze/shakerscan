@@ -7,7 +7,7 @@ engine, VPS, or self-hosted Enterprise gateway and hand it to an agent or script
 ```bash
 pipx install shakerscan          # or: uv tool install shakerscan
 shakerscan check example.com      # free public posture check, no engine/account
-shakerscan mcp --public           # public ShakerScan tools for an MCP client
+shakerscan mcp                    # public MCP when no instance is configured
 shakerscan doctor --url https://scanner.example.com --token-file ./token
 shakerscan mcp    --url https://scanner.example.com --token-file ./token
 shakerscan hunt   --url https://scanner.example.com --token-file ./token list
@@ -23,4 +23,4 @@ Python 3.10 or newer, no third-party dependencies, AGPL-3.0-only. Documentation:
 https://github.com/andriyze/shakerscan/blob/main/docs/client.md
 
 
-Public mode is hardcoded to `https://pub.shakerscan.com`. It never reads or sends a saved ShakerScan service token. `shakerscan mcp` without `--public` keeps the existing local/remote/Enterprise behavior and never falls back to the public service.
+With no local, remote, or saved ShakerScan instance configured, `check` and `mcp` use the hardcoded `https://pub.shakerscan.com` service. Once an instance is configured, the client prefers that instance for all such requests and never falls back to public on failure.
