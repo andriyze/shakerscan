@@ -163,6 +163,7 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
         services = coverage.supporting_images(root / "docker-compose.release.yml", inventory)
         plan.update(first_party=inventory, supporting_services=services,
                     compose_sha256=sbom.sha256((root / "docker-compose.release.yml").read_bytes()))
+        validate_release_image_inventory(index, plan)
         subjects = [dict(a, scope="first-party-runtime") for a in index["artifacts"]]
         for service in services:
             platforms = coverage.service_platforms(sbom.run_json(["docker", "buildx", "imagetools", "inspect", service["image_reference"], "--raw"]))
@@ -214,6 +215,32 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
     print(f"Stage two: wrote {len(extra)} additional catalog pairs/conversions to {output}")
 
 
+def validate_release_image_inventory(index: dict, plan: dict) -> None:
+    """The source inventory, not the surviving catalogs, defines completeness."""
+    inventory = plan.get("first_party", {})
+    require(isinstance(inventory, dict) and inventory.get("schema_version") == "shakerscan-release-images/v1", "missing source image inventory")
+    images = inventory.get("images")
+    require(isinstance(images, list) and images, "empty source image inventory")
+    expected = {}
+    for image in images:
+        require(isinstance(image, dict), "invalid source image entry")
+        key = image.get("key")
+        require(isinstance(key, str) and re.fullmatch(r"[a-z][a-z0-9_]*", key) and key not in expected, "duplicate/invalid source image key")
+        require(isinstance(image.get("repository"), str), "invalid source image repository")
+        repository, _ = coverage.canonical_image(image["repository"], False)
+        expected[key] = repository
+    actual = set()
+    for artifact in index.get("artifacts", []):
+        key, platform = artifact.get("image"), artifact.get("platform")
+        require(key in expected and platform in sbom.PLATFORMS, "unexpected first-party image or platform")
+        repository, digest = coverage.canonical_image(artifact.get("image_reference", ""))
+        require(repository == expected[key] and digest == artifact.get("index_digest"), "first-party repository/digest differs from source inventory")
+        require((key, platform) not in actual, "duplicate first-party platform")
+        actual.add((key, platform))
+    require(actual == {(key, platform) for key in expected for platform in sbom.PLATFORMS},
+            "incomplete first-party images against source inventory")
+
+
 def verify_extension(directory: Path, index: dict) -> set[str]:
     """Offline semantic/integrity checks. Official schema validation occurs before sealing."""
     extension = index.get("extension", {})
@@ -223,6 +250,8 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
     plan, report = sbom.load_json(directory / PLAN), sbom.load_json(directory / REPORT)
     require(plan.get("source_sha") == index["source_sha"] and plan.get("kind") == index["kind"], "stage-two source mismatch")
     require(report.get("status") == "pass" and report.get("schema_version") == EXTENSION, "stage-two coverage failed")
+    if index["kind"] == "engine":
+        validate_release_image_inventory(index, plan)
     require(extension.get("toolchain", {}).get("syft_version") and extension["toolchain"].get("schema_git_blobs"), "missing pinned toolchain identities")
     spdx_files, cdx_files, subjects = set(), set(), set()
     build_inputs = 0

@@ -76,6 +76,11 @@ license enumeration is pinned to the official SPDX 3.29 list, preserving newer v
 identifiers such as SMAIL-GPL rather than deleting or relabeling license evidence.
 Additional semantic
 checks reject dangling/duplicate references and conversion loss of package identifiers.
+The first-party source image inventory defines completeness: removing an entire image
+and both platform catalogs is rejected, not mistaken for a smaller complete release.
+Syft's omitted CycloneDX container-root PURL is filled only after matching the SPDX
+root name and immutable manifest digest. This explicit mapping is recorded on the
+component; missing dependency identities and conflicting roots still fail validation.
 Schema validity is not completeness, correctness of an upstream license assertion or
 proof of vulnerability applicability. Inventory is never filtered by severity or waiver.
 
