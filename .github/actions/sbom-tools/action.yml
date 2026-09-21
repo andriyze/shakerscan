@@ -1,0 +1,14 @@
+name: Pinned release SBOM tools
+description: Install checksum-pinned Syft and content-pinned offline JSON schemas on Linux.
+runs:
+  using: composite
+  steps:
+    - name: Install release-only schema dependencies
+      shell: bash
+      run: python3 -m pip install --disable-pip-version-check 'jsonschema==4.25.1' 'PyYAML==6.0.3'
+    - name: Bootstrap pinned cataloger and schemas
+      shell: bash
+      run: |
+        tools="$(mktemp -d "$RUNNER_TEMP/sbom-tools.XXXXXX")/toolchain"
+        python3 scripts/release_sbom_toolchain.py --output "$tools"
+        echo "SHAKERSCAN_SBOM_TOOLS=$tools" >> "$GITHUB_ENV"
