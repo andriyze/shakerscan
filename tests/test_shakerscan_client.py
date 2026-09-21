@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -387,6 +388,49 @@ def test_connect_registers_claude_code_when_asked(monkeypatch, tmp_path, capsys,
     assert argv[:6] == ["mcp", "add", "--scope", "user", "shakerscan", "--"]
     assert argv[6].endswith("shakerscan") and argv[7] == "mcp"
     assert "registered as MCP server" in capsys.readouterr().out
+
+
+def test_connect_saves_an_open_source_engine_by_address_with_no_token(monkeypatch, tmp_path, capsys, clean_environ):
+    """`shakerscan start --lan` on the server, then one connect on the laptop: no exports."""
+    fake = _connected(monkeypatch, tmp_path)
+    # A stale token from an earlier Enterprise connection must not follow to the engine.
+    cli.save_profile("https://old.example.com", SECRET)
+    cfg = tmp_path / "cfg"
+    code = cli.main(["connect", "http://192.168.1.50:8080/"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert json.loads((cfg / "config.json").read_text(encoding="utf-8")) == {"url": "http://192.168.1.50:8080"}
+    assert not (cfg / "token").exists()
+    assert "open-source engine reached by address; no token" in out and "no token file" in out
+    assert fake.seen == {"base_url": "http://192.168.1.50:8080", "api_token": None}
+    for key in (cli.ENV_URL, cli.ENV_TOKEN, cli.ENV_TOKEN_FILE, cli.ENV_ALLOW_REMOTE):
+        os.environ.pop(key, None)
+    # Every command now addresses the engine, with the remote-origin flag and no credential.
+    assert cli.connection_environment(None, None, None) == {
+        cli.ENV_URL: "http://192.168.1.50:8080",
+        cli.ENV_ALLOW_REMOTE: "true",
+    }
+    assert cli.main(["doctor"]) == 0
+    assert "saved profile" in capsys.readouterr().out
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "opencode", "--workspace", str(workspace), "--no-launch"]) == 0
+    assert "http://192.168.1.50:8080 (an open-source engine" in capsys.readouterr().out
+    assert json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))["mcp"]["shakerscan"]["command"][-2:] == ["--url", "http://192.168.1.50:8080"]
+    assert cli.main(["disconnect"]) == 0
+    assert not (cfg / "config.json").exists()
+
+
+def test_connect_over_https_without_a_login_needs_no_token_said_explicitly(monkeypatch, tmp_path, capsys, clean_environ):
+    fake = _connected(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("\n"))
+    assert cli.main(["connect", "https://engine.example.com", "--token-stdin"]) == 2
+    assert "needs --no-token" in capsys.readouterr().err
+    assert cli.main(["connect", "https://engine.example.com", "--no-token"]) == 0
+    assert json.loads((tmp_path / "cfg" / "config.json").read_text(encoding="utf-8")) == {"url": "https://engine.example.com"}
+    assert fake.seen["api_token"] is None
+    for bad in ("192.168.1.50:8080", "http://u:p@host:8080", "http://host:8080/api", "ftp://host"):
+        assert cli.main(["connect", bad]) == 2, bad
+        assert "instance address" in capsys.readouterr().err
 
 
 def test_connect_refuses_plain_http_and_explains_a_used_link(monkeypatch, tmp_path, capsys, clean_environ):

@@ -75,39 +75,80 @@ a failed private connection never falls back to public. The public backend owns 
 actual DNS/TLS/HTTP posture capabilities and rate limits; the lightweight client only validates
 the target, submits the request, prints the result, or exposes the public MCP catalogue.
 
-## Use an OSS server on the same LAN
+## Connect the client to a server
 
-Run `shakerscan start --lan` on the machine with the full OSS engine. On the laptop,
-install only the pipx/Homebrew client and use the API URL printed by the server:
+The client talks to exactly one instance at a time: the one saved by `shakerscan connect`, or
+the one named with `--url` on a command. There are two kinds of server, and the difference is
+transport and identity, not features: both give the same `api`, `scan`, `hunt`, `mcp`, `doctor`
+and `agent` commands.
+
+| | Open-source engine on a trusted LAN | ShakerScan Enterprise |
+|---|---|---|
+| Transport | plain `http://`, unencrypted | `https://`, encrypted |
+| Login | none: no token, no per-person identity | a service token with a role, issued by the console |
+| Server side | `shakerscan start --lan` | the console creates a token and shows a one-time connect link |
+| Client side | `shakerscan connect http://192.168.1.50:8080` | `shakerscan connect https://scanner.example.com/_enterprise/connect/<code>` |
+| Where it is saved | `~/.config/shakerscan/config.json` (address only) | `config.json` (address) and `token` (owner-only, 0600) |
+| Trust boundary | the network: anyone who can reach ports 8080/3000 can operate the engine | the token: every action runs under that person's identity and role and is audited |
+
+### Open-source engine (unencrypted, no token)
+
+On the machine with Docker and the engine:
 
 ```bash
-shakerscan doctor --url http://192.168.1.50:8080
-shakerscan api --url http://192.168.1.50:8080 GET /findings
-shakerscan mcp --url http://192.168.1.50:8080
+curl -fsSL https://install.shakerscan.com | sh    # once
+shakerscan start --lan                            # or: start --lan --bind-host 192.168.1.50
 ```
 
-An explicit `--url`, or `SHAKERSCAN_API_URL` plus `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true`,
-selects that server, with no public fallback. The laptop needs no Docker. The LAN is the
-trust boundary: this mode adds no login, encryption, or remote shell. Existing API/Hunt
-approvals remain enforced. See [LAN access](lan-access.md) for networking, multi-NIC selection,
-MCP registration, persistence, and returning to localhost-only operation.
-
-## Connect
-
-The quickest way is the one-time link an administrator gets when creating a service token in
-ShakerScan Enterprise's console. Paste the command it shows:
+It prints the addresses it bound to (`API: http://192.168.1.50:8080`, `UI: http://192.168.1.50:3000`)
+and the client commands. Postgres and Redis stay on loopback. On the laptop (no Docker):
 
 ```bash
+pipx install shakerscan                           # or: uv tool install shakerscan / brew install andriyze/shakerscan/shakerscan
+shakerscan connect http://192.168.1.50:8080       # saves the address; runs doctor
+shakerscan doctor                                 # engine: reachable (healthy), mcp: N tools
+shakerscan api GET /findings
+shakerscan agent opencode                         # or claude, codex: the full agent workspace
+```
+
+A plain-http address is always saved without a token (a bearer token is never sent over http);
+an https engine that has no login needs `shakerscan connect https://… --no-token`. Only do this on
+a network whose users you trust: LAN mode adds no login and no encryption, and the ports must
+stay closed to everything else. To go back to localhost-only on the server:
+`shakerscan restart --bind-host 127.0.0.1 --public-host localhost`. Networking details, multi-NIC
+selection and hand-written MCP registration are in [LAN access](lan-access.md).
+
+### ShakerScan Enterprise (encrypted, with a token)
+
+An administrator creates a service token in the Enterprise console; it shows a one-time connect
+link. On the laptop:
+
+```bash
+pipx install shakerscan
 shakerscan connect https://scanner.example.com/_enterprise/connect/<code> --claude
+shakerscan doctor                                 # token: set (sent as a bearer token, https only)
+shakerscan api GET /findings
+shakerscan agent claude
 ```
 
 The link works once and expires after ten minutes; the command carries no secret. `connect`
 fetches the token through it, writes it to `~/.config/shakerscan/token` (owner-only) and the
 instance address to `~/.config/shakerscan/config.json`, runs `doctor`, and with `--claude`
-registers `shakerscan mcp` in Claude Code (user scope). From then on `mcp`, `hunt` and `doctor`
-need no options. `shakerscan connect https://scanner.example.com` prompts for a token instead
-(never on the command line); `shakerscan disconnect` forgets the instance and deletes the token
-file; `SHAKERSCAN_CONFIG_DIR` relocates the files.
+registers `shakerscan mcp` in Claude Code (user scope). `shakerscan connect
+https://scanner.example.com` prompts for a token instead (never on the command line). The token
+is sent only over `https://` and is never printed; a token with a plain-http URL refuses to start.
+How a deployment issues tokens, assigns roles and enables Hunt is documented at
+[shakerscan.com/docs/enterprise](https://shakerscan.com/docs/enterprise).
+
+### Either kind
+
+- `shakerscan doctor` shows which instance is in use and whether it is reachable.
+- `shakerscan disconnect` forgets the instance and deletes the token file.
+- `--url` on any command wins over the saved instance for that one call, without saving anything.
+- `SHAKERSCAN_CONFIG_DIR` relocates the saved files.
+- Target authorization, budgets, credential admission and the deterministic proof rules are the
+  server's in both cases; a route the instance keeps closed answers with a refusal that names what
+  is missing.
 
 Explicit options and the environment still win over the saved profile:
 
