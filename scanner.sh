@@ -20,6 +20,7 @@ DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
 ASSUME_YES=0
 CONFIRM_ACTIVE=0
 REMOTE_ACCESS=0
+LAN_ACCESS=0
 FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
@@ -53,6 +54,88 @@ first_tailscale_ipv4() {
     if command_exists tailscale; then
         tailscale ip -4 2>/dev/null | head -n 1
     fi
+}
+
+# Discover only up, private LAN interfaces. Never probe an external host or select
+# loopback, Docker bridges, Tailscale, or common VPN/tunnel interfaces.
+lan_ipv4_candidates() {
+    local records
+    if command_exists ip; then
+        records="$(ip -o -4 addr show up 2>/dev/null)" || return 1
+        records="$(printf '%s\n' "$records" | awk '{ iface=$2; sub(/@.*/, "", iface); split($4, a, "/"); print iface, a[1] }')"
+    elif command_exists ifconfig; then
+        records="$(ifconfig -a 2>/dev/null)" || return 1
+        records="$(printf '%s\n' "$records" | awk '
+            /^[^ \t]/ { iface=$1; sub(/:$/, "", iface); up=($0 ~ /[<,]UP[,>]/) }
+            up && $1 == "inet" { print iface, $2 }
+        ')"
+    else
+        echo 'Error: --lan needs ip (Linux) or ifconfig (macOS/BSD).' >&2
+        return 1
+    fi
+    printf '%s\n' "$records" | awk '
+        $1 ~ /^(lo[0-9]*|docker.*|br-.*|virbr.*|veth.*|cni.*|flannel.*|tailscale.*|tun[0-9]*|tap[0-9]*|utun[0-9]*|wg.*|zt.*)$/ { next }
+        {
+            n=split($2, a, "."); valid=(n == 4)
+            for (i=1; i<=n; i++) if (a[i] !~ /^[0-9]+$/ || a[i]+0 > 255) valid=0
+            if (valid && (a[1]+0 == 10 || (a[1]+0 == 172 && a[2]+0 >= 16 && a[2]+0 <= 31) || (a[1]+0 == 192 && a[2]+0 == 168)))
+                print $1, $2
+        }
+    ' | sort -u
+}
+
+lan_default_interface() {
+    if command_exists ip; then
+        ip -4 route show default 2>/dev/null | awk '{ for (i=1;i<NF;i++) if ($i == "dev") { print $(i+1); exit } }'
+    elif command_exists route; then
+        route -n get default 2>/dev/null | awk '$1 == "interface:" {print $2; exit}'
+    fi
+}
+
+select_lan_ipv4() {
+    local requested="${1:-}" candidates selected preferred count
+    candidates="$(lan_ipv4_candidates)" || return 1
+    if [ -n "$requested" ]; then
+        selected="$(printf '%s\n' "$candidates" | awk -v ip="$requested" '$2 == ip { print $2; exit }')"
+        if [ -z "$selected" ]; then
+            echo "Error: --lan bind address must be an assigned RFC1918 IPv4 on an up LAN interface: $requested" >&2
+            return 1
+        fi
+    else
+        selected="$(printf '%s\n' "$candidates" | awk 'NF == 2 { print $2 }' | sort -u)"
+        count="$(printf '%s\n' "$selected" | awk 'NF {n++} END {print n+0}')"
+        if [ "$count" -gt 1 ]; then
+            preferred="$(lan_default_interface)"
+            selected="$(printf '%s\n' "$candidates" | awk -v iface="$preferred" '$1 == iface { print $2 }' | sort -u)"
+            count="$(printf '%s\n' "$selected" | awk 'NF {n++} END {print n+0}')"
+        fi
+        if [ "$count" -ne 1 ]; then
+            echo 'Error: --lan could not select one private LAN IPv4 address.' >&2
+            echo 'Use: shakerscan start --lan --bind-host <assigned-LAN-IP>' >&2
+            [ -z "$candidates" ] || printf 'Candidates (interface address):\n%s\n' "$candidates" >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "$selected"
+}
+
+print_lan_client_help() {
+    [ "${LAN_ACCESS:-0}" -eq 1 ] || return 0
+    local url="http://${SHAKERSCAN_BIND_HOST}:${SHAKERSCAN_API_PORT:-8080}"
+    echo
+    echo '[lan] From another trusted machine on this network (client only; no Docker):'
+    echo '  pipx install shakerscan'
+    printf '  shakerscan doctor --url %s\n' "$url"
+    printf '  shakerscan api --url %s GET /health\n' "$url"
+    printf '  shakerscan mcp --url %s\n' "$url"
+    echo '[lan] Or select this instance for all client commands in this shell:'
+    printf '  export SHAKERSCAN_API_URL=%s\n' "$url"
+    echo '  export SHAKERSCAN_MCP_ALLOW_REMOTE_API=true'
+    echo '  shakerscan api GET /findings'
+    echo '  shakerscan mcp'
+    printf '[lan] Web UI: http://%s:%s\n' "$SHAKERSCAN_BIND_HOST" "${SHAKERSCAN_UI_PORT:-3000}"
+    echo '[lan] Configured client commands do not fall back to pub.shakerscan.com.'
+    echo '[lan] To return to localhost: shakerscan restart --bind-host 127.0.0.1 --public-host localhost'
 }
 
 format_url_host() {
@@ -309,7 +392,7 @@ ensure_model_intake_signer_credentials() {
 }
 
 persist_remote_access_env() {
-    if [ "$REMOTE_ACCESS" -ne 1 ]; then
+    if [ "$REMOTE_ACCESS" -ne 1 ] && [ "${LAN_ACCESS:-0}" -ne 1 ] && [ "${SHAKERSCAN_BIND_HOST_EXPLICIT:-0}" -ne 1 ]; then
         return 0
     fi
 
@@ -321,8 +404,25 @@ configure_access_mode() {
     local tailscale_ip
     local cached_bind="${SHAKERSCAN_BIND_HOST:-}"
     local explicit_shell_bind="${SHAKERSCAN_BIND_HOST_EXPLICIT:-0}"
+    local lan_ip requested_bind=""
 
-    if [ "$REMOTE_ACCESS" -eq 1 ]; then
+    if [ "${LAN_ACCESS:-0}" -eq 1 ]; then
+        if [ "$explicit_shell_bind" = 1 ]; then
+            requested_bind="$cached_bind"
+        fi
+        lan_ip="$(select_lan_ipv4 "$requested_bind")" || return 1
+        export SHAKERSCAN_BIND_HOST="$lan_ip"
+        if [ "${SHAKERSCAN_PUBLIC_HOST_EXPLICIT:-0}" != 1 ]; then
+            export SHAKERSCAN_PUBLIC_HOST="$lan_ip"
+        fi
+        # A private subnet is not an authenticated transport. Do not grant the
+        # Tailscale-only token-over-HTTP exception to ordinary LAN traffic.
+        unset SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT
+        export SHAKERSCAN_PUBLIC_API_URL="http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_API_PORT:-8080}"
+        echo "[lan] UI/API will bind only to ${lan_ip}. Datastore bindings are unchanged."
+        echo '[lan] WARNING: reachable LAN users can operate this OSS instance. HTTP is unencrypted.' >&2
+        echo '[lan] Restrict access with a firewall; do not forward these ports to the Internet.' >&2
+    elif [ "$REMOTE_ACCESS" -eq 1 ]; then
         # Always re-resolve the Tailscale IP at start time so a reboot or
         # interface change doesn't leave the persisted .env value pointing at
         # an address that no longer exists. The .env cache is only honored
@@ -2066,6 +2166,9 @@ print_banner() {
 }
 
 print_help() {
+    echo "Trusted LAN: shakerscan start --lan [--bind-host <assigned-LAN-IPv4>]"
+    echo "Also supports restart --lan. Cannot combine --lan with --remote/--tailscale."
+    echo ""
     print_banner
     echo "Usage: ./scanner.sh [command] [options]"
     echo ""
@@ -3390,6 +3493,10 @@ while [[ $# -gt 0 ]]; do
             IMAGE_TAG_OVERRIDE="$2"
             shift 2
             ;;
+        --lan)
+            LAN_ACCESS=1
+            shift
+            ;;
         --remote|--tailscale)
             REMOTE_ACCESS=1
             shift
@@ -3420,14 +3527,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-load_access_env
-
-if ! configure_access_mode; then
-    exit 1
-fi
-
-configure_runtime_mode "$COMMAND"
 
 # Help must never mutate state. Commands with their own parser keep their
 # detailed help; simple wrapper commands are handled here before dependency
@@ -3470,6 +3569,25 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     esac
 fi
 
+if [ "$LAN_ACCESS" -eq 1 ]; then
+    if [ "$REMOTE_ACCESS" -eq 1 ]; then
+        echo 'Error: --lan cannot be combined with --remote/--tailscale.' >&2
+        exit 2
+    fi
+    case "$COMMAND" in
+        start|restart) ;;
+        *) echo 'Error: --lan is supported only by start and restart.' >&2; exit 2 ;;
+    esac
+fi
+
+load_access_env
+
+if ! configure_access_mode; then
+    exit 1
+fi
+
+configure_runtime_mode "$COMMAND"
+
 case $COMMAND in
     help|--help|-h|install-deps|doctor|env|agent|ai)
         ;;
@@ -3484,12 +3602,14 @@ case $COMMAND in
     start)
         print_banner
         start_services
+        print_lan_client_help
         ;;
     stop)
         stop_services
         ;;
     restart)
         restart_services
+        print_lan_client_help
         ;;
     reload)
         reload_services
