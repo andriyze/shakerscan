@@ -350,11 +350,18 @@ class HuntStartPolicy:
         privileged = self.is_privileged(credentials_requested=credentials_requested)
         if privileged and not self.authorization_confirmed:
             raise HuntStartContractError(
-                "active, network, mutation, OOB, and credential use require authorization_confirmed=true"
+                "active, network, mutation, OOB, and credential use require authorization_confirmed=true "
+                "in the policy: the caller states that the target is authorized for this testing"
             )
         if privileged and not self.approval_receipt_id:
+            # The refusal names the remedy: an agent that only sees "approval receipt" has no
+            # way to find the target's standing authorization on its own.
             raise HuntStartContractError(
-                "active, network, mutation, OOB, and credential use require a target-bound approval receipt"
+                "active, network, mutation, OOB, and credential use require a target-bound approval "
+                "receipt, and this target has none: authorize it once with "
+                "POST /targets/{target_id}/authorization {\"approved_by\": \"<name>\", "
+                "\"risk_tier\": \"active\"} (its standing authorization is then resolved automatically "
+                "on every scan and Hunt), or name an approval_receipt_id in the policy"
             )
 
     def forbidden_budget_dimensions(

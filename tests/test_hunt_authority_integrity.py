@@ -90,3 +90,17 @@ def test_hunt_router_owns_the_only_hunt_start_route():
     assert "LegacyHuntStartRequest" not in primary_api
     assert "LegacyHuntStartRequest" not in hunt_router
     assert "api_v2.py" not in entrypoint
+
+
+def test_a_privileged_hunt_without_authorization_is_told_how_to_get_it():
+    """The refusal names the standing-authorization route; "approval receipt" alone left an
+    agent with no way to find it and reading the refusal as a silent downgrade."""
+    payload = _passive_payload()
+    payload["policy"].update({"active_testing": True, "allow_state_changing_http": True, "network_discovery": True})
+    with pytest.raises(HuntStartContractError, match="authorization_confirmed=true"):
+        normalize_hunt_start_payload(payload)
+    payload["policy"]["authorization_confirmed"] = True
+    with pytest.raises(HuntStartContractError, match=r"POST /targets/\{target_id\}/authorization") as excinfo:
+        normalize_hunt_start_payload(payload)
+    assert "this target has none" in str(excinfo.value)
+    assert "approval_receipt_id" in str(excinfo.value)
