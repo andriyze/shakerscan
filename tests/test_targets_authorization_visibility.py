@@ -67,13 +67,21 @@ def test_the_listing_predicate_applies_the_canonical_reader_conditions():
     checked only status, approver, action name and expiry, so a renamed target or a blocked scope
     still showed an Authorized badge while every later check found no authority.
     """
+    root = Path(__file__).resolve().parents[1]
     predicate = _render_predicate()
-    canonical = (Path(__file__).resolve().parents[1] / "api" / "target_authorization.py").read_text()
+    canonical = (root / "api" / "target_authorization.py").read_text()
+    # The tier list moved to the shared approval policy when standing authorization began
+    # covering credential use. Both halves are asserted, so neither the definition nor the
+    # reader's use of it can drift away from the listing predicate.
+    tiers = (root / "api" / "runtime" / "approval_policy.py").read_text()
 
     # the conditions the canonical reader applies, each now present in the listing predicate
     assert "risk_tier = ANY(ARRAY['active', 'intrusive'])" in predicate, "standing tiers"
-    assert "STANDING_RISK_TIERS = (\"active\", \"intrusive\")" in canonical, (
+    assert "STANDING_RISK_TIERS = (\"active\", \"intrusive\")" in tiers, (
         "the canonical tier list changed; the listing predicate must follow it"
+    )
+    assert "STANDING_RISK_TIERS" in canonical, (
+        "the canonical reader must still apply the shared tier list"
     )
     assert "COALESCE(s.verdict, '') <> 'blocked'" in predicate, "blocked scope must not count"
     assert 'scope_verdict") or "") == "blocked"' in canonical
