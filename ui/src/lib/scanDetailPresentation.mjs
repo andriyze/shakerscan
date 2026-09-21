@@ -10,11 +10,19 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback
 }
 
+/** Identity for matching a reported finding to a persisted row.
+ *
+ *  The persisted fingerprint is the stable identity the server reconciles on; two findings
+ *  with different fingerprints are different findings even when their title, URL and tool
+ *  read the same, and a URL path is case-sensitive. The display key is only a fallback for
+ *  rows that carry no fingerprint at all. */
 export function scanFindingIdentity(finding) {
   const item = record(finding)
-  return [
+  const fingerprint = String(item.fingerprint || '').trim()
+  if (fingerprint) return `fp:${fingerprint}`
+  return 'display:' + [
     String(item.title || '').trim().toLowerCase(),
-    String(item.url || '').trim().replace(/\/+$/, '').toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, ''),
     String(item.tool || '').trim().toLowerCase(),
   ].join('|')
 }
@@ -68,9 +76,15 @@ export function scanPhasePresentation(scan) {
 
 export function scanLogEntry(rawLine) {
   const raw = String(rawLine || '').trim()
-  const sourceMatch = raw.match(/^\[([^\]]+)\]\s*/)
+  // A parallel parent's feed is assembled from its children, each line prefixed with the child
+  // that produced it. That prefix is not the log source; keep it as the entry's origin so the
+  // operator can still tell discovery from shard work.
+  const childMatch = raw.match(/^\[(Discovery|Shard \d+)\]\s*/)
+  const child = childMatch ? childMatch[1] : ''
+  const body = childMatch ? raw.slice(childMatch[0].length) : raw
+  const sourceMatch = body.match(/^\[([^\]]+)\]\s*/)
   const source = sourceMatch ? sourceMatch[1] : ''
-  let message = sourceMatch ? raw.slice(sourceMatch[0].length) : raw
+  let message = sourceMatch ? body.slice(sourceMatch[0].length) : body
   let kind = 'detail'
   let label = source ? source.replaceAll('_', ' ') : 'activity'
   let meta = ''
@@ -95,7 +109,8 @@ export function scanLogEntry(rawLine) {
     label = 'milestone'
   }
 
-  return { raw, source, message, kind, label, meta }
+  if (child) meta = meta ? `${child} · ${meta}` : child
+  return { raw, source, child, message, kind, label, meta }
 }
 
 function structuredValue(raw, key) {
@@ -211,24 +226,53 @@ export function nextStepsFor({ targetUrl, testingWarning, coverageReasons, http,
 // What earlier scans found that this run did not observe. Only active rows count, and a row
 // counts as observed here when this scan wrote it, last saw it, or reported the same finding.
 // Subtracting list lengths counted resolved and false-positive rows as "unresolved".
+/** The server's carried-over summary from the deployment decision, or null when the
+ *  decision does not carry one (an older API). The server computes it next to the gate over
+ *  the target's complete active set, so it is the number the page renders whenever present;
+ *  the client computation below is only the fallback. */
+export function carriedOverFromDecision(decision) {
+  const item = record(decision)
+  const summary = item.carried_over
+  if (!summary || typeof summary !== 'object' || !Number.isFinite(Number(summary.count))) return null
+  const complete = summary.complete !== false
+  return {
+    state: complete ? 'ready' : 'partial',
+    count: Math.max(0, Number(summary.count)),
+    material: Math.max(0, Number(summary.material) || 0),
+    highest: summary.highest ? String(summary.highest).toLowerCase() : null,
+    complete,
+    source: 'server',
+  }
+}
+
+/** Unresolved findings on the target that this run did not observe.
+ *
+ *  A row counts as observed by this run only through persisted linkage (written or last seen
+ *  by this scan) or a fingerprint this run reported. Display strings are never proof of
+ *  re-observation. `historyState` 'partial' means the target's active rows were not all
+ *  loaded: the count is a lower bound and an all-clear must not be claimed. */
 export function carriedOverSummary(scan, targetFindings, historyState = 'ready') {
   const scanRecord = record(scan)
   const scanId = String(scanRecord.id || '')
-  if (historyState !== 'ready') {
-    return { state: historyState, count: 0, material: 0, highest: null }
+  if (historyState === 'loading' || historyState === 'error') {
+    return { state: historyState, count: 0, material: 0, highest: null, complete: false }
   }
   const reported = Array.isArray(record(scanRecord.result).findings) ? record(scanRecord.result).findings : []
-  const reportedKeys = new Set(reported.map(scanFindingIdentity))
+  const reportedFingerprints = new Set(
+    reported.map((finding) => String(record(finding).fingerprint || '').trim()).filter(Boolean),
+  )
   const carried = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
     const item = record(finding)
     if (String(item.status || 'active') !== 'active') return false
     if (String(item.scan_id || '') === scanId || String(item.last_seen_scan_id || '') === scanId) return false
-    return !reportedKeys.has(scanFindingIdentity(item))
+    const fingerprint = String(item.fingerprint || '').trim()
+    return !(fingerprint && reportedFingerprints.has(fingerprint))
   })
   const order = ['critical', 'high', 'medium', 'low', 'info']
   const highest = order.find((severity) => carried.some((finding) => String(record(finding).severity || '').toLowerCase() === severity)) || null
   const material = carried.filter((finding) => ['critical', 'high', 'medium'].includes(String(record(finding).severity || '').toLowerCase())).length
-  return { state: 'ready', count: carried.length, material, highest }
+  const complete = historyState !== 'partial'
+  return { state: complete ? 'ready' : 'partial', count: carried.length, material, highest, complete }
 }
 
 // The release line states provenance only when the decision supplies it: a blocker the gate

@@ -591,7 +591,7 @@ function ScansContent() {
                     <ObservedPosture scan={scan} compact />
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
-                        href={`/findings?scan_id=${scan.id}`}
+                        href={`/findings?scan_id=${scan.id}&freshness=all`}
                         className="text-blue-400 hover:text-blue-300"
                       >
                         {scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}
@@ -762,7 +762,7 @@ function ScansContent() {
                   <td className="px-4 py-3">
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
-                        href={`/findings?scan_id=${scan.id}`}
+                        href={`/findings?scan_id=${scan.id}&freshness=all`}
                         className="text-sm text-blue-400 hover:text-blue-300"
                       >
                         {scan.findings_count}

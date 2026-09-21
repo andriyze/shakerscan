@@ -302,8 +302,15 @@ def run_phase(phase: str) -> None:
                 else "FAIL"
             )
             state["phases"][phase] = state["embedding_known_answers_status"]
+            if state["embedding_known_answers_status"] == "NOT_CONFIGURED":
+                # A calibration run: nothing to compare against yet. The observed digest is in
+                # the receipt for the review to pin; the phase cannot pass without a reference.
+                raise ValueError(
+                    "no known-answer embedding digest is configured for this run; "
+                    "the observed digest is recorded for calibration"
+                )
             if state["embedding_known_answers_status"] != "PASS":
-                raise ValueError("known-answer embedding digest is absent or does not match")
+                raise ValueError("known-answer embedding digest does not match the configured value")
         elif phase == "deserialize_convert":
             import shutil
             import torch

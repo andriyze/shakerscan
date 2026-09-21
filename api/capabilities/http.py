@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import sys
+import ssl
 import time
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
@@ -277,6 +278,24 @@ def _bound_redirect_url(
     ))
 
 
+def request_error_class(exc: BaseException) -> str:
+    """Name a failed request by its cause, not just the exception the client wrapped it in.
+
+    httpx reports a certificate the client will not trust as a plain ``ConnectError``. Left
+    like that, a self-signed target failed the whole HTTP baseline as an unclassified adapter
+    error, while every tool that skips verification carried on. The class is a constant
+    token with no target data in it.
+    """
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            break
+        if isinstance(seen, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(seen):
+            return f"tls_certificate_untrusted:{type(exc).__name__}"
+        seen = seen.__cause__ or seen.__context__
+    return f"request_error:{type(exc).__name__}"
+
+
 async def execute_bound_http_request(
     base_url: str,
     args: Mapping[str, Any],
@@ -408,6 +427,7 @@ async def execute_bound_http_request(
     hops_followed = 0
     connection_attempts = 0
     connected_addresses: list[str] = []
+    last_connect_error: Exception | None = None
     response = None
     body = b""
     final_url = url
@@ -453,18 +473,21 @@ async def execute_bound_http_request(
                     connection_attempts += 1
                     try:
                         response = await client.send(request, stream=True)
-                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                         # Retry only failures that happen before a connection.
                         # A post-connect failure may follow target traffic and
                         # must never duplicate a state-changing request.
+                        last_connect_error = exc
                         continue
                     pinned_address = candidate_address
                     connected_addresses.append(candidate_address)
                     break
                 if response is None:
+                    # Keep the real cause on the chain: a certificate the client will not
+                    # trust is a different finding from a port nobody answers on.
                     raise httpx.ConnectError(
                         "all frozen target addresses failed before connect"
-                    )
+                    ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
                 try:
                     (
@@ -570,6 +593,7 @@ async def execute_bound_http_request(
                 current_url = next_url
                 hops_followed += 1
     except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        error_class = request_error_class(exc)
         # A call that never got a response is still a call the scanner made, and it is
         # often the interesting one -- a refused connection to a confirmed origin is how a
         # control proves it works. Archiving only completed responses would leave the
@@ -588,14 +612,14 @@ async def execute_bound_http_request(
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "started_at": request_started_at,
                     "principal_slot": str(principal_slot or "anonymous"),
-                    "error": f"request_error:{type(exc).__name__}",
+                    "error": error_class,
                     "fidelity": "attempted_no_response",
                 })
             except Exception:  # pragma: no cover - recording must never mask the error
                 pass
         return {
             "ok": False,
-            "error": f"request_error:{type(exc).__name__}",
+            "error": error_class,
             "request": request_view,
         }
     if response is None:

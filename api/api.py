@@ -52,6 +52,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
+from scan.carried_over import gate_findings_from_rows, load_target_history, summarize_carried_over
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -177,6 +178,10 @@ try:
 except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake_request
 
+try:
+    from model_intake import review_outcomes as _model_intake_review_outcomes
+except ModuleNotFoundError:
+    from api.model_intake import review_outcomes as _model_intake_review_outcomes
 try:
     from model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
 except ModuleNotFoundError:
@@ -8028,6 +8033,7 @@ def build_deployment_decision(
     db_policy_profiles: dict[str, dict[str, Any]] | None = None,
     db_exceptions: list[dict[str, Any]] | None = None,
     target_active_findings: list[dict[str, Any]] | None = None,
+    target_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -8161,6 +8167,9 @@ def build_deployment_decision(
         "exception_summary": exception_summary,
         "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
         "required_evidence_missing": missing,
+        # The target's unresolved findings this run did not observe, over all severities:
+        # the one definition the scan page renders, computed next to the gate that uses it.
+        "carried_over": summarize_carried_over(scan.get("id"), findings, target_history) if product == "dast" else None,
         "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),
         "grade": scan.get("grade") or (result.get("result") or {}).get("grade") if isinstance(result, dict) else scan.get("grade"),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=int(policy_profile.get("expires_days") or 30))).isoformat(),
@@ -9338,12 +9347,6 @@ def _model_intake_auto_embedding_bundle(
     return bundle
 
 
-def _model_intake_auto_observed_embedding(job: dict[str, Any]) -> str | None:
-    result = _model_intake_json_object(job.get("result_json"))
-    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
-    observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
-    digest = str(observations.get("embedding_output_sha256") or "").lower()
-    return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
 
 
 async def _model_intake_auto_memory_mib(
@@ -9584,6 +9587,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 _model_intake_json_object(job.get("error_json")).get("message")
                 or "controlled conversion failed"
             ))
+        _model_intake_review_outcomes.require_runner_receipt(job, step="controlled conversion")
         rescan = response.get("conversion_rescan")
         next_subjects = (
             rescan.get("next_runtime_subjects") if isinstance(rescan, dict) else None
@@ -9641,7 +9645,8 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "calibration failed"))
-        digest = _model_intake_auto_observed_embedding(job)
+        _model_intake_review_outcomes.require_runner_receipt(job, step="calibration", accepted=_model_intake_review_outcomes.CALIBRATION_ACCEPTED)
+        digest = _model_intake_review_outcomes.observed_embedding_digest(job)
         if not digest:
             raise RuntimeError("calibration completed without a bounded embedding digest")
         await _update_model_intake_automatic_review(
@@ -9682,6 +9687,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "runtime verification failed"))
+        _model_intake_review_outcomes.require_runner_receipt(job, step="runtime verification")
         await _update_model_intake_automatic_review(
             conn, review, state="freeze_pending", current_step="freeze_technical_evidence",
             progress=92, event="runtime_verification_completed",
@@ -11941,16 +11947,9 @@ async def get_scan_deployment_decision(scan_id: str):
               AND severity IN ('critical', 'high')
             LIMIT 200
         """, sibling_ids) if sibling_ids else []
+        target_history = await load_target_history(conn, sibling_ids)
 
-    target_active_findings = [{
-        "id": str(r["id"]),
-        "fingerprint": r["fingerprint"],
-        "title": r["title"],
-        "severity": r["severity"],
-        "tool": r["tool"],
-        "url": r["url"],
-        "source": "target_active",
-    } for r in taf_rows]
+    target_active_findings = gate_findings_from_rows(taf_rows)
 
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
@@ -11987,6 +11986,7 @@ async def get_scan_deployment_decision(scan_id: str):
         db_policy_profiles=db_policy_profiles,
         db_exceptions=db_exceptions,
         target_active_findings=target_active_findings,
+        target_history=target_history,
     )
 
 

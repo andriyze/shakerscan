@@ -173,6 +173,9 @@ export default function NewScanPage() {
 
   useEffect(() => {
     let cancelled = false
+    // Drop the previous selection's answer so the local fallback shows the new preset at once;
+    // the line an operator reads to confirm what will run must never lag the radio.
+    setContractPreview(null)
     setContractPreviewLoading(true)
     const timer = window.setTimeout(() => {
       previewScanContract({

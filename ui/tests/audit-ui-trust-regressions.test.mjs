@@ -95,7 +95,7 @@ test('scoped dashboard keeps global activity visible without attributing it to a
   assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
   assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)
   assert.match(dashboard, /return !targetId && !targetUrl/)
-  assert.match(dashboard, /What changed is hidden in scoped mode/)
+  assert.match(dashboard, /Recent changes are shown per cohort/)
   assert.match(dashboard, /Observed posture \{scan\.grade\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
   assert.match(targets, /gradeTextColor\(domain\.root_target\.last_grade\)/)

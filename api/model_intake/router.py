@@ -1357,8 +1357,12 @@ async def refresh_model_intake_runner_job(submission_id: str, job_id: str, http_
                 claims,
                 actor=actor,
             )
+    payload = result.get("payload") if result and isinstance(result.get("payload"), dict) else {}
     return {
         "job": row_to_dict(updated),
+        # `state` says whether the runner finished the job; the receipt's own verdict says
+        # whether the guest passed. A completed job can carry a FAIL receipt.
+        "receipt_status": str(payload.get("status")) if payload.get("status") else None,
         "evidence": evidence,
         "conversion_rescan": conversion_rescan,
         "deployable": False,

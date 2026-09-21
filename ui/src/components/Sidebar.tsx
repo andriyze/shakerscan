@@ -272,6 +272,10 @@ function NavContent({
                 <Link
                   key={item.href}
                   href={item.href}
+                  // Every page fetches its own data on the client, so prefetching the route
+                  // shell for all fourteen links on each navigation only adds a 307+200
+                  // pair per link that the page's real API calls then queue behind.
+                  prefetch={false}
                   aria-current={active ? 'page' : undefined}
                   className={`flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
