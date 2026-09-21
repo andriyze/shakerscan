@@ -26,8 +26,31 @@ jobs:
         run: |
           set -euo pipefail
           python .github/pr177_lan_patch.py
+          python - <<'PY'
+          from pathlib import Path
+          # Pass script text on stdin, not a single argv exceeding Linux MAX_ARG_STRLEN.
+          p = Path('tests/test_scanner_lan_access.py')
+          s = p.read_text()
+          old = '["bash", "-c", _functions() + "\\nSCRIPT_DIR=" + shlex.quote(str(tmp_path)) + "\\n" + code],'
+          assert s.count(old) == 1
+          s = s.replace(old, '["bash", "-s"],\n        input=_functions() + "\\nSCRIPT_DIR=" + shlex.quote(str(tmp_path)) + "\\n" + code,')
+          p.write_text(s)
+          p = Path('tests/test_scanner_remote_access.py')
+          s = p.read_text()
+          old = '["bash", "-c", command],'
+          assert s.count(old) == 3
+          s = s.replace(old, '["bash", "-s"],\n        input=command,')
+          old = '["bash", "-c", functions + "\\nstart_agent --help\\n"],'
+          assert s.count(old) == 1
+          s = s.replace(old, '["bash", "-s"],\n        input=functions + "\\nstart_agent --help\\n",')
+          p.write_text(s)
+          PY
+          python scripts/generate_install_manifest.py
           bash -n scanner.sh
           git diff --check
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
           tar --exclude=.git --exclude=.env --exclude=dist -czf /tmp/shakerscan-lan-source.tar.gz .
       - name: Install test/build dependencies
         run: python -m pip install 'pytest==9.1.1' 'hatchling>=1.27' 'build==1.2.2.post1'
@@ -51,7 +74,7 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add scanner.sh README.md docs/client.md
+          git add scanner.sh README.md docs/client.md install/MANIFEST.sha256 tests/test_scanner_lan_access.py tests/test_scanner_remote_access.py
           git commit -m 'feat: add explicit trusted-LAN startup and laptop client guidance'
           git push origin HEAD:refs/heads/feat/public-client-checks
       - name: Preserve the tested source snapshot for local verification
