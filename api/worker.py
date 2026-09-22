@@ -21059,6 +21059,11 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         "browser capability is outside the persisted Hunt allowlist"
                     )
                 target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
+                browser_adapter = browser_capability_adapter(capability_name)
+                prepared = prepare_hunt_browser_action(capability_name,
+                    target=target, base_url=target_url, args=capability_input,
+                    context=context, policy=hunt_policy,
+                )
                 policy = browser_worker_policy(capability_name, policy=hunt_policy, target=target)
                 await _revalidate_hunt_action_authority(
                     conn,
@@ -21067,11 +21072,6 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     target_url=target_url,
                     policy=policy,
                     capability_name=capability_name,
-                )
-                browser_adapter = browser_capability_adapter(capability_name)
-                prepared = prepare_hunt_browser_action(capability_name,
-                    target=target, base_url=target_url, args=capability_input,
-                    context=context, policy=policy,
                 )
                 expected_input_digest = str(
                     job_data.get("expected_input_digest") or ""

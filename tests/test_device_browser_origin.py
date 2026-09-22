@@ -1,5 +1,6 @@
 """Device browser services retain exact-host scope through real Chromium execution."""
 import asyncio
+import ast
 from pathlib import Path
 import sys
 import uuid
@@ -8,9 +9,10 @@ import pytest
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "api")]
 from capabilities.browser import browser_capability_adapter
-from capabilities.browser_login_worker import prepare_hunt_browser_action
+from capabilities.browser_login_worker import prepare_hunt_browser_action, browser_worker_policy
 from hunt.target_binding import web_hunt_target
 from runtime.capability_registry import CAPABILITY_REGISTRY
+from runtime.models import ScanPolicy
 from tests.test_hunt_device_traffic import DeviceStore, admit
 
 
@@ -40,13 +42,59 @@ def prepare(name, args, policy=None):
     )
 
 
+async def worker_prepare(name, args, policy=None):
+    """Execute the worker's unchanged binding/preparation/conversion statements.
+
+    Only database authority revalidation is replaced; policy construction and
+    origin validation use the production call sites and production objects.
+    """
+    path = Path(__file__).resolve().parents[1] / "api" / "worker.py"
+    tree = ast.parse(path.read_text())
+    handler = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name == "process_canonical_browser_capability_job")
+    transaction = next(n for n in ast.walk(handler) if isinstance(n, ast.AsyncWith)
+                       and any(isinstance(s, ast.Assign) and any(
+                           isinstance(t, ast.Name) and t.id == "context" for t in s.targets)
+                           for s in n.body))
+    def assigns(statement, name):
+        return isinstance(statement, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in statement.targets)
+    start = next(i for i, s in enumerate(transaction.body) if assigns(s, "context"))
+    end = next(i for i, s in enumerate(transaction.body) if assigns(s, "expected_input_digest"))
+    function = ast.parse("async def execute():\n    pass\n").body[0]
+    function.body = transaction.body[start:end] + [ast.Return(value=ast.Tuple(
+        elts=[ast.Name(id="prepared", ctx=ast.Load()), ast.Name(id="policy", ctx=ast.Load())], ctx=ast.Load()))]
+
+    async def revalidate(conn, **values):
+        assert isinstance(values["policy"], ScanPolicy)
+
+    persisted_policy = dict(POLICY if policy is None else policy)
+    persisted_policy["allowed_capabilities"] = [name]
+    namespace = {
+        "run": {"target_kind": "device", "target_id": None, "device_target_id": uuid.UUID(int=2),
+                "context_pack": {"target": {"locator": "127.0.0.1"}, "authorized_target_addresses": ["127.0.0.1"]},
+                "policy_json": persisted_policy},
+        "capability_name": name, "capability_input": args, "conn": None,
+        "_worker_json_object": dict, "_worker_hunt_web_target": web_hunt_target,
+        "_revalidate_hunt_action_authority": revalidate,
+        "browser_worker_policy": browser_worker_policy,
+        "browser_capability_adapter": browser_capability_adapter,
+        "prepare_hunt_browser_action": prepare_hunt_browser_action,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
+    return await namespace["execute"]()
+
+
 @pytest.mark.parametrize("name", ["browser.navigate", "browser.interact"])
 def test_device_browser_origin_is_in_contract_and_survives_worker_repreparation(name):
     assert "origin" in CAPABILITY_REGISTRY.require(name).input_schema["properties"]
     args = {"origin": "https://127.0.0.1:8443", "path": "/ui"}
     if name == "browser.interact":
         args["selector"] = "#details"
-    admitted, worker = prepare(name, args), prepare(name, args)
+    admitted = prepare(name, args)
+    worker, execution_policy = asyncio.run(worker_prepare(name, args))
+    assert isinstance(execution_policy, ScanPolicy)
+    assert execution_policy.network_discovery is True
     assert admitted.input_digest == worker.input_digest
     assert worker.url == "https://127.0.0.1:8443/ui"
     assert worker.target.allowed_addresses == ("127.0.0.1",)
@@ -68,6 +116,8 @@ def test_device_browser_rejects_invalid_or_unbound_origin(name, origin):
 def test_browser_service_override_requires_existing_network_authority(field):
     with pytest.raises(ValueError, match="network discovery authority"):
         prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None})
+    with pytest.raises(ValueError, match="network discovery authority"):
+        asyncio.run(worker_prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None}))
 
 
 def test_real_browser_navigation_and_interaction_reach_device_service_port():
@@ -100,7 +150,8 @@ def test_real_browser_navigation_and_interaction_reach_device_service_port():
                 args = {"origin": origin, "path": "/", "max_requests": 10}
                 if name == "browser.interact":
                     args.update(selector="#details", settle_ms=0)
-                prepared = prepare(name, args)
+                prepared, execution_policy = await worker_prepare(name, args)
+                assert execution_policy.network_discovery is True
                 result = await browser_capability_adapter(name)(prepared).execute(
                     heartbeat=heartbeat, cancelled=lambda: False,
                 )

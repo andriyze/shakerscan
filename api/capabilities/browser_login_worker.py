@@ -38,7 +38,7 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy):
+def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy: Mapping[str, Any]):
     adapter = browser_capability_adapter(name)
     if name != BROWSER_LOGIN_CAPABILITY:
         target = resolve_hunt_http_origin(target, args.get("origin"), policy)
@@ -56,6 +56,7 @@ def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy
 def browser_worker_policy(name: str, *, policy, target) -> ScanPolicy:
     result = ScanPolicy(
         active_testing=bool(policy.get("active_testing")),
+        network_discovery=bool(policy.get("network_discovery")),
         allow_state_changing_http=(name == BROWSER_LOGIN_CAPABILITY
                                   and policy.get("allow_state_changing_http") is True),
         scope_receipt_id=target.scope_receipt_id,
