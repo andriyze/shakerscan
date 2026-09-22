@@ -19607,58 +19607,9 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             dict(context.get("target") or {})
             if isinstance(context.get("target"), Mapping) else {}
         )
-        origins = tuple(str(item) for item in target_context.get("origins") or () if str(item))
-        target_url = (
-            str(queued_allowed_origins[0])
-            if target_kind == "device"
-            else str(target_context.get("url") or "")
-        )
-        parsed_target = urllib.parse.urlsplit(target_url)
-        hunt_origins = (
-            tuple(str(item) for item in queued_allowed_origins if str(item))
-            if target_kind == "device"
-            else tuple(str(item) for item in origins if str(item))
-        )
-        def _origin_key(value):
-            try:
-                parsed = urllib.parse.urlsplit(str(value or "").strip())
-                port = parsed.port
-            except ValueError:
-                return None
-            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-                return None
-            return (parsed.scheme.lower(), parsed.hostname.lower().rstrip("."),
-                    port or (443 if parsed.scheme.lower() == "https" else 80))
-        # Compare by normalized origin key so a default port (host:80/:443) in a
-        # collection binding matches a Hunt origin stored without it.
-        hunt_origin_keys = {_origin_key(o) for o in hunt_origins}
-        if any(_origin_key(origin) not in hunt_origin_keys for origin in queued_allowed_origins):
-            raise ReplayExecutionError(
-                "request collection binding exceeds the Hunt target origins"
-            )
-        target = TargetBinding(
-            target_id=str(target_owner_id),
-            target_kind=target_kind,
-            canonical_host=(
-                str(target_context.get("locator") or parsed_target.hostname or "")
-                if target_kind == "device"
-                else parsed_target.hostname
-            ),
-            allowed_origins=queued_allowed_origins,
-            allowed_addresses=tuple(
-                str(item) for item in context.get("authorized_target_addresses") or () if str(item)
-            ),
-            allowed_root_domains=(
-                ()
-                if target_kind == "device"
-                else (
-                    str(target_context.get("root_domain") or parsed_target.hostname or "")
-                    .lower().rstrip("."),
-                )
-            ),
-            environment=str(target_context.get("environment") or "unknown"),
-            scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None,
-        )
+        from hunt.service_binding import collection_target
+        target = collection_target(run, context, hunt_policy, queued_allowed_origins)
+        target_url = target.allowed_origins[0]
         stored_runtime_selector = RequestSelector(
             request_ids=stored_selection.request_ids,
             folders=stored_selection.folders,
@@ -20520,6 +20471,8 @@ async def process_canonical_scanner_capability_job(
                 # does (host-pinned, active-testing required) and scan the
                 # selected origin instead of the stored target URL.
                 scanner_base = registered_target
+                from hunt.service_binding import service_origin_changed
+                uses_service_origin = service_origin_changed(target, capability_input.get("origin"))
                 if capability_input.get("origin") is not None:
                     from capabilities.http import resolve_hunt_http_origin
                     from capabilities.http import _origin as _http_service_origin
@@ -20571,7 +20524,7 @@ async def process_canonical_scanner_capability_job(
                     if key in limits
                 }
                 requested_budget["agent_actions"] = 1
-                if spec.requires_active_approval:
+                if spec.requires_active_approval or uses_service_origin:
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
                 recomputed_digest = hunt_capability_action_digest(
@@ -21128,7 +21081,9 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                 }
                 requested_budget["agent_actions"] = 1
                 spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-                if spec.requires_active_approval or prepared.session_ref:
+                from hunt.service_binding import service_origin_changed
+                if (spec.requires_active_approval or prepared.session_ref
+                        or service_origin_changed(target, capability_input.get("origin"))):
                     requested_budget["active_actions"] = 1
                 reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
                 recomputed_digest = hunt_capability_action_digest(
@@ -22019,9 +21974,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 target, target_url = _worker_hunt_web_target(
                     run, context, hunt_policy,
                 )
-                if capability_name == "http.request":
+                if capability_input.get("origin") is not None:
                     from capabilities.http import resolve_hunt_http_origin
-                    target = resolve_hunt_http_origin(target, capability_input.get("origin"), hunt_policy)
+                    target = resolve_hunt_http_origin(target, capability_input["origin"], hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
@@ -22164,9 +22119,16 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 raise CredentialResolutionError(
                     "managed Hunt principal changed after admission"
                 )
+            from hunt.service_binding import endpoint_target
+            selected_base = capability_input.get("origin") or target_url
+            target, endpoint_url = endpoint_target(
+                target, resolved.interactive_http().endpoint_url, hunt_policy, base_url=selected_base,
+            )
             credential = _worker_session_credential(
                 resolved, session_context_ref, target=target,
             )
+            from dataclasses import replace as replace_credential
+            credential = replace_credential(credential, endpoint_url=endpoint_url)
 
             async def establish_session_operation() -> dict[str, Any]:
                 nonlocal private_session
@@ -22226,9 +22188,16 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 raise CredentialResolutionError(
                     "authentication session profile changed before refresh"
                 )
+            from hunt.service_binding import endpoint_target
+            selected_base = session_metadata.service_origin or target_url
+            target, endpoint_url = endpoint_target(
+                target, resolved.interactive_http().endpoint_url, hunt_policy, base_url=selected_base,
+            )
             credential = _worker_session_credential(
                 resolved, session_context_ref, target=target,
             )
+            from dataclasses import replace as replace_credential
+            credential = replace_credential(credential, endpoint_url=endpoint_url)
 
             async def refresh_session_operation() -> dict[str, Any]:
                 nonlocal private_session
@@ -22280,6 +22249,15 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 "secret_values_visible": False,
             }
         elif capability_name == "authz.verify":
+            from hunt.service_binding import endpoint_target
+            routes = [str(item) for item in capability_input["routes"]]
+            resolved_routes = []
+            for route in routes:
+                target, resolved_route = endpoint_target(target, route, hunt_policy,
+                                            base_url=capability_input.get("origin") or target_url)
+                resolved_routes.append(resolved_route)
+            routes = resolved_routes
+            authz_base = capability_input.get("origin") or routes[0]
             primary_ref = str(capability_input["primary_session_ref"])
             secondary_ref = str(capability_input["secondary_session_ref"])
             if primary_ref == secondary_ref:
@@ -22323,10 +22301,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 )
             primary_headers = worker_session.headers()
             secondary_headers = secondary_worker_session.headers()
-            routes = [str(item) for item in capability_input["routes"]]
             async def execute_authz() -> dict[str, Any]:
                 return await verify_target_bound_object_authorization(
-                    target_url,
+                    authz_base,
                     routes,
                     target=target,
                     primary_headers=primary_headers,
@@ -22601,6 +22578,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                         evidence_receipt_digest=private_session.evidence_receipt_digest,
                         source_action_id=action_id,
                         session_ref=private_session.session_ref,
+                        service_origin=urllib.parse.urlunsplit((*urllib.parse.urlsplit(endpoint_url)[:2], "", "", "")),
                     )
                 elif status == "success" and capability_name == "auth.session.refresh":
                     if private_session is None or session_metadata is None:

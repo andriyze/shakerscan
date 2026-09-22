@@ -285,8 +285,13 @@ devices do not belong in web target metrics.
 
 Devices use separate inventory/workers. Confirm ownership/authorization. All-TCP examination is
 possible, so silence is inconclusive and receives no score. Imported Postman/HAR/OpenAPI never
-executes scripts, external references, or arbitrary destinations; requests stay pinned to observed
-origins. Untrusted HTTPS may be observed, but secrets require explicit risk authorization.
+executes scripts, external references, or arbitrary destinations. In an authorized active Hunt,
+select an HTTP(S) service on the same canonical host at any valid port using `origin`; the target
+ID and frozen addresses never change. The operator-selected collection or credential workflow
+may name that same-host service directly. Selected credentials work over HTTP and untrusted
+HTTPS; certificate defects are evidence, not an extra authorization prompt. Session refresh
+uses the saved login service, not the inventory record's default port. Do not bypass managed
+credentials or redirect credentials to another asset.
 
 SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
 uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through

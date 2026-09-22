@@ -2663,7 +2663,7 @@ async def _execute_device_capability_operation(
     if name == "queue_device_scan":
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
-        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+        if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
             raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
         include_web_dast = bool(args.get("include_web_dast")) and safety_profile != "observe_only"
         use_imported = bool(args.get("include_imported_requests"))
@@ -2798,7 +2798,7 @@ async def _execute_device_capability_operation(
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
         if safety_profile == "observe_only":
             raise HTTPException(status_code=409, detail="observe_only does not permit service verification traffic")
-        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+        if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
             raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
         queued = await verify_device_service(str(device_target_id), DeviceServiceVerifyRequest(
             transport=args["transport"],
@@ -3155,7 +3155,7 @@ async def _device_verify_candidate_tool(
         )
     if safety_profile == "observe_only":
         raise HTTPException(status_code=409, detail="observe_only does not permit candidate verification traffic")
-    if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+    if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
         raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
     transport = str(locus.get("transport") or "").lower()
     port = int(locus.get("port") or 0)

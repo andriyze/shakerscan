@@ -404,3 +404,30 @@ and policy boundary.
 - Fixed authenticated host collection accepts only server-owned read-only bundles. Agent-authored
   remote SSH commands execute only after an earlier host key is pinned and a user separately confirms
   the exact digest-bound plan; local-host shell is never exposed.
+
+### Hunt service selection and managed authentication
+
+An authorized active Hunt may select HTTP or HTTPS on any valid port of its existing
+canonical host. This is a per-action service selection: target UUID, frozen IP addresses,
+scope, credential version, and revocation checks remain unchanged. A redirect or imported
+script cannot authorize a different destination.
+
+`auth.session.establish` accepts an optional `origin` for relative saved login endpoints;
+absolute operator-saved endpoints select their own same-host service. New Hunt sessions
+retain the admitted asset binding plus their login service, so an explicitly selected
+session works in subsequent same-asset requests and refresh returns to the original login
+port. Historical exact-bound sessions remain readable; Scan sessions retain exact binding.
+`browser.login_check` accepts an optional `origin`, or derives it from the immutable saved
+workflow. Credential decryption still occurs only in the worker. Device credentials are
+revalidated against the live device inventory, not the separate web-target table.
+
+Request-collection replay resolves only the selected, persisted collection origins against
+the same admitted asset, then narrows the replay transport to those origins. Collection
+ownership, selection digests, frozen addresses, budgets, and secret handling are unchanged.
+This does not authorize reuse between unrelated target UUIDs.
+
+Device authorization investigations use the same API/service/repository as web Hunts.
+Their graph records belong to `device_target_id`; an additive migration supports device
+HTTP sessions and graph ownership without manufacturing web targets. Native device adapters
+inherit the canonical Hunt request and scan limits rather than applying a second legacy
+40-request / three-scan ceiling.

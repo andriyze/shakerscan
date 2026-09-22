@@ -30,13 +30,15 @@ BROWSER_LOGIN_INPUT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "as_principal": {"type": "string", "enum": list(PRINCIPAL_SLOTS)},
+        "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
+                   "description": "HTTP(S) service on the same authorized host; omit to use the saved workflow service."},
         "profile_ref": PROFILE_REF_SCHEMA,
     },
     "required": ["as_principal"],
 }
 BROWSER_LOGIN_PLANNER_SCHEMA = {
     **BROWSER_LOGIN_INPUT_SCHEMA,
-    "properties": {"as_principal": BROWSER_LOGIN_INPUT_SCHEMA["properties"]["as_principal"]},
+    "properties": {name: BROWSER_LOGIN_INPUT_SCHEMA["properties"][name] for name in ("as_principal", "origin")},
 }
 
 

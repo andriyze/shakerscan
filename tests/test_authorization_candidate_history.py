@@ -109,3 +109,41 @@ def test_concurrent_materializers_recheck_link_after_entering_critical_section(m
         assert {result["candidate"]["id"] for result in results} == {CANDIDATE}
         assert all(result["candidate_matches_latest_attempt"] for result in results)
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("kind", ["web", "network", "device"])
+def test_candidate_materialization_and_readback_follow_hunt_asset(monkeypatch, kind):
+    queries, candidates = [], []
+    column = "device_target_id" if kind == "device" else "target_id"
+    original = Connection.fetchrow
+
+    async def fetchrow(self, sql, *args):
+        queries.append((sql, args))
+        return await original(self, sql, *args)
+
+    class AssetRepo(Repo):
+        async def run(self, conn, hunt_id):
+            return {"id": hunt_id, "target_kind": kind, "target_id": None,
+                    "device_target_id": None, column: TARGET}
+
+    async def upsert(conn, candidate, **kwargs):
+        candidates.append(candidate)
+        return {"id": CANDIDATE, "status": "new", "fingerprint": candidate["fingerprint"]}
+
+    monkeypatch.setattr(Connection, "fetchrow", fetchrow)
+    monkeypatch.setattr(module.investigation_candidates, "upsert_candidate", upsert)
+
+    async def scenario():
+        service = SimpleNamespace(pool=Store(), repo=AssetRepo())
+        created = await module.ensure_authorization_candidate(service, HUNT, state())
+        restored = await module.attach_authorization_candidate(service, HUNT, state())
+        assert created["candidate"]["id"] == restored["candidate"]["id"] == CANDIDATE
+        assert restored["candidate"]["authoritative"] is False
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate[column] == TARGET
+        assert candidate["target_id" if kind == "device" else "device_target_id"] is None
+        assert candidate["plane"] == ("device" if kind == "device" else "web")
+        assert candidate["verifier_contract_id"] is None
+        assert all(column + "=$" in sql for sql, _ in queries)
+    asyncio.run(scenario())

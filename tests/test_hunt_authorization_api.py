@@ -44,9 +44,9 @@ class RelationalPool:
         self.calls = []
         self.lock = asyncio.Lock()
         self.db.executescript("""
-        CREATE TABLE IF NOT EXISTS hunt_runs(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,target_kind TEXT,status TEXT,context_pack TEXT);
+        CREATE TABLE IF NOT EXISTS hunt_runs(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,target_kind TEXT,status TEXT,context_pack TEXT,policy_json TEXT DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS auth_sessions(id TEXT PRIMARY KEY,owner_kind TEXT,owner_id TEXT,target_id TEXT,target_kind TEXT,principal_slot TEXT,status TEXT,expires_at TEXT,profile_id TEXT,profile_version INTEGER,refresh_count INTEGER,target_binding_digest TEXT,encrypted_headers TEXT);
-        CREATE TABLE IF NOT EXISTS application_graph_nodes(id TEXT PRIMARY KEY,target_id TEXT,node_type TEXT,node_key TEXT,label TEXT,attributes TEXT,first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(target_id,node_type,node_key));
+        CREATE TABLE IF NOT EXISTS application_graph_nodes(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,node_type TEXT,node_key TEXT,label TEXT,attributes TEXT,first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(target_id,node_type,node_key),UNIQUE(device_target_id,node_type,node_key));
         CREATE TABLE IF NOT EXISTS hunt_actions(id TEXT PRIMARY KEY,hunt_run_id TEXT,capability_name TEXT,status TEXT,input_summary TEXT,result_summary TEXT,receipt_id TEXT,started_at TEXT DEFAULT CURRENT_TIMESTAMP,completed_at TEXT);
         CREATE TABLE IF NOT EXISTS http_transactions(id TEXT PRIMARY KEY,hunt_run_id TEXT,hunt_action_id TEXT,sequence INTEGER,method TEXT,url TEXT,principal_slot TEXT,request_body_bytes INTEGER,status_code INTEGER,error TEXT,truncated INTEGER);
         """)
@@ -85,7 +85,7 @@ class RelationalPool:
     def seed(self):
         context = json.dumps({"target": {"url": ORIGIN, "origins": [ORIGIN]}, "authorized_target_addresses": ["192.0.2.1"]})
         for hid in (HUNT, OTHER_HUNT):
-            self.db.execute("INSERT INTO hunt_runs VALUES(?,?,NULL,'web','active',?)", (hid, TARGET, context))
+            self.db.execute("INSERT INTO hunt_runs(id,target_id,device_target_id,target_kind,status,context_pack) VALUES(?,?,NULL,'web','active',?)", (hid, TARGET, context))
         for session, slot in ((OWNER_SESSION, "primary"), (ACTOR_SESSION, "secondary")):
             self.db.execute("INSERT INTO auth_sessions VALUES(?,'hunt',?,?,'web',?,'active','2099-01-01',?,1,0,?,?)",
                             (session, HUNT, TARGET, slot, ident(slot), "a" * 64, "MUST_NOT_READ_SECRET"))

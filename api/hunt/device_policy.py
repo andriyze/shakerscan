@@ -158,6 +158,8 @@ class DeviceHuntPolicyState:
             "schema_version": "hunt-device-adapter-state/v2",
             "safety_profile": self.safety_profile,
             "scans_queued": self.scans_queued,
+            "scan_budget_limit": self.scan_limit,
+            "device_http_request_limit": self.request_limit,
             "device_http_requests_used": self.requests_used,
             "fragility_budget": self.fragility_limit,
             "fragility_used": self.fragility_used,

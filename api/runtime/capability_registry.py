@@ -1180,6 +1180,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_auth",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "as_principal": {
                     "type": "string",
                     "enum": ["primary", "secondary", "service"],
@@ -1261,6 +1262,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1303,6 +1305,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             )),
             "tls-observation/v2", ("tls_posture_observation",),
             hunt_executor="inline",
+            planner_input_schema=_schema({"origin": _SERVICE_ORIGIN_PROPERTY}),
             credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(

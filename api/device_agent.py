@@ -167,7 +167,8 @@ class DeviceHttpAttemptRejected(ValueError):
 def reserve_device_http_attempt(state: dict[str, Any], *, now_monotonic: float) -> int:
     """Charge one device HTTP attempt before its socket is opened."""
     used = int(state.get("device_http_requests_used") or 0)
-    if used >= DEVICE_HTTP_REQUEST_SESSION_LIMIT:
+    limit = int(state.get("device_http_request_limit", DEVICE_HTTP_REQUEST_SESSION_LIMIT))
+    if used >= limit:
         raise DeviceHttpAttemptRejected(
             "Session device HTTP request limit reached", status_code=409,
         )

@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Mapping
 import urllib.parse
 import uuid
 
-from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
+from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request, _origin_key
 from runtime.credentials import IDENTITY_PAIR_KINDS
 from runtime.models import TargetBinding
 
@@ -169,7 +169,7 @@ class _LoginFormParser(HTMLParser):
 
 
 def _validate_material(credential: TargetBoundSessionCredential) -> None:
-    if credential.lane not in {"primary", "secondary"}:
+    if credential.lane not in {"primary", "secondary", "service"}:
         raise SessionCredentialContractError("session principal lane is invalid")
     if credential.auth_kind not in SESSION_AUTH_KINDS:
         raise SessionCredentialContractError("session credential kind is invalid")
@@ -239,7 +239,7 @@ def _endpoint_args(
         or parsed.username is not None
         or parsed.fragment
         or parsed.hostname.lower().rstrip(".") != target.canonical_host
-        or origin not in target.allowed_origins
+        or _origin_key(origin) not in {_origin_key(o) for o in target.allowed_origins}
     ):
         raise SessionCredentialContractError(
             "session endpoint is outside the frozen target binding"

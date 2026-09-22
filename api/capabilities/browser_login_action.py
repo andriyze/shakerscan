@@ -66,6 +66,7 @@ class PreparedBrowserLogin:
     estimated_budget: Mapping[str, int]
     redacted_execution: Mapping[str, Any]
     session_ref: None = None
+    allow_saved_service_origin: bool = False
 
 
 @asynccontextmanager
@@ -189,7 +190,8 @@ class BrowserLoginAdapter:
 
     @classmethod
     def prepare(cls, *, target: TargetBinding, base_url: str, args: Mapping[str, Any],
-                profile_ref: Mapping[str, Any] | None = None) -> PreparedBrowserLogin:
+                profile_ref: Mapping[str, Any] | None = None,
+                allow_saved_service_origin: bool = False) -> PreparedBrowserLogin:
         validated = CAPABILITY_REGISTRY.validate_input(cls.capability_name, args)
         reference = normalize_browser_login_reference(profile_ref or validated.get("profile_ref"))
         if reference["principal_slot"] != validated["as_principal"]:
@@ -199,8 +201,8 @@ class BrowserLoginAdapter:
         # capabilities (web, api, network, device); a connected device that serves
         # a login page is the same asset examined over HTTP. Compare origins by
         # normalized key so a spelled-out default port matches the binding.
-        from capabilities.http import _origin_key as _service_origin_key
-        origin = _origin(base_url)
+        from .http import _origin_key as _service_origin_key
+        origin = _origin(validated.get("origin") or base_url)
         allowed_origin_keys = {_service_origin_key(value) for value in target.allowed_origins}
         if (target.target_kind not in {"web", "api", "network", "device"}
                 or _service_origin_key(origin) not in allowed_origin_keys
@@ -208,20 +210,21 @@ class BrowserLoginAdapter:
                 or not target.allowed_addresses):
             raise ValueError("browser login target is not frozen")
         encoded = json.dumps({"target_binding": target.digest, "profile_ref": reference,
-                              "capability": cls.capability_name}, sort_keys=True).encode()
+                              "capability": cls.capability_name, "origin": origin}, sort_keys=True).encode()
         digest = hashlib.sha256(encoded).hexdigest()
         return PreparedBrowserLogin(
             cls.capability_name, cls.adapter_name, cls.adapter_version, cls.parser_version,
             target, base_url, origin, reference, digest, dict(BROWSER_LOGIN_BUDGET),
             {"profile_ref": reference, "input_digest": digest,
              "saved_workflow_only": True, "session_exported": False,
-             "verification_basis": "operator_dom_assertion"},
+             "verification_basis": "operator_dom_assertion", "origin": origin},
+            allow_saved_service_origin=allow_saved_service_origin,
         )
 
     def __init__(self, prepared, *, credential_loader, policy,
                  browser_factory=worker_browser, sender=None):
         require_browser_login_policy(policy)
-        self.prepared, self.credential_loader = prepared, credential_loader
+        self.prepared, self.credential_loader, self.policy = prepared, credential_loader, policy
         self.browser_factory, self.sender = browser_factory, sender
 
     async def execute(self, *, heartbeat, cancelled) -> CapabilityAdapterResult:
@@ -236,11 +239,19 @@ class BrowserLoginAdapter:
             async with self.credential_loader() as material:
                 config = normalize_browser_login_profile(material.configuration)
                 workflow = BrowserLoginWorkflow(**config["workflow"])
-                if workflow.origin != self.prepared.origin:
-                    raise ValueError("saved browser workflow differs from target origin")
+                from .http import _origin_key
+                execution_prepared = self.prepared
+                if _origin_key(workflow.origin) != _origin_key(self.prepared.origin):
+                    if not self.prepared.allow_saved_service_origin:
+                        raise ValueError("saved browser workflow differs from selected service origin")
+                    # Only Hunt enables this. The selected immutable profile, not
+                    # a page response, names this service. Scan behavior stays exact.
+                    from hunt.service_binding import endpoint_target
+                    selected, _ = endpoint_target(self.prepared.target, workflow.origin, self.policy)
+                    execution_prepared = replace(self.prepared, target=selected, origin=workflow.origin)
                 await material.revalidate()
                 transport = BrowserLoginRuntimeTransport(
-                    prepared=self.prepared, workflow=workflow,
+                    prepared=execution_prepared, workflow=workflow,
                     revalidate=material.revalidate, heartbeat=heartbeat,
                     cancelled=cancelled, sender=self.sender,
                 )
@@ -294,6 +305,7 @@ class BrowserLoginAdapter:
             "kind": "browser_login_qa", "profile_ref": dict(self.prepared.profile_ref),
             "status": status, "authentication_verified": status == "success",
             "qa_completed": status == "success", "secret_values_visible": False,
+            "service_origin": transport.workflow.origin if transport else self.prepared.origin,
         }
         if receipt is not None:
             for key in ("status", "checks_requested", "checks_completed", "checks",

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS credential_profiles (
     name TEXT NOT NULL,
     auth_kind TEXT NOT NULL CHECK (auth_kind IN (
         'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-        'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
+        'form_login','oauth_client_credentials','oauth_password','json_login','custom_headers','query_parameter',
         'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
     )),
     principal_label TEXT,
@@ -81,13 +81,14 @@ BEGIN
         SELECT 1 FROM pg_constraint
         WHERE conname='credential_profiles_auth_kind_check'
           AND conrelid='credential_profiles'::regclass
-          AND pg_get_constraintdef(oid) NOT LIKE '%query_parameter%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%query_parameter%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%json_login%')
     ) THEN
         ALTER TABLE credential_profiles DROP CONSTRAINT credential_profiles_auth_kind_check;
         ALTER TABLE credential_profiles ADD CONSTRAINT credential_profiles_auth_kind_check
             CHECK (auth_kind IN (
                 'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-                'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
+                'form_login','oauth_client_credentials','oauth_password','json_login','custom_headers','query_parameter',
                 'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
             ));
     END IF;

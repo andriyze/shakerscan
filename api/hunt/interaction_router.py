@@ -1526,7 +1526,8 @@ async def _execute_hunt_capability_lifecycle(
             # the scanner capabilities), not only http.request.
             uses_service_origin = False
             if request.input.get("origin") is not None and (
-                name == "http.request" or is_scanner
+                name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
+                or is_scanner or is_browser
             ):
                 original, _ = web_hunt_target(run, context, policy)
                 try:
