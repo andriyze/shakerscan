@@ -16,7 +16,8 @@ def test_safety_profiles_keep_coverage_independent_and_fail_closed():
     assert catalog["authenticated_active"]["credentials_allowed"] is True
     assert "explicit_user_confirmed_shell" in catalog["authenticated_active"]["allowed_action_classes"]
     assert "explicit_user_confirmed_shell" not in catalog["safe_remote"]["allowed_action_classes"]
-    assert catalog["lab_invasive"]["available"] is False
+    assert set(catalog) == {"observe_only", "safe_remote", "authenticated_active"}
+    assert all(item["available"] is True for item in catalog.values())
     assert catalog["observe_only"]["allowed_action_classes"] == ("readonly",)
 
     observe = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["observe_only"])
@@ -58,3 +59,11 @@ def test_health_degradation_halts_after_indeterminate_baseline_when_ports_were_t
     governor.record_health({"stage": "baseline", "status": "indeterminate", "attempted_tcp_ports": []})
     governor.record_health({"stage": "post_inventory", "status": "degraded", "attempted_tcp_ports": [443]})
     assert governor.halted is True
+
+
+def test_removed_lab_profile_is_refused_plainly_and_grants_nothing():
+    for value in ("lab_invasive", "lab-invasive"):
+        with pytest.raises(ValueError, match="was removed.*use authenticated_active"):
+            device_safety.validate_safety_request({"safety_profile": value, "confirm_lab_invasive": True})
+    for profile in device_safety.SAFETY_PROFILES.values():
+        assert not {"persistent_state", "resource_intensive", "destructive"} & set(profile.allowed_action_classes)

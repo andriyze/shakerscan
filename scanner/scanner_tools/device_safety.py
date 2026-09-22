@@ -2,9 +2,9 @@
 
 Coverage depth and operational safety are deliberately independent.  A scan
 can inventory every TCP port without receiving permission to mutate device
-state, while a future lab workflow may use a narrow target surface with more
-invasive actions.  This module is kept separate from Web DAST so device safety
-decisions cannot change ordinary DAST behavior.
+state.  Only profiles a worker can execute are advertised.  This module is
+kept separate from Web DAST so device safety decisions cannot change ordinary
+DAST behavior.
 """
 
 from __future__ import annotations
@@ -20,8 +20,10 @@ DEVICE_SAFETY_PROFILES = {
     "observe_only",
     "safe_remote",
     "authenticated_active",
-    "lab_invasive",
 }
+# Declared by older releases but never executable: no worker implemented it. It
+# is no longer advertised, and a request that still names it is refused plainly.
+REMOVED_SAFETY_PROFILES = {"lab_invasive"}
 ACTION_SAFETY_CLASSES = {
     "readonly",
     "ephemeral_state",
@@ -42,8 +44,7 @@ class DeviceSafetyProfile:
     max_port_probes_per_second: float
     health_monitor_required: bool
     credentials_allowed: bool
-    explicit_lab_confirmation_required: bool
-    available: bool
+    available: bool = True
     unavailable_reason: str | None = None
 
 
@@ -57,8 +58,6 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         max_port_probes_per_second=50.0,
         health_monitor_required=False,
         credentials_allowed=False,
-        explicit_lab_confirmation_required=False,
-        available=True,
     ),
     "safe_remote": DeviceSafetyProfile(
         name="safe_remote",
@@ -69,8 +68,6 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         max_port_probes_per_second=250.0,
         health_monitor_required=True,
         credentials_allowed=False,
-        explicit_lab_confirmation_required=False,
-        available=True,
     ),
     "authenticated_active": DeviceSafetyProfile(
         name="authenticated_active",
@@ -81,27 +78,6 @@ SAFETY_PROFILES: dict[str, DeviceSafetyProfile] = {
         max_port_probes_per_second=200.0,
         health_monitor_required=True,
         credentials_allowed=True,
-        explicit_lab_confirmation_required=False,
-        available=True,
-    ),
-    "lab_invasive": DeviceSafetyProfile(
-        name="lab_invasive",
-        label="Lab invasive",
-        allowed_action_classes=(
-            "readonly",
-            "ephemeral_state",
-            "persistent_state",
-            "resource_intensive",
-            "destructive",
-        ),
-        max_concurrency=2,
-        max_requests_per_second=3.0,
-        max_port_probes_per_second=100.0,
-        health_monitor_required=True,
-        credentials_allowed=True,
-        explicit_lab_confirmation_required=True,
-        available=False,
-        unavailable_reason="lab_invasive_runner_not_ready",
     ),
 }
 
@@ -113,6 +89,11 @@ def safety_profile_catalog() -> list[dict[str, Any]]:
 
 def resolve_safety_profile(value: Any) -> DeviceSafetyProfile:
     name = str(value or "safe_remote").strip().lower().replace("-", "_")
+    if name in REMOVED_SAFETY_PROFILES:
+        raise ValueError(
+            f"device safety_profile {name} was removed because no runner implemented it; "
+            "use authenticated_active"
+        )
     profile = SAFETY_PROFILES.get(name)
     if not profile:
         raise ValueError(
@@ -129,8 +110,6 @@ def validate_safety_request(options: dict[str, Any]) -> DeviceSafetyProfile:
             f"device safety profile {profile.name} is not ready: "
             f"{profile.unavailable_reason or 'capability_unavailable'}"
         )
-    if profile.explicit_lab_confirmation_required and not options.get("confirm_lab_invasive"):
-        raise ValueError("lab-invasive device testing requires confirm_lab_invasive=true")
     if profile.name == "observe_only" and options.get("include_web_dast"):
         raise ValueError("observe_only permits web-origin discovery but not Web DAST children")
     return profile

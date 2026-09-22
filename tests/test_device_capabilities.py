@@ -56,3 +56,13 @@ def test_vendor_name_alone_does_not_overstate_platform_detection():
     assert tizen["state"] == "ready"
     assert tizen["implementation"] == "partial"
     assert "platform_not_confirmed" not in tizen["blockers"]
+
+
+def test_no_capability_depends_on_the_removed_lab_profile():
+    result = device_capabilities.capability_catalog_for_device({"id": "device-1"}, services=[])
+    by_id = {item["id"]: item for item in result["items"]}
+    for capability_id in ("media-parser-fuzzing", "hardware-debug-lab-review"):
+        assert by_id[capability_id]["state"] == "planned"
+        assert by_id[capability_id]["executor"] is None
+    assert all(item["minimum_profile"] != "lab_invasive" for item in result["items"])
+    assert "lab_only" not in result["summary"]

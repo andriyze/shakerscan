@@ -301,9 +301,10 @@ class DeviceRequestCollectionUpdate(BaseModel):
 class DeviceScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     profile: Literal["inventory", "posture", "thorough"] = "inventory"
-    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active"] = "safe_remote"
     confirm_authorized: bool = False
-    confirm_lab_invasive: bool = False
+    # Accepted and ignored so older clients are not rejected by extra="forbid".
+    confirm_lab_invasive: bool = Field(default=False, deprecated=True)
     include_web_dast: bool = True
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
@@ -335,9 +336,10 @@ class DeviceServiceVerifyRequest(BaseModel):
     transport: Literal["tcp", "udp"]
     port: int = Field(ge=1, le=65535)
     expected_state: Literal["open", "closed"]
-    safety_profile: Literal["safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    safety_profile: Literal["safe_remote", "authenticated_active"] = "safe_remote"
     confirm_authorized: bool = False
-    confirm_lab_invasive: bool = False
+    # Accepted and ignored so older clients are not rejected by extra="forbid".
+    confirm_lab_invasive: bool = Field(default=False, deprecated=True)
     reason: str = Field(min_length=1, max_length=500)
     candidate_id: Optional[str] = None
     approval_receipt_id: Optional[str] = None
@@ -1424,7 +1426,6 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
         })
     except ValueError as exc:
@@ -1623,7 +1624,6 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_profile": request.profile,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
@@ -1755,7 +1755,6 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": False,
         })
     except ValueError as exc:
@@ -1824,7 +1823,6 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             "reason": request.reason,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "approval_receipt_id": request.approval_receipt_id,
             "candidate_id": str(candidate_uuid) if candidate_uuid else None,
             "proof_contract_id": str(candidate["verifier_contract_id"] or "") if candidate else None,

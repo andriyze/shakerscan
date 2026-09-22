@@ -661,8 +661,8 @@ capability-labeled sensor extension rather than an implied Docker-worker capabil
 [`connected-device-security.md`](connected-device-security.md).
 
 Device coverage depth and action safety are independent. `observe_only`, `safe_remote`, and
-`authenticated_active` are available; `lab_invasive` remains declared but fails closed until its
-dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus a
+`authenticated_active` are the executable profiles. The never-implemented `lab_invasive` profile was
+removed; a request naming it is rejected with a pointer to `authenticated_active`. Device reports carry `device-safety/v1` receipts plus a
 stable `device-evidence/v1` node/edge/observation graph. A device-target `POST /hunts` run lets the
 current coding agent inspect device state, inspect redacted user-bound request collections, compare scans, recall prior hypotheses, query effective policy, use
 size-capped SHA-256-pinned offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query

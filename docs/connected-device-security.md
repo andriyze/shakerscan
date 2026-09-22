@@ -48,8 +48,11 @@ recorded safety profiles are:
 - `authenticated_active`: supplied-credential SSH and web checks with device-bound, encrypted
   credential profiles. It never guesses credentials. Fixed host review is read-only; model-authored
   remote SSH commands require a separate exact-plan user confirmation.
-- `lab_invasive`: reserved for a dedicated recovery-capable lab runner. It currently fails closed as
-  unavailable and cannot be enabled by choosing a deeper coverage profile.
+
+Older releases advertised a fourth `lab_invasive` profile that no worker ever implemented. It has
+been removed; a request that still names it is rejected and should use `authenticated_active`.
+Persistent-state, resource-intensive, and destructive action classes remain unavailable to every
+profile.
 
 Every device action receives a declared safety class. The device safety governor blocks actions not
 permitted by the selected profile and records baseline, post-inventory, and final health checkpoints.

@@ -1497,10 +1497,10 @@ export interface DeviceCapabilityItem {
   id: string
   title: string
   group: string
-  implementation: 'available' | 'partial' | 'planned' | 'sensor_required' | 'lab_only'
+  implementation: 'available' | 'partial' | 'planned' | 'sensor_required'
   executor?: string | null
-  minimum_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
-  state: 'ready' | 'completed' | 'blocked' | 'planned' | 'sensor_required' | 'lab_only' | 'not_applicable'
+  minimum_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
+  state: 'ready' | 'completed' | 'blocked' | 'planned' | 'sensor_required' | 'not_applicable'
   blockers: string[]
   applicable: boolean
   notes?: string
@@ -5202,14 +5202,13 @@ export async function getDeviceReadiness(): Promise<{
   profiles: string[]
   coverage_profiles: string[]
   safety_profiles: Array<{
-    name: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+    name: 'observe_only' | 'safe_remote' | 'authenticated_active'
     label: string
     allowed_action_classes: string[]
     max_concurrency: number
     max_requests_per_second: number
     health_monitor_required: boolean
     credentials_allowed: boolean
-    explicit_lab_confirmation_required: boolean
     available: boolean
     unavailable_reason?: string | null
   }>
@@ -5317,9 +5316,8 @@ export async function createDevice(payload: {
 
 export async function scanDevice(deviceId: string, payload: {
   profile: 'inventory' | 'posture' | 'thorough'
-  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
   confirm_authorized: boolean
-  confirm_lab_invasive?: boolean
   include_web_dast: boolean
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number

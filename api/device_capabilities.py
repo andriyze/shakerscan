@@ -31,10 +31,10 @@ CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
     {"id": "android-tv-platform-review", "title": "Android TV / Google TV platform review", "group": "platform", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active", "platform": "android"},
     {"id": "tizen-tv-platform-review", "title": "Tizen TV platform review", "group": "platform", "implementation": "partial", "executor": "device_application", "minimum_profile": "safe_remote", "platform": "tizen"},
     {"id": "webos-tv-platform-review", "title": "webOS TV platform review", "group": "platform", "implementation": "partial", "executor": "device_application", "minimum_profile": "safe_remote", "platform": "webos"},
-    {"id": "media-parser-fuzzing", "title": "Media and parser fuzzing", "group": "lab", "implementation": "lab_only", "executor": None, "minimum_profile": "lab_invasive", "requires": ["lab_runner", "recovery_proof"]},
+    {"id": "media-parser-fuzzing", "title": "Media and parser fuzzing", "group": "lab", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active"},
     {"id": "privacy-telemetry-cloud-review", "title": "Privacy, telemetry, sensors, and cloud review", "group": "ecosystem", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
     {"id": "companion-app-ecosystem-review", "title": "Companion application and ecosystem review", "group": "ecosystem", "implementation": "planned", "executor": None, "minimum_profile": "safe_remote"},
-    {"id": "hardware-debug-lab-review", "title": "Hardware and physical debug review", "group": "lab", "implementation": "lab_only", "executor": None, "minimum_profile": "lab_invasive", "requires": ["lab_runner", "recovery_proof"]},
+    {"id": "hardware-debug-lab-review", "title": "Hardware and physical debug review", "group": "lab", "implementation": "planned", "executor": None, "minimum_profile": "authenticated_active"},
     {"id": "evidence-correlation-reporting", "title": "Evidence correlation and reporting", "group": "evidence", "implementation": "available", "executor": "device_evidence", "minimum_profile": "observe_only"},
     {"id": "remediation-rescan-regression", "title": "Remediation, rescan, and regression", "group": "evidence", "implementation": "partial", "executor": "device_agent", "minimum_profile": "observe_only", "notes": "Scan diffs are implemented; exact finding regression workflows are planned."},
 )
@@ -98,8 +98,6 @@ def capability_catalog_for_device(
                 blockers.append("confirmed_web_origin_required")
             elif requirement == "radio_sensor" and not ({"bluetooth", "ble", "wifi_direct"} & sensor_capabilities):
                 blockers.append("radio_sensor_required")
-            elif requirement in {"lab_runner", "recovery_proof"}:
-                blockers.append(requirement + "_required")
             elif requirement == "user_confirmation":
                 confirmation_required = True
 
@@ -107,7 +105,7 @@ def capability_catalog_for_device(
             state = "completed"
         elif not applicable:
             state = "not_applicable"
-        elif item["implementation"] in {"planned", "sensor_required", "lab_only"}:
+        elif item["implementation"] in {"planned", "sensor_required"}:
             state = item["implementation"]
         elif blockers:
             state = "blocked"
@@ -126,7 +124,7 @@ def capability_catalog_for_device(
         "items": items,
         "summary": {
             state: sum(1 for item in items if item["state"] == state)
-            for state in ("ready", "completed", "approval_required", "blocked", "partial", "planned", "sensor_required", "lab_only", "not_applicable")
+            for state in ("ready", "completed", "approval_required", "blocked", "partial", "planned", "sensor_required", "not_applicable")
         },
     }
 
