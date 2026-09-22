@@ -1052,12 +1052,13 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {
                 "hosts_attempted": _NETWORK_ADDRESS_GRANT,
-                "tcp_ports_attempted": 65_535, "tool_wall_seconds": 600,
+                "tcp_ports_attempted": 1_200, "tool_wall_seconds": 120,
             },
             {"network_reachability": True, "binary": "naabu"}, _schema({
-                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000", "top_5000", "device_common", "full"]},
-                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 65535},
-                "port_range": {"type": "string", "pattern": "^[0-9]{1,5}-[0-9]{1,5}$"},
+                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000", "device_common"]},
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},
+                "port_range": {"type": "string", "pattern": "^[0-9]{1,5}-[0-9]{1,5}$",
+                               "description": "Contiguous START-END range on the authorized host, bounded per call; chunk a wider span across calls."},
             }),
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),

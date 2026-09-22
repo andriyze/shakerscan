@@ -637,8 +637,9 @@ def test_candidate_verifier_block_conservatively_charges_the_full_hold():
     assert result.errors == ("verifier stopped after uncertain wire activity",)
 
 
-def test_ports_discover_supports_full_range_and_a_custom_range():
+def test_ports_discover_supports_a_bounded_contiguous_range():
     from capabilities.network import PortsDiscoverAdapter
+    from capabilities.network import CapabilityInputError
     from runtime.models import ScanPolicy
 
     net_target = TargetBinding(
@@ -649,16 +650,21 @@ def test_ports_discover_supports_full_range_and_a_custom_range():
                         approval_receipt_id="approval", scope_receipt_id="scope-1")
     adapter = PortsDiscoverAdapter()
 
-    full = adapter.prepare(target=net_target, args={"profile": "full"}, policy=policy)
-    assert full.estimated_budget["tcp_ports_attempted"] == 65_535
-    assert "-" in full.commands[0].argv and "-p" in full.commands[0].argv
-
     ranged = adapter.prepare(target=net_target, args={"port_range": "8000-8999"}, policy=policy)
     assert ranged.estimated_budget["tcp_ports_attempted"] == 1_000
     assert "8000-8999" in ranged.commands[0].argv
     # Two different ranges must not collide on the idempotency digest.
     other = adapter.prepare(target=net_target, args={"port_range": "9000-9999"}, policy=policy)
     assert ranged.input_digest != other.input_digest
+
+    # One call never becomes a full-range sweep; a wider span is chunked.
+    for bad in ("1-65535", "1-1002"):
+        try:
+            adapter.prepare(target=net_target, args={"port_range": bad}, policy=policy)
+        except CapabilityInputError:
+            pass
+        else:
+            raise AssertionError(f"port_range {bad} should exceed the per-call ceiling")
 
 
 def test_active_collection_replay_reaches_device_and_network_targets():
