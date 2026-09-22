@@ -9,8 +9,10 @@ same surface classification and body limits as the running ASGI application.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -437,12 +439,60 @@ def add_public_v2_idempotency_openapi(openapi: dict[str, Any]) -> dict[str, Any]
     return openapi
 
 
-def _origin_is_allowed(origin: str, allowed_origins: Sequence[str], allow_origin_regex: str = "") -> bool:
+def _header_hostname(value: str) -> str:
+    """The bare hostname from an Origin or a Host header, lowercased, port removed."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"//{raw}"
+    try:
+        hostname = urllib.parse.urlsplit(raw).hostname
+    except ValueError:
+        return ""
+    return (hostname or "").lower().strip(".")
+
+
+def origin_is_same_deployment(origin: str, request_host: str) -> bool:
+    """Whether this Origin is the same *address literal* the API itself was reached on.
+
+    The configured allowlist names one address, so every other route to the same engine was
+    refused: a LAN install answered only on the private IP the launcher picked, and the same UI
+    opened by public IP or through a tunnel lost its CORS headers on reads and got 403 on every
+    write. Reaching the API at an address means the UI served from that address is the same
+    deployment, so admitting it grants nothing new.
+
+    Both sides must be an IP literal, which is what keeps this from becoming a DNS-rebinding
+    hole. A name can be re-pointed: a page on ``evil.test`` whose DNS flips to an internal
+    address would present ``Origin: http://evil.test`` against ``Host: evil.test`` and match on
+    name equality alone, which would hand that page the API. An IP literal cannot be rebound,
+    because the browser connected to that address directly and an attacker cannot serve a page
+    from an address it does not hold. Names stay with the operator: list them in
+    ``SHAKERSCAN_CORS_ALLOW_ORIGINS``. Only the host is compared, never the port, because the
+    UI and the API sit on different ports of that one address.
+    """
+    host = _header_hostname(request_host)
+    if not host or _header_hostname(origin) != host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _origin_is_allowed(
+    origin: str,
+    allowed_origins: Sequence[str],
+    allow_origin_regex: str = "",
+    request_host: str = "",
+) -> bool:
     """Apply the same exact/regex origin decision to actual unsafe requests as CORS preflights.
 
     CORS response headers are not a CSRF boundary: browsers still dispatch simple cross-origin POSTs
     and merely hide the response. ShakerScan intentionally remains friendly to curl/agents (which do
-    not send Origin), while browser requests that do carry Origin must come from the configured UI.
+    not send Origin), while browser requests that do carry Origin must come from the configured UI
+    or from the very host this request reached the API on.
     """
     normalized = str(origin or "").strip()
     if not normalized:
@@ -451,6 +501,8 @@ def _origin_is_allowed(origin: str, allowed_origins: Sequence[str], allow_origin
         return True
     if normalized in allowed_origins:
         return True
+    if request_host and origin_is_same_deployment(normalized, request_host):
+        return True
     if allow_origin_regex:
         try:
             return re.fullmatch(allow_origin_regex, normalized) is not None
@@ -458,6 +510,72 @@ def _origin_is_allowed(origin: str, allowed_origins: Sequence[str], allow_origin
             # Invalid security configuration fails closed for browser mutations.
             return False
     return False
+
+
+class SameHostCorsMiddleware:
+    """Answer CORS for a UI served from the same host this request reached the API on.
+
+    Registered outside the configured CORS middleware, so anything the operator listed keeps its
+    existing answer untouched and this only fills the gap that made every other route to the same
+    engine unusable. Credentials stay off, exactly as the configured policy has them.
+    """
+
+    _DEFAULT_ALLOW_HEADERS = "content-type, idempotency-key, authorization"
+
+    def __init__(self, app: Any, *, expose_headers: Sequence[str] = ()):
+        self.app = app
+        self.expose_headers = ", ".join(expose_headers)
+
+    def _headers(self, scope: dict[str, Any]) -> dict[str, str]:
+        return {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers") or []
+        }
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = self._headers(scope)
+        origin = headers.get("origin", "")
+        if not origin or not origin_is_same_deployment(origin, headers.get("host", "")):
+            await self.app(scope, receive, send)
+            return
+        encoded = origin.encode("latin-1")
+        if str(scope.get("method") or "").upper() == "OPTIONS" and headers.get(
+            "access-control-request-method"
+        ):
+            requested = headers.get("access-control-request-headers") or self._DEFAULT_ALLOW_HEADERS
+            response_headers = [
+                (b"access-control-allow-origin", encoded),
+                (b"access-control-allow-methods", b"DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"),
+                (b"access-control-allow-headers", requested.encode("latin-1")),
+                (b"access-control-max-age", b"600"),
+                (b"content-length", b"0"),
+                (b"vary", b"Origin"),
+            ]
+            await send({"type": "http.response.start", "status": 200, "headers": response_headers})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def send_with_cors(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                existing = list(message.get("headers") or [])
+                names = {key.lower() for key, _value in existing}
+                # The configured policy answered first when it recognised this origin; never
+                # emit a second, conflicting allow-origin header.
+                if b"access-control-allow-origin" not in names:
+                    existing.append((b"access-control-allow-origin", encoded))
+                    existing.append((b"vary", b"Origin"))
+                    if self.expose_headers:
+                        existing.append((
+                            b"access-control-expose-headers",
+                            self.expose_headers.encode("latin-1"),
+                        ))
+                message = {**message, "headers": existing}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
 
 
 class UnsafeOriginGuardMiddleware:
@@ -481,7 +599,10 @@ class UnsafeOriginGuardMiddleware:
                 for key, value in scope.get("headers") or []
             }
             origin = headers.get("origin", "")
-            if origin and not _origin_is_allowed(origin, self.allow_origins, self.allow_origin_regex):
+            if origin and not _origin_is_allowed(
+                origin, self.allow_origins, self.allow_origin_regex,
+                request_host=headers.get("host", ""),
+            ):
                 body = json.dumps({"detail": "Cross-origin browser mutation is not allowed"}).encode("utf-8")
                 await send({
                     "type": "http.response.start",
@@ -502,7 +623,9 @@ __all__ = [
     "PUBLIC_V2_SURFACE_PREFIXES",
     "PUBLIC_V2_WRITE_BODY_LIMITS",
     "PublicV2BodyLimitMiddleware",
+    "SameHostCorsMiddleware",
     "UnsafeOriginGuardMiddleware",
+    "origin_is_same_deployment",
     "PublicV2IdempotencyMiddleware",
     "add_public_v2_idempotency_openapi",
     "public_v2_surface",

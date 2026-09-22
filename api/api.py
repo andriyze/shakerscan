@@ -4013,6 +4013,7 @@ try:
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
+        SameHostCorsMiddleware,
         UnsafeOriginGuardMiddleware,
         _origin_is_allowed,
         add_public_v2_idempotency_openapi,
@@ -4022,6 +4023,7 @@ except ModuleNotFoundError:
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
+        SameHostCorsMiddleware,
         UnsafeOriginGuardMiddleware,
         _origin_is_allowed,
         add_public_v2_idempotency_openapi,
@@ -7274,6 +7276,13 @@ app.add_middleware(
     allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""),
 )
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
+# Outermost, so the configured policy above answers first for everything it recognises. This only
+# covers the UI reached at the same host as the API itself, which the fixed allowlist could not
+# name: a LAN install answered on one private IP and the same engine opened by public IP, by
+# hostname or through a tunnel lost its CORS headers on reads and 403'd on every write.
+app.add_middleware(
+    SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"],
+)
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):
