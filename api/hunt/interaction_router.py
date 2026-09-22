@@ -284,14 +284,6 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
 
 
 @router.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")
-def _device_locator_url(target_context: Mapping[str, Any]) -> str:
-    """A device's bare locator as a URL, so one binding serves both inventories."""
-    locator = str((target_context or {}).get("locator") or "").strip()
-    if not locator or "://" in locator:
-        return locator
-    return f"http://[{locator}]" if ":" in locator and not locator.startswith("[") else f"http://{locator}"
-
-
 async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
@@ -1262,6 +1254,14 @@ async def _hunt_confirmed_shell_dispatch(
         "safety_profile": "authenticated_active",
         "ui_url": f"/scans/{row['id']}",
     }
+
+
+def _device_locator_url(target_context: Mapping[str, Any]) -> str:
+    """A device's bare locator as a URL, so one binding serves both inventories."""
+    locator = str((target_context or {}).get("locator") or "").strip()
+    if not locator or "://" in locator:
+        return locator
+    return f"http://[{locator}]" if ":" in locator and not locator.startswith("[") else f"http://{locator}"
 
 
 def _hunt_ledger_limits(budget: Mapping[str, Any]) -> dict[str, int]:
