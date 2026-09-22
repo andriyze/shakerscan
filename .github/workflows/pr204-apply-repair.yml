@@ -2,7 +2,7 @@ name: PR204 service execution repair
 on:
   push:
     branches: [fix/hunt-any-port-remove-dead-lab]
-    paths: [.github/workflows/pr204-apply-repair.yml, .github/pr204-repair-1.b64, .github/pr204-repair-2.b64, .github/pr204-repair-3.b64]
+    paths: [.github/workflows/pr204-apply-repair.yml, .github/pr204-repair-1.b64, .github/pr204-repair-2.b64, .github/pr204-repair-3.b64, .github/pr204-followup.b64]
 permissions:
   contents: write
 concurrency:
@@ -19,7 +19,7 @@ jobs:
         with:
           ref: fix/hunt-any-port-remove-dead-lab
           fetch-depth: 0
-      - name: Apply exact reviewed patch without replacing concurrent work
+      - name: Apply exact reviewed patches without replacing concurrent work
         env:
           EXPECTED_HEAD: ${{ github.sha }}
         run: |
@@ -27,10 +27,12 @@ jobs:
           python - <<'PY'
           import base64,hashlib,lzma,pathlib,subprocess
           encoded=''.join(pathlib.Path(f'.github/pr204-repair-{i}.b64').read_text().strip() for i in (1,2,3))
-          patch=lzma.decompress(base64.b64decode(encoded,validate=True))
-          assert hashlib.sha256(patch).hexdigest()=='d8397f30684d3df46f7df39c10684632fd15a801e8d07f12bf629bcd1642f989'
-          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
-          subprocess.run(['git','apply','-'],input=patch,check=True)
+          patches=[(encoded,'d8397f30684d3df46f7df39c10684632fd15a801e8d07f12bf629bcd1642f989'),(pathlib.Path('.github/pr204-followup.b64').read_text().strip(),'a1709e018c51ce7bd3516206aa58c2f319dc30beb66fa42526572f4c07f034ab')]
+          for encoded,expected in patches:
+              patch=lzma.decompress(base64.b64decode(encoded,validate=True))
+              assert hashlib.sha256(patch).hexdigest()==expected
+              subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+              subprocess.run(['git','apply','-'],input=patch,check=True)
           path=pathlib.Path('tests/test_hunt_service_postgres.py')
           source=path.read_text()
           old='configuration={}, encrypted_secret='
@@ -68,7 +70,7 @@ jobs:
       - name: Test real service execution, database migration, and worker regressions
         run: |
           mkdir -p artifacts
-          python -m pytest -q tests/test_hunt_service_execution.py tests/test_hunt_service_postgres.py tests/test_auth_session_store.py tests/test_auth_session_capability.py tests/test_browser_login_action.py tests/test_browser_login_worker.py tests/test_hunt_authorization_api.py tests/test_hunt_device_parity.py tests/test_hunt_device_traffic.py tests/test_hunt_action_dispatcher.py tests/test_runtime_capabilities.py tests/test_hunt_http_capability.py tests/test_hunt_operator_execution.py tests/test_request_replay_executor.py tests/test_device_agent.py tests/test_device_safety.py tests/test_device_browser_origin.py tests/test_hunt_fragment_xss_browser_proof.py tests/test_hunt_scanner_reservations.py --junitxml=artifacts/pr204-service-tests.xml
+          python -m pytest -q tests/test_hunt_service_execution.py tests/test_hunt_service_postgres.py tests/test_auth_session_store.py tests/test_auth_session_capability.py tests/test_browser_login_action.py tests/test_browser_login_worker.py tests/test_hunt_authorization_api.py tests/test_hunt_device_parity.py tests/test_hunt_device_traffic.py tests/test_hunt_action_dispatcher.py tests/test_runtime_capabilities.py tests/test_hunt_http_capability.py tests/test_hunt_operator_execution.py tests/test_request_replay_executor.py tests/test_device_agent.py tests/test_device_safety.py tests/test_device_browser_origin.py tests/test_hunt_fragment_xss_browser_proof.py tests/test_hunt_scanner_reservations.py tests/test_credential_store.py tests/test_authorization_candidate_materialization.py tests/test_authorization_candidate_history.py --junitxml=artifacts/pr204-service-tests.xml
           python - <<'PY'
           import xml.etree.ElementTree as E
           cases=list(E.parse('artifacts/pr204-service-tests.xml').getroot().iter('testcase'))
@@ -94,7 +96,7 @@ jobs:
         run: |
           git fetch origin fix/hunt-any-port-remove-dead-lab
           test "$(git rev-parse origin/fix/hunt-any-port-remove-dead-lab)" = "$EXPECTED_HEAD"
-          git rm .github/pr204-repair-1.b64 .github/pr204-repair-2.b64 .github/pr204-repair-3.b64 .github/workflows/pr204-apply-repair.yml
+          git rm .github/pr204-repair-1.b64 .github/pr204-repair-2.b64 .github/pr204-repair-3.b64 .github/pr204-followup.b64 .github/workflows/pr204-apply-repair.yml
           git add -u
           git add api/hunt/service_binding.py api/runtime/hunt_service_schema.py tests/test_hunt_service_execution.py tests/test_hunt_service_postgres.py
           git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'fix(hunt): complete authenticated service-port execution and device ownership'
