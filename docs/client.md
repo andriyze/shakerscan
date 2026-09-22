@@ -63,6 +63,16 @@ Python 3.10 or newer; no third-party dependencies.
 
 A pipx/Homebrew client can use the bounded ShakerScan public service immediately:
 
+Client 0.7.1 adds a dedicated public stdio MCP mode exposing only
+`shakerscan_public_check(target)`. It uses the same credential-free `/v1/check`
+pipeline as `check`; no private-engine discovery, Hunt, Arsenal, shell or target
+management tools are available. A configured private instance retains its own tools.
+The service currently observes DNS, direct email policy and a bounded cleartext HTTP
+root HEAD response/redirect. HTTPS/TLS is explicitly unsupported on this backend;
+Cloudflare cannot reliably combine pinned destination IPs with hostname TLS verification.
+HTTP redirects are reported, never followed, and platform-blocked destinations are unknown.
+Public checks share a 100-uncached-attempts/IP/day quota, resetting at midnight UTC.
+
 ```bash
 shakerscan check example.com
 shakerscan check https://example.com --json

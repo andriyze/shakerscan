@@ -16,6 +16,40 @@ sys.modules[SPEC.name] = mcp
 SPEC.loader.exec_module(mcp)
 
 
+def test_public_mode_has_only_fixed_tool_and_no_discovery():
+    client = mcp.PublicClient()
+    calls = []
+    def request(method, path, payload):
+        calls.append((method, path, payload))
+        return {"schema_version": "1", "target": "example.com", "checks": []}
+    client.transport.request_json = request
+    server = mcp.MCPServer(client)
+    initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert "Hunt V2" not in initialized["result"]["instructions"]
+    tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
+    assert [t["name"] for t in tools] == ["shakerscan_public_check"]
+    assert calls == []
+    result = client.call_tool("shakerscan_public_check", {"target": "example.com"})
+    assert result["isError"] is False
+    assert calls == [("POST", "/v1/check", {"target": "example.com"})]
+    assert client.transport.api_token is None
+    assert client.transport.max_response_bytes == 32768
+    for name, args in [("shakerscan_hunt_start", {}), ("shakerscan_public_check", {"target": "example.com", "headers": {}}), ("shakerscan_public_check", {"target": "https://example.com/path"})]:
+        with pytest.raises(mcp.MCPError):
+            client.call_tool(name, args)
+    assert len(calls) == 1
+
+
+def test_public_upstream_failure_is_tool_error_without_raw_body():
+    client = mcp.PublicClient()
+    def fail(*args):
+        raise mcp.MCPError(-32002, "ShakerScan API returned HTTP 429", "SECRET BODY")
+    client.transport.request_json = fail
+    result = client.call_tool("shakerscan_public_check", {"target": "example.com"})
+    assert result["isError"] is True
+    assert "SECRET" not in json.dumps(result)
+
+
 def _catalog(*, drift_command=None):
     commands = []
     for tool in mcp.TOOLS:
