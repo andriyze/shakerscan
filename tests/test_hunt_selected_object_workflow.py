@@ -59,9 +59,9 @@ class RelationalPool:
         self.db.row_factory = sqlite3.Row
         self.lock = asyncio.Lock()
         self.db.executescript("""
-        CREATE TABLE IF NOT EXISTS hunt_runs(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,target_kind TEXT,status TEXT,context_pack TEXT);
+        CREATE TABLE IF NOT EXISTS hunt_runs(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,target_kind TEXT,status TEXT,context_pack TEXT,policy_json TEXT NOT NULL DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS auth_sessions(id TEXT PRIMARY KEY,owner_kind TEXT,owner_id TEXT,target_id TEXT,target_kind TEXT,principal_slot TEXT,status TEXT,expires_at TEXT,profile_id TEXT,profile_version INTEGER,refresh_count INTEGER,target_binding_digest TEXT);
-        CREATE TABLE IF NOT EXISTS application_graph_nodes(id TEXT PRIMARY KEY,target_id TEXT,node_type TEXT,node_key TEXT,label TEXT,attributes TEXT,UNIQUE(target_id,node_type,node_key));
+        CREATE TABLE IF NOT EXISTS application_graph_nodes(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT,node_type TEXT,node_key TEXT,label TEXT,attributes TEXT,UNIQUE(target_id,node_type,node_key),UNIQUE(device_target_id,node_type,node_key));
         CREATE TABLE IF NOT EXISTS hunt_actions(id TEXT PRIMARY KEY,hunt_run_id TEXT,capability_name TEXT,status TEXT,input_summary TEXT,result_summary TEXT,receipt_id TEXT,started_at TEXT,completed_at TEXT);
         CREATE TABLE IF NOT EXISTS http_transactions(id TEXT PRIMARY KEY,hunt_run_id TEXT,hunt_action_id TEXT,sequence INTEGER,method TEXT,url TEXT,principal_slot TEXT,request_body_bytes INTEGER,status_code INTEGER,error TEXT,truncated INTEGER);
         CREATE TABLE IF NOT EXISTS investigation_candidates(id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),plane TEXT,target_id TEXT,device_target_id TEXT,research_episode_id TEXT,agent_hunt_run_id TEXT,device_agent_run_id TEXT,hunt_run_id TEXT,family TEXT,canonical_locus TEXT,title TEXT,claim TEXT,claimed_severity TEXT,evidence_refs TEXT,verifier_contract_id TEXT,source_kind TEXT,fingerprint TEXT UNIQUE,status TEXT,created_by TEXT,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -93,12 +93,17 @@ class RelationalPool:
         return [_Row.wrap(r) for r in self._query(sql, args).fetchall()]
     async def execute(self, sql, *args):
         self._query(sql, args)
-    def seed(self, origin, mode="vulnerable", selected="101", own="202"):
+    def seed(self, origin, mode="vulnerable", selected="101", own="202", *, kind="web"):
         context = json.dumps({"target": {"origins": [origin], "url": origin}, "authorized_target_addresses": ["127.0.0.1"]})
+        # Mirror the persisted authorization and owner columns used by the real
+        # repository; an empty/missing policy would bypass service-origin checks.
+        policy = json.dumps({"active_testing": True, "network_discovery": False,
+                             "scope_receipt_id": "fixture-scope", "approval_receipt_id": "fixture-approval"})
         for hid in (HUNT, OTHER_HUNT):
-            self.db.execute("INSERT INTO hunt_runs VALUES(?,?,NULL,'web','active',?)", (hid, TARGET, context))
+            self.db.execute("INSERT INTO hunt_runs(id,target_id,device_target_id,target_kind,status,context_pack,policy_json) VALUES(?,?,?,?,'active',?,?)",
+                (hid, None if kind == "device" else TARGET, TARGET if kind == "device" else None, kind, context, policy))
         for sid, slot in ((A_SESSION, "primary"), (B_SESSION, "secondary")):
-            self.db.execute("INSERT INTO auth_sessions VALUES(?,'hunt',?,?,'web',?,'active','2099-01-01',?,1,0,?)", (sid, HUNT, TARGET, slot, uid(slot), "a" * 64))
+            self.db.execute("INSERT INTO auth_sessions VALUES(?,'hunt',?,?,?,?,'active','2099-01-01',?,1,0,?)", (sid, HUNT, TARGET, kind, slot, uid(slot), "a" * 64))
         for cid, slot, sid, obj in ((CAPTURE, "primary", A_SESSION, selected), (BASELINE, "secondary", B_SESSION, own)):
             path = f"/{mode}/{obj}"
             action = uid("source:" + cid)
@@ -170,7 +175,8 @@ class WorkerBoundary:
         self.pool, self.fixture = pool, fixture
         self.calls = []
         self.results = []
-        self.target = TargetBinding(target_id=TARGET, target_kind="web", canonical_host="127.0.0.1",
+        kind = pool.db.execute("SELECT target_kind FROM hunt_runs WHERE id=?", (HUNT,)).fetchone()[0]
+        self.target = TargetBinding(target_id=TARGET, target_kind=kind, canonical_host="127.0.0.1",
             allowed_origins=(fixture.origin,), allowed_addresses=("127.0.0.1",), scope_receipt_id="fixture-scope")
     async def __call__(self, hunt_id, key, inputs):
         action = str(canonical_action_id(hunt_id, key))
@@ -210,11 +216,11 @@ def run(coro):
     return asyncio.run(coro)
 
 
-@pytest.fixture
-def setup(monkeypatch):
+@pytest.fixture(params=["web", "api", "network", "device"])
+def setup(monkeypatch, request):
     fixture = LoopbackFixture()
     monkeypatch.setattr(authz, "execute_bound_http_request", fixture.transport)
-    pool = RelationalPool(); pool.seed(fixture.origin)
+    pool = RelationalPool(); pool.seed(fixture.origin, kind=request.param)
     boundary = WorkerBoundary(pool, fixture)
     service = AuthorizationInvestigationService(pool, boundary, proof_url)
     try:
@@ -380,7 +386,8 @@ def test_unattributable_or_incomplete_evidence_never_creates_lead(setup, change)
     pool, _, _, service = setup
     state = approve(service, run(service.propose(HUNT, **refs())))
     proposal = json.loads(pool.db.execute("SELECT attributes FROM application_graph_nodes WHERE id=?", (state["proposal_id"],)).fetchone()[0])
-    attempt = run(service.repo.attempts(pool, {"id": HUNT, "target_id": TARGET}, state["proposal_id"]))[0]
+    persisted_run = run(service.repo.run(pool, HUNT))
+    attempt = run(service.repo.attempts(pool, persisted_run, state["proposal_id"]))[0]
     action = run(service.repo.action(pool, {"id": HUNT}, attempt["action_id"]))
     transactions = run(service.repo.transactions(pool, {"id": HUNT}, attempt["action_id"]))
     summary = json.loads(action["result_summary"])
