@@ -1,7 +1,30 @@
+function sameAddressApiUrl(configured: string): string | null {
+  // The configured API URL names one address. Opened at any other address that reaches the
+  // same engine -- the public IP of the host, or a forwarded port -- the page kept fetching
+  // the configured one, which the browser either cannot route to or refuses as a
+  // private-network request from a public page, so every read and write failed.
+  //
+  // Only an address literal is followed, and only when the configured URL names one too. A
+  // hostname is left alone: it may legitimately be a gateway in front of a different API
+  // host, and following names would also be the shape a rebound DNS name relies on.
+  try {
+    const parsed = new URL(configured)
+    const page = window.location.hostname
+    const isLiteral = (value: string) =>
+      /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || value.includes(':') || value.startsWith('[')
+    if (!page || page === parsed.hostname) return null
+    if (!isLiteral(page) || !isLiteral(parsed.hostname)) return null
+    const port = parsed.port ? `:${parsed.port}` : ''
+    return `${parsed.protocol}//${window.location.hostname}${port}`
+  } catch {
+    return null
+  }
+}
+
 export function getApiUrl(): string {
   if (typeof window !== 'undefined') {
     const runtimeUrl = window.__SHAKERSCAN_API_URL__
-    if (runtimeUrl) return runtimeUrl
+    if (runtimeUrl) return sameAddressApiUrl(runtimeUrl) ?? runtimeUrl
     const host = window.location.hostname
     const pageProtocol = window.location.protocol
     if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
