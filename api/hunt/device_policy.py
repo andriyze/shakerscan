@@ -31,12 +31,21 @@ class DeviceHuntPolicyState:
     circuit_breaker_threshold: int = 2
     traffic_frozen: bool = False
     last_request_at: str | None = None
+    # Why traffic is frozen. Only a transient health freeze may auto-clear on a
+    # healthy checkpoint; any other reason must be cleared deliberately.
+    freeze_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != DEVICE_HUNT_POLICY_SCHEMA:
             raise DeviceHuntPolicyError("unknown native device Hunt policy schema")
         if self.safety_profile not in {"safe_remote", "authenticated_active"}:
             raise DeviceHuntPolicyError("invalid native device Hunt safety profile")
+        if self.freeze_reason is not None and self.freeze_reason not in {
+            "health_degradation", "operator_pause", "policy_violation", "budget_exhausted",
+        }:
+            raise DeviceHuntPolicyError("unknown device Hunt freeze reason")
+        if self.traffic_frozen and self.freeze_reason is None:
+            object.__setattr__(self, "freeze_reason", "health_degradation")
         numeric = (
             self.fragility_limit,
             self.fragility_used,
@@ -188,16 +197,19 @@ class DeviceHuntPolicyState:
             if health_observed
             else self.consecutive_health_failures
         )
-        # A healthy checkpoint clears a prior transient freeze: the circuit
-        # breaker protects a struggling device, but once the device is observed
-        # healthy again an authorized Hunt must be able to resume rather than
-        # stay frozen for the rest of its life.
-        if health_observed and not health_failed:
+        # A healthy checkpoint clears a *transient health* freeze so an authorized
+        # Hunt can resume rather than stay frozen for the rest of its life. A
+        # freeze set for any other reason (operator pause, policy, budget) is not
+        # cleared by a healthy device and must be lifted deliberately.
+        health_clearable = self.freeze_reason in (None, "health_degradation")
+        if health_observed and not health_failed and health_clearable:
             frozen = False
+            freeze_reason = None
         else:
             frozen = self.traffic_frozen or bool(after.get("traffic_frozen")) or (
                 failures >= self.circuit_breaker_threshold
             )
+            freeze_reason = self.freeze_reason or ("health_degradation" if frozen else None)
         return DeviceHuntPolicyState(
             safety_profile=self.safety_profile,
             fragility_limit=self.fragility_limit,

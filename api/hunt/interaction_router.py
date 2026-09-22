@@ -1520,8 +1520,14 @@ async def _execute_hunt_capability_lifecycle(
             uses_direct_origin = bool(
                 str(request.input.get("via_address") or "").strip()
             )
+            # Selecting another service port on the same authorized host is an
+            # active act and is re-metered/re-approved per call, for every
+            # HTTP-capable capability that accepts an origin (http.request and
+            # the scanner capabilities), not only http.request.
             uses_service_origin = False
-            if name == "http.request" and request.input.get("origin") is not None:
+            if request.input.get("origin") is not None and (
+                name == "http.request" or is_scanner
+            ):
                 original, _ = web_hunt_target(run, context, policy)
                 try:
                     selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
@@ -2336,6 +2342,17 @@ async def _execute_hunt_capability_lifecycle(
             # KeyError, and bind as the actual target kind (device/network are
             # allowed by the adapter, not only web/api).
             tls_target, tls_origin = web_hunt_target(run, context, policy)
+            # An explicit HTTPS service origin on the same authorized host lets
+            # tls.inspect examine a service on any port (e.g. https://host:8443)
+            # instead of only the target's stored origin.
+            if request.input.get("origin") is not None:
+                try:
+                    tls_target = resolve_hunt_http_origin(
+                        tls_target, request.input["origin"], policy,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                tls_origin = str(request.input["origin"])
             tls_budget = (
                 durable_reservation.record.requested
                 if durable_reservation is not None

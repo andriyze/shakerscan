@@ -413,11 +413,30 @@ _SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
 }
 
 
+# A service origin on the same authorized target host. Scheme and port are
+# service coordinates on the already-authorized asset, not a new authorization
+# boundary, so any valid port is allowed under the Hunt's active target
+# authorization; a different host is never admitted by this field.
+_SERVICE_ORIGIN_PROPERTY: Mapping[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 2_048,
+    "description": (
+        "HTTP(S) service origin on the same authorized target host. Any valid "
+        "port is allowed under the Hunt's active target authorization; a "
+        "different host is never admitted."
+    ),
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
     """Declare the content-free identity binding shared by HTTP capabilities."""
     merged = dict(properties or {})
+    # Every HTTP-capable capability may be pointed at another service port on
+    # the same authorized host; a caller that declares its own origin keeps it.
+    merged.setdefault("origin", _SERVICE_ORIGIN_PROPERTY)
     merged.update(_HTTP_PRINCIPAL_BINDING_PROPERTIES)
     return _schema(merged, required=required)
 
@@ -1063,7 +1082,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
-                           "description": "HTTP(S) service on this host; additional ports use the Hunt's existing network-discovery authority."},
+                           "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1277,6 +1296,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "address_count": {
                     "type": "integer", "minimum": 1, "maximum": 64,
                 },
+                "origin": _SERVICE_ORIGIN_PROPERTY,
             }, required=(
                 "origins_ref", "origin_count", "addresses_ref", "address_count",
             )),
@@ -1353,7 +1373,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "session_ref": {"type": "string", "format": "uuid"},
-                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1386,7 +1406,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
-                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
                 "session_ref": {"type": "string", "format": "uuid"},
                 "steps": {

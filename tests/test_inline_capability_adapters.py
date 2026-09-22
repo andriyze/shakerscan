@@ -666,3 +666,36 @@ def test_active_collection_replay_reaches_device_and_network_targets():
     for name in ("collections.replay_active", "collections.replay_authentication"):
         spec = CAPABILITY_REGISTRY.require(name)
         assert {"web", "api", "network", "device"} <= set(spec.target_kinds)
+
+
+def test_http_capabilities_accept_a_same_host_service_origin_input():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    # Scanner and TLS capabilities now accept an `origin`, so an authorized Hunt
+    # can point them at another service port on the same host.
+    for name in ("web.probe", "templates.scan", "web.crawl", "web.browser_crawl",
+                 "web.content_discover", "xss.verify", "sqli.verify",
+                 "tls.inspect", "http.request"):
+        props = CAPABILITY_REGISTRY.require(name).input_schema["properties"]
+        assert "origin" in props, f"{name} input schema is missing origin"
+    # The planner projection must also admit origin where one exists.
+    for name in ("templates.scan", "xss.verify", "sqli.verify"):
+        projection = CAPABILITY_REGISTRY.require(name).planner_input_schema
+        assert "origin" in projection["properties"], f"{name} planner projection is missing origin"
+
+
+def test_scanner_execution_target_uses_the_selected_service_origin_base():
+    from worker import _worker_scanner_execution_target
+    # A path joins onto the selected origin (any port), and a path that escapes
+    # that origin is rejected against the selected origin, not the stored URL.
+    assert _worker_scanner_execution_target(
+        "https://host.example:8443", {"path": "/status"},
+    ) == "https://host.example:8443/status"
+    import agent_tools
+    try:
+        _worker_scanner_execution_target(
+            "https://host.example:8443", {"path": "https://host.example:9443/x"},
+        )
+    except agent_tools.AgentToolError:
+        pass
+    else:
+        raise AssertionError("a path escaping the selected origin must be rejected")

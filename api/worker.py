@@ -20515,8 +20515,23 @@ async def process_canonical_scanner_capability_job(
                         "scanner capability no longer has active approval"
                     )
                 target, registered_target = _worker_hunt_web_target(run, context, hunt_policy)
+                # A scanner capability may be pointed at another service port on
+                # the same authorized host. Resolve it the same way http.request
+                # does (host-pinned, active-testing required) and scan the
+                # selected origin instead of the stored target URL.
+                scanner_base = registered_target
+                if capability_input.get("origin") is not None:
+                    from capabilities.http import resolve_hunt_http_origin
+                    from capabilities.http import _origin as _http_service_origin
+                    try:
+                        target = resolve_hunt_http_origin(
+                            target, capability_input.get("origin"), hunt_policy,
+                        )
+                    except ValueError as exc:
+                        raise agent_tools.AgentToolError(str(exc)) from exc
+                    scanner_base = _http_service_origin(capability_input["origin"]) or registered_target
                 execution_target = _worker_scanner_execution_target(
-                    registered_target,
+                    scanner_base,
                     capability_input,
                 )
                 authorized_addresses = [

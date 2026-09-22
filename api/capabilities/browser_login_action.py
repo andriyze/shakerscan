@@ -195,8 +195,15 @@ class BrowserLoginAdapter:
         if reference["principal_slot"] != validated["as_principal"]:
             raise ValueError("browser login principal differs from the saved reference")
         from .browser_login import _origin
+        # login_check is advertised for the same target kinds as the other HTTP
+        # capabilities (web, api, network, device); a connected device that serves
+        # a login page is the same asset examined over HTTP. Compare origins by
+        # normalized key so a spelled-out default port matches the binding.
+        from capabilities.http import _origin_key as _service_origin_key
         origin = _origin(base_url)
-        if (target.target_kind not in {"web", "api"} or origin not in target.allowed_origins
+        allowed_origin_keys = {_service_origin_key(value) for value in target.allowed_origins}
+        if (target.target_kind not in {"web", "api", "network", "device"}
+                or _service_origin_key(origin) not in allowed_origin_keys
                 or urlsplit(origin).hostname != target.canonical_host
                 or not target.allowed_addresses):
             raise ValueError("browser login target is not frozen")
