@@ -168,6 +168,13 @@ class DeviceSafetyGovernor:
         self.health_checkpoints.append(current)
         if current.get("status") != "degraded":
             return
+        # A closed or unresponsive TCP port is normal on a device and is never
+        # proof that a service is absent, so it must not halt an authorized
+        # Hunt.  Only loss of name/address resolution — the device itself
+        # becoming unreachable — halts, and only after a healthy or
+        # port-tested baseline established that it was reachable before.
+        if current.get("resolution_succeeded") is not False:
+            return
         prior = self.health_checkpoints[:-1]
         attempted_tcp_ports = bool(current.get("attempted_tcp_ports"))
         if any(item.get("status") == "healthy" for item in prior) or (

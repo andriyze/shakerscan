@@ -63,7 +63,7 @@ async def inspect_tls_origin(
             },
         }
     if (
-        target.target_kind not in {"web", "api"}
+        target.target_kind not in {"web", "api", "network", "device"}
         or parsed.hostname.lower().rstrip(".") != target.canonical_host
         or normalized_origin not in target.allowed_origins
     ):

@@ -112,12 +112,26 @@ def test_device_browser_rejects_invalid_or_unbound_origin(name, origin):
         prepare(name, {"origin": origin, "selector": "#details"} if name.endswith("interact") else {"origin": origin})
 
 
-@pytest.mark.parametrize("field", ["active_testing", "network_discovery", "approval_receipt_id", "scope_receipt_id"])
-def test_browser_service_override_requires_existing_network_authority(field):
-    with pytest.raises(ValueError, match="network discovery authority"):
-        prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None})
-    with pytest.raises(ValueError, match="network discovery authority"):
-        asyncio.run(worker_prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None}))
+def test_browser_service_override_requires_active_testing_authority():
+    # Reaching another port on the SAME already-authorized host needs active
+    # testing (which the target's standing authorization grants). The host is
+    # still pinned, so this never admits a different host.
+    without_active = {**POLICY, "active_testing": None}
+    with pytest.raises(ValueError, match="active-testing authority"):
+        prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, without_active)
+    with pytest.raises(ValueError, match="active-testing authority"):
+        asyncio.run(worker_prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, without_active))
+
+
+@pytest.mark.parametrize("field", ["network_discovery", "approval_receipt_id", "scope_receipt_id"])
+def test_browser_service_override_no_longer_requires_network_discovery(field):
+    # An authorized active Hunt reaches a service on another port of its exact
+    # host without separately being granted network discovery, an approval
+    # receipt, or a matching scope receipt.
+    admitted = prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None})
+    assert admitted.url == "http://127.0.0.1:8080/"
+    worker, _ = asyncio.run(worker_prepare("browser.navigate", {"origin": "http://127.0.0.1:8080"}, {**POLICY, field: None}))
+    assert worker.url == "http://127.0.0.1:8080/"
 
 
 def test_real_browser_navigation_and_interaction_reach_device_service_port():

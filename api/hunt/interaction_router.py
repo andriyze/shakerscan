@@ -2331,7 +2331,11 @@ async def _execute_hunt_capability_lifecycle(
                 action_digest=durable_action_digest,
             )
         elif name == "tls.inspect":
-            tls_target = inline_web_target_binding()
+            # A device Hunt records a bare locator, not a "url": resolve the
+            # origin the same way the HTTP binding does so this does not raise
+            # KeyError, and bind as the actual target kind (device/network are
+            # allowed by the adapter, not only web/api).
+            tls_target, tls_origin = web_hunt_target(run, context, policy)
             tls_budget = (
                 durable_reservation.record.requested
                 if durable_reservation is not None
@@ -2340,7 +2344,7 @@ async def _execute_hunt_capability_lifecycle(
             tls_adapter = TlsInspectionExecutionAdapter(
                 specification=spec,
                 operation=lambda: inspect_tls_origin(
-                    str(context["target"]["url"]),
+                    tls_origin,
                     target=tls_target,
                     timeout_seconds=int(
                         tls_budget.get("tool_wall_seconds") or 1

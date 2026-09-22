@@ -172,10 +172,15 @@ def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping
     candidate = _origin(text)
     if _origin_key(candidate) in {_origin_key(value) for value in target.allowed_origins}:
         return target
-    if not (policy.get("active_testing") is True and policy.get("network_discovery") is True
-            and policy.get("approval_receipt_id") and target.scope_receipt_id
-            and target.scope_receipt_id == policy.get("scope_receipt_id")):
-        raise ValueError("another service port requires the Hunt's network discovery authority")
+    # A different port or scheme on the SAME already-authorized host is another
+    # service on the target the operator authorized, not a new destination: the
+    # host is pinned above and cannot change here, and a response redirect still
+    # cannot widen scope this way. Reaching it needs active testing (which the
+    # target's standing authorization grants); network discovery is sufficient
+    # but no longer required, so an authorized Hunt is not refused a service that
+    # simply listens on another port.
+    if policy.get("active_testing") is not True:
+        raise ValueError("another service port on this host requires the Hunt's active-testing authority")
     return replace(target, allowed_origins=(*target.allowed_origins, candidate))
 
 

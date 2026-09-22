@@ -201,6 +201,15 @@ def test_native_device_policy_is_typed_paced_and_fail_closed():
     with pytest.raises(DeviceHuntPolicyError, match="circuit breaker"):
         second.require_admission(request_attempts=1)
 
+    # A healthy checkpoint clears the freeze so an authorized Hunt can resume
+    # rather than stay frozen for the rest of its life.
+    before_third = second.adapter_state(credential_refs=[], collection_refs=[])
+    after_third = {**before_third, "health_observed": True, "health_failed": False}
+    third = second.reconcile_adapter_state(before_third, after_third, health_failed=False)
+    assert third.traffic_frozen is False
+    assert third.consecutive_health_failures == 0
+    third.require_admission(request_attempts=0)
+
 
 def test_native_device_hunts_never_seed_legacy_agent_state():
     source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")

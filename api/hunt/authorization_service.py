@@ -37,8 +37,18 @@ def _active(run: Mapping[str, Any]) -> None:
 def _target_context(run: Mapping[str, Any]) -> dict[str, Any]:
     context = mapping(run.get("context_pack"))
     target = mapping(context.get("target"))
-    if not isinstance(target.get("origins"), list) or not target["origins"]:
-        raise AuthorizationWorkflowError("This Hunt has no frozen HTTP origins")
+    origins = target.get("origins")
+    if not isinstance(origins, list) or not origins:
+        # A connected device records a bare locator instead of a frozen origin
+        # list, but it is examined over HTTP exactly like a web target. Derive
+        # its origin from the locator so device Hunts are not refused the
+        # authorization workflow that web Hunts get.
+        locator = str(target.get("locator") or target.get("url") or "").strip()
+        if locator:
+            origin = locator if "://" in locator else f"http://{locator}"
+            target = {**target, "origins": [origin]}
+        else:
+            raise AuthorizationWorkflowError("This Hunt has no frozen HTTP origins")
     return {"target": target, "addresses": context.get("authorized_target_addresses", [])}
 
 

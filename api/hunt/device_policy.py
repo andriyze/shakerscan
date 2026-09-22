@@ -188,9 +188,16 @@ class DeviceHuntPolicyState:
             if health_observed
             else self.consecutive_health_failures
         )
-        frozen = self.traffic_frozen or bool(after.get("traffic_frozen")) or (
-            failures >= self.circuit_breaker_threshold
-        )
+        # A healthy checkpoint clears a prior transient freeze: the circuit
+        # breaker protects a struggling device, but once the device is observed
+        # healthy again an authorized Hunt must be able to resume rather than
+        # stay frozen for the rest of its life.
+        if health_observed and not health_failed:
+            frozen = False
+        else:
+            frozen = self.traffic_frozen or bool(after.get("traffic_frozen")) or (
+                failures >= self.circuit_breaker_threshold
+            )
         return DeviceHuntPolicyState(
             safety_profile=self.safety_profile,
             fragility_limit=self.fragility_limit,
