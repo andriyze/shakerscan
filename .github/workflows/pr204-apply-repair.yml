@@ -31,6 +31,11 @@ jobs:
           assert hashlib.sha256(patch).hexdigest()=='d8397f30684d3df46f7df39c10684632fd15a801e8d07f12bf629bcd1642f989'
           subprocess.run(['git','apply','--check','-'],input=patch,check=True)
           subprocess.run(['git','apply','-'],input=patch,check=True)
+          path=pathlib.Path('tests/test_hunt_service_postgres.py')
+          source=path.read_text()
+          old='configuration={}, encrypted_secret='
+          assert source.count(old)==1
+          path.write_text(source.replace(old,'configuration={"auth_kind": "json_login", "secret_values_visible": False}, encrypted_secret='))
           PY
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
