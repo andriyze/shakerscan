@@ -1,0 +1,38 @@
+name: Cleanup safety
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/clean-shakerscan.sh'
+      - 'tests/test_clean_shakerscan*'
+      - '.github/workflows/cleanup-safety.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/clean-shakerscan.sh'
+      - 'tests/test_clean_shakerscan*'
+      - '.github/workflows/cleanup-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Exercise native Bash and inert Docker/removal fault fixtures
+        env:
+          CLEAN_TEST_BASH: /bin/bash
+        run: bash tests/test_clean_shakerscan.sh

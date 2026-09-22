@@ -1,147 +1,258 @@
 #!/usr/bin/env bash
-# ShakerScan clean uninstall / reinstall helper for macOS and Linux.
-# Removes only resources owned by the selected ShakerScan installation.
+# Local ShakerScan cleanup. Bash 3.2 compatible; no Compose/.env evaluation.
 set -euo pipefail
 
-INSTALL_DIR="${SHAKERSCAN_HOME:-$HOME/.shakerscan}"
-CONFIG_DIR="${SHAKERSCAN_CONFIG_DIR:-$HOME/.config/shakerscan}"
-BIN_DIR="${SHAKERSCAN_BIN_DIR:-$HOME/.local/bin}"
-PROJECT="${COMPOSE_PROJECT_NAME:-shakerscan}"
-YES=0
-PURGE_CLIENT=1
-PURGE_IMAGES=0
+INSTALL_DIR="${SHAKERSCAN_HOME-$HOME/.shakerscan}"
+CONFIG_DIR="${SHAKERSCAN_CONFIG_DIR-$HOME/.config/shakerscan}"
+BIN_DIR="${SHAKERSCAN_BIN_DIR-$HOME/.local/bin}"
+PROJECT="${COMPOSE_PROJECT_NAME-shakerscan}"
+YES=0 DRY_RUN=0 PURGE_CLIENT=1 PURGE_IMAGES=0 SUDO_DOCKER=0
+PHASE=preflight
 
 usage() {
   cat <<'EOF'
 Usage: clean-shakerscan.sh [options]
 
-Completely removes local ShakerScan runtime data so the host can be cleanly
-reinstalled. macOS and Linux are supported.
+Remove a local ShakerScan runtime and its project-labeled Docker resources.
+macOS and Linux are supported. Preview with --dry-run before deleting data.
 
 Options:
-  --home PATH       ShakerScan runtime directory (default: ~/.shakerscan)
-  --project NAME    Compose project name (default: shakerscan)
-  --keep-client     Keep ~/.config/shakerscan and the launcher
-  --images          Also remove ShakerScan Docker images (not needed to reinstall)
-  -y, --yes         Skip the destructive confirmation
-  -h, --help        Show this help
+  --home PATH       Runtime directory (default: ~/.shakerscan)
+  --project NAME    Compose project (default: shakerscan or COMPOSE_PROJECT_NAME)
+  --keep-client     Keep the saved client profile and launcher
+  --images          Also remove first-party image references used by this project
+  --sudo-docker     Use sudo for Docker only, on the same local Docker socket
+  --dry-run         Validate and display the plan without deleting anything
+  -y, --yes         Skip confirmation, never validation
+  -h, --help        Show help
 
-This removes PostgreSQL, Redis, local MinIO/Caddy volumes, results/evidence,
-runtime configuration, backups inside the runtime, fleet state, and the runtime
-directory itself. External S3/object storage and backups outside the runtime are
-not deleted.
+Deletes project containers, labeled volumes (including PostgreSQL/Redis/MinIO),
+networks, and the verified runtime, including its evidence, secrets and backups.
+Client cleanup removes only config.json, token and this runtime's launcher;
+other client-directory files and package-manager-owned commands are retained.
+External storage, external volumes, host-wide /etc, /opt, /var/lib integrations,
+systemd/WireGuard configuration and backups outside the runtime are NOT removed.
+Run as the installation owner. Docker must be reachable; a failed inventory is
+not an empty inventory. Local files are retained if Docker cleanup fails.
 EOF
 }
 
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+on_exit() {
+  local status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$PHASE" in
+      preflight) echo 'Cleanup aborted before removal; local files are unchanged.' >&2 ;;
+      docker) echo 'Docker cleanup incomplete; some resources may be gone, but local runtime and client files were retained. Fix Docker access and retry.' >&2 ;;
+      local) echo 'Local cleanup incomplete; inspect the reported paths before reinstalling. No rollback was performed.' >&2 ;;
+    esac
+  fi
+}
+trap on_exit EXIT
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --home) [ "$#" -ge 2 ] || { echo "Error: --home needs a path" >&2; exit 2; }; INSTALL_DIR="$2"; shift 2 ;;
-    --project) [ "$#" -ge 2 ] || { echo "Error: --project needs a name" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
+    --home|--project)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      if [ "$1" = --home ]; then INSTALL_DIR=$2; else PROJECT=$2; fi
+      shift 2 ;;
     --keep-client) PURGE_CLIENT=0; shift ;;
     --images) PURGE_IMAGES=1; shift ;;
+    --sudo-docker) SUDO_DOCKER=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -y|--yes) YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "Error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) die "Unknown option: $1 (see --help)" ;;
   esac
 done
 
-case "$INSTALL_DIR" in
-  ""|"/"|"$HOME") echo "Refusing unsafe runtime path: $INSTALL_DIR" >&2; exit 2 ;;
-esac
+# Resolve trailing slashes, dot components and parent symlinks portably. Missing
+# leaves are supported for repeat cleanup, but never a dangling symlink or file.
+canonical_dir() {
+  local path=$1 suffix='' leaf base
+  [ -n "$path" ] || die 'Directory must not be empty'
+  [[ ! "$path" =~ [[:cntrl:]] ]] || die 'Control characters in directory path'
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  while [ "$path" != / ] && [ "${path%/}" != "$path" ]; do path=${path%/}; done
+  while [ ! -d "$path" ]; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || die "Not a directory: $path"
+    leaf=${path##*/}
+    case "$leaf" in ''|.|..) die "Cannot resolve directory: $1" ;; esac
+    suffix="/$leaf$suffix"
+    path=${path%/*}; [ -n "$path" ] || path=/
+  done
+  base=$(cd -P -- "$path" && pwd -P) || die "Cannot resolve directory: $1"
+  base="${base%/}$suffix"
+  printf '%s\n' "${base:-/}"
+}
 
-echo "ShakerScan clean reinstall"
-echo "  Runtime: $INSTALL_DIR"
-echo "  Compose project: $PROJECT"
-echo "  Client config: $([ "$PURGE_CLIENT" -eq 1 ] && printf 'remove' || printf 'keep')"
-echo "  Docker images: $([ "$PURGE_IMAGES" -eq 1 ] && printf 'remove' || printf 'keep')"
-echo
-echo "WARNING: scan history, findings, evidence, database, queues, local object"
-echo "storage, credentials, backups inside the runtime, and fleet state will be deleted."
-echo "External object storage and backups outside this directory are NOT deleted."
+HOME_CANON=$(canonical_dir "$HOME")
+[ -d "$HOME_CANON" ] || die 'HOME is not an existing directory'
+[ -z "${SUDO_USER:-}" ] || die 'Run as the installation owner; use --sudo-docker instead of sudo for the entire script'
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 'Invalid Compose project name'
+
+safe_dir() {
+  local path=$1 protected resolved
+  case "$path" in
+    /|/bin|/sbin|/usr|/usr/bin|/usr/sbin|/usr/lib|/usr/local|/usr/local/bin|/etc|/opt|/var|/var/lib|/var/run|/var/tmp|/var/log|/run|/tmp|/private|/private/tmp|/private/var|/private/var/tmp|/private/var/log|/private/etc|/home|/Users|/root|/System|/Library|/Applications|/Volumes|/mnt|/media)
+      die "Refusing unsafe directory: $path" ;;
+  esac
+  case "$HOME_CANON/" in "$path/"*) die "Refusing HOME or its ancestor: $path" ;; esac
+  for protected in .config .local .local/bin Desktop Documents Downloads Library; do
+    resolved=$(canonical_dir "$HOME_CANON/$protected")
+    [ "$path" != "$resolved" ] || die "Refusing shared user directory: $path"
+  done
+}
+
+RAW_INSTALL=$INSTALL_DIR RAW_CONFIG=$CONFIG_DIR RAW_BIN=$BIN_DIR
+INSTALL_DIR=$(canonical_dir "$RAW_INSTALL")
+safe_dir "$INSTALL_DIR"
+CONFIG_DIR=$(canonical_dir "$RAW_CONFIG")
+BIN_DIR=$(canonical_dir "$RAW_BIN")
+
+validate_paths() {
+  local compose candidate
+  [ "$(canonical_dir "$RAW_INSTALL")" = "$INSTALL_DIR" ] || die 'Runtime path changed during cleanup'
+  # Refuse a symlink as the deletion root even if its destination is marked.
+  candidate=$RAW_INSTALL
+  while [ "$candidate" != / ] && [ "${candidate%/}" != "$candidate" ]; do candidate=${candidate%/}; done
+  [ ! -L "$candidate" ] || die 'Runtime must not be a symlink; name its real directory explicitly'
+  safe_dir "$INSTALL_DIR"
+  if [ -d "$INSTALL_DIR" ]; then
+    [ -O "$INSTALL_DIR" ] || die 'Runtime is not owned by the current user'
+    [ -f "$INSTALL_DIR/scanner.sh" ] && [ ! -L "$INSTALL_DIR/scanner.sh" ] &&
+      grep -Fq 'ShakerScan - CLI Management Tool' "$INSTALL_DIR/scanner.sh" ||
+      die "Not a recognized ShakerScan runtime: $INSTALL_DIR (missing launcher marker)"
+    compose=''
+    for candidate in docker-compose.release.yml docker-compose.yml; do
+      if [ -f "$INSTALL_DIR/$candidate" ] && [ ! -L "$INSTALL_DIR/$candidate" ] &&
+          grep -qi shakerscan "$INSTALL_DIR/$candidate"; then compose=$candidate; break; fi
+    done
+    [ -n "$compose" ] || die 'Runtime lacks a recognized ShakerScan Compose file'
+  fi
+  if [ "$PURGE_CLIENT" -eq 1 ]; then
+    [ "$(canonical_dir "$RAW_CONFIG")" = "$CONFIG_DIR" ] || die 'Client path changed during cleanup'
+    [ "$(canonical_dir "$RAW_BIN")" = "$BIN_DIR" ] || die 'Launcher directory changed during cleanup'
+    safe_dir "$CONFIG_DIR"
+    case "$INSTALL_DIR/" in "$CONFIG_DIR/"*) die 'Client directory must not contain the runtime' ;; esac
+    if [ -d "$CONFIG_DIR" ]; then
+      [ -O "$CONFIG_DIR" ] || die 'Client directory is not owned by the current user'
+      if [ -e "$CONFIG_DIR/config.json" ] || [ -L "$CONFIG_DIR/config.json" ]; then
+        [ -f "$CONFIG_DIR/config.json" ] && [ ! -L "$CONFIG_DIR/config.json" ] &&
+          grep -Eq '"url"[[:space:]]*:[[:space:]]*"https?://' "$CONFIG_DIR/config.json" ||
+          die 'Client profile is not recognized; use --keep-client to retain it'
+      elif [ -e "$CONFIG_DIR/token" ] || [ -L "$CONFIG_DIR/token" ]; then
+        die 'Cannot attribute token without config.json; use --keep-client'
+      fi
+      [ ! -d "$CONFIG_DIR/token" ] || die 'Client token is a directory; refusing removal'
+    fi
+  else
+    case "$CONFIG_DIR/" in "$INSTALL_DIR/"*) die '--keep-client cannot preserve a client directory inside the deleted runtime' ;; esac
+    case "$BIN_DIR/" in "$INSTALL_DIR/"*) die '--keep-client cannot preserve a launcher directory inside the deleted runtime' ;; esac
+  fi
+}
+validate_paths
+
+command -v docker >/dev/null 2>&1 || die 'Docker is unavailable. Install/start Docker and retry; no local files will be removed'
+# Resolve in the owner's context, then pin the endpoint even when sudo is used.
+if [ -n "${DOCKER_CONTEXT:-}" ] || [ -z "${DOCKER_HOST:-}" ]; then
+  context=${DOCKER_CONTEXT:-$(docker context show)}
+  DOCKER_ENDPOINT=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}') || die 'Cannot inspect Docker context'
+else
+  DOCKER_ENDPOINT=$DOCKER_HOST
+fi
+case "$DOCKER_ENDPOINT" in unix:///*) ;; *) die 'This is a local cleanup helper; select a local Unix-socket Docker context' ;; esac
+[[ ! "$DOCKER_ENDPOINT" =~ [[:cntrl:]] ]] || die 'Invalid Docker endpoint'
+docker_cmd=(docker)
+if [ "$SUDO_DOCKER" -eq 1 ]; then
+  command -v sudo >/dev/null 2>&1 || die 'sudo is unavailable'
+  docker_cmd=(sudo -- docker)
+fi
+docker_call() (
+  unset DOCKER_CONTEXT DOCKER_HOST
+  "${docker_cmd[@]}" --host "$DOCKER_ENDPOINT" "$@"
+)
+DAEMON_ID=$(docker_call info --format '{{.ID}}') || die 'Docker is unreachable. Start Docker or use --sudo-docker for a local socket permission error'
+[ -n "$DAEMON_ID" ] || die 'Docker returned no daemon identity'
+LABEL="label=com.docker.compose.project=$PROJECT"
+inventory() {
+  CONTAINERS=$(docker_call ps -aq --no-trunc --filter "$LABEL") || die 'Cannot list project containers'
+  VOLUMES=$(docker_call volume ls -q --filter "$LABEL") || die 'Cannot list project volumes'
+  NETWORKS=$(docker_call network ls -q --no-trunc --filter "$LABEL") || die 'Cannot list project networks'
+}
+inventory
+IMAGES=''
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  workdir=$(docker_call inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$id") || die 'Cannot inspect project ownership'
+  if [ -n "$workdir" ] && [ "$workdir" != '<no value>' ]; then
+    [ "$(canonical_dir "$workdir")" = "$INSTALL_DIR" ] || die "Project $PROJECT belongs to a different runtime: $workdir"
+  fi
+  if [ "$PURGE_IMAGES" -eq 1 ]; then
+    image=$(docker_call inspect --format '{{.Config.Image}}' "$id") || die 'Cannot inspect project image'
+    case "$image" in shakerscan/shakerscan-*|shakerscan-*) IMAGES="$IMAGES$image"$'\n' ;; esac
+  fi
+done <<< "$CONTAINERS"
+IMAGES=$(printf '%s' "$IMAGES" | sort -u)
+
+printf 'ShakerScan cleanup plan\n  Runtime: %s\n  Docker: %s\n  Compose project: %s\n' "$INSTALL_DIR" "$DOCKER_ENDPOINT" "$PROJECT"
+printf '  Containers:\n%s\n  Volumes:\n%s\n  Networks:\n%s\n' "${CONTAINERS:-(none)}" "${VOLUMES:-(none)}" "${NETWORKS:-(none)}"
+if [ "$PURGE_CLIENT" -eq 1 ]; then
+  printf '  Client files: %s/{config.json,token}\n  Owned launcher only: %s/shakerscan\n' "$CONFIG_DIR" "$BIN_DIR"
+else echo '  Client files and launcher: kept'; fi
+if [ "$PURGE_IMAGES" -eq 1 ]; then printf '  Project first-party image references:\n%s\n' "${IMAGES:-(none)}"; else echo '  Docker images: kept'; fi
+echo 'Host-wide integrations, external volumes/storage and backups outside the runtime are retained.'
+echo 'WARNING: selected database, credentials, scan history, evidence and runtime backups will be deleted.'
+[ "$DRY_RUN" -eq 0 ] || { echo 'Dry run complete. Nothing was removed.'; exit 0; }
 if [ "$YES" -ne 1 ]; then
   printf 'Type DELETE SHAKERSCAN to continue: '
-  IFS= read -r answer
-  [ "$answer" = "DELETE SHAKERSCAN" ] || { echo "Cancelled."; exit 0; }
+  if ! IFS= read -r answer || [ "$answer" != 'DELETE SHAKERSCAN' ]; then echo 'Cancelled. Nothing was removed.'; exit 0; fi
 fi
+validate_paths
+[ "$(docker_call info --format '{{.ID}}')" = "$DAEMON_ID" ] || die 'Docker daemon changed; rerun the preview'
+# Re-inventory after confirmation; a new resource needs a fresh operator preview.
+old_containers=$CONTAINERS old_volumes=$VOLUMES old_networks=$NETWORKS
+inventory
+[ "$CONTAINERS" = "$old_containers" ] && [ "$VOLUMES" = "$old_volumes" ] && [ "$NETWORKS" = "$old_networks" ] || die 'Project resources changed during confirmation; rerun cleanup'
 
-compose=()
-if command -v docker >/dev/null 2>&1; then
-  if docker compose version >/dev/null 2>&1; then compose=(docker compose)
-  elif command -v docker-compose >/dev/null 2>&1; then compose=(docker-compose)
-  fi
-fi
-
-compose_file=""
-for f in docker-compose.release.yml docker-compose.yml; do
-  [ -f "$INSTALL_DIR/$f" ] && { compose_file="$INSTALL_DIR/$f"; break; }
+PHASE=docker
+# No Compose interpolation/password is necessary. Only exact project-label
+# inventory is removed, never a global prune or external/unlabeled volume.
+for kind in containers volumes networks images; do
+  case "$kind" in
+    containers) values=$CONTAINERS; command_args=(rm -f) ;;
+    volumes) values=$VOLUMES; command_args=(volume rm) ;;
+    networks) values=$NETWORKS; command_args=(network rm) ;;
+    images) values=$IMAGES; command_args=(image rm) ;;
+  esac
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    docker_call "${command_args[@]}" "$id" || die "Failed removing $kind: $id"
+  done <<< "$values"
 done
+inventory
+[ -z "$CONTAINERS$VOLUMES$NETWORKS" ] || die 'Project resources remain after deletion; local files were retained'
+[ "$(docker_call info --format '{{.ID}}')" = "$DAEMON_ID" ] || die 'Cannot verify the same Docker daemon after removal'
+validate_paths
 
-if [ "${#compose[@]}" -gt 0 ] && [ -n "$compose_file" ]; then
-  args=("${compose[@]}" --project-directory "$INSTALL_DIR" --project-name "$PROJECT" -f "$compose_file")
-  [ -f "$INSTALL_DIR/.env" ] && args+=(--env-file "$INSTALL_DIR/.env")
-  echo "Stopping ShakerScan and deleting Compose volumes..."
-  # Include optional profiles so stopped MinIO/Caddy/fleet resources are in scope.
-  "${args[@]}" --profile '*' down --volumes --remove-orphans || {
-    echo "Warning: Compose cleanup did not complete; checking labeled resources." >&2
-  }
-elif command -v docker >/dev/null 2>&1; then
-  echo "Runtime Compose file not found; cleaning resources by Compose project label..."
-fi
-
-# Compose can miss resources from an old/changed compose file. Labels are safer
-# than name globs and avoid touching unrelated Docker workloads.
-if command -v docker >/dev/null 2>&1; then
-  ids="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)"
-  [ -z "$ids" ] || docker rm -f $ids >/dev/null
-  vols="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)"
-  [ -z "$vols" ] || docker volume rm $vols >/dev/null
-  nets="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)"
-  [ -z "$nets" ] || docker network rm $nets >/dev/null 2>&1 || true
-
-  if [ "$PURGE_IMAGES" -eq 1 ]; then
-    echo "Removing ShakerScan images..."
-    image_ids="$(docker images --format '{{.Repository}} {{.ID}}' 2>/dev/null |
-      awk '$1 ~ /(^|\/)shakerscan([\/-]|$)/ || $1 ~ /^shakerscan-/ {print $2}' | sort -u)"
-    [ -z "$image_ids" ] || docker image rm $image_ids >/dev/null 2>&1 || true
-  fi
-fi
-
-# Optional Linux host integrations are outside Compose. Disable them only when
-# present; never fail a normal/macOS uninstall because systemd/WireGuard is absent.
-if [ "$(uname -s)" = "Linux" ]; then
-  if command -v systemctl >/dev/null 2>&1; then
-    for unit in shakerscan-model-intake-runner.service shakerscan-fleet-reconcile.timer shakerscan-fleet-reconcile.service; do
-      systemctl list-unit-files "$unit" >/dev/null 2>&1 &&
-        sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
-    done
-  fi
-  # Host-level runner files are ShakerScan-owned. Fleet WireGuard is removed only
-  # when its exact ShakerScan config exists.
-  [ ! -e /etc/systemd/system/shakerscan-model-intake-runner.service ] ||
-    sudo rm -f /etc/systemd/system/shakerscan-model-intake-runner.service
-  [ ! -d /etc/shakerscan ] || sudo rm -rf /etc/shakerscan
-  [ ! -d /opt/shakerscan ] || sudo rm -rf /opt/shakerscan
-  [ ! -d /var/lib/shakerscan ] || sudo rm -rf /var/lib/shakerscan
-  if [ -f /etc/wireguard/shakerscan.conf ]; then
-    command -v wg-quick >/dev/null 2>&1 && sudo wg-quick down shakerscan >/dev/null 2>&1 || true
-    sudo rm -f /etc/wireguard/shakerscan.conf
-  fi
-  command -v systemctl >/dev/null 2>&1 && sudo systemctl daemon-reload >/dev/null 2>&1 || true
-fi
-
-echo "Removing runtime directory..."
-rm -rf -- "$INSTALL_DIR"
-
+PHASE=local
+# Client config is deliberately NOT recursively removed. Unknown files survive.
 if [ "$PURGE_CLIENT" -eq 1 ]; then
-  rm -rf -- "$CONFIG_DIR"
-  # Remove only a launcher that is recognizably ShakerScan-owned.
+  for name in config.json token; do
+    rm -f -- "$CONFIG_DIR/$name" || die "Cannot remove client file: $name"
+  done
+  if [ -d "$CONFIG_DIR" ]; then
+    if ! rmdir -- "$CONFIG_DIR"; then echo "Retained client directory (other files or permissions): $CONFIG_DIR"; fi
+  fi
   launcher="$BIN_DIR/shakerscan"
-  if [ -f "$launcher" ] && (grep -q 'shakerscan' "$launcher" 2>/dev/null || [ -L "$launcher" ]); then
-    rm -f -- "$launcher"
+  if [ -f "$launcher" ] && [ ! -L "$launcher" ] &&
+      grep -Fq "exec \"$INSTALL_DIR/scanner.sh\" \"\$@\"" "$launcher"; then
+    rm -f -- "$launcher" || die 'Cannot remove owned launcher'
+  elif [ -e "$launcher" ] || [ -L "$launcher" ]; then
+    echo "Kept launcher not attributed to this runtime: $launcher"
   fi
 fi
-
-echo
-echo "ShakerScan cleanup complete."
-echo "Docker itself and unrelated Docker resources were left untouched."
-echo "You can now perform a clean ShakerScan install."
+rm -rf -- "$INSTALL_DIR" || die 'Cannot remove runtime; check ownership and permissions'
+[ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] || die 'Runtime remains after removal'
+PHASE=done
+echo 'ShakerScan local runtime cleanup complete; selected Docker resources were verified absent.'
