@@ -20560,9 +20560,6 @@ async def process_canonical_scanner_capability_job(
                     action_id=action_id,
                     capability_name=capability_name,
                     target_kind=str(run["target_kind"]),
-                    # The control plane digests a device Hunt by its device id, so reading
-                    # only the web id here made every queued capability on a device fail with
-                    # "queue payload does not match its durable action".
                     target_id=run["device_target_id"] or run["target_id"],
                     capability_input=capability_input,
                     requested_budget=requested_budget,
@@ -21149,9 +21146,6 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     action_id=action_id,
                     capability_name=capability_name,
                     target_kind=str(run["target_kind"]),
-                    # The control plane digests a device Hunt by its device id, so reading
-                    # only the web id here made every queued capability on a device fail with
-                    # "queue payload does not match its durable action".
                     target_id=run["device_target_id"] or run["target_id"],
                     capability_input=capability_input,
                     requested_budget=requested_budget,
@@ -21629,9 +21623,6 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     action_id=action_id,
                     capability_name=capability_name,
                     target_kind=str(run["target_kind"]),
-                    # The control plane digests a device Hunt by its device id, so reading
-                    # only the web id here made every queued capability on a device fail with
-                    # "queue payload does not match its durable action".
                     target_id=run["device_target_id"] or run["target_id"],
                     capability_input=capability_input,
                     requested_budget=requested_budget,
@@ -22081,9 +22072,6 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     action_id=action_id,
                     capability_name=capability_name,
                     target_kind=str(run["target_kind"]),
-                    # The control plane digests a device Hunt by its device id, so reading
-                    # only the web id here made every queued capability on a device fail with
-                    # "queue payload does not match its durable action".
                     target_id=run["device_target_id"] or run["target_id"],
                     capability_input=capability_input,
                     requested_budget=requested_budget,
