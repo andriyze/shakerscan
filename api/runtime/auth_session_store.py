@@ -20,6 +20,7 @@ except ModuleNotFoundError:
     from api.secret_store import SecretStoreUnavailable, decrypt_secret, encrypt_secret
 
 from .models import TargetBinding
+from .session_service_authority import normalize_session_origin, validate_session_service_use
 
 
 AUTH_SESSION_SCHEMA_VERSION = "auth-session/v1"
@@ -343,12 +344,10 @@ class PostgresAuthSessionStore:
         if not isinstance(encrypted, str) or not encrypted.startswith("enc:fernet:"):
             raise AuthSessionStoreError("authentication session encryption is unavailable")
         session_id = uuid.UUID(str(session_ref)) if session_ref else uuid.uuid4()
-        if service_origin is not None:
-            from urllib.parse import urlsplit
-            candidate = urlsplit(service_origin)
-            if (candidate.scheme not in {"http", "https"} or candidate.hostname != target.canonical_host
-                    or service_origin not in target.allowed_origins):
-                raise AuthSessionStoreError("session service origin is outside the target binding")
+        try:
+            service_origin = normalize_session_origin(target, service_origin)
+        except ValueError as exc:
+            raise AuthSessionStoreError(str(exc)) from exc
         row = await conn.fetchrow(
             """INSERT INTO auth_sessions (
                    id, owner_kind, owner_id, target_kind, target_id,
@@ -482,6 +481,12 @@ class PostgresAuthSessionStore:
             raise AuthSessionStoreError(
                 "authentication session profile no longer allows the capability"
             )
+        try:
+            await validate_session_service_use(
+                conn, target=target, metadata=metadata, capability=capability_name,
+            )
+        except ValueError as exc:
+            raise AuthSessionStoreError(str(exc)) from exc
         try:
             decoded = decrypt_secret(row["encrypted_headers"])
             headers = json.loads(str(decoded or ""))

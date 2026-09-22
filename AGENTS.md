@@ -245,6 +245,21 @@ credentials has been authorized. Keep control-plane TLS verification separate an
 Web, API and network are views of the same target row and reuse its credentials and collections;
 different target UUIDs and device identities remain distinct.
 
+### Authorized service reuse
+
+An approved active Hunt with selected credentials may use those identities on HTTP or HTTPS
+services at other ports of the same frozen asset, including services with invalid certificates.
+Reuse the existing standing authorization; do not add a per-port, per-scheme, or per-call prompt.
+The login service is provenance and the refresh destination, not a permanent replay-port lock.
+At execution, revalidate the saved Hunt authority and asset binding before cross-service session
+decryption. A changed or revoked authorization is different from an unobserved service port.
+
+Use the scheme, host, port, path and principal actually captured when building evidence and
+comparing accounts. Equivalent default-port spellings are one service, but different services
+must not be mistaken for the same access-control baseline. A failed identity comparison is
+inconclusive, not a reason to abandon other authorized Hunt work. Service reuse does not grant
+another asset's authority, waive traffic budgets, or turn a successful request into proof.
+
 ### Progressive methodologies
 
 The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.

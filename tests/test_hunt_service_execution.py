@@ -88,13 +88,14 @@ def test_service_selection_still_rejects_changed_assets_or_invalid_origins(kind,
 @pytest.mark.parametrize("kind", ["web", "device", "network"])
 def test_hunt_session_store_survives_service_selection_not_asset_changes(monkeypatch, kind):
     from api.runtime import auth_session_store as store
-    from tests.test_auth_session_store import SessionConn, target, NOW, OWNER_ID, PROFILE_ID, ACTION_ID, SESSION_ID
+    from tests.test_auth_session_store import target, NOW, OWNER_ID, PROFILE_ID, ACTION_ID, SESSION_ID
+    from tests.test_hunt_session_service_authority import PolicyConn
     monkeypatch.setattr(store, "encrypt_secret", lambda s: "enc:fernet:" + s)
     monkeypatch.setattr(store, "decrypt_secret", lambda s: s.removeprefix("enc:fernet:"))
 
     async def scenario():
-        conn = SessionConn()
         base = replace(target(), target_kind=kind)
+        conn = PolicyConn(base)
         selected = resolve_hunt_http_origin(base, "https://app.example.test:8443", POLICY)
         metadata = await store.PostgresAuthSessionStore().create(conn,
             owner_kind="hunt", owner_id=OWNER_ID, target=selected, profile_id=PROFILE_ID,

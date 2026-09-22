@@ -13,7 +13,7 @@ import uuid
 
 from .authorization_evidence import (
     AuthorizationWorkflowError, attributed_outcome, canonical_action_id,
-    digest, mapping, request_identity, supported_capture,
+    digest, mapping, request_identity, supported_capture, _origin,
 )
 from .authorization_repository import (
     ATTEMPT_TYPE, DECISION_TYPE, MAX_ATTEMPTS, PROPOSAL_TYPE,
@@ -71,9 +71,14 @@ class AuthorizationInvestigationService:
         if mapping(run.get("policy_json")).get("active_testing") is True:
             from .target_binding import web_hunt_target
             from .service_binding import endpoint_target
-            binding, _ = web_hunt_target(run, mapping(run.get("context_pack")), mapping(run.get("policy_json")))
-            for captured in (capture, baseline):
-                binding, _ = endpoint_target(binding, str(captured.get("url") or ""), mapping(run.get("policy_json")))
+            try:
+                binding, _ = web_hunt_target(run, mapping(run.get("context_pack")), mapping(run.get("policy_json")))
+                for captured in (capture, baseline):
+                    binding, _ = endpoint_target(binding, str(captured.get("url") or ""), mapping(run.get("policy_json")))
+            except ValueError as exc:
+                raise AuthorizationWorkflowError(
+                    "The capture's service is not valid for this Hunt's authorized asset", 422,
+                ) from exc
             origins = list(binding.allowed_origins)
         path = supported_capture(capture, origins)
         baseline_path = supported_capture(baseline, origins)
@@ -102,8 +107,7 @@ class AuthorizationInvestigationService:
             if capture.get("status_code") != 200 or baseline.get("status_code") != 200:
                 raise AuthorizationWorkflowError("Selected-object comparison requires HTTP 200 object captures", 422)
         elif (baseline_path.rstrip("/") != f"/{request.collection}"
-                or urlsplit(capture["url"]).netloc != urlsplit(baseline["url"]).netloc
-                or urlsplit(capture["url"]).scheme != urlsplit(baseline["url"]).scheme):
+                or _origin(capture["url"]) != _origin(baseline["url"])):
             raise AuthorizationWorkflowError("The baseline must address the same origin and resource collection as the selected object", 422)
         return primary, secondary, capture, baseline
 
