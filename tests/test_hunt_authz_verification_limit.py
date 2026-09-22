@@ -21,10 +21,7 @@ import uuid
 
 from fastapi import HTTPException
 import pytest
-try:
-    from hunt.device_traffic import reserve_device_traffic
-except ModuleNotFoundError:
-    from api.hunt.device_traffic import reserve_device_traffic
+from hunt.device_traffic import reserve_device_traffic
 
 
 ROOT = Path(__file__).resolve().parents[1]
