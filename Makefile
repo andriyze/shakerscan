@@ -91,6 +91,7 @@ UNIT_TESTS = tests/test_deployment_gate.py tests/test_canonical_dedupe.py \
 	tests/test_agent_receipt_verification.py tests/test_application_graph.py \
 	tests/test_runtime_hardening.py
 FOUNDATION_PACKAGE_TESTS = tests/test_http_archive.py \
+	tests/test_hunt_device_traffic.py tests/test_device_and_cors_regressions.py tests/test_same_host_cors.py \
 	tests/test_authenticated_assurance.py \
 	tests/test_assurance_capability_admission.py tests/test_hunt_semantic_registry.py \
 	tests/test_authenticated_assurance_snapshots.py tests/test_scan_health_plan.py tests/test_http_credential_destination.py \

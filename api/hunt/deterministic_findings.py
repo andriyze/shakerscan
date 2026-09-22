@@ -147,10 +147,13 @@ async def materialize_verified_hunt_findings(
     receipt_id: uuid.UUID,
     capability_input: Mapping[str, Any],
     observations: Any,
+    *, target_kind: str = "web",
 ) -> list[str]:
     """Persist proof-bearing capability output without trusting planner fields."""
     if capability_name != "xss.verify":
         return []
+    target_column = "device_target_id" if target_kind == "device" else "target_id"
+    target_table = "device_targets" if target_kind == "device" else "targets"
     findings: list[str] = []
     method = str(capability_input.get("method") or "GET").strip().upper()
     if not method.isalpha() or not 3 <= len(method) <= 12:
@@ -195,8 +198,8 @@ async def materialize_verified_hunt_findings(
             dom_marker_executed=proof.get("dom_marker_executed") if browser_proof else None,
         )
         finding_id = await conn.fetchval(
-            """INSERT INTO findings (
-                   target_id, hunt_run_id, fingerprint, title, description,
+            f"""INSERT INTO findings (
+                   {target_column}, hunt_run_id, fingerprint, title, description,
                    severity, cvss_score, tool, cwe, url, evidence, source, status,
                    last_verification_status, last_verification_verdict,
                    last_verification_confidence, last_verified_at, verification_count
@@ -205,14 +208,14 @@ async def materialize_verified_hunt_findings(
                    $6,
                    'high',NULL,$7,'CWE-79',$4,$5::jsonb,'deep_hunt','active',
                    'still_vulnerable','exploited',1.0,NOW(),1
-               ) ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL
+               ) ON CONFLICT ({target_column}, fingerprint) WHERE {target_column} IS NOT NULL
                DO UPDATE SET
                    hunt_run_id=EXCLUDED.hunt_run_id, status='active', resolved_at=NULL,
                    last_seen_at=NOW(), url=EXCLUDED.url,
                    evidence=EXCLUDED.evidence || CASE
                        WHEN findings.evidence ? 'cvss'
                        THEN jsonb_build_object('cvss', findings.evidence->'cvss')
-                       ELSE '{}'::jsonb END,
+                       ELSE '{{}}'::jsonb END,
                    last_verification_status='still_vulnerable',
                    last_verification_verdict='exploited',
                    last_verification_confidence=1.0, last_verified_at=NOW(),
@@ -228,8 +231,8 @@ async def materialize_verified_hunt_findings(
             tool,
         )
         await conn.execute(
-            """INSERT INTO finding_verifications (
-                   finding_id, target_id, requested_by, status, result_status,
+            f"""INSERT INTO finding_verifications (
+                   finding_id, {target_column}, requested_by, status, result_status,
                    verdict, verdict_reason, finding_type, target_url, original_url,
                    proof, confidence, verification_mode, contract_id,
                    contract_version, proof_basis, started_at, completed_at, updated_at
@@ -250,9 +253,9 @@ async def materialize_verified_hunt_findings(
         findings.append(str(finding_id))
     if findings:
         await conn.execute(
-            """UPDATE targets t SET active_findings_count=(
+            f"""UPDATE {target_table} t SET active_findings_count=(
                    SELECT COUNT(*) FROM findings f
-                   WHERE f.target_id=t.id AND f.status='active'
+                   WHERE f.{target_column}=t.id AND f.status='active'
                ), updated_at=NOW() WHERE t.id=$1""",
             target_id,
         )

@@ -2707,7 +2707,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_UI_PORT` | `api/api.py`, `api/public_api_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |

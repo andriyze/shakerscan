@@ -1352,6 +1352,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "session_ref": {"type": "string", "format": "uuid"},
+                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1384,6 +1385,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
+                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
                 "session_ref": {"type": "string", "format": "uuid"},
                 "steps": {

@@ -44,6 +44,8 @@ from .cancellation import (
 )
 from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
+from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
+from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
@@ -1520,18 +1522,7 @@ async def _execute_hunt_capability_lifecycle(
             )
             uses_service_origin = False
             if name == "http.request" and request.input.get("origin") is not None:
-                original = TargetBinding(
-                    target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
-                    # A device's frozen locator is a bare host, so urlsplit finds no hostname
-                    # in it and the binding raised "require a canonical host". Parse it the
-                    # same way whether or not it carries a scheme.
-                    canonical_host=(
-                        urllib.parse.urlsplit(frozen_locator).hostname
-                        or urllib.parse.urlsplit(f"//{frozen_locator}").hostname
-                    ),
-                    allowed_origins=tuple(target_context.get("origins") or ()),
-                    scope_receipt_id=policy.get("scope_receipt_id"),
-                )
+                original, _ = web_hunt_target(run, context, policy)
                 try:
                     selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
                 except ValueError as exc:
@@ -1588,19 +1579,8 @@ async def _execute_hunt_capability_lifecycle(
             if is_network:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(target_context.get("root_domain") or parsed_target.hostname or "").lower().rstrip(".")
                 try:
-                    network_target = TargetBinding(
-                        target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
-                        canonical_host=parsed_target.hostname,
-                        allowed_origins=tuple(target_context.get("origins") or ()),
-                        allowed_addresses=tuple(authority_context.get("authorized_target_addresses") or ()),
-                        allowed_root_domains=(root_domain,) if root_domain else (),
-                        environment=str(target_context.get("environment") or "unknown"),
-                        scope_receipt_id=validated_scope_receipt_id,
-                    )
+                    network_target, target_url = web_hunt_target(run, authority_context, policy)
                     network_policy = ScanPolicy(
                         active_testing=bool(policy.get("active_testing")),
                         network_discovery=bool(policy.get("network_discovery")),
@@ -1624,26 +1604,8 @@ async def _execute_hunt_capability_lifecycle(
                     if isinstance(authority_context.get("target"), Mapping)
                     else {}
                 )
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(
-                    target_context.get("root_domain")
-                    or parsed_target.hostname
-                    or ""
-                ).lower().rstrip(".")
                 try:
-                    browser_target = TargetBinding(
-                        target_id=str(run["target_id"]),
-                        target_kind=str(run["target_kind"]),
-                        canonical_host=parsed_target.hostname,
-                        allowed_origins=tuple(target_context.get("origins") or ()),
-                        allowed_addresses=tuple(
-                            authority_context.get("authorized_target_addresses") or ()
-                        ),
-                        allowed_root_domains=(root_domain,) if root_domain else (),
-                        environment=str(target_context.get("environment") or "unknown"),
-                        scope_receipt_id=validated_scope_receipt_id,
-                    )
+                    browser_target, target_url = web_hunt_target(run, authority_context, policy)
                     prepared_browser = prepare_hunt_browser_action(name,
                         target=browser_target,
                         base_url=target_url,
@@ -1738,36 +1700,17 @@ async def _execute_hunt_capability_lifecycle(
                             None,
                         )
                         charges[transport_dimension] = 1
-                    if fragility_cost:
-                        legacy_daily = int(await conn.fetchval(
-                            """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-                               WHERE device_target_id=$1 AND outcome <> 'blocked'
-                                 AND created_at >= date_trunc('day', NOW())""",
-                            run["device_target_id"],
-                        ) or 0)
-                        hunt_daily = int(await conn.fetchval(
-                            """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
-                               FROM hunt_runs WHERE device_target_id=$1
-                                 AND created_at >= date_trunc('day', NOW())""",
-                            run["device_target_id"],
-                        ) or 0)
-                        if legacy_daily + hunt_daily + fragility_cost > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
-                            raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
-            if is_device_adapter:
-                authority_context = _hunt_json(run["context_pack"], {})
+            reserve_device_traffic(run, spec, charges)
+            if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
                 try:
-                    device_policy_state = DeviceHuntPolicyState.from_mapping(
-                        authority_context.get("device_policy_state") or {}
-                    )
-                    device_policy_state.require_admission(
-                        request_attempts=1 if is_device_http else 0,
-                        scan_attempts=1 if is_device_queue else 0,
-                        fragility_cost=int(
-                            charges.get("device_fragility_points") or 0
-                        ),
+                    await require_device_admission(
+                        conn, run, fragility=int(charges.get("device_fragility_points") or 0),
+                        requests=(0 if is_device_queue or is_device_control or is_device_ssh_proposal
+                                  else int(charges.get("device_fragility_points") or 1)),
+                        scans=1 if is_device_queue else 0,
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2014,32 +1957,7 @@ async def _execute_hunt_capability_lifecycle(
     context = _hunt_json(run["context_pack"], {})
 
     def inline_web_target_binding() -> TargetBinding:
-        target_context = (
-            dict(context.get("target") or {})
-            if isinstance(context.get("target"), Mapping)
-            else {}
-        )
-        target_url = str(target_context.get("url") or "")
-        parsed_target = urllib.parse.urlsplit(target_url)
-        root_domain = str(
-            target_context.get("root_domain")
-            or parsed_target.hostname
-            or ""
-        ).lower().rstrip(".")
-        return TargetBinding(
-            target_id=str(run["target_id"]),
-            target_kind=str(run["target_kind"]),
-            canonical_host=parsed_target.hostname,
-            allowed_origins=tuple(target_context.get("origins") or ()),
-            allowed_addresses=tuple(
-                str(item)
-                for item in context.get("authorized_target_addresses") or ()
-                if str(item)
-            ),
-            allowed_root_domains=(root_domain,) if root_domain else (),
-            environment=str(target_context.get("environment") or "unknown"),
-            scope_receipt_id=validated_scope_receipt_id,
-        )
+        return web_hunt_target(run, context, policy)[0]
 
     def inline_device_target_binding() -> TargetBinding:
         target_context = (
@@ -2794,6 +2712,8 @@ async def _execute_hunt_capability_lifecycle(
                     current_ledger = {
                         key: int(current_used.get(key) or 0) for key in limits
                     }
+                    if not is_device_adapter:
+                        await settle_device_traffic(conn, locked, charges, actual_charges, status=status)
                     prospective_ledger = reconcile_budget_snapshot(
                         current_ledger,
                         latest_reservation.record.requested,

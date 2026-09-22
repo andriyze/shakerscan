@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import uuid
 
 from .browser import browser_capability_adapter
+from .http import resolve_hunt_http_origin
 from .browser_login_action import BrowserLoginAdapter, BrowserLoginMaterial
 from .browser_login import BrowserLoginValues
 try:
@@ -37,9 +38,10 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy):
+def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy: Mapping[str, Any]):
     adapter = browser_capability_adapter(name)
     if name != BROWSER_LOGIN_CAPABILITY:
+        target = resolve_hunt_http_origin(target, args.get("origin"), policy)
         return adapter.prepare(target=target, base_url=base_url, args=args)
     require_browser_login_policy(policy)
     # Use the persisted run's principal selection, never a planner-supplied ID.
@@ -54,6 +56,7 @@ def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy
 def browser_worker_policy(name: str, *, policy, target) -> ScanPolicy:
     result = ScanPolicy(
         active_testing=bool(policy.get("active_testing")),
+        network_discovery=bool(policy.get("network_discovery")),
         allow_state_changing_http=(name == BROWSER_LOGIN_CAPABILITY
                                   and policy.get("allow_state_changing_http") is True),
         scope_receipt_id=target.scope_receipt_id,
@@ -80,7 +83,8 @@ async def browser_login_material(pool, *, prepared, owner_kind, owner_id, policy
         # durable action lease. Heartbeat in the adapter maintains that lease.
         if owner_kind == "hunt":
             row = await conn.fetchrow(
-                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 AND target_id=$2",
+                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 "
+                "AND (target_id=$2 OR device_target_id=$2)",
                 owner_uuid, target_uuid,
             )
             if not row or row["status"] not in {"active", "awaiting_planner", "budget_exhausted"}:

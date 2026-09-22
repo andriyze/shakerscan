@@ -46,7 +46,9 @@ def web_hunt_target(
         target_id=str(target_id),
         target_kind=kind,
         canonical_host=parsed.hostname,
-        allowed_origins=tuple(target_context.get("origins") or ()),
+        allowed_origins=tuple(target_context.get("origins") or (
+            (f"{parsed.scheme}://{parsed.netloc}",) if kind == "device" else ()
+        )),
         allowed_addresses=tuple(
             str(item)
             for item in context.get("authorized_target_addresses") or ()
@@ -57,4 +59,3 @@ def web_hunt_target(
         scope_receipt_id=str(policy.get("scope_receipt_id") or "") or None,
     )
     return target, target_url
-
