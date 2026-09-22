@@ -754,7 +754,14 @@ async def get_target_authorization(target_id: str):
     """The target's standing authorization for active testing, or null."""
     target_uuid = _uuid_or_400(target_id, "target id")
     async with _pool().acquire() as conn:
-        exists = await conn.fetchval("SELECT 1 FROM targets WHERE id=$1", target_uuid)
+        # A connected device can hold a standing authorization too, so the reader accepts the
+        # same id from either inventory. Writing one and then being unable to read it back was
+        # the worse half of treating a device as the one asset that cannot be authorized.
+        exists = await conn.fetchval(
+            """SELECT 1 FROM targets WHERE id=$1
+               UNION ALL SELECT 1 FROM device_targets WHERE id=$1 LIMIT 1""",
+            target_uuid,
+        )
         if not exists:
             raise HTTPException(status_code=404, detail="Target not found")
         authorization = await target_authorization.current_target_authorization(conn, target_uuid)
