@@ -1514,7 +1514,13 @@ async def _execute_hunt_capability_lifecycle(
             if name == "http.request" and request.input.get("origin") is not None:
                 original = TargetBinding(
                     target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
-                    canonical_host=urllib.parse.urlsplit(frozen_locator).hostname,
+                    # A device's frozen locator is a bare host, so urlsplit finds no hostname
+                    # in it and the binding raised "require a canonical host". Parse it the
+                    # same way whether or not it carries a scheme.
+                    canonical_host=(
+                        urllib.parse.urlsplit(frozen_locator).hostname
+                        or urllib.parse.urlsplit(f"//{frozen_locator}").hostname
+                    ),
                     allowed_origins=tuple(target_context.get("origins") or ()),
                     scope_receipt_id=policy.get("scope_receipt_id"),
                 )
