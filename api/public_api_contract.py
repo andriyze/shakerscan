@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -453,6 +454,34 @@ def _header_hostname(value: str) -> str:
     return (hostname or "").lower().strip(".")
 
 
+def _header_port(value: str) -> str:
+    """The explicit port in an Origin or Host header, or the scheme's default."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+    try:
+        port = urllib.parse.urlsplit(raw if scheme else f"//{raw}").port
+    except ValueError:
+        return ""
+    if port:
+        return str(port)
+    return {"https": "443", "http": "80"}.get(scheme, "")
+
+
+def _deployment_web_ports(request_host: str) -> frozenset[str]:
+    """The ports this deployment serves its own UI and API on.
+
+    The API's own port comes from the request that arrived, so a non-default deployment needs
+    no extra configuration; the UI port is the one the launcher publishes.
+    """
+    ports = {str(os.environ.get("SHAKERSCAN_UI_PORT") or "3000").strip() or "3000", "3000"}
+    api_port = _header_port(request_host)
+    if api_port:
+        ports.add(api_port)
+    return frozenset(ports)
+
+
 def origin_is_same_deployment(origin: str, request_host: str) -> bool:
     """Whether this Origin is the same *address literal* the API itself was reached on.
 
@@ -468,8 +497,12 @@ def origin_is_same_deployment(origin: str, request_host: str) -> bool:
     name equality alone, which would hand that page the API. An IP literal cannot be rebound,
     because the browser connected to that address directly and an attacker cannot serve a page
     from an address it does not hold. Names stay with the operator: list them in
-    ``SHAKERSCAN_CORS_ALLOW_ORIGINS``. Only the host is compared, never the port, because the
-    UI and the API sit on different ports of that one address.
+    ``SHAKERSCAN_CORS_ALLOW_ORIGINS``.
+
+    The port must be this deployment's own UI or API port. Comparing only the host admitted
+    every other service on that address: anything a person happens to run on the same machine
+    could serve a page that drives this API, which on a shared or multi-tenant host is exactly
+    the site a cross-origin boundary exists to keep out.
     """
     host = _header_hostname(request_host)
     if not host or _header_hostname(origin) != host:
@@ -478,7 +511,7 @@ def origin_is_same_deployment(origin: str, request_host: str) -> bool:
         ipaddress.ip_address(host)
     except ValueError:
         return False
-    return True
+    return _header_port(origin) in _deployment_web_ports(request_host)
 
 
 def _origin_is_allowed(

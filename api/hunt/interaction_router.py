@@ -284,6 +284,14 @@ async def query_hunt(hunt_id: str, request: HuntQueryRequest):
 
 
 @router.post("/hunts/{hunt_id}/capabilities/{capability_name:path}")
+def _device_locator_url(target_context: Mapping[str, Any]) -> str:
+    """A device's bare locator as a URL, so one binding serves both inventories."""
+    locator = str((target_context or {}).get("locator") or "").strip()
+    if not locator or "://" in locator:
+        return locator
+    return f"http://[{locator}]" if ":" in locator and not locator.startswith("[") else f"http://{locator}"
+
+
 async def execute_hunt_capability(
     hunt_id: str, capability_name: str, request: HuntCapabilityRequest,
 ):
@@ -1521,7 +1529,8 @@ async def _execute_hunt_capability_lifecycle(
             uses_service_origin = False
             if name == "http.request" and request.input.get("origin") is not None:
                 original = TargetBinding(
-                    target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
+                    target_id=str(run["target_id"] or run["device_target_id"]),
+                    target_kind=str(run["target_kind"]),
                     # A device's frozen locator is a bare host, so urlsplit finds no hostname
                     # in it and the binding raised "require a canonical host". Parse it the
                     # same way whether or not it carries a scheme.
@@ -1588,12 +1597,18 @@ async def _execute_hunt_capability_lifecycle(
             if is_network:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-                target_url = str(target_context.get("url") or "")
+                # A device stores a bare locator and its id in device_target_id, so reading
+                # only url and target_id here raised "bindings require a canonical host" for
+                # every network capability a device Hunt is now offered.
+                target_url = str(
+                    target_context.get("url") or _device_locator_url(target_context)
+                )
                 parsed_target = urllib.parse.urlsplit(target_url)
                 root_domain = str(target_context.get("root_domain") or parsed_target.hostname or "").lower().rstrip(".")
                 try:
                     network_target = TargetBinding(
-                        target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
+                        target_id=str(run["target_id"] or run["device_target_id"]),
+                        target_kind=str(run["target_kind"]),
                         canonical_host=parsed_target.hostname,
                         allowed_origins=tuple(target_context.get("origins") or ()),
                         allowed_addresses=tuple(authority_context.get("authorized_target_addresses") or ()),
@@ -1624,7 +1639,9 @@ async def _execute_hunt_capability_lifecycle(
                     if isinstance(authority_context.get("target"), Mapping)
                     else {}
                 )
-                target_url = str(target_context.get("url") or "")
+                target_url = str(
+                    target_context.get("url") or _device_locator_url(target_context)
+                )
                 parsed_target = urllib.parse.urlsplit(target_url)
                 root_domain = str(
                     target_context.get("root_domain")
@@ -1633,7 +1650,7 @@ async def _execute_hunt_capability_lifecycle(
                 ).lower().rstrip(".")
                 try:
                     browser_target = TargetBinding(
-                        target_id=str(run["target_id"]),
+                        target_id=str(run["target_id"] or run["device_target_id"]),
                         target_kind=str(run["target_kind"]),
                         canonical_host=parsed_target.hostname,
                         allowed_origins=tuple(target_context.get("origins") or ()),
@@ -1756,14 +1773,28 @@ async def _execute_hunt_capability_lifecycle(
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
-            if is_device_adapter:
+            # Every capability that reaches a device answers to the device's safety state, not
+            # only the device-placed ones. Gating this on the adapter let a web capability in a
+            # device Hunt -- which the shared HTTP capabilities now are -- send traffic through
+            # a frozen circuit breaker, past the request pacing, and at zero fragility.
+            sends_device_traffic = is_device_adapter or (
+                str(run["target_kind"]) == "device"
+                and bool(spec.placement_requirements.get("network_reachability"))
+            )
+            if sends_device_traffic:
                 authority_context = _hunt_json(run["context_pack"], {})
+                if not is_device_adapter and not charges.get("device_fragility_points"):
+                    # A request over the wire costs the device the same whichever capability
+                    # sent it, so it is metered like the device's own HTTP probe.
+                    charges["device_fragility_points"] = device_agent.tool_fragility_cost(
+                        "device_http_request", {},
+                    ) or 1
                 try:
                     device_policy_state = DeviceHuntPolicyState.from_mapping(
                         authority_context.get("device_policy_state") or {}
                     )
                     device_policy_state.require_admission(
-                        request_attempts=1 if is_device_http else 0,
+                        request_attempts=0 if is_device_queue or is_device_control else 1,
                         scan_attempts=1 if is_device_queue else 0,
                         fragility_cost=int(
                             charges.get("device_fragility_points") or 0
@@ -2019,7 +2050,9 @@ async def _execute_hunt_capability_lifecycle(
             if isinstance(context.get("target"), Mapping)
             else {}
         )
-        target_url = str(target_context.get("url") or "")
+        target_url = str(
+            target_context.get("url") or _device_locator_url(target_context)
+        )
         parsed_target = urllib.parse.urlsplit(target_url)
         root_domain = str(
             target_context.get("root_domain")
@@ -2027,7 +2060,7 @@ async def _execute_hunt_capability_lifecycle(
             or ""
         ).lower().rstrip(".")
         return TargetBinding(
-            target_id=str(run["target_id"]),
+            target_id=str(run["target_id"] or run["device_target_id"]),
             target_kind=str(run["target_kind"]),
             canonical_host=parsed_target.hostname,
             allowed_origins=tuple(target_context.get("origins") or ()),
