@@ -676,18 +676,20 @@ def cmd_check(args: argparse.Namespace) -> int:
     summary = data.get("summary")
     if isinstance(summary, str) and summary.strip():
         print("\n" + summary.strip())
-    else:
-        checks = data.get("checks")
-        if isinstance(checks, list):
-            for item in checks:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or item.get("id") or "check")
-                status = str(item.get("status") or "unknown")
-                detail = str(item.get("detail") or item.get("message") or "").strip()
-                print(f"{name:16} {status}" + (f"  {detail}" if detail else ""))
-        else:
-            print(json.dumps(data, indent=2, sort_keys=True))
+    checks = data.get("checks")
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or "check")
+            status = str(item.get("status") or "unknown")
+            detail = str(item.get("detail") or item.get("message") or "").strip()
+            print(f"{name:24} {status}" + (f"  {detail}" if detail else ""))
+    elif not summary:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    for limitation in data.get("limitations", []):
+        if isinstance(limitation, str):
+            print(f"Note: {limitation}")
     print(f"\nService: {PUBLIC_API_URL} (no saved ShakerScan credential is sent)")
     return 0
 
@@ -727,7 +729,10 @@ def apply_default_connection(args: argparse.Namespace) -> str:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    apply_default_connection(args)
+    url = apply_default_connection(args)
+    if urllib.parse.urlsplit(url).hostname == "pub.shakerscan.com":
+        os.environ.pop(ENV_TOKEN, None)
+        os.environ.pop(ENV_TOKEN_FILE, None)
     mcp = load("_mcp")
     mcp.SERVER_VERSION = f"client-{__version__}"
     return int(mcp.main())
