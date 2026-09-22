@@ -469,20 +469,20 @@ def _header_port(value: str) -> str:
     return {"https": "443", "http": "80"}.get(scheme, "")
 
 
-def _deployment_web_ports(request_host: str) -> frozenset[str]:
+def _deployment_web_ports(request_host: str, request_scheme: str = "http") -> frozenset[str]:
     """The ports this deployment serves its own UI and API on.
 
     The API's own port comes from the request that arrived, so a non-default deployment needs
     no extra configuration; the UI port is the one the launcher publishes.
     """
-    ports = {str(os.environ.get("SHAKERSCAN_UI_PORT") or "3000").strip() or "3000", "3000"}
-    api_port = _header_port(request_host)
+    ports = {str(os.environ.get("SHAKERSCAN_UI_PORT") or "3000").strip() or "3000"}
+    api_port = _header_port(request_host) or {"http": "80", "https": "443"}.get(request_scheme, "")
     if api_port:
         ports.add(api_port)
     return frozenset(ports)
 
 
-def origin_is_same_deployment(origin: str, request_host: str) -> bool:
+def origin_is_same_deployment(origin: str, request_host: str, request_scheme: str = "http") -> bool:
     """Whether this Origin is the same *address literal* the API itself was reached on.
 
     The configured allowlist names one address, so every other route to the same engine was
@@ -511,7 +511,7 @@ def origin_is_same_deployment(origin: str, request_host: str) -> bool:
         ipaddress.ip_address(host)
     except ValueError:
         return False
-    return _header_port(origin) in _deployment_web_ports(request_host)
+    return _header_port(origin) in _deployment_web_ports(request_host, request_scheme)
 
 
 def _origin_is_allowed(
@@ -519,6 +519,7 @@ def _origin_is_allowed(
     allowed_origins: Sequence[str],
     allow_origin_regex: str = "",
     request_host: str = "",
+    request_scheme: str = "http",
 ) -> bool:
     """Apply the same exact/regex origin decision to actual unsafe requests as CORS preflights.
 
@@ -534,7 +535,7 @@ def _origin_is_allowed(
         return True
     if normalized in allowed_origins:
         return True
-    if request_host and origin_is_same_deployment(normalized, request_host):
+    if request_host and origin_is_same_deployment(normalized, request_host, request_scheme):
         return True
     if allow_origin_regex:
         try:
@@ -571,7 +572,9 @@ class SameHostCorsMiddleware:
             return
         headers = self._headers(scope)
         origin = headers.get("origin", "")
-        if not origin or not origin_is_same_deployment(origin, headers.get("host", "")):
+        if not origin or not origin_is_same_deployment(
+            origin, headers.get("host", ""), str(scope.get("scheme") or "http"),
+        ):
             await self.app(scope, receive, send)
             return
         encoded = origin.encode("latin-1")
@@ -635,6 +638,7 @@ class UnsafeOriginGuardMiddleware:
             if origin and not _origin_is_allowed(
                 origin, self.allow_origins, self.allow_origin_regex,
                 request_host=headers.get("host", ""),
+                request_scheme=str(scope.get("scheme") or "http"),
             ):
                 body = json.dumps({"detail": "Cross-origin browser mutation is not allowed"}).encode("utf-8")
                 await send({

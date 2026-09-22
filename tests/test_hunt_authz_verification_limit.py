@@ -21,6 +21,10 @@ import uuid
 
 from fastapi import HTTPException
 import pytest
+try:
+    from hunt.device_traffic import reserve_device_traffic
+except ModuleNotFoundError:
+    from api.hunt.device_traffic import reserve_device_traffic
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +156,7 @@ def admission(store):
         "family_proof": SimpleNamespace(canonical_family=lambda family: family),
         "web_candidate_budget": lambda family: {}, "_AGENT_MUTATING_VERIFY_FAMILIES": frozenset(),
         "PostgresBudgetReservationStore": ReservationStore,
+        "reserve_device_traffic": reserve_device_traffic,
         "DurableBudgetReservation": SimpleNamespace(request=lambda **kwargs: Reservation(kwargs["amounts"])),
         "hunt_capability_action_digest": lambda **kwargs: "a" * 64,
         "hunt_capability_lease_seconds": lambda _: 120,

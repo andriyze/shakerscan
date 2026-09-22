@@ -80,7 +80,8 @@ async def browser_login_material(pool, *, prepared, owner_kind, owner_id, policy
         # durable action lease. Heartbeat in the adapter maintains that lease.
         if owner_kind == "hunt":
             row = await conn.fetchrow(
-                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 AND target_id=$2",
+                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 "
+                "AND (target_id=$2 OR device_target_id=$2)",
                 owner_uuid, target_uuid,
             )
             if not row or row["status"] not in {"active", "awaiting_planner", "budget_exhausted"}:

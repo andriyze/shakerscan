@@ -19735,6 +19735,8 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 1, min(int(job_data.get("tool_wall_seconds") or 60), 300),
             ),
         }
+        if run["device_target_id"]:
+            additional_budget["device_fragility_points"] = len(plan.requests)
         requested_budget = replay_reservation_budget(plan, additional_budget)
         requested = DurableBudgetReservation.request(
             owner_kind="hunt",
@@ -19753,6 +19755,9 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 )
                 if not locked or str(locked["status"]) not in {"active", "awaiting_planner"}:
                     raise ReplayExecutionError("Hunt is no longer executable")
+                if locked["device_target_id"]:
+                    await require_device_admission(conn, locked,
+                        fragility=len(plan.requests), requests=len(plan.requests))
                 stored = await store.create_requested(
                     conn,
                     action_id=action_id,
@@ -19877,6 +19882,8 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                             _worker_json_object(locked["budget_json"])
                         )
                     }
+                    await record_device_traffic(conn, locked,
+                        int(terminal.actual.get("device_fragility_points") or 0), status=receipt.status)
                     settled_ledger = terminal.reconcile_consumed(current_ledger)
                     persisted = await store.persist_terminal(
                         conn,
@@ -20105,6 +20112,7 @@ def _worker_terminal_network_result(
 
 
 from hunt.target_binding import web_hunt_target as _worker_hunt_web_target
+from hunt.device_traffic import reserve_device_traffic, require_worker_device_policy, settle_device_traffic, require_device_admission, record_device_traffic
 
 
 async def _revalidate_hunt_action_authority(
@@ -20117,6 +20125,8 @@ async def _revalidate_hunt_action_authority(
     capability_name: str,
 ) -> None:
     """Recheck mutable target and receipt authority immediately before traffic."""
+    if agent_tools.CAPABILITY_REGISTRY.require(capability_name).placement_requirements.get("network_reachability"):
+        require_worker_device_policy(run)
     if run.get("device_target_id"):
         current = await conn.fetchrow(
             "SELECT primary_locator AS locator, is_active FROM device_targets WHERE id=$1",
@@ -20491,12 +20501,7 @@ async def process_canonical_scanner_capability_job(
                     raise agent_tools.AgentToolError(
                         "scanner capability no longer has active approval"
                     )
-                target_context = (
-                    dict(context.get("target") or {})
-                    if isinstance(context.get("target"), Mapping)
-                    else {}
-                )
-                registered_target = str(target_context.get("url") or "")
+                target, registered_target = _worker_hunt_web_target(run, context, hunt_policy)
                 execution_target = _worker_scanner_execution_target(
                     registered_target,
                     capability_input,
@@ -20513,21 +20518,6 @@ async def process_canonical_scanner_capability_job(
                 pinned_address = agent_tools.validate_pinned_scanner_address(
                     None,
                     authorized_addresses,
-                )
-                target = TargetBinding(
-                    target_id=str(run["target_id"]),
-                    target_kind=str(run["target_kind"]),
-                    canonical_host=urllib.parse.urlsplit(
-                        registered_target
-                    ).hostname,
-                    allowed_origins=tuple(target_context.get("origins") or ()),
-                    allowed_addresses=tuple(authorized_addresses),
-                    environment=str(
-                        target_context.get("environment") or "unknown"
-                    ),
-                    scope_receipt_id=str(
-                        hunt_policy.get("scope_receipt_id") or ""
-                    ) or None,
                 )
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
@@ -20555,6 +20545,7 @@ async def process_canonical_scanner_capability_job(
                 requested_budget["agent_actions"] = 1
                 if spec.requires_active_approval:
                     requested_budget["active_actions"] = 1
+                reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -20782,6 +20773,7 @@ async def process_canonical_scanner_capability_job(
                         _worker_json_object(locked["budget_json"])
                     )
                 }
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -20833,7 +20825,7 @@ async def process_canonical_scanner_capability_job(
                         finished_at.replace("Z", "+00:00")
                     ),
                 )
-                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, capability_input, observations)
+                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, capability_input, observations, target_kind=target.target_kind)
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,
@@ -21066,38 +21058,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     raise BrowserCapabilityInputError(
                         "browser capability is outside the persisted Hunt allowlist"
                     )
-                target_context = (
-                    dict(context.get("target") or {})
-                    if isinstance(context.get("target"), Mapping)
-                    else {}
-                )
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(
-                    target_context.get("root_domain")
-                    or parsed_target.hostname
-                    or ""
-                ).lower().rstrip(".")
-                target = TargetBinding(
-                    target_id=str(run["target_id"]),
-                    target_kind=str(run["target_kind"]),
-                    canonical_host=parsed_target.hostname,
-                    allowed_origins=tuple(target_context.get("origins") or ()),
-                    allowed_addresses=tuple(
-                        str(item)
-                        for item in context.get(
-                            "authorized_target_addresses"
-                        ) or ()
-                        if str(item)
-                    ),
-                    allowed_root_domains=(root_domain,) if root_domain else (),
-                    environment=str(
-                        target_context.get("environment") or "unknown"
-                    ),
-                    scope_receipt_id=str(
-                        hunt_policy.get("scope_receipt_id") or ""
-                    ) or None,
-                )
+                target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 policy = browser_worker_policy(capability_name, policy=hunt_policy, target=target)
                 await _revalidate_hunt_action_authority(
                     conn,
@@ -21141,6 +21102,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                 spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
                 if spec.requires_active_approval or prepared.session_ref:
                     requested_budget["active_actions"] = 1
+                reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -21292,6 +21254,8 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                         _worker_json_object(locked["budget_json"])
                     )
                 }
+                actual = dict(execution.actual_budget)
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -21303,7 +21267,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     target_kind=target.target_kind,
                     capability_input=receipt_input,
                     action_status=action_status,
-                    actual_budget=execution.actual_budget,
+                    actual_budget=actual,
                     worker_id=worker_id,
                     started_at=started_at.isoformat(),
                     finished_at=finished_at.isoformat(),
@@ -21329,7 +21293,7 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                     parser_errors=parser_errors,
                     record_count=len(observations),
                     reserved=latest.record.requested,
-                    actual=execution.actual_budget,
+                    actual=actual,
                     used_after=reconciled,
                     started_at=started_at,
                     finished_at=finished_at,
@@ -21547,28 +21511,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     raise CapabilityInputError(
                         "network capability is outside the persisted Hunt allowlist"
                     )
-                target_context = (
-                    dict(context.get("target") or {})
-                    if isinstance(context.get("target"), Mapping) else {}
-                )
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(
-                    target_context.get("root_domain") or parsed_target.hostname or ""
-                ).lower().rstrip(".")
-                target = TargetBinding(
-                    target_id=str(run["target_id"]),
-                    target_kind=str(run["target_kind"]),
-                    canonical_host=parsed_target.hostname,
-                    allowed_origins=tuple(target_context.get("origins") or ()),
-                    allowed_addresses=tuple(
-                        str(item) for item in context.get("authorized_target_addresses") or ()
-                        if str(item)
-                    ),
-                    allowed_root_domains=(root_domain,) if root_domain else (),
-                    environment=str(target_context.get("environment") or "unknown"),
-                    scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None,
-                )
+                target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
@@ -21618,6 +21561,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     capability_name
                 ).requires_active_approval:
                     requested_budget["active_actions"] = 1
+                reserve_device_traffic(run, agent_tools.CAPABILITY_REGISTRY.require(capability_name), requested_budget)
                 recomputed_digest = hunt_capability_action_digest(
                     hunt_id=hunt_id,
                     action_id=action_id,
@@ -21773,6 +21717,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                         _worker_json_object(locked["budget_json"])
                     )
                 }
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -22583,6 +22528,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                         _worker_json_object(locked["budget_json"])
                     )
                 }
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,

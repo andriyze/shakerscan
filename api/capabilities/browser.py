@@ -319,7 +319,7 @@ def _prepare_browser_base(
         raise BrowserCapabilityInputError(
             f"unsupported browser input fields: {', '.join(unknown_fields)}"
         )
-    if target.target_kind not in {"web", "api"}:
+    if target.target_kind not in {"web", "api", "network", "device"}:
         raise BrowserCapabilityInputError(
             "browser actions support only web and API targets"
         )

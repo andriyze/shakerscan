@@ -41,6 +41,17 @@ test('the port and scheme of the configured API are preserved', () => {
   )
 })
 
+test('rewriting a literal host preserves the configured proxy path and query', () => {
+  assert.equal(
+    browserAt('https://192.0.2.2:3000/', 'https://192.0.2.1:9443/api/v2?route=x/'),
+    'https://192.0.2.2:9443/api/v2?route=x/',
+  )
+  assert.equal(
+    browserAt('http://[2001:db8::2]:3000/', 'http://[2001:db8::1]:8080/api/'),
+    'http://[2001:db8::2]:8080/api/',
+  )
+})
+
 test('a forwarded port on loopback is not an address literal and is left alone', () => {
   assert.equal(
     browserAt('http://localhost:3000/', 'http://172.31.33.227:8080'),

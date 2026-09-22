@@ -14,8 +14,10 @@ function sameAddressApiUrl(configured: string): string | null {
       /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || value.includes(':') || value.startsWith('[')
     if (!page || page === parsed.hostname) return null
     if (!isLiteral(page) || !isLiteral(parsed.hostname)) return null
-    const port = parsed.port ? `:${parsed.port}` : ''
-    return `${parsed.protocol}//${window.location.hostname}${port}`
+    parsed.hostname = page
+    return parsed.pathname === '/' && !parsed.search && !parsed.hash
+      ? parsed.origin
+      : parsed.toString()
   } catch {
     return null
   }

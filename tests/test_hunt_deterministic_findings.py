@@ -117,3 +117,24 @@ def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():
     assert db.evidence["cvss"]["status"] == "not_assessed"
     assert db.evidence["execution_sink"]["parameter"] == "q"
     assert db.evidence["proof_state"] == "verified"
+
+
+def test_device_proof_and_verification_use_the_device_inventory():
+    class DB:
+        def __init__(self): self.queries = []
+        async def fetchval(self, query, *args):
+            self.queries.append(query)
+            return uuid.uuid4()
+        async def execute(self, query, *args): self.queries.append(query)
+
+    db = DB()
+    ids = asyncio.run(materialize_verified_hunt_findings(
+        db, uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "http://192.0.2.10",
+        "xss.verify", uuid.uuid4(), {}, [{
+            "kind": "xss_alert", "proof_state": "verified", "param": "q",
+            "url": "http://192.0.2.10/?q=payload", "payload_sha256": "a" * 64,
+        }], target_kind="device",
+    ))
+    assert len(ids) == 1
+    assert all("device_target_id" in query for query in db.queries)
+    assert "UPDATE device_targets" in db.queries[-1]

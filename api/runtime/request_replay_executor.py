@@ -348,6 +348,9 @@ def _settled_budget(
         if dimension in plan_dimensions:
             continue
         actual[dimension] = (
+            min(int(amount), attempted)
+            if dimension == "device_fragility_points"
+            else
             min(int(amount), elapsed_seconds)
             if dimension == "tool_wall_seconds"
             else int(amount)
