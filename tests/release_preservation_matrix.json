@@ -76,7 +76,7 @@
         {"id":"reachability","label":"Reachability requires corroborated positive evidence","pytest_selector":"tests/test_device_reachability.py::test_scan_responses_corroborate_online_and_service_accessibility"},
         {"id":"service_identity","label":"Service transport and TLS identity are retained","pytest_selector":"tests/test_device_posture_scanner.py::test_parse_nmap_services_preserves_transport_and_tls_identity"},
         {"id":"web_evidence","label":"Web evidence binds the exact device service","pytest_selector":"tests/test_device_evidence.py::test_evidence_graph_is_stable_and_links_web_to_the_exact_service"},
-        {"id":"fragility","label":"Health degradation stops subsequent device actions","pytest_selector":"tests/test_device_safety.py::test_health_degradation_halts_future_actions_after_a_healthy_checkpoint"},
+        {"id":"fragility","label":"Lost device resolution stops subsequent device actions","pytest_selector":"tests/test_device_safety.py::test_lost_resolution_halts_future_actions_after_a_healthy_checkpoint"},
         {"id":"credentials","label":"Saved device credentials decrypt only in worker memory","pytest_selector":"tests/test_device_review_regressions.py::test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memory"},
         {"id":"collections","label":"Saved device collections stay encrypted and pinned","pytest_selector":"tests/test_device_review_regressions.py::test_device_request_collections_are_encrypted_pinned_and_agent_bounded"},
         {"id":"review","label":"Device review remains target-bound","pytest_selector":"tests/test_device_review_regressions.py::test_unified_hunt_history_is_durable_and_target_bound"},

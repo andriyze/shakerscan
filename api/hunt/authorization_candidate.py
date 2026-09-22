@@ -15,7 +15,7 @@ except ModuleNotFoundError:
 
 from .authorization_evidence import AuthorizationWorkflowError, mapping
 from .authorization_history import with_candidate_history
-from .authorization_repository import MAX_ATTEMPTS, uid
+from .authorization_repository import MAX_ATTEMPTS, uid, asset_column, asset_id
 
 
 LINK_TYPE = "authorization_candidate_link"
@@ -103,17 +103,17 @@ async def _linked_candidate(conn: Any, service: Any, hunt_id: Any, link_key: str
     """Resolve an existing link within the Hunt's target, without creating one."""
     run = await service.repo.run(conn, hunt_id)
     row = await conn.fetchrow(
-        "SELECT attributes FROM application_graph_nodes WHERE target_id=$1 "
+        f"SELECT attributes FROM application_graph_nodes WHERE {asset_column(run)}=$1 "
         "AND node_type=$2 AND node_key=$3",
-        uid(run["target_id"]), LINK_TYPE, link_key,
+        uid(asset_id(run)), LINK_TYPE, link_key,
     )
     link = mapping(dict(row).get("attributes")) if row else {}
     if not link:
         return run, None
     existing = await conn.fetchrow(
         "SELECT id,status,fingerprint FROM investigation_candidates "
-        "WHERE id=$1::uuid AND target_id=$2::uuid",
-        str(link.get("candidate_id") or ""), str(run["target_id"]),
+        f"WHERE id=$1::uuid AND {asset_column(run)}=$2::uuid",
+        str(link.get("candidate_id") or ""), str(asset_id(run)),
     )
     if not existing:
         raise AuthorizationWorkflowError(
@@ -169,7 +169,8 @@ async def ensure_authorization_candidate(service: Any, hunt_id: Any, state: Mapp
             _, existing = await _linked_candidate(conn, service, hunt_id, link_key, attempt)
             if not existing:
                 candidate = investigation_candidates.normalize_candidate(
-                    plane="web", target_id=str(run["target_id"]), hunt_run_id=str(run["id"]),
+                    plane="device" if run.get("target_kind") == "device" else "web",
+                    **{asset_column(run): str(asset_id(run))}, hunt_run_id=str(run["id"]),
                     family=plan["family"], locus=plan["locus"], title=plan["title"],
                     claim=plan["claim"], severity=plan["severity"],
                     evidence_refs=plan["evidence_refs"],

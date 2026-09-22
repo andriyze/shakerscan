@@ -223,9 +223,23 @@ def _utc(clock: Clock) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _origin_key(value: Any) -> tuple[str, str, int] | None:
+    """Scheme/host/port with default ports normalized, so host:443 == host."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    return (parsed.scheme.lower(), parsed.hostname.lower().rstrip("."),
+            port or (443 if parsed.scheme.lower() == "https" else 80))
+
+
 def _validate_runtime_binding(plan: ReplayPlan, target: TargetBinding) -> None:
-    target_origins = set(target.allowed_origins)
-    if not target_origins or not set(plan.allowed_origins) <= target_origins:
+    target_keys = {_origin_key(value) for value in target.allowed_origins}
+    plan_keys = {_origin_key(value) for value in plan.allowed_origins}
+    if None in plan_keys or not target_keys or not plan_keys <= target_keys:
         raise ReplayExecutionError("replay plan origins are outside the frozen target binding")
     if target.target_kind in {"web", "api", "device"} and not target.allowed_addresses:
         raise ReplayExecutionError("exact replay requires frozen target addresses")

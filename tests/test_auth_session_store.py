@@ -47,6 +47,8 @@ class SessionConn:
         normalized = " ".join(query.split())
         if query == sessions.AUTH_SESSION_SCHEMA_SQL:
             return "OK"
+        if "ADD COLUMN IF NOT EXISTS service_origin" in query:
+            return "OK"
         if normalized.startswith("UPDATE auth_sessions SET evidence_receipt_id"):
             receipt_id, session_id, digest = args
             if (
@@ -67,7 +69,7 @@ class SessionConn:
                 binding_digest, profile_id, profile_version, principal_slot,
                 principal_label, auth_kind, capabilities, encrypted_headers,
                 established_at, expires_at, refresh_after, evidence_digest,
-                source_action_id,
+                source_action_id, service_origin,
             ) = args
             self.row = {
                 "id": session_id,
@@ -94,6 +96,7 @@ class SessionConn:
                 "evidence_receipt_digest": evidence_digest,
                 "evidence_receipt_id": None,
                 "source_action_id": source_action_id,
+                "service_origin": service_origin,
             }
             return dict(self.row)
         if normalized.startswith("SELECT s.*, p.current_version"):

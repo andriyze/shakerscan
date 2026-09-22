@@ -3406,6 +3406,20 @@ def test_device_routes_confirm_handoff_before_reporting_queued():
         ) < route.index('status": "queued"')
 
 
+def test_device_requests_no_longer_offer_the_removed_lab_profile():
+    from pydantic import ValidationError
+
+    for model in (devices_router_module.DeviceScanRequest, devices_router_module.DeviceServiceVerifyRequest):
+        extra = {} if model is devices_router_module.DeviceScanRequest else {
+            "transport": "tcp", "port": 8443, "expected_state": "open", "reason": "check",
+        }
+        with pytest.raises(ValidationError):
+            model(safety_profile="lab_invasive", confirm_lab_invasive=True, **extra)
+        # Older clients still send the retired flag; it is accepted and has no effect.
+        assert model(safety_profile="authenticated_active", confirm_lab_invasive=True, **extra).safety_profile == "authenticated_active"
+    assert "lab_invasive" not in {item["name"] for item in devices_router_module.safety_profile_catalog()}
+
+
 class _FakeConn:
     def __init__(self, schedules):
         self.schedules = schedules

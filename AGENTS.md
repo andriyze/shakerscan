@@ -245,6 +245,21 @@ credentials has been authorized. Keep control-plane TLS verification separate an
 Web, API and network are views of the same target row and reuse its credentials and collections;
 different target UUIDs and device identities remain distinct.
 
+### Authorized service reuse
+
+An approved active Hunt with selected credentials may use those identities on HTTP or HTTPS
+services at other ports of the same frozen asset, including services with invalid certificates.
+Reuse the existing standing authorization; do not add a per-port, per-scheme, or per-call prompt.
+The login service is provenance and the refresh destination, not a permanent replay-port lock.
+At execution, revalidate the saved Hunt authority and asset binding before cross-service session
+decryption. A changed or revoked authorization is different from an unobserved service port.
+
+Use the scheme, host, port, path and principal actually captured when building evidence and
+comparing accounts. Equivalent default-port spellings are one service, but different services
+must not be mistaken for the same access-control baseline. A failed identity comparison is
+inconclusive, not a reason to abandon other authorized Hunt work. Service reuse does not grant
+another asset's authority, waive traffic budgets, or turn a successful request into proof.
+
 ### Progressive methodologies
 
 The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.
@@ -285,8 +300,13 @@ devices do not belong in web target metrics.
 
 Devices use separate inventory/workers. Confirm ownership/authorization. All-TCP examination is
 possible, so silence is inconclusive and receives no score. Imported Postman/HAR/OpenAPI never
-executes scripts, external references, or arbitrary destinations; requests stay pinned to observed
-origins. Untrusted HTTPS may be observed, but secrets require explicit risk authorization.
+executes scripts, external references, or arbitrary destinations. In an authorized active Hunt,
+select an HTTP(S) service on the same canonical host at any valid port using `origin`; the target
+ID and frozen addresses never change. The operator-selected collection or credential workflow
+may name that same-host service directly. Selected credentials work over HTTP and untrusted
+HTTPS; certificate defects are evidence, not an extra authorization prompt. Session refresh
+uses the saved login service, not the inventory record's default port. Do not bypass managed
+credentials or redirect credentials to another asset.
 
 SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
 uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through

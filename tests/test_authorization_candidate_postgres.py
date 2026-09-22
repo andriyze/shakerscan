@@ -24,8 +24,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not c
 # Only the tables this repository operation touches. The real repository SQL,
 # JSONB casts, UUIDs, xmax and row locks are executed without SQLite adaptation.
 DDL = """
-CREATE TABLE hunt_runs(id uuid PRIMARY KEY,target_id uuid,device_target_id uuid,target_kind text,status text,context_pack jsonb);
-CREATE TABLE application_graph_nodes(id uuid PRIMARY KEY,target_id uuid,node_type text,node_key text,label text,attributes jsonb,UNIQUE(target_id,node_type,node_key));
+CREATE TABLE hunt_runs(id uuid PRIMARY KEY,target_id uuid,device_target_id uuid,target_kind text,status text,context_pack jsonb,policy_json jsonb NOT NULL DEFAULT '{}'::jsonb);
+CREATE TABLE application_graph_nodes(id uuid PRIMARY KEY,target_id uuid,device_target_id uuid,node_type text,node_key text,label text,attributes jsonb,UNIQUE(target_id,node_type,node_key),UNIQUE(device_target_id,node_type,node_key));
 CREATE TABLE investigation_candidates(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),plane text,target_id uuid,device_target_id uuid,
  research_episode_id uuid,agent_hunt_run_id uuid,device_agent_run_id uuid,hunt_run_id uuid,
@@ -41,7 +41,7 @@ CREATE TABLE investigation_candidate_observations(
 
 
 @asynccontextmanager
-async def postgres_store():
+async def postgres_store(kind="web"):
     import asyncpg
     assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}, "Use a disposable local database"
     schema = "hunt_integrity_" + uuid.uuid4().hex
@@ -54,12 +54,17 @@ async def postgres_store():
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=10,
             server_settings={"search_path": schema, "application_name": schema})
         hunt, target = uuid.uuid4(), uuid.uuid4()
-        await admin.execute("INSERT INTO hunt_runs VALUES($1,$2,NULL,'web','active','{}'::jsonb)", hunt, target)
+        await admin.execute(
+            "INSERT INTO hunt_runs(id,target_id,device_target_id,target_kind,status,context_pack,policy_json) "
+            "VALUES($1,$2,$3,$4,'active','{}'::jsonb,'{}'::jsonb)",
+            hunt, None if kind == "device" else target, target if kind == "device" else None, kind,
+        )
         core = {"schema_version": "hunt-authorization/v1", "hunt_id": str(hunt), "target_id": str(target)}
         proposal_digest = digest(core)
         proposal = uuid.uuid5(hunt, "authorization:" + proposal_digest)
         repo = PostgresAuthorizationRepository()
-        await repo.insert_node(admin, {"id": hunt, "target_id": target}, proposal, PROPOSAL_TYPE,
+        persisted_run = await repo.run(admin, hunt)
+        await repo.insert_node(admin, persisted_run, proposal, PROPOSAL_TYPE,
             f"authz:{proposal}", {**core, "proposal_id": str(proposal), "proposal_digest": proposal_digest})
         state = {"proposal_id": str(proposal), "proposal_digest": proposal_digest,
             "baseline_kind": "own_object", "expected_access": "denied",
@@ -76,9 +81,10 @@ async def postgres_store():
         await admin.close()
 
 
-def test_concurrent_real_postgres_materialization_waits_for_proposal_lock():
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+def test_concurrent_real_postgres_materialization_waits_for_proposal_lock(kind):
     async def exercise():
-        async with postgres_store() as (admin, service, hunt, state, application):
+        async with postgres_store(kind) as (admin, service, hunt, state, application):
             transaction = admin.transaction()
             await transaction.start()
             await admin.fetchrow("SELECT id FROM application_graph_nodes WHERE id=$1 FOR UPDATE", uuid.UUID(state["proposal_id"]))
@@ -101,12 +107,21 @@ def test_concurrent_real_postgres_materialization_waits_for_proposal_lock():
                 results = await asyncio.wait_for(asyncio.gather(*tasks), 15)
             assert len({result["candidate"]["id"] for result in results}) == 1
             assert await admin.fetchval("SELECT count(*) FROM investigation_candidates") == 1
+            owner_column = "device_target_id" if kind == "device" else "target_id"
+            other_column = "target_id" if kind == "device" else "device_target_id"
+            assert await admin.fetchval(
+                f"SELECT count(*) FROM investigation_candidates WHERE {owner_column} IS NOT NULL AND {other_column} IS NULL"
+            ) == 1
+            assert await admin.fetchval(
+                f"SELECT count(*) FROM application_graph_nodes WHERE {owner_column} IS NULL OR {other_column} IS NOT NULL"
+            ) == 0
             assert await admin.fetchval("SELECT count(*) FROM investigation_candidate_observations") == 1
             assert await admin.fetchval("SELECT count(*) FROM application_graph_nodes WHERE node_type=$1", LINK_TYPE) == 1
     asyncio.run(exercise())
 
 
-def test_link_failure_rolls_back_candidate_and_observation_then_retry_recovers():
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+def test_link_failure_rolls_back_candidate_and_observation_then_retry_recovers(kind):
     class FailingRepository(PostgresAuthorizationRepository):
         async def insert_node(self, conn, run, node_id, kind, key, attributes):
             if kind == LINK_TYPE:
@@ -114,7 +129,7 @@ def test_link_failure_rolls_back_candidate_and_observation_then_retry_recovers()
             return await super().insert_node(conn, run, node_id, kind, key, attributes)
 
     async def exercise():
-        async with postgres_store() as (admin, service, hunt, state, _):
+        async with postgres_store(kind) as (admin, service, hunt, state, _):
             service.repo = FailingRepository()
             with pytest.raises(RuntimeError, match="fixture link failure"):
                 await ensure_authorization_candidate(service, hunt, state)

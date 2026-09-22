@@ -16,7 +16,7 @@ def web_hunt_target(
     policy: Mapping[str, Any],
 ) -> tuple[TargetBinding, str]:
     kind = str(run["target_kind"])
-    target_id = run["target_id"] or run["device_target_id"]
+    target_id = run.get("device_target_id") or run.get("target_id")
     if kind not in {"web", "api", "network", "device"} or not target_id:
         raise CapabilityInputError(
             "HTTP capability requires a Web, API, network or device Hunt target"
@@ -47,7 +47,7 @@ def web_hunt_target(
         target_kind=kind,
         canonical_host=parsed.hostname,
         allowed_origins=tuple(target_context.get("origins") or (
-            (f"{parsed.scheme}://{parsed.netloc}",) if kind == "device" else ()
+            (f"{parsed.scheme}://{parsed.netloc}",)
         )),
         allowed_addresses=tuple(
             str(item)

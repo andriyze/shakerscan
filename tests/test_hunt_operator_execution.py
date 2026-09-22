@@ -185,6 +185,11 @@ def test_discovered_service_is_executable_in_the_same_hunt(tmp_path):
             result = await execute_bound_http_request('https://fixture.test', args, target=selected, trusted_headers={'Cookie': f'session={COOKIE}'})
             assert result['ok'] and result['response']['status'] == 200 and len(calls) == 1
             assert selected.allowed_addresses == primary.allowed_addresses
-            with pytest.raises(ValueError): resolve_hunt_http_origin(primary, origin, {**policy, 'network_discovery': False})
+            # Another port on the same authorized host no longer needs network
+            # discovery on top of active testing; only active testing is required.
+            still_selected = resolve_hunt_http_origin(primary, origin, {**policy, 'network_discovery': False})
+            assert origin in {o for o in still_selected.allowed_origins}
+            with pytest.raises(ValueError): resolve_hunt_http_origin(primary, origin, {**policy, 'active_testing': False})
+            # A different host is still refused: host pinning is unchanged.
             with pytest.raises(ValueError): resolve_hunt_http_origin(primary, origin.replace('fixture.test', 'another.test'), policy)
     asyncio.run(execute())

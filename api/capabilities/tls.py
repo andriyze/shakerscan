@@ -42,6 +42,11 @@ def _origin(value: str) -> str | None:
     ))
 
 
+def _origin_key(value: str):
+    parsed = urllib.parse.urlsplit(value)
+    return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
 async def inspect_tls_origin(
     origin: str,
     *,
@@ -63,9 +68,9 @@ async def inspect_tls_origin(
             },
         }
     if (
-        target.target_kind not in {"web", "api"}
+        target.target_kind not in {"web", "api", "network", "device"}
         or parsed.hostname.lower().rstrip(".") != target.canonical_host
-        or normalized_origin not in target.allowed_origins
+        or _origin_key(normalized_origin) not in {_origin_key(o) for o in target.allowed_origins}
     ):
         return {
             "ok": False,

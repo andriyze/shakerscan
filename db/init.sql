@@ -483,11 +483,12 @@ CREATE TABLE auth_sessions (
     id UUID PRIMARY KEY,
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
     owner_id UUID NOT NULL,
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api','network','device')),
     target_id UUID NOT NULL,
     target_binding_digest TEXT NOT NULL CHECK (
         target_binding_digest ~ '^[0-9a-f]{64}$'
     ),
+    service_origin TEXT,
     profile_id UUID NOT NULL REFERENCES credential_profiles(id) ON DELETE CASCADE,
     profile_version INTEGER NOT NULL CHECK (profile_version > 0),
     principal_slot TEXT NOT NULL CHECK (
@@ -1247,6 +1248,7 @@ CREATE INDEX idx_export_events_finding ON export_events(finding_id, created_at D
 CREATE TABLE application_graph_nodes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
     node_type TEXT NOT NULL,        -- route | object | principal
     node_key TEXT NOT NULL,         -- canonical, type-prefixed id
     label TEXT,
@@ -1269,6 +1271,7 @@ CREATE TABLE application_graph_edges (
     CONSTRAINT app_graph_edge_unique UNIQUE (target_id, src_key, dst_key, edge_type)
 );
 CREATE INDEX idx_app_graph_nodes_target ON application_graph_nodes(target_id);
+CREATE UNIQUE INDEX app_graph_device_node_unique ON application_graph_nodes(device_target_id,node_type,node_key);
 CREATE INDEX idx_app_graph_edges_target ON application_graph_edges(target_id);
 
 -- ============================================================

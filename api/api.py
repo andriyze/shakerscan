@@ -13218,8 +13218,12 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                     else "safe_remote"
                 ),
                 fragility_limit=budget.max_device_fragility_points,
-                request_limit=min(40, budget.max_http_requests),
-                scan_limit=3,
+                # The per-run request cap follows the resolved budget profile
+                # rather than a fixed 40: device wear is bounded by the fragility
+                # budget and the per-device daily cap, so an authorized device
+                # Hunt is not forced to stop after 40 requests.
+                request_limit=budget.max_http_requests,
+                scan_limit=8,
             )
             context_pack = {
                 "schema_version": "hunt-context/v2",

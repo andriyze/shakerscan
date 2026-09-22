@@ -7,7 +7,7 @@ the in-memory values after use.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import re
@@ -20,6 +20,7 @@ except ModuleNotFoundError:
     from api.secret_store import SecretStoreUnavailable, decrypt_secret, encrypt_secret
 
 from .models import TargetBinding
+from .session_service_authority import normalize_session_origin, validate_session_service_use
 
 
 AUTH_SESSION_SCHEMA_VERSION = "auth-session/v1"
@@ -90,6 +91,15 @@ INSERT INTO app_schema_migrations(name)
 VALUES ('v2_auth_sessions_v1')
 ON CONFLICT (name) DO NOTHING;
 """
+
+
+def session_target_digest(target: TargetBinding, owner_kind: str) -> str:
+    """Hunt sessions follow explicitly selected services on the same frozen asset.
+
+    Keep host, kind, UUID, addresses, environment and scope in the digest. Scan
+    sessions retain their exact-origin binding. No old session digest is rewritten.
+    """
+    return replace(target, allowed_origins=()).digest if owner_kind == "hunt" else target.digest
 
 
 class AuthSessionStoreError(ValueError):
@@ -178,6 +188,7 @@ class AuthSessionMetadata:
     evidence_receipt_digest: str
     evidence_receipt_id: str | None
     source_action_id: str
+    service_origin: str | None = None
 
     @classmethod
     def from_row(cls, value: Any) -> "AuthSessionMetadata":
@@ -222,6 +233,7 @@ class AuthSessionMetadata:
                 if item.get("evidence_receipt_id") else None
             ),
             source_action_id=str(uuid.UUID(str(item["source_action_id"]))),
+            service_origin=str(item["service_origin"]) if item.get("service_origin") else None,
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -250,6 +262,7 @@ class AuthSessionMetadata:
             "evidence_receipt_digest": self.evidence_receipt_digest,
             "evidence_receipt_id": self.evidence_receipt_id,
             "source_action_id": self.source_action_id,
+            "service_origin": self.service_origin,
             "secret_values_visible": False,
         }
 
@@ -283,6 +296,8 @@ class WorkerAuthSession:
 class PostgresAuthSessionStore:
     async def ensure_schema(self, conn: Any) -> None:
         await conn.execute(AUTH_SESSION_SCHEMA_SQL)
+        from .hunt_service_schema import HUNT_SESSION_SCHEMA_SQL
+        await conn.execute(HUNT_SESSION_SCHEMA_SQL)
 
     async def create(
         self,
@@ -304,11 +319,12 @@ class PostgresAuthSessionStore:
         evidence_receipt_digest: str,
         source_action_id: Any,
         session_ref: Any | None = None,
+        service_origin: str | None = None,
     ) -> AuthSessionMetadata:
         owner = str(owner_kind or "").strip().lower()
         if owner not in {"scan", "hunt"}:
             raise AuthSessionStoreError("authentication session owner is invalid")
-        if target.target_kind not in {"web", "api"}:
+        if target.target_kind not in {"web", "api", "network", "device"}:
             raise AuthSessionStoreError("authentication session target is invalid")
         slot = str(principal_slot or "").strip().lower()
         if slot not in {"primary", "secondary", "service"}:
@@ -328,6 +344,10 @@ class PostgresAuthSessionStore:
         if not isinstance(encrypted, str) or not encrypted.startswith("enc:fernet:"):
             raise AuthSessionStoreError("authentication session encryption is unavailable")
         session_id = uuid.UUID(str(session_ref)) if session_ref else uuid.uuid4()
+        try:
+            service_origin = normalize_session_origin(target, service_origin)
+        except ValueError as exc:
+            raise AuthSessionStoreError(str(exc)) from exc
         row = await conn.fetchrow(
             """INSERT INTO auth_sessions (
                    id, owner_kind, owner_id, target_kind, target_id,
@@ -335,17 +355,17 @@ class PostgresAuthSessionStore:
                    principal_slot, principal_label, auth_kind,
                    compatible_capabilities, encrypted_headers, status,
                    established_at, expires_at, refresh_after,
-                   evidence_receipt_digest, source_action_id
+                   evidence_receipt_digest, source_action_id, service_origin
                ) VALUES (
                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,
-                   'active',$14,$15,$16,$17,$18
+                   'active',$14,$15,$16,$17,$18,$19
                ) RETURNING *""",
             session_id,
             owner,
             uuid.UUID(str(owner_id)),
             target.target_kind,
             uuid.UUID(str(target.target_id)),
-            target.digest,
+            session_target_digest(target, owner),
             uuid.UUID(str(profile_id)),
             int(profile_version),
             slot,
@@ -358,6 +378,7 @@ class PostgresAuthSessionStore:
             _utc(refresh_after, name="refresh_after"),
             str(evidence_receipt_digest or "").lower(),
             uuid.UUID(str(source_action_id)),
+            service_origin,
         )
         if not row:
             raise AuthSessionStoreError("authentication session was not persisted")
@@ -409,7 +430,7 @@ class PostgresAuthSessionStore:
         )
         profile_expires = row.get("live_profile_expires_at")
         if (
-            metadata.target_binding_digest != target.digest
+            metadata.target_binding_digest not in {target.digest, session_target_digest(target, owner_kind)}
             or not bool(row.get("live_profile_active"))
             or int(row.get("live_profile_version") or 0) != metadata.profile_version
             or (
@@ -460,6 +481,12 @@ class PostgresAuthSessionStore:
             raise AuthSessionStoreError(
                 "authentication session profile no longer allows the capability"
             )
+        try:
+            await validate_session_service_use(
+                conn, target=target, metadata=metadata, capability=capability_name,
+            )
+        except ValueError as exc:
+            raise AuthSessionStoreError(str(exc)) from exc
         try:
             decoded = decrypt_secret(row["encrypted_headers"])
             headers = json.loads(str(decoded or ""))

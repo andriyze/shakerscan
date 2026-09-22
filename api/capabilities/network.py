@@ -245,6 +245,22 @@ def _ports(values: Any, *, maximum: int) -> tuple[int, ...]:
     return tuple(sorted(result))
 
 
+def _port_range(value: Any, *, maximum: int) -> tuple[int, int]:
+    text = str(value or "").strip()
+    parts = text.split("-")
+    if len(parts) != 2:
+        raise CapabilityInputError("port_range must be START-END")
+    try:
+        start, end = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError) as exc:
+        raise CapabilityInputError("port_range must be two integers") from exc
+    if not (1 <= start <= end <= 65_535):
+        raise CapabilityInputError("port_range must be within 1-65535 with start <= end")
+    if end - start + 1 > maximum:
+        raise CapabilityInputError(f"port_range spans more than {maximum} ports; scan it in chunks")
+    return start, end
+
+
 def _require_network_policy(policy: ScanPolicy) -> None:
     if not policy.network_discovery:
         raise CapabilityInputError("network discovery policy is not enabled")
@@ -271,11 +287,21 @@ class PortsDiscoverAdapter:
         addresses = _addresses(target)
         profile = str(args.get("profile") or "top_100").strip().lower()
         custom = args.get("ports")
+        port_range = args.get("port_range")
+        selected = None
         if custom is not None:
             selected = _ports(custom, maximum=1_000)
             port_args = ("-p", ",".join(map(str, selected)))
             attempted_per_host = len(selected)
             profile = "custom"
+        elif port_range is not None:
+            # A contiguous range on the authorized host. Bounded to the same
+            # per-call ceiling as a custom list so one call never becomes a
+            # full-range sweep; the planner chunks a wider span across calls.
+            start, end = _port_range(port_range, maximum=1_000)
+            port_args = ("-p", f"{start}-{end}")
+            attempted_per_host = end - start + 1
+            profile = "range"
         else:
             configured = PORT_PROFILES.get(profile)
             if configured is None:
@@ -296,7 +322,10 @@ class PortsDiscoverAdapter:
             )
             for address in addresses
         )
-        normalized = {"profile": profile, "ports": list(selected) if custom is not None else None,
+        # port_args is part of the digest so two different ranges/profiles never
+        # collide on the same idempotency key.
+        normalized = {"profile": profile, "ports": list(selected) if selected is not None else None,
+                      "port_args": list(port_args),
                       "target_id": target.target_id, "addresses": list(addresses)}
         return PreparedExecution(
             self.capability_name, self.adapter_name, self.adapter_version, commands,

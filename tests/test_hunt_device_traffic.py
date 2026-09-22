@@ -19,6 +19,7 @@ from hunt.device_traffic import (
     require_worker_device_policy,
 )
 from hunt.target_binding import web_hunt_target
+from capabilities.http import resolve_hunt_http_origin
 from capabilities.inline import HttpRequestExecutionAdapter
 from capabilities.browser import browser_capability_adapter, BrowserCapabilityInputError
 from capabilities.browser_login_worker import prepare_hunt_browser_action
@@ -73,6 +74,7 @@ async def admit(store, name="http.request", values=None, key="device-attempt-1")
         reserve_device_traffic=reserve_device_traffic,
         require_device_admission=require_device_admission,
         web_hunt_target=web_hunt_target,
+        resolve_hunt_http_origin=resolve_hunt_http_origin,
         network_capability_adapter=network_capability_adapter,
         prepare_hunt_browser_action=prepare_hunt_browser_action,
         CapabilityInputError=CapabilityInputError,

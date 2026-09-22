@@ -118,7 +118,10 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
     }
     assert specification.planner_visible is True
     assert specification.hunt_executor == "worker_auth"
-    assert specification.planner_contract()["input_schema"] == {
+    schema = dict(specification.planner_contract()["input_schema"])
+    schema["properties"] = dict(schema["properties"])
+    assert schema["properties"].pop("origin")["type"] == "string"
+    assert schema == {
         "type": "object",
         "properties": {
             "as_principal": {
@@ -162,7 +165,7 @@ def test_authz_verification_is_read_only_proof_gated_and_worker_bound():
     assert specification.hunt_executor == "worker_http"
     assert set(
         specification.planner_contract()["input_schema"]["properties"]
-    ) == {"primary_session_ref", "secondary_session_ref", "routes"}
+    ) == {"primary_session_ref", "secondary_session_ref", "routes", "origin"}
 
 
 def test_ssh_proposal_registry_budget_is_control_plane_only():

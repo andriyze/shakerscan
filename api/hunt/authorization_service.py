@@ -13,11 +13,11 @@ import uuid
 
 from .authorization_evidence import (
     AuthorizationWorkflowError, attributed_outcome, canonical_action_id,
-    digest, mapping, request_identity, supported_capture,
+    digest, mapping, request_identity, supported_capture, _origin,
 )
 from .authorization_repository import (
     ATTEMPT_TYPE, DECISION_TYPE, MAX_ATTEMPTS, PROPOSAL_TYPE,
-    PostgresAuthorizationRepository, uid,
+    PostgresAuthorizationRepository, uid, asset_id,
 )
 from .authorization_workflow import CapturedRequest, investigate
 from .investigation_memory import Experiment, InMemoryGraphStore, InvestigationMemory
@@ -37,8 +37,15 @@ def _active(run: Mapping[str, Any]) -> None:
 def _target_context(run: Mapping[str, Any]) -> dict[str, Any]:
     context = mapping(run.get("context_pack"))
     target = mapping(context.get("target"))
-    if not isinstance(target.get("origins"), list) or not target["origins"]:
-        raise AuthorizationWorkflowError("This Hunt has no frozen HTTP origins")
+    if not target.get("origins"):
+        from urllib.parse import urlunsplit
+        locator = str(target.get("url") or target.get("locator") or "").strip()
+        if not locator:
+            raise AuthorizationWorkflowError("This Hunt has no frozen HTTP origins")
+        if "://" not in locator:
+            locator = "http://" + (f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator)
+        parsed = urlsplit(locator)
+        target = {**target, "origins": [urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))]}
     return {"target": target, "addresses": context.get("authorized_target_addresses", [])}
 
 
@@ -58,7 +65,21 @@ class AuthorizationInvestigationService:
             raise AuthorizationWorkflowError("The sessions must use distinct profiles on the same frozen target")
         capture = await self.repo.capture(conn, run, values["capture_id"])
         baseline = await self.repo.capture(conn, run, values["baseline_capture_id"])
-        origins = _target_context(run)["target"]["origins"]
+        origins = list(_target_context(run)["target"]["origins"])
+        # A capture is evidence, not authority. Validate its selected service
+        # against the admitted asset/policy before accepting the captured origin.
+        if mapping(run.get("policy_json")).get("active_testing") is True:
+            from .target_binding import web_hunt_target
+            from .service_binding import endpoint_target
+            try:
+                binding, _ = web_hunt_target(run, mapping(run.get("context_pack")), mapping(run.get("policy_json")))
+                for captured in (capture, baseline):
+                    binding, _ = endpoint_target(binding, str(captured.get("url") or ""), mapping(run.get("policy_json")))
+            except ValueError as exc:
+                raise AuthorizationWorkflowError(
+                    "The capture's service is not valid for this Hunt's authorized asset", 422,
+                ) from exc
+            origins = list(binding.allowed_origins)
         path = supported_capture(capture, origins)
         baseline_path = supported_capture(baseline, origins)
         if capture.get("principal_slot") != "primary" or baseline.get("principal_slot") != "secondary":
@@ -71,7 +92,7 @@ class AuthorizationInvestigationService:
             source_input = mapping(mapping(source.get("input_summary")).get("input")) if source else {}
             if (not source or source.get("capability_name") != "http.request"
                     or str(source_input.get("session_ref")) != str(session["id"])
-                    or set(source_input) - {"method", "path", "session_ref", "headers", "body", "timeout_seconds", "max_response_bytes"}
+                    or set(source_input) - {"method", "path", "origin", "session_ref", "headers", "body", "timeout_seconds", "max_response_bytes"}
                     or source_input.get("headers")
                     or any(source_input.get(key) for key in ("body", "json_body", "request_collection_id", "collection_id", "request_collection_ref"))):
                 raise AuthorizationWorkflowError(
@@ -86,8 +107,7 @@ class AuthorizationInvestigationService:
             if capture.get("status_code") != 200 or baseline.get("status_code") != 200:
                 raise AuthorizationWorkflowError("Selected-object comparison requires HTTP 200 object captures", 422)
         elif (baseline_path.rstrip("/") != f"/{request.collection}"
-                or urlsplit(capture["url"]).netloc != urlsplit(baseline["url"]).netloc
-                or urlsplit(capture["url"]).scheme != urlsplit(baseline["url"]).scheme):
+                or _origin(capture["url"]) != _origin(baseline["url"])):
             raise AuthorizationWorkflowError("The baseline must address the same origin and resource collection as the selected object", 422)
         return primary, secondary, capture, baseline
 
@@ -110,11 +130,11 @@ class AuthorizationInvestigationService:
                 request = CapturedRequest("GET", urlsplit(capture["url"]).path, "primary")
                 # Reuse the proposal semantics. No ownership is inferred from the capture.
                 proposal = investigate(request, available_principals=["primary", "secondary"],
-                                       memory=InvestigationMemory(InMemoryGraphStore(), target_id=run["target_id"]))["proposals"][0]
+                                       memory=InvestigationMemory(InMemoryGraphStore(), target_id=asset_id(run)))["proposals"][0]
                 origin = _target_context(run)["target"]["origins"][0]
                 binding = {
                     "schema_version": "hunt-authorization/v1", "hunt_id": str(run["id"]),
-                    "target_id": str(run["target_id"]), **refs,
+                    "target_id": str(asset_id(run)), **refs,
                     "target_context_sha256": digest(_target_context(run)),
                     "sessions_sha256": digest([primary, secondary]),
                     "capture_sha256": request_identity(capture), "baseline_sha256": request_identity(baseline),
@@ -162,7 +182,7 @@ class AuthorizationInvestigationService:
             deferred = await self.repo.skipped(conn, run, proposal_id)
         # A request-scoped memory projection, reconstructed from PostgreSQL after
         # every restart. The graph stores references; canonical actions own outcomes.
-        memory = InvestigationMemory(InMemoryGraphStore(), target_id=run["target_id"])
+        memory = InvestigationMemory(InMemoryGraphStore(), target_id=asset_id(run))
         template = urlsplit(proposal["public_consumer_url"]).path
         collection = urlsplit(proposal["public_baseline_url"]).path
         own_object = proposal.get("baseline_kind") == "own_object"

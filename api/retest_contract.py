@@ -4365,6 +4365,12 @@ async def _run_schema_migrations_once(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_nodes_target ON application_graph_nodes(target_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_edges_target ON application_graph_edges(target_id)")
+            from runtime.hunt_service_schema import HUNT_SERVICE_SCHEMA_SQL
+            if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name='v2_hunt_service_assets_v1')"
+            ):
+                await conn.execute(HUNT_SERVICE_SCHEMA_SQL)
+
 
             # Phase-1 owned-fleet identity and enrollment foundation. These
             # tables intentionally contain only hashes of join/node secrets.

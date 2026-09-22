@@ -71,6 +71,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_authenticated_assurance_postgres.py \
+            tests/test_hunt_service_postgres.py \
             tests/test_authenticated_validation_worker.py \
             tests/test_scan_authentication_health.py \
             tests/test_authenticated_assurance_restore.py \
@@ -87,6 +88,7 @@ jobs:
           cases = list(ET.parse(report).getroot().iter('testcase'))
           required = (
               'test_authenticated_assurance_postgres',
+              'test_hunt_service_postgres',
               'test_authenticated_validation_worker',
               'test_scan_authentication_health',
               'test_authenticated_assurance_restore',

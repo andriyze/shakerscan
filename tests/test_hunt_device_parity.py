@@ -162,3 +162,21 @@ def test_an_operator_named_port_needs_no_discovery_scan():
     source = (ROOT / "api" / "devices" / "router.py").read_text(encoding="utf-8")
     assert "_device_operator_named_web_origin" in source
     assert "port directly with origin_port" in source
+
+
+def test_authorization_workflow_derives_an_origin_for_a_device_locator():
+    # A device records a bare locator instead of a frozen origin list; the
+    # authorization workflow must still resolve a target context for it rather
+    # than refusing every device with "no frozen HTTP origins".
+    from hunt.authorization_service import _target_context
+    from hunt.authorization_evidence import AuthorizationWorkflowError
+
+    device_run = {"context_pack": {"target": {"locator": "tv.local"}}}
+    resolved = _target_context(device_run)
+    assert resolved["target"]["origins"] == ["http://tv.local"]
+
+    web_run = {"context_pack": {"target": {"origins": ["https://app.example"]}}}
+    assert _target_context(web_run)["target"]["origins"] == ["https://app.example"]
+
+    with pytest.raises(AuthorizationWorkflowError, match="no frozen HTTP origins"):
+        _target_context({"context_pack": {"target": {}}})

@@ -413,11 +413,30 @@ _SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
 }
 
 
+# A service origin on the same authorized target host. Scheme and port are
+# service coordinates on the already-authorized asset, not a new authorization
+# boundary, so any valid port is allowed under the Hunt's active target
+# authorization; a different host is never admitted by this field.
+_SERVICE_ORIGIN_PROPERTY: Mapping[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 2_048,
+    "description": (
+        "HTTP(S) service origin on the same authorized target host. Any valid "
+        "port is allowed under the Hunt's active target authorization; a "
+        "different host is never admitted."
+    ),
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
     """Declare the content-free identity binding shared by HTTP capabilities."""
     merged = dict(properties or {})
+    # Every HTTP-capable capability may be pointed at another service port on
+    # the same authorized host; a caller that declares its own origin keeps it.
+    merged.setdefault("origin", _SERVICE_ORIGIN_PROPERTY)
     merged.update(_HTTP_PRINCIPAL_BINDING_PROPERTIES)
     return _schema(merged, required=required)
 
@@ -1036,8 +1055,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "tcp_ports_attempted": 1_200, "tool_wall_seconds": 120,
             },
             {"network_reachability": True, "binary": "naabu"}, _schema({
-                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000"]},
+                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000", "device_common"]},
                 "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},
+                "port_range": {"type": "string", "pattern": "^[0-9]{1,5}-[0-9]{1,5}$",
+                               "description": "Contiguous START-END range on the authorized host, bounded per call; chunk a wider span across calls."},
             }),
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),
@@ -1062,7 +1083,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
-                           "description": "HTTP(S) service on this host; additional ports use the Hunt's existing network-discovery authority."},
+                           "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1159,6 +1180,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_auth",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "as_principal": {
                     "type": "string",
                     "enum": ["primary", "secondary", "service"],
@@ -1240,6 +1262,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1276,11 +1299,13 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "address_count": {
                     "type": "integer", "minimum": 1, "maximum": 64,
                 },
+                "origin": _SERVICE_ORIGIN_PROPERTY,
             }, required=(
                 "origins_ref", "origin_count", "addresses_ref", "address_count",
             )),
             "tls-observation/v2", ("tls_posture_observation",),
             hunt_executor="inline",
+            planner_input_schema=_schema({"origin": _SERVICE_ORIGIN_PROPERTY}),
             credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
@@ -1352,7 +1377,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "session_ref": {"type": "string", "format": "uuid"},
-                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1385,7 +1410,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
-                "origin": {"type": "string", "maxLength": 2048, "description": "Exact-target HTTP(S) service origin; a new port requires network discovery authority."},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
                 "session_ref": {"type": "string", "format": "uuid"},
                 "steps": {
@@ -1582,7 +1607,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_active",
             "Replay an exact approved state-changing request selection from a bound collection.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "state_changing_http",
             {
                 "http_requests": 2_000,
@@ -1607,7 +1632,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_authentication",
             "Replay at most five exact POST authentication requests bound to disposable credentials.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "active_testing",
             {"http_requests": 5, "tool_wall_seconds": 60},
             {

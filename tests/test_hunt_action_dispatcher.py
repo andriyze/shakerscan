@@ -201,6 +201,15 @@ def test_native_device_policy_is_typed_paced_and_fail_closed():
     with pytest.raises(DeviceHuntPolicyError, match="circuit breaker"):
         second.require_admission(request_attempts=1)
 
+    # A healthy checkpoint clears the freeze so an authorized Hunt can resume
+    # rather than stay frozen for the rest of its life.
+    before_third = second.adapter_state(credential_refs=[], collection_refs=[])
+    after_third = {**before_third, "health_observed": True, "health_failed": False}
+    third = second.reconcile_adapter_state(before_third, after_third, health_failed=False)
+    assert third.traffic_frozen is False
+    assert third.consecutive_health_failures == 0
+    third.require_admission(request_attempts=0)
+
 
 def test_native_device_hunts_never_seed_legacy_agent_state():
     source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
@@ -240,3 +249,30 @@ def test_public_hunt_route_returns_the_canonical_action_result_on_first_and_retr
     assert '"schema_version": "hunt-action-result/v2"' in (
         ROOT / "api" / "hunt" / "action_dispatcher.py"
     ).read_text(encoding="utf-8")
+
+
+def test_canonical_device_hunt_is_not_capped_by_legacy_session_ceilings():
+    # The canonical Hunt device policy follows the resolved budget, not the
+    # legacy device-agent per-session constants. A realistic budget must admit
+    # far more than the old fixed 40-request ceiling.
+    from hunt.device_policy import DeviceHuntPolicyState
+
+    state = DeviceHuntPolicyState.initial(
+        safety_profile="authenticated_active",
+        fragility_limit=5_000,
+        request_limit=5_000,
+        scan_limit=8,
+        minimum_request_interval_ms=0,
+    )
+    # 41 sequential admissions (past the retired 40 ceiling) all succeed.
+    for _ in range(41):
+        state.require_admission(request_attempts=1, fragility_cost=1)
+    assert state.request_limit >= 5_000
+
+    # The native device policy/traffic modules must not import the legacy
+    # per-session ceilings, so they can never silently constrain a Hunt.
+    for module in ("api/hunt/device_policy.py", "api/hunt/device_traffic.py"):
+        source = (ROOT / module).read_text(encoding="utf-8")
+        for legacy in ("MAX_ACTIONS_PER_SESSION", "MAX_SCANS_PER_SESSION",
+                       "MAX_FRAGILITY_PER_SESSION", "DEVICE_HTTP_REQUEST_SESSION_LIMIT"):
+            assert legacy not in source, f"{module} references legacy {legacy}"
