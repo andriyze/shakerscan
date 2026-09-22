@@ -140,7 +140,18 @@ async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, A
         return None
     target = _row(await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid))
     if not target:
-        return None
+        # The same id may name a connected device. Reading only the web table made every
+        # standing receipt recorded for a device invisible to the readers that gate scans and
+        # Hunts, so the receipt existed and nothing could resolve it.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator FROM device_targets WHERE id=$1", target_uuid,
+        ))
+        if not device:
+            return None
+        locator = str(device.get("primary_locator") or "").strip()
+        target = {"id": device.get("id"), "url": locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )}
     rows = await conn.fetch(
         """
         SELECT a.*, s.id AS scope_id, s.allowed_hosts AS scope_allowed_hosts,
@@ -204,11 +215,26 @@ async def authorize_target(
     if existing and existing.get("standing") and existing.get("risk_tier") == risk_tier:
         return existing
     target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
-    if not target:
-        raise TargetAuthorizationError("target not found")
-    metadata = _json(target.get("metadata_json")) or {}
-    env = effective_target_environment(metadata, requested=environment)
-    url = str(target.get("url") or "")
+    if target:
+        metadata = _json(target.get("metadata_json")) or {}
+        env = effective_target_environment(metadata, requested=environment)
+        url = str(target.get("url") or "")
+    else:
+        # A connected device is an asset the operator owns exactly as a web target is. Reading
+        # only the web table meant `POST /targets/{id}/authorization` answered 404 for a device,
+        # so every device scan re-asked for permission inline and no device Hunt could resolve a
+        # standing receipt. The device's own environment wins when the caller names none.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator, environment FROM device_targets WHERE id=$1",
+            target_uuid,
+        ))
+        if not device:
+            raise TargetAuthorizationError("target not found")
+        locator = str(device.get("primary_locator") or "").strip()
+        env = str(environment or device.get("environment") or "production").strip() or "production"
+        url = locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )
     host = _host(url)
     receipt = receipt_to_dict(evaluate_scope(
         url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),

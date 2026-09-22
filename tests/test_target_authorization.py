@@ -30,6 +30,11 @@ class _Conn:
             if args and str(args[0]) != str(TARGET_ID):
                 return None
             return {"id": TARGET_ID, "url": self.url, "metadata_json": json.dumps({"environment": "production"})}
+        if "FROM device_targets" in query:
+            # An id absent from the web inventory is looked for among connected devices, which
+            # can hold the same standing authorization. This fixture has no devices, so an
+            # unknown id still reaches "target not found".
+            return None
         if "INSERT INTO approval_receipts" in query:
             row = {
                 "id": uuid.uuid4(), "scope_receipt_id": args[0], "risk_tier": args[1],

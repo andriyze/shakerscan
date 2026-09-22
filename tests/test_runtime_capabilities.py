@@ -62,12 +62,20 @@ def test_registry_filters_target_kind_and_active_permission():
         "templates.passive_scan", "templates.passive_batch",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }
-    assert all_device == {
+    # A device that serves HTTP is the same host a web target is, so it carries the HTTP
+    # capabilities too: the operator should be able to examine one address either way and get
+    # the same reach. Its own capabilities stay, and no web kind gains them.
+    assert {
         "device.inspect", "device.capabilities.inspect", "device.http.probe",
         "device.scan", "device.service.verify", "collections.inspect", "collections.select",
         "collections.replay_safe", "device.ssh.propose", "device.ssh.execute_confirmed",
         "candidate.verify", "findings.create", "findings.update", "findings.delete",
-    }
+    } <= all_device
+    assert {"http.request", "web.crawl", "tls.inspect"} <= all_device
+    assert not {
+        spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="web")
+        if spec.name.startswith("device.")
+    }, "a web target never gains device capabilities"
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 

@@ -566,6 +566,25 @@ async def _validate_device_credential_refs(
     return refs
 
 
+async def _device_has_standing_authorization(device_id: str) -> bool:
+    """Whether this device carries the same standing authorization a web target can.
+
+    Authorizing once is the operator's confirmation. Re-asking per scan taught nothing and
+    made a device the one asset whose permission could not be recorded and reused.
+    """
+    try:
+        try:
+            import target_authorization
+        except ModuleNotFoundError:
+            from .. import target_authorization  # type: ignore[no-redef]
+        async with _pool().acquire() as conn:
+            standing = await target_authorization.current_target_authorization(conn, device_id)
+    except Exception:
+        # Unknown authority is not authority: fall back to the explicit confirmation.
+        return False
+    return bool(standing and standing.get("standing") and standing.get("approval_receipt_id"))
+
+
 def _device_worker_readiness() -> dict[str, Any]:
     """Return fresh, build-current device-worker capacity without touching Web DAST telemetry."""
     enabled = _device_posture_enabled()
@@ -1384,8 +1403,16 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 "worker_count": readiness["worker_count"],
             },
         )
-    if not request.confirm_authorized:
-        raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
+    if not request.confirm_authorized and not await _device_has_standing_authorization(device_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Re-submit with confirm_authorized=true, or authorize this device once with "
+                "POST /targets/{device_id}/authorization "
+                '{"approved_by": "<name>", "risk_tier": "active"}, which every later scan '
+                "and Hunt then reuses"
+            ),
+        )
     if request.request_collection_ids and not request.include_web_dast:
         raise HTTPException(status_code=422, detail="Imported request collections require include_web_dast=true")
     if request.request_collection_ids and not request.confirm_request_replay:
@@ -2698,14 +2725,26 @@ async def _execute_device_capability_operation(
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
         origins = await _device_confirmed_web_origins(device_target_id)
-        if not origins:
-            raise HTTPException(status_code=409, detail="No confirmed-open web origin is available; run a device scan first")
         requested_port = args.get("origin_port")
         origin = next((
             item for item in origins if requested_port is not None and int(item["port"]) == int(requested_port)
         ), None)
-        if requested_port is not None and not origin:
-            raise HTTPException(status_code=409, detail="origin_port does not match a confirmed-open web origin on this device")
+        if origin is None and requested_port is not None:
+            # An operator who names the port already knows the service is there. Requiring a
+            # discovery scan first made a device the one asset whose known port could not be
+            # reached, and a device locator cannot carry a port to say it any other way. The
+            # port is still one address on the bound device, inside the same scope and budget.
+            origin = await _device_operator_named_web_origin(
+                device_target_id, int(requested_port),
+            )
+        if origin is None and not origins:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No confirmed-open web origin is available: run a device scan, or name the "
+                    "port directly with origin_port"
+                ),
+            )
         if origin is None:
             origin = origins[0]
         try:
@@ -2935,6 +2974,38 @@ async def _device_confirmed_web_origins(device_target_id: uuid.UUID) -> list[dic
             "host_header": str(raw.get("host_header") or ""),
         })
     return origins
+
+
+async def _device_operator_named_web_origin(
+    device_target_id: uuid.UUID, port: int,
+) -> dict[str, Any] | None:
+    """One web origin on the bound device at a port the operator named.
+
+    Built from the device's own locator, never from planner input, so this reaches exactly the
+    asset the run is bound to and nothing else. Scheme follows the port's convention; scope,
+    budget and fragility accounting are unchanged.
+    """
+    if not 1 <= int(port) <= 65535:
+        return None
+    async with _pool().acquire() as conn:
+        device = await conn.fetchrow(
+            "SELECT primary_locator FROM device_targets WHERE id=$1 AND is_active=true",
+            device_target_id,
+        )
+    locator = str((device or {}).get("primary_locator") or "").strip() if device else ""
+    if not locator:
+        return None
+    scheme = "https" if int(port) in {443, 8443} else "http"
+    bracketed = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
+    return {
+        "origin": f"{scheme}://{bracketed}:{port}",
+        "scheme": scheme,
+        "hostname": locator,
+        "port": int(port),
+        "connect_address": locator,
+        "host_header": "",
+        "operator_named": True,
+    }
 
 
 def _bounded_device_scan_result(row: Any) -> dict[str, Any]:

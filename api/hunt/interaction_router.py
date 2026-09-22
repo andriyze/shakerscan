@@ -1478,7 +1478,15 @@ async def _execute_hunt_capability_lifecycle(
                 principal_slot = (
                     str(principal["principal_slot"]) if principal is not None else "anonymous"
                 )
-            if str(run["target_kind"]) == "device" and not name.startswith("collections."):
+            # Route by the capability's own placement, not by the target kind. A device Hunt
+            # now carries the web capabilities too, and sending every one of them down the
+            # device adapter meant `http.request` on a device answered "Native device Hunt
+            # adapter state is unavailable" instead of reaching the service.
+            if (
+                str(run["target_kind"]) == "device"
+                and not name.startswith("collections.")
+                and str(spec.hunt_executor or "").startswith("device")
+            ):
                 device_adapter_name = str(spec.adapter).split(".")[-1]
                 validated_device_input = dict(request.input)
             uses_session = bool(
@@ -1514,7 +1522,13 @@ async def _execute_hunt_capability_lifecycle(
             if name == "http.request" and request.input.get("origin") is not None:
                 original = TargetBinding(
                     target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
-                    canonical_host=urllib.parse.urlsplit(frozen_locator).hostname,
+                    # A device's frozen locator is a bare host, so urlsplit finds no hostname
+                    # in it and the binding raised "require a canonical host". Parse it the
+                    # same way whether or not it carries a scheme.
+                    canonical_host=(
+                        urllib.parse.urlsplit(frozen_locator).hostname
+                        or urllib.parse.urlsplit(f"//{frozen_locator}").hostname
+                    ),
                     allowed_origins=tuple(target_context.get("origins") or ()),
                     scope_receipt_id=policy.get("scope_receipt_id"),
                 )
@@ -2260,8 +2274,9 @@ async def _execute_hunt_capability_lifecycle(
                 action_id=action_id,
                 action_digest=durable_action_digest,
             )
-        elif str(run["target_kind"]) == "device":
-            assert device_adapter_name is not None and validated_device_input is not None
+        elif device_adapter_name is not None and validated_device_input is not None:
+            # Chosen above by the capability's placement, so a web capability in a device Hunt
+            # takes the ordinary path below rather than asserting its way into this one.
             device_state = device_adapter_state
             if not isinstance(device_state, dict):
                 raise HTTPException(
