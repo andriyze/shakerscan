@@ -123,7 +123,7 @@ export const HUNT_START_CONTRACT = {
       "max_http_requests": 20000,
       "max_oob_interactions": 200,
       "max_state_changing_requests": 80,
-      "max_tcp_ports": 10000,
+      "max_tcp_ports": 65535,
       "max_udp_ports": 5000,
       "max_verifications": 100
     }

@@ -19619,7 +19619,20 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             if target_kind == "device"
             else tuple(str(item) for item in origins if str(item))
         )
-        if any(origin not in hunt_origins for origin in queued_allowed_origins):
+        def _origin_key(value):
+            try:
+                parsed = urllib.parse.urlsplit(str(value or "").strip())
+                port = parsed.port
+            except ValueError:
+                return None
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+                return None
+            return (parsed.scheme.lower(), parsed.hostname.lower().rstrip("."),
+                    port or (443 if parsed.scheme.lower() == "https" else 80))
+        # Compare by normalized origin key so a default port (host:80/:443) in a
+        # collection binding matches a Hunt origin stored without it.
+        hunt_origin_keys = {_origin_key(o) for o in hunt_origins}
+        if any(_origin_key(origin) not in hunt_origin_keys for origin in queued_allowed_origins):
             raise ReplayExecutionError(
                 "request collection binding exceeds the Hunt target origins"
             )

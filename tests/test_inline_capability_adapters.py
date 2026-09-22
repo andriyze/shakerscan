@@ -635,3 +635,34 @@ def test_candidate_verifier_block_conservatively_charges_the_full_hold():
     assert result.execution_started is True
     assert result.actual_budget == requested
     assert result.errors == ("verifier stopped after uncertain wire activity",)
+
+
+def test_ports_discover_supports_full_range_and_a_custom_range():
+    from capabilities.network import PortsDiscoverAdapter
+    from runtime.models import ScanPolicy
+
+    net_target = TargetBinding(
+        target_id="net-1", target_kind="network", canonical_host="host.example.test",
+        allowed_origins=(), allowed_addresses=("192.0.2.30",), scope_receipt_id="scope-1",
+    )
+    policy = ScanPolicy(active_testing=True, network_discovery=True,
+                        approval_receipt_id="approval", scope_receipt_id="scope-1")
+    adapter = PortsDiscoverAdapter()
+
+    full = adapter.prepare(target=net_target, args={"profile": "full"}, policy=policy)
+    assert full.estimated_budget["tcp_ports_attempted"] == 65_535
+    assert "-" in full.commands[0].argv and "-p" in full.commands[0].argv
+
+    ranged = adapter.prepare(target=net_target, args={"port_range": "8000-8999"}, policy=policy)
+    assert ranged.estimated_budget["tcp_ports_attempted"] == 1_000
+    assert "8000-8999" in ranged.commands[0].argv
+    # Two different ranges must not collide on the idempotency digest.
+    other = adapter.prepare(target=net_target, args={"port_range": "9000-9999"}, policy=policy)
+    assert ranged.input_digest != other.input_digest
+
+
+def test_active_collection_replay_reaches_device_and_network_targets():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    for name in ("collections.replay_active", "collections.replay_authentication"):
+        spec = CAPABILITY_REGISTRY.require(name)
+        assert {"web", "api", "network", "device"} <= set(spec.target_kinds)

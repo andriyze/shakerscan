@@ -220,6 +220,7 @@ PORT_PROFILES: Mapping[str, tuple[int, ...] | str] = {
                        1433, 1521, 1883, 3000, 3306, 5432, 6379, 8080, 8443, 8883, 9200),
     "top_100": "100",
     "top_1000": "1000",
+    "top_5000": "5000",
     "device_common": (22, 23, 53, 80, 81, 443, 445, 554, 631, 1883, 1900, 5000,
                       7000, 8008, 8009, 8060, 8080, 8443, 8883, 9000, 9100, 49152, 55000),
 }
@@ -243,6 +244,20 @@ def _ports(values: Any, *, maximum: int) -> tuple[int, ...]:
         if len(result) > maximum:
             raise CapabilityInputError(f"at most {maximum} ports are allowed")
     return tuple(sorted(result))
+
+
+def _port_range(value: Any) -> tuple[int, int]:
+    text = str(value or "").strip()
+    parts = text.split("-")
+    if len(parts) != 2:
+        raise CapabilityInputError("port_range must be START-END")
+    try:
+        start, end = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError) as exc:
+        raise CapabilityInputError("port_range must be two integers") from exc
+    if not (1 <= start <= end <= 65_535):
+        raise CapabilityInputError("port_range must be within 1-65535 with start <= end")
+    return start, end
 
 
 def _require_network_policy(policy: ScanPolicy) -> None:
@@ -271,11 +286,22 @@ class PortsDiscoverAdapter:
         addresses = _addresses(target)
         profile = str(args.get("profile") or "top_100").strip().lower()
         custom = args.get("ports")
+        port_range = args.get("port_range")
+        selected = None
         if custom is not None:
-            selected = _ports(custom, maximum=1_000)
+            selected = _ports(custom, maximum=65_535)
             port_args = ("-p", ",".join(map(str, selected)))
             attempted_per_host = len(selected)
             profile = "custom"
+        elif port_range is not None:
+            start, end = _port_range(port_range)
+            port_args = ("-p", f"{start}-{end}")
+            attempted_per_host = end - start + 1
+            profile = "range"
+        elif profile == "full":
+            # The entire TCP port space on the authorized host.
+            port_args = ("-p", "-")
+            attempted_per_host = 65_535
         else:
             configured = PORT_PROFILES.get(profile)
             if configured is None:
@@ -296,12 +322,17 @@ class PortsDiscoverAdapter:
             )
             for address in addresses
         )
-        normalized = {"profile": profile, "ports": list(selected) if custom is not None else None,
+        # port_args is part of the digest so two different ranges/profiles never
+        # collide on the same idempotency key.
+        normalized = {"profile": profile, "ports": list(selected) if selected is not None else None,
+                      "port_args": list(port_args),
                       "target_id": target.target_id, "addresses": list(addresses)}
+        # A wide sweep needs more wall time than the fixed top-100 default.
+        wall_per_host = 300 if attempted_per_host > 1_000 else 120
         return PreparedExecution(
             self.capability_name, self.adapter_name, self.adapter_version, commands,
             {"tcp_ports_attempted": attempted_per_host * len(addresses),
-             "hosts_attempted": len(addresses), "tool_wall_seconds": 120 * len(addresses)},
+             "hosts_attempted": len(addresses), "tool_wall_seconds": wall_per_host * len(addresses)},
             PreparedExecution.digest_input(normalized),
             {"profile": profile, "port_count": attempted_per_host,
              "approved_addresses": list(addresses)}, self.parser_version,

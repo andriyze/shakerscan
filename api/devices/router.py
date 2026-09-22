@@ -2974,6 +2974,11 @@ async def _device_confirmed_web_origins(device_target_id: uuid.UUID) -> list[dic
     return origins
 
 
+# Conventional HTTPS/TLS ports for devices. A service the operator named on one
+# of these is reached as HTTPS; every other port defaults to HTTP.
+_CONVENTIONAL_TLS_PORTS = frozenset({443, 4443, 7443, 8443, 8843, 9443, 10443})
+
+
 async def _device_operator_named_web_origin(
     device_target_id: uuid.UUID, port: int,
 ) -> dict[str, Any] | None:
@@ -2993,7 +2998,10 @@ async def _device_operator_named_web_origin(
     locator = str((device or {}).get("primary_locator") or "").strip() if device else ""
     if not locator:
         return None
-    scheme = "https" if int(port) in {443, 8443} else "http"
+    # Conventional TLS ports beyond 443/8443 so an HTTPS service the operator
+    # named on a non-standard port (9443, 4443, 10443, …) is reached as HTTPS
+    # rather than plain HTTP. Built from the device locator, never planner input.
+    scheme = "https" if int(port) in _CONVENTIONAL_TLS_PORTS else "http"
     bracketed = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
     return {
         "origin": f"{scheme}://{bracketed}:{port}",

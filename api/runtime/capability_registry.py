@@ -1033,11 +1033,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {
                 "hosts_attempted": _NETWORK_ADDRESS_GRANT,
-                "tcp_ports_attempted": 1_200, "tool_wall_seconds": 120,
+                "tcp_ports_attempted": 65_535, "tool_wall_seconds": 600,
             },
             {"network_reachability": True, "binary": "naabu"}, _schema({
-                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000"]},
-                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},
+                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000", "top_5000", "device_common", "full"]},
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 65535},
+                "port_range": {"type": "string", "pattern": "^[0-9]{1,5}-[0-9]{1,5}$"},
             }),
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),
@@ -1582,7 +1583,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_active",
             "Replay an exact approved state-changing request selection from a bound collection.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "state_changing_http",
             {
                 "http_requests": 2_000,
@@ -1607,7 +1608,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_authentication",
             "Replay at most five exact POST authentication requests bound to disposable credentials.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "active_testing",
             {"http_requests": 5, "tool_wall_seconds": 60},
             {
