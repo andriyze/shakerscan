@@ -323,7 +323,7 @@ def _prepare_browser_base(
         raise BrowserCapabilityInputError(
             "browser actions support only web and API targets"
         )
-    base_origin = _origin(base_url)
+    base_origin = _origin(args.get("origin") or base_url)
     if base_origin not in target.allowed_origins:
         raise BrowserCapabilityInputError(
             "browser origin is not present in the target binding"
@@ -451,7 +451,7 @@ class BrowserNavigateAdapter:
             target=target,
             base_url=base_url,
             args=args,
-            allowed_fields={"path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
+            allowed_fields={"origin", "path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
         )
         normalized = {
             "target_id": target.target_id,
@@ -533,7 +533,7 @@ class BrowserInteractAdapter:
             base_url=base_url,
             args=args,
             allowed_fields={
-                "path", "selector", "wait_until", "timeout_ms",
+                "origin", "path", "selector", "wait_until", "timeout_ms",
                 "max_requests", "settle_ms", "steps", "session_ref",
             },
         )

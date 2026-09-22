@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import uuid
 
 from .browser import browser_capability_adapter
+from .http import resolve_hunt_http_origin
 from .browser_login_action import BrowserLoginAdapter, BrowserLoginMaterial
 from .browser_login import BrowserLoginValues
 try:
@@ -40,6 +41,7 @@ def _mapping(value: Any) -> dict[str, Any]:
 def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy):
     adapter = browser_capability_adapter(name)
     if name != BROWSER_LOGIN_CAPABILITY:
+        target = resolve_hunt_http_origin(target, args.get("origin"), policy)
         return adapter.prepare(target=target, base_url=base_url, args=args)
     require_browser_login_policy(policy)
     # Use the persisted run's principal selection, never a planner-supplied ID.
