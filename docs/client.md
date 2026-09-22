@@ -67,10 +67,11 @@ Client 0.7.1 adds a dedicated public stdio MCP mode exposing only
 `shakerscan_public_check(target)`. It uses the same credential-free `/v1/check`
 pipeline as `check`; no private-engine discovery, Hunt, Arsenal, shell or target
 management tools are available. A configured private instance retains its own tools.
-The service currently observes DNS, direct email policy and a bounded cleartext HTTP
-root HEAD response/redirect. HTTPS/TLS is explicitly unsupported on this backend;
-Cloudflare cannot reliably combine pinned destination IPs with hostname TLS verification.
-HTTP redirects are reported, never followed, and platform-blocked destinations are unknown.
+The service observes DNS, direct email policy and bounded HTTP/HTTPS root HEAD
+responses through its AWS Lambda backend. Connections use validated public IPs;
+TLS verifies certificate trust, validity and the requested hostname. Only the
+negotiated TLS version is reported. Redirects are reported, never followed;
+unavailable evidence is unknown, and missing headers are posture observations.
 Public checks share a 100-uncached-attempts/IP/day quota, resetting at midnight UTC.
 
 ```bash

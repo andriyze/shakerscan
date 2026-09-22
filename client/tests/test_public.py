@@ -98,6 +98,20 @@ class PublicClientTests(unittest.TestCase):
             call = fake_api.main.call_args.args[0]
             self.assertEqual(call[:4], ["--api-url", "https://private.example.com", "POST", "/public/check"])
 
+    def test_check_prints_observations_and_limitations_with_summary(self):
+        args = argparse.Namespace(target="example.com", json=False, timeout=None)
+        data = {"summary": "One observation to review", "checks": [
+            {"name": "HTTPS", "status": "pass", "detail": "HTTPS responded."}
+        ], "limitations": ["Only the negotiated TLS version was observed."]}
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(cli, "profile", return_value={}), \
+             mock.patch.object(cli, "engine_launcher", return_value=None), \
+             mock.patch.object(cli, "public_request_json", return_value=data), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(cli.cmd_check(args), 0)
+            for text in (data["summary"], "HTTPS responded.", data["limitations"][0]):
+                self.assertIn(text, stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

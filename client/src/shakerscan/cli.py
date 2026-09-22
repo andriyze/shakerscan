@@ -676,22 +676,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     summary = data.get("summary")
     if isinstance(summary, str) and summary.strip():
         print("\n" + summary.strip())
-    if isinstance(data.get("checks"), list):
-        for item in data["checks"]:
-            if isinstance(item, dict):
-                print(f"{str(item.get('name') or item.get('id') or 'check'):24} {item.get('status', 'unknown')}  {item.get('detail', '')}")
+    checks = data.get("checks")
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or "check")
+            status = str(item.get("status") or "unknown")
+            detail = str(item.get("detail") or item.get("message") or "").strip()
+            print(f"{name:24} {status}" + (f"  {detail}" if detail else ""))
     elif not summary:
-        checks = data.get("checks")
-        if isinstance(checks, list):
-            for item in checks:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or item.get("id") or "check")
-                status = str(item.get("status") or "unknown")
-                detail = str(item.get("detail") or item.get("message") or "").strip()
-                print(f"{name:16} {status}" + (f"  {detail}" if detail else ""))
-        else:
-            print(json.dumps(data, indent=2, sort_keys=True))
+        print(json.dumps(data, indent=2, sort_keys=True))
     for limitation in data.get("limitations", []):
         if isinstance(limitation, str):
             print(f"Note: {limitation}")
