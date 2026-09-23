@@ -456,7 +456,7 @@ def prepare_workspace(
         kit_version = version_file.read_text(encoding="utf-8").strip() or kit_version
     template = INSTANCE_NOTE if authenticated else ENGINE_NOTE
     note = template.format(url=url, who=who, kit_version=kit_version)
-    for name in ("AGENTS.md", "CLAUDE.md"):
+    for name in ("AGENTS.md",):
         (workspace / name).write_text(note + sources[name].read_text(encoding="utf-8"), encoding="utf-8")
         written.append(name)
     (workspace / ".mcp.json").write_text(
