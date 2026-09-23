@@ -31,6 +31,8 @@ def test_real_login_protected_navigation_and_expiry(storage, mode, decoded_gzip_
     async def scenario():
         from playwright.async_api import async_playwright
 
+        polling = storage == "cookie" and mode == "fixed_qa" and decoded_gzip_response
+        poll_script = b"<script>setInterval(() => fetch('/poll'), 20); fetch('/poll');</script>" if polling else b""
         login = b'''<!doctype html><input id="username"><input id="password" type="password">
 <button id="sign-in" type="button">Sign in</button><div id="login-error" hidden>Rejected</div>
 <script>
@@ -41,7 +43,7 @@ document.querySelector('#sign-in').onclick=async()=>{
  if(r.ok){localStorage.setItem('synthetic-session','active');location.href='/account';}
  else document.querySelector('#login-error').hidden=false;
 };
-</script>'''
+</script>''' + poll_script
         async def transport(request, phase):
             path = request.url.removeprefix(ORIGIN)
             headers = {"Content-Type": "text/html"}
@@ -51,6 +53,9 @@ document.querySelector('#sign-in').onclick=async()=>{
                 headers["Content-Encoding"] = "gzip"
             if path == "/login":
                 return bl.BrowserLoginResponse(200, headers, login)
+            if path == "/poll":
+                await asyncio.sleep(0.15)
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/plain"}, b"ok")
             if path == "/session" and request.method == "POST":
                 assert json.loads(request.post_data) == {"username": "synthetic-user", "password": "synthetic-password"}
                 headers["Set-Cookie"] = "synthetic-session=active; Path=/; HttpOnly; SameSite=Lax"
@@ -58,7 +63,8 @@ document.querySelector('#sign-in').onclick=async()=>{
             if path == "/account":
                 if storage == "cookie":
                     authenticated = "synthetic-session=active" in (await request.all_headers()).get("cookie", "")
-                    body = b'<div id="private-account">Account</div>' if authenticated else b'<div id="login-error">Expired</div>'
+                    body = (b'<div id="private-account">Account</div>' if authenticated else
+                            b'<div id="login-error">Expired</div>') + poll_script
                 else:
                     body = b'''<div id="private-account" hidden>Account</div><div id="login-error" hidden>Expired</div>
 <script>document.querySelector(localStorage.getItem('synthetic-session')==='active'?'#private-account':'#login-error').hidden=false;</script>'''
@@ -70,7 +76,7 @@ document.querySelector('#sign-in').onclick=async()=>{
             check_url=ORIGIN + "/account", username_selector="#username",
             password_selector="#password", submit_selector="#sign-in",
             authenticated_selector="#private-account", rejected_selector="#login-error",
-            timeout_ms=5_000,
+            timeout_ms=10_000 if polling else 5_000,
         )
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(executable_path=CHROMIUM, headless=True,
