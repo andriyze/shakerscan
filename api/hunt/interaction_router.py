@@ -35,6 +35,7 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
+from .worker_accounting import worker_replay_settlement_matches
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -2923,6 +2924,33 @@ async def _execute_hunt_capability_lifecycle(
                         raise RuntimeError(
                             "Hunt capability action changed before settlement"
                         )
+            elif (
+                worker_managed_budget
+                and isinstance(receipt_payload, Mapping)
+                and receipt_payload.get("durable_budget_settled") is True
+                and receipt_payload.get("receipt_id")
+            ):
+                if durable_action_digest is None:
+                    raise RuntimeError("Replay action digest disappeared after dispatch")
+                async with conn.transaction():
+                    stored = await durable_store.load(
+                        conn, str(receipt_payload.get("reservation_id") or ""),
+                        for_update=True,
+                    )
+                    action = await conn.fetchrow(
+                        """SELECT status, receipt_id, result_summary FROM hunt_actions
+                           WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                        action_id, run["id"],
+                    )
+                    if not worker_replay_settlement_matches(
+                        receipt_payload, stored, dict(action) if action else None,
+                        action_digest=durable_action_digest,
+                    ):
+                        raise RuntimeError(
+                            "Replay capability settlement is not internally consistent"
+                        )
+                # The worker has already persisted the exact action outcome and
+                # receipt atomically with its reservation. Do not replace them.
             elif worker_durable_budget:
                 if (
                     isinstance(receipt_payload, dict)

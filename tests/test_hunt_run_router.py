@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -15,7 +16,9 @@ from api.hunt.run_service import (
     public_hunt_action_trace,
     public_hunt_run,
 )
-from api.hunt.worker_accounting import worker_hunt_budget_accounting
+from api.hunt.worker_accounting import (
+    worker_hunt_budget_accounting, worker_replay_settlement_matches,
+)
 
 
 def _row(**overrides):
@@ -249,6 +252,51 @@ def test_historical_worker_settlement_requires_matching_receipt():
     unmatched = public_hunt_action(row)
     assert unmatched["result"]["ok"] is None
     assert unmatched["result"]["budget_accounting"]["basis"] == "no_reservation"
+
+
+def test_replay_worker_settlement_must_match_the_stored_receipt_and_charge():
+    reservation_id = str(uuid.uuid4())
+    receipt_id = str(uuid.uuid4())
+    actual = {"agent_actions": 1, "http_requests": 2}
+    stored = SimpleNamespace(
+        record=SimpleNamespace(
+            terminal=True, reservation_id=reservation_id,
+            status="committed", actual=actual,
+        ),
+        action_digest="action-digest",
+        receipt={"receipt_id": receipt_id},
+    )
+    payload = {
+        "durable_budget_settled": True,
+        "reservation_id": reservation_id,
+        "receipt_id": receipt_id,
+    }
+    action = {
+        "status": "completed",
+        "receipt_id": uuid.UUID(receipt_id),
+        "result_summary": json.dumps({
+            "ok": True,
+            "budget_reservation_id": reservation_id,
+            "budget_reservation_state": "committed",
+            "budget_accounting": worker_hunt_budget_accounting(
+                {"agent_actions": 1, "http_requests": 25}, actual, actual,
+                reservation_id=reservation_id, settlement_status="succeeded",
+            ),
+        }),
+    }
+    assert worker_replay_settlement_matches(
+        payload, stored, action, action_digest="action-digest",
+    )
+    action["result_summary"] = json.dumps({
+        **json.loads(action["result_summary"]),
+        "budget_accounting": {"settlement_status": "worker_managed"},
+    })
+    assert not worker_replay_settlement_matches(
+        payload, stored, action, action_digest="action-digest",
+    )
+    assert not worker_replay_settlement_matches(
+        payload, stored, action, action_digest="wrong-digest",
+    )
 
 
 def test_factual_hunt_outcome_excludes_unsuccessful_action_claims():
