@@ -57,6 +57,8 @@ class Locator:
                 and not flags.get("protected_public_marker") and not flags.get("anonymous_unknown")
             ))
         if self.selector == SPEC.authenticated_selector:
+            if flags.get("redirect_login"):
+                return self.page.browser.authenticated and self.page.url == SPEC.check_url
             return bool(flags.get("public_marker") or self.page.browser.authenticated or (
                 flags.get("protected_public_marker") and self.page.url == SPEC.check_url
             ))
@@ -73,7 +75,7 @@ class Locator:
 
     async def click(self):
         route = await self.page.browser.send(SPEC.submit_url, "POST")
-        if route.response and route.response["status"] == 200:
+        if route.response and route.response["status"] in {200, 303}:
             self.page.browser.authenticated = True
         if self.page.browser.flags.get("double_submit"):
             second = await self.page.browser.send(SPEC.submit_url, "POST")
@@ -141,7 +143,11 @@ class Browser:
         if self.flags.get("oversized"):
             return bl.BrowserLoginResponse(200, {}, b"x" * (SPEC.max_response_bytes + 1))
         status = 401 if self.flags.get("bad_password") and request.method == "POST" else 200
-        return bl.BrowserLoginResponse(status, {"Content-Length": "10"}, b"synthetic")
+        headers = {"Content-Length": "10"}
+        if self.flags.get("redirect_login") and request.method == "POST":
+            status = 303
+            headers["Location"] = SPEC.check_url
+        return bl.BrowserLoginResponse(status, headers, b"synthetic")
 
 
 def execute(browser, spec=SPEC, values=VALUES):
@@ -189,6 +195,16 @@ def test_login_verification_retries_transient_navigation_context_loss(monkeypatc
     assert failed_once
     assert receipt["authentication_verified"] is True
     assert receipt["qa_completed"] is True
+
+
+def test_intercepted_login_redirect_uses_saved_protected_check_url():
+    browser = Browser(redirect_login=True)
+    receipt = execute(browser)
+
+    assert receipt["authentication_verified"] is True
+    assert receipt["login_response_status"] == 303
+    assert receipt["qa_completed"] is True
+    assert [url for _, url, _ in browser.calls][-2:] == [SPEC.check_url, SPEC.check_url]
 
 
 @pytest.mark.parametrize("change", [

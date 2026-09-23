@@ -393,12 +393,16 @@ async def authenticated_browser_page(
             await page.locator("css=" + workflow.password_selector).fill(values.password)
             phase = "login"
             await page.locator("css=" + workflow.submit_selector).click()
-            await verify(page)
-            phase = "verify"
+            await idle.wait()
+            check_health()
             if receipt["login_submissions"] != 1 or receipt["login_response_status"] is None:
                 raise fail("login_submission_not_observed")
-            # Fresh navigation checks that the protected view survives the login
-            # UI transition, for cookie- and browser-storage-backed applications.
+            if receipt["login_response_status"] >= 400:
+                raise fail("authentication_rejected")
+            # An intercepted form redirect may not advance Chromium's page.
+            # Check the operator-configured protected URL explicitly; the
+            # post-QA recheck below proves the browser session persists.
+            phase = "verify"
             await page.goto(workflow.check_url, wait_until="domcontentloaded")
             await verify(page)
         phase = "read_only"
