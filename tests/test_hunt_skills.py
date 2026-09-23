@@ -110,16 +110,14 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     assert "capabilities" not in suggestions[0]
 
 
-def test_suggestions_respect_the_hunt_authority_allowlist(library):
+def test_suggestions_do_not_hide_methodology_when_authority_is_narrow(library):
     suggestions = library.suggest(
         goal="Validate Cloudflare WAF and direct origin exposure",
         target_kind="web",
         allowed_capabilities=("http.request",),
     )
-    assert all(
-        item["skill_id"] != "skill.web.edge-waf-and-origin-exposure-validation"
-        for item in suggestions
-    )
+    assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
+    assert suggestions[0]["auto_bound"] is False
 
 
 def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
@@ -133,6 +131,22 @@ def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
     assert bound.context_section["bound"] == []
     assert "suggested" in bound.context_section
     assert len(bound.context_section["suggested"]) <= 3
+
+
+def test_binding_methodology_does_not_fail_only_because_some_techniques_are_withheld(library):
+    skill_id = "skill.web.edge-waf-and-origin-exposure-validation"
+    budget = object()
+    bound = bind_skills_to_hunt(
+        [skill_id],
+        target_kind="web",
+        allowed_capabilities=("http.request",),
+        budget=budget,
+        library=library,
+        goal="Investigate edge and origin exposure",
+    )
+    assert any(spec.skill_id == skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == ("http.request",)
+    assert bound.budget is budget
 
 
 def test_binding_methodology_preserves_the_run_authority_and_budget(library):
