@@ -106,7 +106,9 @@ from capabilities.inline import (
 from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_binding
-from capabilities.replay import ReplayExecutionAdapter, hunt_replay_additional_budget
+from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget
+from hunt.service_binding import registered_hunt_locator
+from hunt.verification_budget import record_budget_shortage
 from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.action_dispatcher import (
     HUNT_ACTION_DISPATCHER,
@@ -19665,9 +19667,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     "target_binding_digest": target.digest,
                 }, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             })
-        additional_budget = hunt_replay_additional_budget(
+        additional_budget = worker_hunt_replay_budget(
+            run=run, context=context, policy=hunt_policy, origins=stored_origins,
             wall_seconds=int(job_data.get("tool_wall_seconds") or 60),
-            device_requests=len(plan.requests) if run["device_target_id"] else 0,
+            request_count=len(plan.requests),
             managed_principal=bool(credential_profile_id),
         )
         requested_budget = replay_reservation_budget(plan, additional_budget)
@@ -19726,21 +19729,19 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         ledger_after_settlement=consumed,
                         receipt=None,
                     )
-                    dimension = next(iter(exc.shortages), "unknown")
-                    await conn.execute(
-                        """UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2,
-                                  updated_at=NOW() WHERE id=$1""",
-                        uuid.UUID(hunt_id), f"budget_exhausted:{dimension}",
+                    shortage = await record_budget_shortage(
+                        conn, hunt_id=uuid.UUID(hunt_id), limits=limits,
+                        used=consumed, shortages=exc.shortages,
                     )
                     await conn.execute(
                         """UPDATE hunt_actions SET status='failed', completed_at=NOW(),
                                   result_summary=$2 WHERE id=$1""",
-                        uuid.UUID(action_id), json.dumps({"error": f"budget_exhausted:{dimension}"}),
+                        uuid.UUID(action_id), json.dumps(shortage),
                     )
                     result = {
                         "job_id": job_id,
                         "status": "failed",
-                        "error": f"budget_exhausted:{dimension}",
+                        **shortage,
                         "reservation_id": reservation_id,
                         "budget_consumed": {},
                         "durable_budget_settled": True,
@@ -20083,13 +20084,13 @@ async def _revalidate_hunt_action_authority(
             "SELECT primary_locator AS locator, is_active FROM device_targets WHERE id=$1",
             run["device_target_id"],
         )
-        frozen_locator = str(target.canonical_host or "").strip()
+        frozen_locator = registered_hunt_locator(run, target.canonical_host)
     else:
         current = await conn.fetchrow(
             "SELECT url AS locator, is_active FROM targets WHERE id=$1",
             run["target_id"],
         )
-        frozen_locator = str(target_url or "").strip()
+        frozen_locator = registered_hunt_locator(run, target_url)
     if not current or not current["is_active"]:
         raise CapabilityInputError("Hunt target is no longer active")
     if str(current["locator"] or "").strip() != frozen_locator:
@@ -21491,6 +21492,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
+                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
                     subdomain_discovery=capability_name == "subdomains.discover",
                     scope_receipt_id=target.scope_receipt_id,
@@ -21694,7 +21696,8 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                         _worker_json_object(locked["budget_json"])
                     )
                 }
-                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status,
+                                            health_observed=False if capability_name == "service.nse_check" else None)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,

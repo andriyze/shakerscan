@@ -1,8 +1,9 @@
 """Credential service reuse follows persisted Hunt authority, not a login-port lock.
 
 A login origin is provenance and the refresh destination. An active, approved Hunt
-may reuse that identity on other services of the same frozen asset without
-downgrading an HTTPS session to HTTP. These checks consume existing authority;
+may reuse that identity on selected HTTP/HTTPS services of the same frozen asset.
+The transport choice is covered by that standing authorization, not the scheme
+used at login. These checks consume existing authority;
 they never create a per-port approval prompt.
 """
 from __future__ import annotations
@@ -67,8 +68,8 @@ async def validate_session_service_use(
     Exact-bound legacy sessions and Scan retain their existing semantics. For a
     Hunt's asset-bound session, the worker cannot grant another service merely by
     changing its TargetBinding: reconstruct that binding from the stored run and
-    reload the existing approval. HTTP and untrusted TLS need no extra approval,
-    but an HTTPS-established session never releases secrets to HTTP.
+    reload the existing approval. Selected HTTP and untrusted TLS need no extra
+    approval. A response redirect cannot select a service or expand this binding.
     """
     if metadata.owner_kind != "hunt":
         return
@@ -79,15 +80,6 @@ async def validate_session_service_use(
     )
     if not origins or not origins.issubset(bound_origins):
         raise ValueError("session service selection is outside the target binding")
-    if metadata.service_origin:
-        if (urlsplit(service_origin(metadata.service_origin)).scheme == "https"
-                and any(urlsplit(origin).scheme == "http" for origin in origins)):
-            raise ValueError("HTTPS session cannot be reused over HTTP")
-    elif (metadata.target_binding_digest != target.digest
-          and any(urlsplit(origin).scheme == "http" for origin in origins)):
-        # Legacy sessions have no origin provenance. Exact-bound use remains
-        # compatible, but cross-service HTTP cannot prove it is not a downgrade.
-        raise ValueError("session origin is unavailable for cross-service HTTP reuse")
     if metadata.service_origin and origins == {service_origin(metadata.service_origin)}:
         return
     if not metadata.service_origin and metadata.target_binding_digest == target.digest:

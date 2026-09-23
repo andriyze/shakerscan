@@ -6,6 +6,7 @@ A service selection is per action. Responses and redirects never call this resol
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
+import json
 from typing import Any, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -58,3 +59,31 @@ def collection_target(run: Mapping[str, Any], context: Mapping[str, Any],
 
 def service_origin_changed(target: TargetBinding, origin: Any) -> bool:
     return origin is not None and _origin_key(origin) not in {_origin_key(o) for o in target.allowed_origins}
+
+
+def replay_uses_service_origin(target: TargetBinding, origins: Sequence[str]) -> bool:
+    """Shared admission/worker classification; origins come from a saved binding."""
+    return any(service_origin_changed(target, origin) for origin in origins)
+
+
+def collection_uses_service_origin(target: TargetBinding, context: Mapping[str, Any],
+                                   collection_id: Any) -> bool:
+    """Whether a bound collection reaches a service origin beyond the Hunt's own."""
+    wanted = str(collection_id or "")
+    bound = next((
+        item for item in context.get("request_collections") or []
+        if isinstance(item, Mapping) and wanted
+        and wanted in {str(item.get("collection_id") or ""), str(item.get("selection_id") or "")}
+    ), None)
+    return bound is not None and replay_uses_service_origin(target, bound.get("allowed_origins") or ())
+
+
+def registered_hunt_locator(run: Mapping[str, Any], fallback: str) -> str:
+    """Inventory identity is not the per-action service URL or collection origin."""
+    context = run.get("context_pack") or {}
+    if isinstance(context, str):
+        context = json.loads(context)
+    target = context.get("target") or {}
+    if run.get("device_target_id"):
+        return str(target.get("locator") or target.get("url") or fallback).strip()
+    return str(target.get("url") or target.get("locator") or fallback).strip()

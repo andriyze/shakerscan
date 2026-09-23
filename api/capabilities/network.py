@@ -81,7 +81,16 @@ class NetworkExecutionAdapter:
         if self._heartbeat_interval_seconds <= 0:
             raise ValueError("network capability heartbeat interval must be positive")
 
-    async def _run_command_with_heartbeats(
+    async def _run_command_with_heartbeats(self, command, **kwargs):
+        if self.capability_name != "service.nse_check":
+            return await self._run_process_with_heartbeats(command, **kwargs)
+        from .nse_http_runtime import NseCommandResult, command_transport
+        async with command_transport(self._prepared, command, heartbeat=kwargs["heartbeat"],
+                                     cancelled=kwargs["cancelled"]) as (bound_command, bridge):
+            process = await self._run_process_with_heartbeats(bound_command, **kwargs)
+        return NseCommandResult(process, bridge)
+
+    async def _run_process_with_heartbeats(
         self,
         command: PreparedCommand,
         *,
@@ -134,6 +143,8 @@ class NetworkExecutionAdapter:
             // command_count,
         )
         status = "failed"
+        process_failed = False
+        nse_http_actual = {"http_requests": 0, "state_changing_requests": 0}
 
         for command in prepared.commands:
             if cancelled():
@@ -164,8 +175,24 @@ class NetworkExecutionAdapter:
                 parse_kwargs["root_domain"] = str(
                     prepared.redacted_execution["root_domain"]
                 )
+            elif prepared.capability_name == "service.nse_check":
+                parse_kwargs["expected_ports"] = tuple(
+                    int(item) for item in prepared.redacted_execution.get("ports") or ()
+                )
+                parse_kwargs["expected_scripts"] = tuple(
+                    str(item) for item in prepared.redacted_execution.get("scripts") or ()
+                )
             parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
-            observations.extend(dict(row) for row in parsed.observations)
+            parsed_observations = parsed.observations
+            bridge = getattr(streamed, "nse_http", None)
+            if bridge is not None:
+                from .nse_http_runtime import decorate_observations
+                parsed_observations = decorate_observations(parsed_observations, bridge)
+                for key in nse_http_actual:
+                    nse_http_actual[key] += bridge.actual[key]
+                errors.extend(bridge.errors)
+                partial = partial or bool(bridge.errors)
+            observations.extend(dict(row) for row in parsed_observations)
             errors.extend(str(item) for item in parsed.errors)
             partial = bool(
                 partial
@@ -181,15 +208,17 @@ class NetworkExecutionAdapter:
                 status = "cancelled"
                 errors.insert(0, "cancelled")
                 break
-            if streamed.returncode != 0 and not streamed.stdout.strip():
-                status = "failed"
+            if streamed.returncode != 0:
+                process_failed = True
+                partial = True
                 errors.insert(
                     0,
                     f"{prepared.adapter_name}_exit_{streamed.returncode}",
                 )
-                break
+                # A failed host must not discard its usable output or prevent
+                # examination of the other admitted addresses.
         else:
-            status = "partial" if partial else "success"
+            status = "failed" if process_failed and not observations else "partial" if partial else "success"
 
         actual: dict[str, int] = {}
         for dimension, reserved_amount in prepared.estimated_budget.items():
@@ -206,13 +235,16 @@ class NetworkExecutionAdapter:
                     )
                     // command_count,
                 )
-            elif dimension in {"http_requests", "device_fragility_points"} and prepared.capability_name == "service.nse_check":
-                # NSE does not expose a trustworthy per-request count. Charge the
-                # conservative server-owned envelope for each command attempted.
-                actual[dimension] = min(
-                    reserved_amount,
-                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
-                )
+            elif prepared.capability_name == "service.nse_check":
+                if dimension in nse_http_actual:
+                    actual[dimension] = nse_http_actual[dimension]
+                elif dimension == "device_fragility_points":
+                    # Native connects/TLS retain an explicitly labelled cost
+                    # estimate; HTTP is measured and unused HTTP grant released.
+                    non_http = reserved_amount - int(prepared.estimated_budget.get("http_requests") or 0)
+                    actual[dimension] = ((non_http * attempted_commands + command_count - 1) // command_count
+                                         + nse_http_actual["http_requests"])
+
 
         return CapabilityAdapterResult(
             status=status,

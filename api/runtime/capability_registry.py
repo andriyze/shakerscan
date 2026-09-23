@@ -1054,7 +1054,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "network_discovery", {
                 "hosts_attempted": _NETWORK_ADDRESS_GRANT,
                 "tcp_ports_attempted": 4 * _NETWORK_ADDRESS_GRANT,
-                "http_requests": 48 * _NETWORK_ADDRESS_GRANT,
+                "http_requests": 52 * _NETWORK_ADDRESS_GRANT,
                 "tool_wall_seconds": 90 * _NETWORK_ADDRESS_GRANT,
             },
             {"network_reachability": True, "binary": "nmap", "server_owned_nse_allowlist": True},

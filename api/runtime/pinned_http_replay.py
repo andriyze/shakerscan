@@ -6,7 +6,7 @@ import asyncio
 import ipaddress
 import socket
 import ssl
-from typing import Any
+from typing import Any, Awaitable, Callable
 import urllib.parse
 
 import aiohttp
@@ -97,7 +97,9 @@ class PinnedAiohttpReplayTransport:
     def __init__(self, *, verify_tls: bool = False,
                  reject_duplicate_response_headers: bool = False,
                  tolerate_incomplete_body: bool = False,
-                 auto_decompress: bool = False) -> None:
+                 auto_decompress: bool = False,
+                 before_request_headers: Callable[[str, str], Awaitable[None]] | None = None) -> None:
+        self.before_request_headers = before_request_headers
         self.verify_tls = verify_tls
         self.reject_duplicate_response_headers = reject_duplicate_response_headers
         # Exact collection replay preserves wire bytes. Browser login is the
@@ -172,9 +174,17 @@ class PinnedAiohttpReplayTransport:
         )
         timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
         started = asyncio.get_running_loop().time()
+        traces = []
+        if self.before_request_headers is not None:
+            trace = aiohttp.TraceConfig()
+            async def before_headers(_session, _context, params):
+                await self.before_request_headers(params.method, str(params.url))
+            trace.on_request_headers_sent.append(before_headers)
+            traces.append(trace)
         try:
             async with aiohttp.ClientSession(
                 connector=connector,
+                trace_configs=traces,
                 timeout=timeout,
                 trust_env=False,
                 auto_decompress=self.auto_decompress,

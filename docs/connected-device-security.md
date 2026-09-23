@@ -431,3 +431,34 @@ Their graph records belong to `device_target_id`; an additive migration supports
 HTTP sessions and graph ownership without manufacturing web targets. Native device adapters
 inherit the canonical Hunt request and scan limits rather than applying a second legacy
 40-request / three-scan ceiling.
+
+### Hunt NSE transport and coverage
+
+`service.nse_check` retains the installed Nmap analyses for `http-methods`,
+`http-security-headers`, `http-trace`, and `ssl-enum-ciphers`. The HTTP analyses
+use the worker's pinned transport, preserving Host and TLS SNI on the frozen
+address. Same-asset HTTP/HTTPS redirects, including alternate ports and untrusted
+certificates, reuse existing network authority; no per-hop approval is created.
+A redirect to another asset is recorded as incomplete coverage, and other selected
+checks continue. Evidence includes the actual response service and redacted URL.
+
+HTTP discovery uses metered HEAD requests instead of an implicit `-sV` version
+scan. Native TLS enumeration is forced on the explicitly selected port, including
+nonstandard ports; broader fingerprinting remains `service.fingerprint`.
+HTTP budgets count every request-header attempt, including connection-library
+retries, detector requests, and permitted optional method probes. Unused HTTP
+allowances are released. Native port/TLS device cost is still an estimate, not a
+claim of exact handshake or packet counting.
+
+The method analysis can probe POST and an unknown method as negative controls.
+Those probes use the existing `allow_state_changing_http` permission and budget.
+Without it, Hunt preserves the available read-method observations and explains
+which optional probes were omitted instead of refusing the entire capability.
+An incomplete script is not a clean security result; observations remain unverified
+until a separate deterministic proof contract validates a finding.
+
+NSE coverage outcomes do not stand in for a device health checkpoint. Repeated
+partial results (closed services, unavailable script output or optional omissions)
+do not trip the health circuit breaker, and a completed NSE action does not clear
+a pre-existing failure or operator pause. Traffic usage and pacing still settle;
+other capabilities retain their actual health-check behavior.
