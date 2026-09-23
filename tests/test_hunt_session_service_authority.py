@@ -64,15 +64,16 @@ async def create(conn, target, *, source=None):
     )
 
 
-async def load(conn, target):
+async def load(conn, target, *, selected_origins=None):
     return await sessions.PostgresAuthSessionStore().load_for_worker(
         conn, session_ref=fixture.SESSION_ID, owner_kind="hunt", owner_id=fixture.OWNER_ID,
-        target=target, capability="http.request", now=fixture.NOW,
+        target=target, capability="http.request", selected_origins=selected_origins,
+        now=fixture.NOW,
     )
 
 
 @pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
-@pytest.mark.parametrize("destination", ["https://app.example.test:9443", "http://app.example.test:8080", "http://app.example.test"])
+@pytest.mark.parametrize("destination", ["https://app.example.test:9443", "https://app.example.test"])
 def test_one_standing_authorization_allows_selected_session_on_other_services(monkeypatch, kind, destination):
     fixture.install_fake_crypto(monkeypatch)
     original = replace(fixture.target(), target_kind=kind, allowed_origins=("https://app.example.test:8443",))
@@ -86,6 +87,48 @@ def test_one_standing_authorization_allows_selected_session_on_other_services(mo
     assert conn.run["policy_json"]["network_discovery"] is False
     assert not conn.executed  # Consume existing authority; never create an approval.
     worker.close()
+
+
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+@pytest.mark.parametrize("destination", ["http://app.example.test:8080", "http://app.example.test"])
+def test_https_session_refuses_http_service_before_decryption(monkeypatch, kind, destination):
+    fixture.install_fake_crypto(monkeypatch)
+    original = replace(fixture.target(), target_kind=kind, allowed_origins=("https://app.example.test:8443",))
+    conn = PolicyConn(original)
+    asyncio.run(create(conn, original))
+    monkeypatch.setattr(sessions, "decrypt_secret", lambda _: pytest.fail("downgrade decrypted session"))
+    with pytest.raises(sessions.AuthSessionStoreError, match="HTTPS session cannot be reused over HTTP"):
+        asyncio.run(load(conn, replace(original, allowed_origins=(destination,))))
+    assert conn.reads == []
+
+
+def test_http_session_can_reuse_another_http_port_with_existing_authority(monkeypatch):
+    fixture.install_fake_crypto(monkeypatch)
+    original = replace(fixture.target(), allowed_origins=("http://app.example.test:8008",))
+    conn = PolicyConn(original)
+    asyncio.run(create(conn, original))
+    worker = asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8060",))))
+    assert worker.headers() == {"Authorization": fixture.SECRET}
+    assert conn.reads == ["hunt", "approval"]
+    worker.close()
+
+
+def test_only_selected_service_in_multi_origin_binding_controls_downgrade(monkeypatch):
+    fixture.install_fake_crypto(monkeypatch)
+    original = replace(fixture.target(), allowed_origins=("https://app.example.test:8443",))
+    conn = PolicyConn(original)
+    asyncio.run(create(conn, original))
+    selected = replace(original, allowed_origins=(
+        "http://app.example.test", "https://app.example.test:8443",
+    ))
+
+    worker = asyncio.run(load(conn, selected, selected_origins=("https://app.example.test:8443",)))
+    assert worker.headers() == {"Authorization": fixture.SECRET}
+    worker.close()
+    with pytest.raises(sessions.AuthSessionStoreError, match="HTTPS session cannot be reused over HTTP"):
+        asyncio.run(load(conn, selected, selected_origins=("http://app.example.test",)))
+    with pytest.raises(sessions.AuthSessionStoreError, match="outside the target binding"):
+        asyncio.run(load(conn, selected, selected_origins=("https://other.example.test",)))
 
 
 def test_equivalent_default_port_is_not_an_extra_service_or_approval(monkeypatch):
@@ -125,16 +168,16 @@ def test_changed_service_authority_is_rejected_before_decryption(monkeypatch, ch
         asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
 
 
-def test_legacy_asset_bound_session_uses_current_authorization_without_new_prompt(monkeypatch):
+def test_legacy_asset_bound_session_refuses_unattributable_http_reuse(monkeypatch):
     fixture.install_fake_crypto(monkeypatch)
     original = fixture.target()
     conn = PolicyConn(original)
     asyncio.run(create(conn, original))
     conn.row["service_origin"] = None
-    worker = asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
-    assert worker.headers()["Authorization"] == fixture.SECRET
-    assert conn.reads == ["hunt", "approval"]
-    worker.close()
+    monkeypatch.setattr(sessions, "decrypt_secret", lambda _: pytest.fail("legacy HTTP reuse decrypted session"))
+    with pytest.raises(sessions.AuthSessionStoreError, match="session origin is unavailable"):
+        asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
+    assert conn.reads == []
 
 
 def test_exact_bound_legacy_session_keeps_its_original_binding(monkeypatch):

@@ -251,6 +251,22 @@ def test_public_hunt_route_returns_the_canonical_action_result_on_first_and_retr
     ).read_text(encoding="utf-8")
 
 
+def test_worker_partial_parser_errors_survive_canonical_result_conversion():
+    from hunt.action_dispatcher import worker_result_errors
+
+    result = {
+        "status": "partial", "error": None,
+        "typed_output": {"errors": ["nse_script_no_output:http-security-headers:8008"]},
+    }
+    assert worker_result_errors(result) == (
+        "nse_script_no_output:http-security-headers:8008",
+    )
+    assert worker_result_errors({"error": "tool_failed", "typed_output": {
+        "errors": ["tool_failed", "malformed_nmap_xml:ParseError"]}}) == (
+        "tool_failed", "malformed_nmap_xml:ParseError",
+    )
+
+
 def test_canonical_device_hunt_is_not_capped_by_legacy_session_ceilings():
     # The canonical Hunt device policy follows the resolved budget, not the
     # legacy device-agent per-session constants. A realistic budget must admit

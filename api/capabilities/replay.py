@@ -9,6 +9,21 @@ from runtime.capability_registry import CapabilitySpec
 from runtime.request_replay_executor import execute_replay_plan
 
 
+def hunt_replay_additional_budget(
+    *, wall_seconds: int, device_requests: int = 0, managed_principal: bool = False,
+) -> dict[str, int]:
+    """Reserve Hunt dimensions owned by the worker alongside the exact replay plan."""
+    budget = {
+        "agent_actions": 1,
+        "tool_wall_seconds": max(1, min(int(wall_seconds), 300)),
+    }
+    if device_requests:
+        budget["device_fragility_points"] = int(device_requests)
+    if managed_principal:
+        budget["active_actions"] = 1
+    return budget
+
+
 class ReplayExecutionAdapter:
     """Run the durable exact-replay engine behind the canonical capability seam."""
 

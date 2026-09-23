@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import uuid
 
 try:
@@ -452,6 +452,7 @@ class PostgresAuthSessionStore:
         owner_id: Any,
         target: TargetBinding,
         capability: str,
+        selected_origins: Sequence[str] | None = None,
         now: datetime | None = None,
     ) -> WorkerAuthSession:
         current = (
@@ -484,6 +485,7 @@ class PostgresAuthSessionStore:
         try:
             await validate_session_service_use(
                 conn, target=target, metadata=metadata, capability=capability_name,
+                selected_origins=selected_origins,
             )
         except ValueError as exc:
             raise AuthSessionStoreError(str(exc)) from exc

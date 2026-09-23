@@ -79,7 +79,7 @@ def test_hunt_with_valid_receipt_gets_active_capabilities_but_never_mutation():
         or spec.required_approval == "state_changing_http"
         or spec.placement_requirements.get("state_changing_http")
     }
-    assert not names & {"ports.discover", "service.fingerprint"}, (
+    assert not names & {"ports.discover", "service.fingerprint", "service.nse_check"}, (
         "network discovery was not granted"
     )
 

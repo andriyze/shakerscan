@@ -1048,6 +1048,28 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_network",
         ),
         CapabilitySpec(
+            "service.nse_check",
+            "Run up to three reviewed, low-impact Nmap NSE service checks on up to four bound TCP ports; results are observations, not vulnerability proof.",
+            "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 4 * _NETWORK_ADDRESS_GRANT,
+                "http_requests": 48 * _NETWORK_ADDRESS_GRANT,
+                "tool_wall_seconds": 90 * _NETWORK_ADDRESS_GRANT,
+            },
+            {"network_reachability": True, "binary": "nmap", "server_owned_nse_allowlist": True},
+            _schema({
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535},
+                          "minItems": 1, "maxItems": 4},
+                "scripts": {"type": "array", "items": {"type": "string", "enum": [
+                    "ssl-enum-ciphers", "http-security-headers", "http-methods", "http-trace",
+                ]}, "minItems": 1, "maxItems": 3},
+            }, required=("ports", "scripts")),
+            "nmap-nse-observation/v1", ("nse_observation", "tool_receipt"),
+            "nmap", None, 120_000, ("--version",), ("/opt/tools/nmap",),
+            arsenal_status="gated", hunt_executor="worker_network",
+        ),
+        CapabilitySpec(
             "ports.discover", "Bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {

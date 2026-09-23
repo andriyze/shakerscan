@@ -165,7 +165,7 @@ def test_a_network_hunt_can_speak_http_to_what_it_finds():
         start(policy, target_kind="network"), credentials_available=False,
     )
     assert {"http.request", "web.crawl", "web.probe", "tls.inspect"} <= set(names)
-    assert {"ports.discover", "service.fingerprint"} <= set(names)
+    assert {"ports.discover", "service.fingerprint", "service.nse_check"} <= set(names)
     assert len(names) > 3
 
 
@@ -175,7 +175,7 @@ def test_a_network_hunt_is_not_wider_than_a_web_hunt():
     network = set(allowed_capability_names(
         start(policy, target_kind="network"), credentials_available=False,
     ))
-    assert network <= web | {"ports.discover", "service.fingerprint", "subdomains.discover"}
+    assert network <= web | {"ports.discover", "service.fingerprint", "service.nse_check", "subdomains.discover"}
 
 
 def test_the_skill_cap_matches_the_library_and_leaves_room_for_a_real_engagement():

@@ -26,6 +26,7 @@ async def browser_session_headers(pool: Any, *, prepared: Any, hunt_id: Any, pol
         session = await PostgresAuthSessionStore().load_for_worker(
             conn, session_ref=prepared.session_ref, owner_kind="hunt", owner_id=hunt_id,
             target=prepared.target, capability=prepared.capability_name,
+            selected_origins=(prepared.origin,),
         )
     headers = {}
     try:

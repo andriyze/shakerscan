@@ -144,7 +144,10 @@ def _response_headers(values: Mapping[str, str]) -> dict[str, str]:
         result[lowered] = value
     connection_fields = {name.strip().lower() for name in result.get("connection", "").split(",")}
     for name in connection_fields | {
-        "content-length", "transfer-encoding", "connection", "keep-alive",
+        # Pinned HTTP replay returns decoded bytes. Replaying the origin's
+        # Content-Encoding would make Chromium try to decompress them again,
+        # breaking JavaScript-rendered login pages that serve gzip assets.
+        "content-length", "content-encoding", "transfer-encoding", "connection", "keep-alive",
         "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
     }:
         result.pop(name, None)
@@ -211,6 +214,7 @@ async def authenticated_browser_page(
     fatal_reason: str | None = None
     idle = asyncio.Event()
     idle.set()
+    login_done = asyncio.Event()
     started = asyncio.get_running_loop().time()
 
     def fault(reason: str) -> None:
@@ -231,7 +235,7 @@ async def authenticated_browser_page(
     async def route_request(route: Any) -> None:
         request = route.request
         try:
-            if fatal_reason or phase == "closed":
+            if fatal_reason or phase in {"closed", "settling"}:
                 raise ValueError("browser check no longer admits requests")
             url = _url(request.url, origin, fragment=False)
             method = request.method
@@ -296,6 +300,8 @@ async def authenticated_browser_page(
             receipt["requests_in_flight"] -= 1
             if receipt["requests_in_flight"] == 0:
                 idle.set()
+            if write:
+                login_done.set()
 
     async def deny_websocket(route: Any) -> None:
         receipt["requests_blocked"] += 1
@@ -314,23 +320,36 @@ async def authenticated_browser_page(
             receipt["cleanup_failed"] = True
             raise
 
+    async def settle() -> None:
+        """Stop new background polling, then settle every admitted request."""
+        nonlocal phase
+        phase = "settling"
+        await idle.wait()
+        check_health()
+
     async def verify(page: Any) -> None:
         while True:
-            await idle.wait()
             check_health()
             state = await browser_authentication_state(page, workflow)
             if state in {"requires_user_action", "authentication_rejected", "out_of_scope"}:
                 raise fail(state)
             if state == "verification_unavailable":
-                raise fail("verification_incomplete")
+                # Chromium can briefly destroy the old DOM context while a
+                # login redirect commits. Let the enclosing workflow timeout
+                # bound that transition; never treat an unavailable assertion
+                # as authenticated.
+                await asyncio.sleep(0.05)
+                continue
             status = receipt["login_response_status"]
             if status is not None and status >= 400:
                 raise fail("authentication_rejected")
             if state == "authenticated":
-                # DOM lookups await the browser and can admit a new background
-                # request. Settle that work as well before returning success.
-                await idle.wait()
-                check_health()
+                # A SPA can keep read-only long polls in flight indefinitely.
+                # Freeze new admissions after the DOM assertion, then settle
+                # all already admitted traffic before accepting the assertion.
+                await settle()
+                if await browser_authentication_state(page, workflow) != "authenticated":
+                    raise fail("authentication_rejected")
                 return
             await asyncio.sleep(0.05)
 
@@ -338,7 +357,6 @@ async def authenticated_browser_page(
         """Check the same protected assertion without submitting credentials."""
         await page.goto(workflow.check_url, wait_until="domcontentloaded")
         while True:
-            await idle.wait()
             check_health()
             state = await browser_authentication_state(page, workflow)
             if state == "authenticated":
@@ -346,11 +364,13 @@ async def authenticated_browser_page(
             if state in {"requires_user_action", "out_of_scope", "verification_unavailable"}:
                 raise fail(state)
             if state == "authentication_rejected":
+                await settle()
                 break
             # A protected page may redirect anonymous users to the login form.
             if (_url(page.url, origin) == workflow.login_url
                     and await page.locator("css=" + workflow.username_selector).is_visible()
                     and await page.locator("css=" + workflow.password_selector).is_visible()):
+                await settle()
                 break
             await asyncio.sleep(0.05)
         receipt["anonymous_check_verified"] = True
@@ -388,13 +408,33 @@ async def authenticated_browser_page(
             await page.locator("css=" + workflow.password_selector).fill(values.password)
             phase = "login"
             await page.locator("css=" + workflow.submit_selector).click()
-            await verify(page)
-            phase = "verify"
+            try:
+                await asyncio.wait_for(login_done.wait(), timeout=min(2, workflow.timeout_ms / 4000))
+            except TimeoutError:
+                raise fail("login_submission_not_observed") from None
+            check_health()
             if receipt["login_submissions"] != 1 or receipt["login_response_status"] is None:
                 raise fail("login_submission_not_observed")
-            # Fresh navigation checks that the protected view survives the login
-            # UI transition, for cookie- and browser-storage-backed applications.
-            await page.goto(workflow.check_url, wait_until="domcontentloaded")
+            if receipt["login_response_status"] >= 400:
+                raise fail("authentication_rejected")
+            # A script-driven login may set storage and navigate after the
+            # intercepted POST has settled. Give that bounded navigation time
+            # to commit before forcing the protected check URL; otherwise the
+            # explicit navigation can cancel the login script mid-continuation.
+            # Intercepted form redirects may not advance the page at all, so
+            # the protected URL remains an explicit fallback.
+            phase = "verify"
+            if hasattr(page, "wait_for_url"):
+                from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+                try:
+                    await page.wait_for_url(
+                        workflow.check_url, wait_until="domcontentloaded",
+                        timeout=min(1_000, max(250, workflow.timeout_ms // 5)),
+                    )
+                except PlaywrightTimeoutError:
+                    await page.goto(workflow.check_url, wait_until="domcontentloaded")
+            else:
+                await page.goto(workflow.check_url, wait_until="domcontentloaded")
             await verify(page)
         phase = "read_only"
         receipt.update(status="authenticated", authentication_verified=True)
@@ -420,8 +460,8 @@ async def authenticated_browser_page(
             yield page, MappingProxyType(receipt)
             # Settle admitted work, then recheck the protected view. A successful
             # login is not successful QA when the session or transport later fails.
-            await idle.wait()
-            check_health()
+            await settle()
+            phase = "read_only"
             await page.goto(workflow.check_url, wait_until="domcontentloaded")
             await verify(page)
     except BaseException as error:

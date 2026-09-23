@@ -969,7 +969,19 @@ report reserved traffic, exact settled traffic when the scanner exposes it, and 
 traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
 argv and revalidates the target host; the API never spawns them. The external coding agent owns its
 model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
-claim for that planner. It meters every executable capability. A final debrief persists evidence-backed claims only as durable,
+claim for that planner. It meters every executable capability.
+
+`service.nse_check` exposes Nmap's scripting engine inside Hunt only for the reviewed
+`ssl-enum-ciphers`, `http-security-headers`, `http-methods`, and `http-trace` scripts. It requires
+network-discovery authority and a standing active authorization, accepts at most four bound TCP
+ports and three script IDs per call, and never accepts script arguments, categories, paths, or raw
+Nmap flags. HTTP script traffic is charged at a conservative fixed allowance because NSE does not
+report a reliable request count. Results contain bounded signals and a digest of the script output,
+without raw target content; they are observations and cannot verify a finding. Broader CVE scripts
+need separate review of their request and device-fragility behavior before being added to the
+server-owned allowlist.
+
+A final debrief persists evidence-backed claims only as durable,
 non-authoritative investigation candidates outside the findings table. Candidate lifecycle is linked
 to the server verification record and typed evidence. A finding is materialized only after a
 supported family reaches **Verified** through server-run deterministic proof. Legacy unverified

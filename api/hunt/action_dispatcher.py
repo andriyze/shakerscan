@@ -177,6 +177,17 @@ class HuntActionResult:
         }
 
 
+def worker_result_errors(result: Mapping[str, Any]) -> tuple[str, ...]:
+    """Keep parser diagnostics from a worker's typed partial result visible."""
+    errors: list[str] = []
+    if result.get("error"):
+        errors.append(str(result["error"]))
+    typed_output = result.get("typed_output")
+    if isinstance(typed_output, Mapping):
+        errors.extend(str(item) for item in typed_output.get("errors") or () if item)
+    return tuple(dict.fromkeys(errors))
+
+
 class HuntActionDispatcher:
     """Resolve and execute native Hunt actions without capability-set routing."""
 
@@ -253,4 +264,3 @@ class HuntActionDispatcher:
 
 
 HUNT_ACTION_DISPATCHER = HuntActionDispatcher()
-

@@ -20,17 +20,22 @@ from runtime.models import (
     ScanPolicy,
     TargetBinding,
 )
-
-
-class CapabilityInputError(ValueError):
-    pass
+from .network_inputs import (
+    CapabilityInputError, _addresses, _port_range, _ports, _require_network_policy,
+)
 
 
 NETWORK_CAPABILITY_ADAPTERS = {
     "ports.discover": lambda: PortsDiscoverAdapter(),
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
+    "service.nse_check": lambda: _nse_check_adapter(),
     "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
 }
+
+
+def _nse_check_adapter():
+    from .nse import NseCheckAdapter
+    return NseCheckAdapter()
 
 
 def network_capability_adapter(name: str) -> Any:
@@ -201,6 +206,13 @@ class NetworkExecutionAdapter:
                     )
                     // command_count,
                 )
+            elif dimension in {"http_requests", "device_fragility_points"} and prepared.capability_name == "service.nse_check":
+                # NSE does not expose a trustworthy per-request count. Charge the
+                # conservative server-owned envelope for each command attempted.
+                actual[dimension] = min(
+                    reserved_amount,
+                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
+                )
 
         return CapabilityAdapterResult(
             status=status,
@@ -223,55 +235,6 @@ PORT_PROFILES: Mapping[str, tuple[int, ...] | str] = {
     "device_common": (22, 23, 53, 80, 81, 443, 445, 554, 631, 1883, 1900, 5000,
                       7000, 8008, 8009, 8060, 8080, 8443, 8883, 9000, 9100, 49152, 55000),
 }
-
-
-def _ports(values: Any, *, maximum: int) -> tuple[int, ...]:
-    if not isinstance(values, (list, tuple)) or not values:
-        raise CapabilityInputError("ports must be a non-empty array")
-    result: list[int] = []
-    for value in values:
-        if isinstance(value, bool):
-            raise CapabilityInputError("ports must contain integers")
-        try:
-            port = int(value)
-        except (TypeError, ValueError) as exc:
-            raise CapabilityInputError("ports must contain integers") from exc
-        if not 1 <= port <= 65_535:
-            raise CapabilityInputError("ports must be between 1 and 65535")
-        if port not in result:
-            result.append(port)
-        if len(result) > maximum:
-            raise CapabilityInputError(f"at most {maximum} ports are allowed")
-    return tuple(sorted(result))
-
-
-def _port_range(value: Any, *, maximum: int) -> tuple[int, int]:
-    text = str(value or "").strip()
-    parts = text.split("-")
-    if len(parts) != 2:
-        raise CapabilityInputError("port_range must be START-END")
-    try:
-        start, end = int(parts[0]), int(parts[1])
-    except (TypeError, ValueError) as exc:
-        raise CapabilityInputError("port_range must be two integers") from exc
-    if not (1 <= start <= end <= 65_535):
-        raise CapabilityInputError("port_range must be within 1-65535 with start <= end")
-    if end - start + 1 > maximum:
-        raise CapabilityInputError(f"port_range spans more than {maximum} ports; scan it in chunks")
-    return start, end
-
-
-def _require_network_policy(policy: ScanPolicy) -> None:
-    if not policy.network_discovery:
-        raise CapabilityInputError("network discovery policy is not enabled")
-    if not policy.active_testing or not policy.approval_receipt_id:
-        raise CapabilityInputError("network discovery requires active approval")
-
-
-def _addresses(target: TargetBinding) -> tuple[str, ...]:
-    if not target.allowed_addresses:
-        raise CapabilityInputError("target binding has no approved runtime addresses")
-    return tuple(str(ipaddress.ip_address(value)) for value in target.allowed_addresses)
 
 
 class PortsDiscoverAdapter:
@@ -338,6 +301,7 @@ class PortsDiscoverAdapter:
     def parse(self, output: str, *, timed_out: bool = False) -> ParsedCapabilityResult:
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
+        seen_ports: set[tuple[str, int]] = set()
         for line in str(output or "").splitlines():
             line = line.strip()
             if not line:
@@ -348,8 +312,10 @@ class PortsDiscoverAdapter:
                 port = int(row.get("port"))
                 if not 1 <= port <= 65_535:
                     raise ValueError("invalid port")
-                observations.append({"kind": "open_port", "address": address, "port": port,
-                                     "transport": "tcp"})
+                if (address, port) not in seen_ports:
+                    seen_ports.add((address, port))
+                    observations.append({"kind": "open_port", "address": address, "port": port,
+                                         "transport": "tcp"})
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 errors.append(f"malformed_naabu_record:{type(exc).__name__}")
         partial = bool(timed_out or errors)

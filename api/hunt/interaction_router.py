@@ -35,6 +35,7 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
+from .worker_accounting import worker_replay_settlement_matches
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -49,7 +50,7 @@ from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
-from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory
+from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory, worker_result_errors
 try:
     from action_scope import _decode_json_value
     from ai_gate.targets.widget_playwright import logger
@@ -1287,6 +1288,20 @@ def _hunt_nonexecuting_actual(
     return actual
 
 
+def _worker_replay_actual(
+    requested: Mapping[str, int], result: Mapping[str, Any],
+) -> dict[str, int]:
+    """Report only replay charges the worker says it settled in its ledger."""
+    measured = result.get("budget_consumed")
+    if not isinstance(measured, Mapping):
+        return {}
+    return {
+        dimension: min(int(limit), max(0, int(measured[dimension])))
+        for dimension, limit in requested.items()
+        if dimension in measured
+    }
+
+
 async def _execute_hunt_capability_lifecycle(
     hunt_id: str,
     name: str,
@@ -2512,6 +2527,10 @@ async def _execute_hunt_capability_lifecycle(
             for dimension, amount in measured.items():
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
+            if worker_managed_budget:
+                actual_charges = _worker_replay_actual(
+                    charges, receipt_payload if isinstance(receipt_payload, Mapping) else {},
+                )
             if capability_execution is not None:
                 actual_charges = dict(capability_execution.actual_budget)
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
@@ -2535,7 +2554,7 @@ async def _execute_hunt_capability_lifecycle(
                 ):
                     if dimension in charges:
                         actual_charges[dimension] = int(charges[dimension])
-            if status == "blocked":
+            if status == "blocked" and not worker_managed_budget:
                 actual_charges = _hunt_blocked_actual(
                     charges,
                     actual_charges,
@@ -2582,7 +2601,7 @@ async def _execute_hunt_capability_lifecycle(
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), 1 + followed,
                 )
-            elif name == "collections.replay_safe" and isinstance(receipt_payload, dict):
+            elif name == "collections.replay_safe" and not worker_managed_budget and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
@@ -2905,6 +2924,33 @@ async def _execute_hunt_capability_lifecycle(
                         raise RuntimeError(
                             "Hunt capability action changed before settlement"
                         )
+            elif (
+                worker_managed_budget
+                and isinstance(receipt_payload, Mapping)
+                and receipt_payload.get("durable_budget_settled") is True
+                and receipt_payload.get("receipt_id")
+            ):
+                if durable_action_digest is None:
+                    raise RuntimeError("Replay action digest disappeared after dispatch")
+                async with conn.transaction():
+                    stored = await durable_store.load(
+                        conn, str(receipt_payload.get("reservation_id") or ""),
+                        for_update=True,
+                    )
+                    action = await conn.fetchrow(
+                        """SELECT status, receipt_id, result_summary FROM hunt_actions
+                           WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                        action_id, run["id"],
+                    )
+                    if not worker_replay_settlement_matches(
+                        receipt_payload, stored, dict(action) if action else None,
+                        action_digest=durable_action_digest,
+                    ):
+                        raise RuntimeError(
+                            "Replay capability settlement is not internally consistent"
+                        )
+                # The worker has already persisted the exact action outcome and
+                # receipt atomically with its reservation. Do not replace them.
             elif worker_durable_budget:
                 if (
                     isinstance(receipt_payload, dict)
@@ -3064,11 +3110,7 @@ async def _execute_hunt_capability_lifecycle(
                 )
                 if isinstance(item, Mapping)
             ),
-            errors=(
-                (str(result.get("error")),)
-                if isinstance(result, Mapping) and result.get("error")
-                else ()
-            ),
+            errors=worker_result_errors(result) if isinstance(result, Mapping) else (),
             actual_budget=(
                 dict(result.get("budget_consumed") or {})
                 if isinstance(result, Mapping)

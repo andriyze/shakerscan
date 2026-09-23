@@ -27,7 +27,8 @@ def test_browser_rechecks_live_authority_and_exact_session_capability(monkeypatc
     monkeypatch.setattr(module, "PostgresAuthSessionStore", Store)
     monkeypatch.setattr(module, "validate_worker_credential_authority", validate)
     target = SimpleNamespace(scope_receipt_id="scope")
-    prepared = SimpleNamespace(session_ref="session", capability_name="browser.interact", target=target)
+    prepared = SimpleNamespace(session_ref="session", capability_name="browser.interact", target=target,
+                               origin="https://fixture.example.test:8443")
     async def run():
         async with module.browser_session_headers(Pool(), prepared=prepared, hunt_id="hunt", policy=SimpleNamespace(approval_receipt_id="approval")) as resolved:
             assert resolved["authorization"] == "Bearer worker-only"
@@ -42,5 +43,6 @@ def test_browser_rechecks_live_authority_and_exact_session_capability(monkeypatc
         assert calls[1][1]["capability"] == "browser.interact"
         assert calls[1][1]["owner_id"] == "hunt"
         assert calls[1][1]["target"] is target
+        assert calls[1][1]["selected_origins"] == ("https://fixture.example.test:8443",)
         assert headers == {}
         assert calls[-1] == "closed"
