@@ -1,0 +1,679 @@
+diff --git a/api/capabilities/network.py b/api/capabilities/network.py
+index 6be67b8..a1f2f69 100644
+--- a/api/capabilities/network.py
++++ b/api/capabilities/network.py
+@@ -136,0 +137 @@ class NetworkExecutionAdapter:
++        process_failed = False
+@@ -191,2 +192,3 @@ class NetworkExecutionAdapter:
+-            if streamed.returncode != 0 and not streamed.stdout.strip():
+-                status = "failed"
++            if streamed.returncode != 0:
++                process_failed = True
++                partial = True
+@@ -197 +199,2 @@ class NetworkExecutionAdapter:
+-                break
++                # A failed host must not discard its usable output or prevent
++                # examination of the other admitted addresses.
+@@ -199 +202 @@ class NetworkExecutionAdapter:
+-            status = "partial" if partial else "success"
++            status = "failed" if process_failed and not observations else "partial" if partial else "success"
+diff --git a/api/capabilities/nse.py b/api/capabilities/nse.py
+index ab161a2..e7185df 100644
+--- a/api/capabilities/nse.py
++++ b/api/capabilities/nse.py
+@@ -69 +69,2 @@ class NseCheckAdapter:
+-            "nmap", ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason",
++            "nmap", (("-6",) if ipaddress.ip_address(address).version == 6 else ()) +
++                    ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason", "-v",
+@@ -106,0 +108 @@ class NseCheckAdapter:
++        port_states: dict[int, str] = {}
+@@ -128,0 +131,5 @@ class NseCheckAdapter:
++                    elif event == "start" and element.tag == "state" and port:
++                        port_states[port] = element.attrib.get("state", "unknown")
++                    elif event == "end" and element.tag == "finished":
++                        if element.attrib.get("exit") == "error":
++                            errors.append("nmap_run_error")
+@@ -132,0 +140,6 @@ class NseCheckAdapter:
++                            failed = bool(re.match(
++                                r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
++                                script_output, re.I,
++                            ))
++                            if failed:
++                                errors.append(f"nse_script_failed:{script_id}:{port}")
+@@ -138,2 +151,2 @@ class NseCheckAdapter:
+-                                "status": "reported" if script_output.strip() else "no_output",
+-                                "signals": _signals(script_id, script_output),
++                                "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
++                                "signals": {} if failed else _signals(script_id, script_output),
+@@ -150,2 +163,3 @@ class NseCheckAdapter:
+-        # A requested check that produced no script element (closed or filtered
+-        # port, script timeout, host down) is indeterminate, not a clean result.
++        # Silence is not proof that a script did not run: positive-only scripts
++        # also return nil on a normal response. Keep this coverage inconclusive,
++        # preserve other observations, and let the planner choose another check.
+@@ -152,0 +167 @@ class NseCheckAdapter:
++        coverage = []
+@@ -156 +171,5 @@ class NseCheckAdapter:
+-                    errors.append(f"nse_script_not_run:{script_id}:{int(expected_port)}")
++                    errors.append(f"nse_script_no_result:{script_id}:{int(expected_port)}")
++                    state = port_states.get(int(expected_port), "unknown")
++                    coverage.append({"port": int(expected_port), "script_id": script_id,
++                                     "status": "not_applicable" if state == "closed" else "inconclusive",
++                                     "port_state": state})
+@@ -160 +179 @@ class NseCheckAdapter:
+-            bool(timed_out), tuple(errors[:20]), {"record_count": len(observations)},
++            bool(timed_out), tuple(errors[:20]), {"record_count": len(observations), "coverage_gaps": coverage},
+diff --git a/api/capabilities/replay.py b/api/capabilities/replay.py
+index b0658d4..ec97181 100644
+--- a/api/capabilities/replay.py
++++ b/api/capabilities/replay.py
+@@ -5 +5 @@ from __future__ import annotations
+-from typing import Any, Mapping
++from typing import Any, Mapping, Sequence
+@@ -9,0 +10,2 @@ from runtime.request_replay_executor import execute_replay_plan
++from hunt.service_binding import replay_uses_service_origin
++from hunt.target_binding import web_hunt_target
+@@ -13,0 +16 @@ def hunt_replay_additional_budget(
++    uses_service_origin: bool = False,
+@@ -22 +25 @@ def hunt_replay_additional_budget(
+-    if managed_principal:
++    if managed_principal or uses_service_origin:
+@@ -26,0 +30,19 @@ def hunt_replay_additional_budget(
++def worker_hunt_replay_budget(
++    *, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
++    origins: Sequence[str], wall_seconds: int, request_count: int, managed_principal: bool,
++) -> dict[str, int]:
++    """Derive the durable worker charge from revalidated server-owned selection.
++
++    Do not trust an active/passive flag supplied by the planner or queued caller.
++    Reuse the same normalized-origin predicate as admission, and never ask the
++    operator for another receipt merely because the selected port changed.
++    """
++    original, _ = web_hunt_target(run, context, policy)
++    return hunt_replay_additional_budget(
++        wall_seconds=wall_seconds,
++        device_requests=request_count if run.get("device_target_id") else 0,
++        managed_principal=managed_principal,
++        uses_service_origin=replay_uses_service_origin(original, origins),
++    )
++
++
+diff --git a/api/hunt/service_binding.py b/api/hunt/service_binding.py
+index 44e6204..018bdc8 100644
+--- a/api/hunt/service_binding.py
++++ b/api/hunt/service_binding.py
+@@ -8,0 +9 @@ from dataclasses import asdict, is_dataclass, replace
++import json
+@@ -62,0 +64,5 @@ def service_origin_changed(target: TargetBinding, origin: Any) -> bool:
++def replay_uses_service_origin(target: TargetBinding, origins: Sequence[str]) -> bool:
++    """Shared admission/worker classification; origins come from a saved binding."""
++    return any(service_origin_changed(target, origin) for origin in origins)
++
++
+@@ -72,3 +78,12 @@ def collection_uses_service_origin(target: TargetBinding, context: Mapping[str,
+-    return bound is not None and any(
+-        service_origin_changed(target, origin) for origin in bound.get("allowed_origins") or ()
+-    )
++    return bound is not None and replay_uses_service_origin(target, bound.get("allowed_origins") or ())
++
++
++def registered_hunt_locator(run: Mapping[str, Any], fallback: str) -> str:
++    """Inventory identity is not the per-action service URL or collection origin."""
++    context = run.get("context_pack") or {}
++    if isinstance(context, str):
++        context = json.loads(context)
++    target = context.get("target") or {}
++    if run.get("device_target_id"):
++        return str(target.get("locator") or target.get("url") or fallback).strip()
++    return str(target.get("url") or target.get("locator") or fallback).strip()
+diff --git a/api/runtime/budgets.py b/api/runtime/budgets.py
+index 354e0b1..5480630 100644
+--- a/api/runtime/budgets.py
++++ b/api/runtime/budgets.py
+@@ -43 +43,3 @@ class Reservation:
+-def _normalize_amounts(values: Mapping[str, int], *, dimensions: frozenset[str]) -> dict[str, int]:
++def _normalize_amounts(
++    values: Mapping[str, int], *, dimensions: frozenset[str], keep_zero: bool = False,
++) -> dict[str, int]:
+@@ -57 +59 @@ def _normalize_amounts(values: Mapping[str, int], *, dimensions: frozenset[str])
+-        if amount:
++        if amount or keep_zero:
+@@ -71 +73 @@ def reserve_budget_snapshot(
+-    normalized_limits = _normalize_amounts(limits, dimensions=dimensions)
++    normalized_limits = _normalize_amounts(limits, dimensions=dimensions, keep_zero=True)
+@@ -135 +137 @@ class BudgetLedger:
+-        self._limits = _normalize_amounts(limits, dimensions=dimensions)
++        self._limits = _normalize_amounts(limits, dimensions=dimensions, keep_zero=True)
+diff --git a/api/runtime/session_service_authority.py b/api/runtime/session_service_authority.py
+index 51fbbcb..bbd5efe 100644
+--- a/api/runtime/session_service_authority.py
++++ b/api/runtime/session_service_authority.py
+@@ -4,2 +4,3 @@ A login origin is provenance and the refresh destination. An active, approved Hu
+-may reuse that identity on other services of the same frozen asset without
+-downgrading an HTTPS session to HTTP. These checks consume existing authority;
++may reuse that identity on selected HTTP/HTTPS services of the same frozen asset.
++The transport choice is covered by that standing authorization, not the scheme
++used at login. These checks consume existing authority;
+@@ -70,2 +71,2 @@ async def validate_session_service_use(
+-    reload the existing approval. HTTP and untrusted TLS need no extra approval,
+-    but an HTTPS-established session never releases secrets to HTTP.
++    reload the existing approval. Selected HTTP and untrusted TLS need no extra
++    approval. A response redirect cannot select a service or expand this binding.
+@@ -82,9 +82,0 @@ async def validate_session_service_use(
+-    if metadata.service_origin:
+-        if (urlsplit(service_origin(metadata.service_origin)).scheme == "https"
+-                and any(urlsplit(origin).scheme == "http" for origin in origins)):
+-            raise ValueError("HTTPS session cannot be reused over HTTP")
+-    elif (metadata.target_binding_digest != target.digest
+-          and any(urlsplit(origin).scheme == "http" for origin in origins)):
+-        # Legacy sessions have no origin provenance. Exact-bound use remains
+-        # compatible, but cross-service HTTP cannot prove it is not a downgrade.
+-        raise ValueError("session origin is unavailable for cross-service HTTP reuse")
+diff --git a/api/worker.py b/api/worker.py
+index a44a425..197dccb 100644
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -109 +109,2 @@ from capabilities.tls import inspect_tls_binding
+-from capabilities.replay import ReplayExecutionAdapter, hunt_replay_additional_budget
++from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget
++from hunt.service_binding import registered_hunt_locator
+@@ -19668 +19669,2 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+-        additional_budget = hunt_replay_additional_budget(
++        additional_budget = worker_hunt_replay_budget(
++            run=run, context=context, policy=hunt_policy, origins=stored_origins,
+@@ -19670 +19672 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+-            device_requests=len(plan.requests) if run["device_target_id"] else 0,
++            request_count=len(plan.requests),
+@@ -20086 +20088 @@ async def _revalidate_hunt_action_authority(
+-        frozen_locator = str(target.canonical_host or "").strip()
++        frozen_locator = registered_hunt_locator(run, target.canonical_host)
+@@ -20092 +20094 @@ async def _revalidate_hunt_action_authority(
+-        frozen_locator = str(target_url or "").strip()
++        frozen_locator = registered_hunt_locator(run, target_url)
+diff --git a/client/src/shakerscan/cli.py b/client/src/shakerscan/cli.py
+index a2772bd..923e541 100644
+--- a/client/src/shakerscan/cli.py
++++ b/client/src/shakerscan/cli.py
+@@ -18,0 +19 @@ import getpass
++import ipaddress
+@@ -593 +594,5 @@ def scan_ui_url(api_url: str) -> str:
+-    """Use the LAN UI port for a directly connected open-source engine."""
++    """Recognize a bare local IP, not every reverse proxy listening on 8080.
++
++    Named gateways and path prefixes retain the configured URL. The forwarded
++    scan CLI's explicit --ui-url always wins for custom/private proxy layouts.
++    """
+@@ -595,2 +600,12 @@ def scan_ui_url(api_url: str) -> str:
+-    if parts.scheme == "http" and parts.port == 8080:
+-        host = parts.hostname or ""
++    host = parts.hostname or ""
++    try:
++        address = ipaddress.ip_address(host)
++        local = address.is_loopback or any(address in network for network in (
++            ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
++            ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("fc00::/7"),
++        ) if network.version == address.version)
++    except ValueError:
++        local = host.lower() == "localhost"
++    if (parts.scheme == "http" and parts.port == 8080 and local
++            and parts.path in {"", "/"} and not parts.query and not parts.fragment
++            and parts.username is None):
+diff --git a/client/tests/test_public.py b/client/tests/test_public.py
+index bb13fc0..6251ed9 100644
+--- a/client/tests/test_public.py
++++ b/client/tests/test_public.py
+@@ -133,0 +134,9 @@ if __name__ == "__main__":
++
++
++def test_scan_ui_url_preserves_reverse_proxy_authority_and_path():
++    for url in ("http://gateway.example:8080", "http://gateway.example:8080/shakerscan",
++                "http://192.168.1.10:8080/shakerscan", "http://8.8.8.8:8080",
++                "https://192.168.1.10:8080"):
++        assert cli.scan_ui_url(url) == url
++    assert cli.scan_ui_url("http://localhost:8080") == "http://localhost:3000"
++    assert cli.scan_ui_url("http://[fd00::10]:8080") == "http://[fd00::10]:3000"
+diff --git a/docs/client.md b/docs/client.md
+index e0b34dc..1453444 100644
+--- a/docs/client.md
++++ b/docs/client.md
+@@ -131,0 +132,5 @@ selection and hand-written MCP registration are in [LAN access](lan-access.md).
++Scan links use port 3000 automatically for a direct private-IP or localhost API on
++port 8080. Named gateways and URL prefixes keep their configured origin. For a custom
++layout (including a reverse proxy on a private IP), specify the UI explicitly:
++`shakerscan scan --ui-url https://scanner.example.com https://authorized-app.example`.
++
+diff --git a/install/MANIFEST.sha256 b/install/MANIFEST.sha256
+index f261f82..0eb0707 100644
+--- a/install/MANIFEST.sha256
++++ b/install/MANIFEST.sha256
+@@ -52 +52 @@ f1dc5fdd82e17975971192415fbb927d38ce9e6437840a90b0492ddebafaae44  api/runtime/__
+-b52f49d669272a8e0232067acef0e0d818ad1403b4d26909fe4e8040fd65ce97  api/runtime/budgets.py
++aafb73c9b97e15635b4c9dea3f49225834d45b6b5a8594ee8d452644f36c36dd  api/runtime/budgets.py
+diff --git a/tests/test_hunt_nse_capability.py b/tests/test_hunt_nse_capability.py
+index 6c6f6ad..4805abf 100644
+--- a/tests/test_hunt_nse_capability.py
++++ b/tests/test_hunt_nse_capability.py
+@@ -161 +161,2 @@ def test_nse_requested_script_that_never_ran_is_indeterminate_not_clean():
+-    assert result.errors == ("nse_script_not_run:http-methods:8008",)
++    assert result.errors == ("nse_script_no_result:http-methods:8008",)
++    assert result.metadata["coverage_gaps"][0]["status"] == "not_applicable"
+@@ -188,0 +190,68 @@ def test_nse_execution_marks_a_missing_script_result_partial():
++
++
++@pytest.mark.parametrize("message", [
++    "ERROR: Script execution failed (use -d to debug)",
++    "\nERROR: Request failed", "Request failed", "Script execution failed",
++])
++def test_nse_script_errors_preserve_other_checks_without_false_security_signals(message):
++    xml = XML.replace("Content-Security-Policy: private-token-DO-NOT-LEAK", message)
++    result = network_capability_adapter("service.nse_check").parse(
++        xml, expected_ports=[8443], expected_scripts=["http-security-headers", "ssl-enum-ciphers"],
++    )
++    assert result.partial and result.status == "partial"
++    assert result.errors == ("nse_script_failed:http-security-headers:8443",)
++    assert result.observations[0]["signals"]["tls_versions"] == ["TLSv1.2"]
++    assert result.observations[1]["status"] == "failed"
++    assert result.observations[1]["signals"] == {}
++
++
++def test_nse_trace_silence_is_no_conclusive_result_not_proof_the_script_did_not_run():
++    xml = XML.replace("</nmaprun>", "<runstats><finished exit='success'/></runstats></nmaprun>")
++    result = network_capability_adapter("service.nse_check").parse(
++        xml, expected_ports=[8443], expected_scripts=["http-trace"],
++    )
++    assert result.errors == ("nse_script_no_result:http-trace:8443",)
++    assert result.metadata["coverage_gaps"] == [{
++        "port": 8443, "script_id": "http-trace", "status": "inconclusive", "port_state": "open",
++    }]
++    assert result.partial and len(result.observations) == 2
++
++
++def test_nse_run_error_keeps_observations_but_cannot_be_success():
++    xml = XML.replace("</nmaprun>", "<runstats><finished exit='error' errormsg='private'/></runstats></nmaprun>")
++    result = network_capability_adapter("service.nse_check").parse(xml)
++    assert result.status == "partial" and result.errors == ("nmap_run_error",)
++    assert len(result.observations) == 2
++    assert "private" not in str(result)
++
++
++def test_nse_ipv6_commands_and_verbose_method_discovery():
++    from dataclasses import replace
++    target = replace(TARGET, allowed_addresses=("192.0.2.10", "2001:db8::10"))
++    prepared = network_capability_adapter("service.nse_check").prepare(
++        target=target, args={"ports": [8080], "scripts": ["http-methods"]}, policy=POLICY,
++    )
++    assert "-6" not in prepared.commands[0].argv
++    assert "-6" in prepared.commands[1].argv
++    assert all("-v" in command.argv for command in prepared.commands)
++    assert prepared.commands[1].argv[-1] == "2001:db8::10"
++
++
++def test_nse_nonzero_exit_keeps_partial_observations_and_examines_next_address():
++    from dataclasses import replace
++    target = replace(TARGET, allowed_addresses=("192.0.2.10", "192.0.2.11"))
++    parser = network_capability_adapter("service.nse_check")
++    prepared = parser.prepare(target=target, args={"ports": [8443], "scripts": ["ssl-enum-ciphers"]}, policy=POLICY)
++    calls = []
++    async def run_command(argv, **_kwargs):
++        calls.append(argv[-1])
++        return SimpleNamespace(stdout=XML.replace("172.31.32.220", argv[-1]),
++                               returncode=1 if len(calls) == 1 else 0, timed_out=False,
++                               partial=False, stdout_truncated=False, cancelled=False)
++    result = asyncio.run(NetworkExecutionAdapter(
++        prepared=prepared, parser=parser, command_runner=run_command,
++        max_stdout_bytes=10000, max_stderr_bytes=1000,
++    ).execute(heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False))
++    assert calls == ["192.0.2.10", "192.0.2.11"]
++    assert result.status == "partial" and "nmap_exit_1" in result.errors
++    assert len(result.observations) == 4
+diff --git a/tests/test_hunt_replay_worker_lifecycle.py b/tests/test_hunt_replay_worker_lifecycle.py
+new file mode 100644
+index 0000000..1cfb9fa
+--- /dev/null
++++ b/tests/test_hunt_replay_worker_lifecycle.py
+@@ -0,0 +1,269 @@
++"""Production admission and complete replay worker, real loopback HTTP and ledger.
++
++Only persistence/queue/authority I/O are doubled. The worker function is compiled
++unchanged from its composition root so this exercises its actual budget call site,
++not a hand-written reconstruction of that call or a source-string assertion.
++"""
++from __future__ import annotations
++
++import ast
++import asyncio
++from contextlib import AsyncExitStack
++from dataclasses import replace
++from datetime import datetime, timezone
++import hashlib
++import json
++from pathlib import Path
++import re
++from types import SimpleNamespace
++from typing import Any, Mapping
++import uuid
++
++import pytest
++
++from capabilities.network import CapabilityInputError
++from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget, hunt_replay_additional_budget
++from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
++from hunt.service_binding import collection_uses_service_origin, registered_hunt_locator
++from hunt.target_binding import web_hunt_target
++from hunt.worker_accounting import worker_hunt_budget_accounting
++from runtime.budget_reservations import DurableBudgetReservation
++from runtime.budgets import BudgetExceeded
++from runtime.capability_registry import CAPABILITY_REGISTRY
++from runtime.credential_refs import CredentialReferenceError
++from runtime.credential_resolver import CredentialResolutionError
++from runtime.models import ScanPolicy, TargetBinding
++from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
++from runtime.request_collection_store import (
++    RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest,
++)
++from runtime.request_replay_executor import ReplayExecutionError, replay_reservation_budget
++from runtime.reservation_store import StoredBudgetReservation, ReservationConflict, ReservationStoreError
++from scan.authorization import ActionAuthorityDecision, revalidate_scan_action_authority
++from scanner_tools.request_collections import RequestSelector, select_requests
++from scanner_tools.request_replay import ReplayAuthorization, RequestReplayError, build_selected_replay_plan
++from tests.test_hunt_authz_verification_limit import AdmissionStore, Lifecycle, admission, HUNT, TARGET
++
++
++class Store:
++    def __init__(self):
++        self.rows = {}
++        self.transitions = []
++
++    async def load(self, conn, reservation_id, **_):
++        return self.rows.get(reservation_id)
++
++    async def create_requested(self, conn, *, record, action_id, action_digest):
++        stored = StoredBudgetReservation(action_id, action_digest, record)
++        self.rows[record.reservation_id] = stored
++        self.transitions.append(record.status)
++        return stored
++
++    async def persist_transition(self, conn, *, previous, current, ledger_after_hold=None):
++        assert self.rows[current.reservation_id].record.state_digest == previous.record.state_digest
++        stored = replace(previous, record=current, ledger_after_hold=ledger_after_hold or previous.ledger_after_hold)
++        self.rows[current.reservation_id] = stored
++        self.transitions.append(current.status)
++        return stored
++
++    async def persist_terminal(self, conn, *, previous, terminal, ledger_after_settlement, receipt):
++        assert self.rows[terminal.reservation_id].record.state_digest == previous.record.state_digest
++        stored = replace(previous, record=terminal, ledger_after_settlement=ledger_after_settlement,
++                         receipt=receipt.public_dict() if receipt is not None else None)
++        self.rows[terminal.reservation_id] = stored
++        self.transitions.append(terminal.status)
++        return stored
++
++
++class Connection(AdmissionStore):
++    def __init__(self, *, kind, origin, registered_origin, active_limit):
++        super().__init__()
++        cid, bid, sid = (str(uuid.UUID(int=n)) for n in (3, 4, 5))
++        payload = {"collection": {"info": {"name": "replay fixture"}, "item": [
++            {"name": "read", "request": {"method": "GET", "url": origin + "/probe"}},
++        ]}}
++        self.request_id = select_requests(payload, RequestSelector(limit=1))[0]["id"]
++        self.plaintext = json.dumps(payload, sort_keys=True, separators=(",", ":"))
++        digest = hashlib.sha256(self.plaintext.encode()).hexdigest()
++        selector = RequestCollectionSelection(request_ids=(self.request_id,), safe_methods_only=True, max_requests=1)
++        selection_digest = request_collection_selection_digest(
++            collection_id=cid, payload_sha256=digest, binding_id=bid,
++            allowed_origins=[origin], selector=selector, replay_policy="safe_reads", environment_sha256=None,
++        )
++        self.collection = {
++            "id": cid, "encrypted_payload": "encrypted-fixture", "payload_sha256": digest,
++            "binding_id": bid, "allowed_origins": [origin], "environment_id": None,
++            "environment_sha256": None, "selection_id": sid, "selection_digest": selection_digest,
++            "selector_json": selector.public_dict(), "replay_policy": "safe_reads",
++        }
++        self.run.update(target_kind=kind, target_id=None if kind == "device" else TARGET,
++                        device_target_id=TARGET if kind == "device" else None)
++        self.run["context_pack"] = {
++            "target": {"locator" if kind == "device" else "url": registered_origin},
++            "authorized_target_addresses": ["127.0.0.1"],
++            "request_collections": [{"collection_id": cid, "selection_id": sid, "allowed_origins": [origin]}],
++        }
++        self.registered_locator = registered_origin
++        self.run["policy_json"].update(active_testing=True, approval_receipt_id=str(uuid.UUID(int=6)))
++        self.run["budget_json"].update(max_active_actions=active_limit, max_device_fragility_points=20)
++        self.approvals = []
++        self.result = None
++        self.store = Store()
++
++    async def fetchrow(self, query, *args):
++        if "FROM hunt_runs" in query:
++            return self.run
++        if "FROM request_collections" in query:
++            return self.collection
++        if "FROM targets" in query or "FROM device_targets" in query:
++            return {"locator": self.registered_locator, "url": self.registered_locator,
++                    "primary_locator": self.registered_locator, "is_active": True}
++        if "FROM scope_receipts" in query:
++            return {"id": "scope", "target_id": TARGET, "allowed_hosts": ["fixture.test"], "verdict": "allowed"}
++        if "FROM approval_receipts" in query:
++            self.approvals.append("dispatch")
++            return {"id": uuid.UUID(int=6), "scope_receipt_id": "scope", "approved_by": "operator",
++                    "action_name": "target.authorization", "risk_tier": "active", "expires_at": None,
++                    "confirmations": ["confirm_authorized"]}
++        return await super().fetchrow(query, *args)
++
++    async def execute(self, query, *args):
++        if query.startswith("UPDATE hunt_actions"):
++            action = self.actions[str(args[0])]
++            if "SET status=$2" in query:
++                action.update(status=args[1], result_summary=json.loads(args[2]), receipt_id=args[3])
++            elif "status='running'" in query:
++                action["status"] = "running"
++            else:
++                action.update(status="failed", result_summary=json.loads(args[1]))
++            return "UPDATE 1"
++        if "UPDATE hunt_runs SET status='budget_exhausted'" in query:
++            self.run.update(status="budget_exhausted", stop_reason=args[1])
++            return "UPDATE 1"
++        return await super().execute(query, *args)
++
++    def exists(self, key):
++        return False
++
++    def set(self, key, value, **_):
++        self.result = json.loads(value)
++
++    def hset(self, *_, **__):
++        pass
++
++    def expire(self, *_):
++        pass
++
++    def delete(self, *_):
++        pass
++
++
++async def noop(*_, **__):
++    pass
++
++
++def worker(conn):
++    path = Path(__file__).resolve().parents[1] / "api/worker.py"
++    names = {"process_request_collection_replay_job", "_worker_hunt_ledger_limits", "_worker_terminal_replay_result",
++             "_revalidate_hunt_action_authority"}
++    tree = ast.parse(path.read_text())
++    definitions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
++    assert len(definitions) == len(names)
++    # Keep real worker authority and receipt evaluation; only storage I/O is doubled.
++    async def dispatch(**kwargs):
++        return await CapabilityExecutor().execute(
++            CapabilityExecutionContext(specification=kwargs["specification"], target=kwargs["target"],
++                requested_budget=kwargs["requested_budget"], adapter_managed_cancellation=True),
++            kwargs["adapter"], heartbeat=kwargs["heartbeat"], cancelled=kwargs["cancelled"],
++        )
++    namespace = {**globals(), "db_pool": conn, "get_redis": lambda: conn,
++        "PostgresBudgetReservationStore": lambda: conn.store,
++        "decrypt_secret": lambda encrypted: conn.plaintext if encrypted == "encrypted-fixture" else None,
++        "_worker_json_object": lambda v: json.loads(v) if isinstance(v, str) else dict(v or {}),
++        "_worker_json_array": lambda v: json.loads(v) if isinstance(v, str) else list(v or []),
++        "_worker_runtime_identity": lambda: "worker:fixture",
++        "_AGENT_TOOL_RESULT_TTL_SECONDS": 60,
++        "agent_tools": SimpleNamespace(CAPABILITY_REGISTRY=CAPABILITY_REGISTRY),
++        "require_device_admission": noop, "record_device_traffic": noop,
++        "require_worker_device_policy": lambda _: None,
++        "_dispatch_registered_hunt_adapter": dispatch,
++    }
++    module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
++                              *definitions], type_ignores=[])
++    exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
++    return namespace["process_request_collection_replay_job"]
++
++
++async def execute(conn):
++    fn = admission(conn)
++    async def approval(*_, **kwargs):
++        conn.approvals.append(kwargs["risk_tier"])
++        return {"scope_receipt_id": "scope"}
++    fn.__globals__.update(
++        _hunt_public=lambda *_a, **_kw: {"capabilities": [{"name": "collections.replay_safe"}]},
++        _hunt_managed_principal_reference=lambda *_: None,
++        collection_uses_service_origin=collection_uses_service_origin,
++        web_hunt_target=web_hunt_target, _validate_approval_receipt_for_action=approval,
++        require_device_admission=noop,
++    )
++    life = Lifecycle("collections.replay_safe")
++    life.specification = CAPABILITY_REGISTRY.require("collections.replay_safe")
++    life.placement = life.specification.hunt_executor
++    action = await fn(str(HUNT), "collections.replay_safe", SimpleNamespace(
++        input={"collection_id": conn.collection["id"]}, idempotency_key="replay-" + str(len(conn.actions)),
++    ), life)
++    job = {
++        "job_id": str(uuid.uuid4()), "hunt_id": str(HUNT), "action_id": action["action_id"],
++        "action_digest": "a" * 64, "reservation_id": str(uuid.uuid4()),
++        "collection_id": conn.collection["id"], "binding_id": conn.collection["binding_id"],
++        "selection_id": conn.collection["selection_id"], "selection_digest": conn.collection["selection_digest"],
++        "expected_payload_sha256": conn.collection["payload_sha256"],
++        "allowed_origins": conn.collection["allowed_origins"], "replay_policy": "safe_reads",
++        "selector": {"request_ids": [conn.request_id], "limit": 1}, "tool_wall_seconds": 60,
++    }
++    await worker(conn)(job)
++    return conn.result
++
++
++@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
++@pytest.mark.parametrize("active_limit,alternate", [(0, True), (1, True), (0, False)])
++def test_anonymous_service_replay_admission_worker_wire_and_settlement(kind, active_limit, alternate):
++    async def scenario():
++        wire = []
++        async def serve(reader, writer):
++            try:
++                wire.append(await reader.readuntil(b"\r\n\r\n"))
++                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
++                await writer.drain()
++            finally:
++                writer.close()
++                await writer.wait_closed()
++        server = await asyncio.start_server(serve, "127.0.0.1", 0)
++        async with server:
++            origin = f"http://fixture.test:{server.sockets[0].getsockname()[1]}"
++            registered = ("fixture.test" if kind == "device" else "https://fixture.test/app") if alternate else origin
++            conn = Connection(kind=kind, origin=origin, registered_origin=registered,
++                              active_limit=active_limit)
++            result = await execute(conn)
++            if active_limit == 0 and alternate:
++                assert result["error"] == "budget_exhausted:active_actions", result
++                assert wire == []
++                assert conn.run["budget_used_json"].get("active_actions", 0) == 0
++            else:
++                assert result["status"] == "success", result
++                assert len(wire) == 1 and wire[0].startswith(b"GET /probe ")
++                expected = int(alternate)
++                assert conn.run["budget_used_json"].get("active_actions", 0) == expected
++                assert conn.approvals == (["active", "dispatch"] if alternate else ["dispatch"])
++                settled = next(iter(conn.store.rows.values()))
++                assert settled.record.requested.get("active_actions", 0) == settled.record.actual.get("active_actions", 0) == expected
++                assert settled.record.status == "committed"
++                summary = next(iter(conn.actions.values()))["result_summary"]
++                assert summary["budget_accounting"]["actual"] == dict(settled.record.actual)
++                # The second action is stopped by the existing operator budget,
++                # not by a new port/scheme permission, and sends no extra traffic.
++                if alternate:
++                    again = await execute(conn)
++                    assert again["error"] == "budget_exhausted:active_actions", again
++                    assert len(wire) == 1
++    asyncio.run(scenario())
+diff --git a/tests/test_hunt_session_service_authority.py b/tests/test_hunt_session_service_authority.py
+index 9a12a61..a899611 100644
+--- a/tests/test_hunt_session_service_authority.py
++++ b/tests/test_hunt_session_service_authority.py
+@@ -94 +94 @@ def test_one_standing_authorization_allows_selected_session_on_other_services(mo
+-def test_https_session_refuses_http_service_before_decryption(monkeypatch, kind, destination):
++def test_https_session_reuses_selected_http_service_under_standing_authority(monkeypatch, kind, destination):
+@@ -99,4 +99,6 @@ def test_https_session_refuses_http_service_before_decryption(monkeypatch, kind,
+-    monkeypatch.setattr(sessions, "decrypt_secret", lambda _: pytest.fail("downgrade decrypted session"))
+-    with pytest.raises(sessions.AuthSessionStoreError, match="HTTPS session cannot be reused over HTTP"):
+-        asyncio.run(load(conn, replace(original, allowed_origins=(destination,))))
+-    assert conn.reads == []
++    worker = asyncio.run(load(conn, replace(original, allowed_origins=(destination,))))
++    assert worker.headers() == {"Authorization": fixture.SECRET}
++    assert worker.metadata.service_origin == original.allowed_origins[0]
++    assert conn.reads == ["hunt", "approval"]
++    assert not conn.executed  # No per-port or per-scheme approval was created.
++    worker.close()
+@@ -116 +118 @@ def test_http_session_can_reuse_another_http_port_with_existing_authority(monkey
+-def test_only_selected_service_in_multi_origin_binding_controls_downgrade(monkeypatch):
++def test_only_selected_service_in_multi_origin_binding_controls_authority(monkeypatch):
+@@ -128,2 +130,5 @@ def test_only_selected_service_in_multi_origin_binding_controls_downgrade(monkey
+-    with pytest.raises(sessions.AuthSessionStoreError, match="HTTPS session cannot be reused over HTTP"):
+-        asyncio.run(load(conn, selected, selected_origins=("http://app.example.test",)))
++    assert conn.reads == []
++    worker = asyncio.run(load(conn, selected, selected_origins=("http://app.example.test",)))
++    assert worker.headers() == {"Authorization": fixture.SECRET}
++    assert conn.reads == ["hunt", "approval"]
++    worker.close()
+@@ -171 +176 @@ def test_changed_service_authority_is_rejected_before_decryption(monkeypatch, ch
+-def test_legacy_asset_bound_session_refuses_unattributable_http_reuse(monkeypatch):
++def test_legacy_asset_bound_session_uses_live_authority_without_inventing_login_origin(monkeypatch):
+@@ -177,4 +182,5 @@ def test_legacy_asset_bound_session_refuses_unattributable_http_reuse(monkeypatc
+-    monkeypatch.setattr(sessions, "decrypt_secret", lambda _: pytest.fail("legacy HTTP reuse decrypted session"))
+-    with pytest.raises(sessions.AuthSessionStoreError, match="session origin is unavailable"):
+-        asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
+-    assert conn.reads == []
++    worker = asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
++    assert worker.headers() == {"Authorization": fixture.SECRET}
++    assert worker.metadata.service_origin is None
++    assert conn.reads == ["hunt", "approval"]
++    worker.close()
+diff --git a/tests/test_runtime_zero_limits.py b/tests/test_runtime_zero_limits.py
+new file mode 100644
+index 0000000..0c1c757
+--- /dev/null
++++ b/tests/test_runtime_zero_limits.py
+@@ -0,0 +1,28 @@
++"""An explicit zero is an exhausted limit, not an undeclared/unlimited dimension."""
++import pytest
++
++from runtime.budgets import BudgetError, BudgetExceeded, BudgetLedger, reserve_budget_snapshot
++
++
++@pytest.mark.parametrize("dimension", ["active_actions", "state_changing_requests", "device_fragility_points"])
++def test_zero_limit_preserves_other_work_and_reports_typed_exhaustion(dimension):
++    limits = {dimension: 0, "http_requests": 2}
++    assert reserve_budget_snapshot(limits, {}, {"http_requests": 1}) == {dimension: 0, "http_requests": 1}
++    with pytest.raises(BudgetExceeded) as error:
++        reserve_budget_snapshot(limits, {}, {dimension: 1})
++    assert error.value.shortages == {dimension: 1}
++    ledger = BudgetLedger(limits)
++    request = ledger.reserve({"http_requests": 1})
++    ledger.commit(request)
++    assert ledger.remaining("http_requests") == 1 and ledger.remaining(dimension) == 0
++    with pytest.raises(BudgetExceeded) as error:
++        ledger.reserve({dimension: 1})
++    assert error.value.shortages == {dimension: 1}
++    assert ledger.remaining("http_requests") == 1
++
++
++def test_missing_dimension_stays_distinct_from_an_explicit_zero():
++    with pytest.raises(BudgetError, match="declared explicitly"):
++        reserve_budget_snapshot({"http_requests": 1}, {}, {"active_actions": 1})
++    with pytest.raises(BudgetError, match="declared explicitly"):
++        BudgetLedger({"http_requests": 1}).reserve({"active_actions": 1})
