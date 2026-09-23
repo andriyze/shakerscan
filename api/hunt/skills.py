@@ -387,7 +387,6 @@ class HuntSkillLibrary:
         techniques, and report the unavailable technique as a coverage gap. Binding never grants
         authority, so filtering the suggestion away only hides useful investigative knowledge.
         """
-        available = set(allowed_capabilities) if allowed_capabilities is not None else None
         compatible: list[HuntSkillSpec] = []
         for spec in self.bindable(target_kind=target_kind):
             try:
@@ -463,6 +462,15 @@ class HuntSkillLibrary:
                 reason = "Objective matches: " + ", ".join(matched_goal[:4])
             else:
                 reason = "Baseline methodology for initial surface discovery"
+            allowed = set(allowed_capabilities) if allowed_capabilities is not None else None
+            required = tuple(dict.fromkeys(
+                name for item in self.resolve_for_hunt([spec.skill_id], target_kind=target_kind)
+                for name in item.capabilities
+            ))
+            unavailable = (
+                tuple(name for name in required if name not in allowed)
+                if allowed is not None else ()
+            )
             suggestions.append({
                 "skill_id": spec.skill_id,
                 "title": spec.title,
@@ -470,6 +478,10 @@ class HuntSkillLibrary:
                 "methodology_url": f"/hunt/skills/{spec.skill_id}",
                 "bind_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/bind",
                 "auto_bound": False,
+                "execution": {
+                    "fully_executable": not unavailable,
+                    "unavailable_capabilities": list(unavailable),
+                },
             })
         return tuple(suggestions)
 
