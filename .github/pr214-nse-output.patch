@@ -1,0 +1,142 @@
+--- a/api/capabilities/nse.py
++++ b/api/capabilities/nse.py
+@@ -54,7 +54,15 @@
+     script_id = element.attrib.get("id", "")
+     if script_id != "nse_http":
+         return [(script_id, element.attrib.get("output", ""))]
+-    return [(row.attrib.get("key", ""), row.findtext("elem[@key='output']", ""))
++    def text(node):
++        # Preserve installed NSE structured output (named tables plus scalar
++        # elements), not only an optional pre-rendered output string.
++        return " ".join(
++            ((child.attrib.get("key", "") + ": ") if child.attrib.get("key") else "")
++            + (text(child) if child.tag == "table" else child.text or "")
++            for child in node
++        )
++    return [(row.attrib.get("key", ""), row.findtext("elem[@key='output']") or text(row))
+             for row in element.findall("table")]
+ 
+ 
+--- a/api/capabilities/nse_http.nse
++++ b/api/capabilities/nse_http.nse
+@@ -4,6 +4,7 @@
+ local stdnse = require "stdnse"
+ local json = require "json"
+ local base64 = require "base64"
++local shortport = require "shortport"
+ local allowed = { ["http-methods"]=true, ["http-security-headers"]=true, ["http-trace"]=true }
+ 
+ description = [[ShakerScan worker bridge for installed HTTP NSE service checks.]]
+@@ -37,10 +38,6 @@
+   result.body = base64.dec(result.body_base64 or "")
+   result.rawheader = result.rawheader or {}
+   result.header = result.header or {}
+-  if result.ssl then
+-    port.version = port.version or {}
+-    port.version.service_tunnel = "ssl"
+-  end
+   return result
+ end
+ 
+@@ -55,15 +52,24 @@
+       for key, value in pairs(port) do analysis_port[key] = value end
+       analysis_port.version = {}
+       for key, value in pairs(port.version or {}) do analysis_port.version[key] = value end
++      local uses_tls
++      local function request(method, path, redirects)
++        local result = exchange(name, analysis_port, method, path, redirects)
++        if result.status then uses_tls = result.ssl == true end
++        return result
++      end
+       local http = {}
+-      http.generic_request = function(h, p, method, path, options)
+-        return exchange(name, p, method, path, false)
+-      end
+-      http.head = function(h, p, path, options) return exchange(name, p, "HEAD", path, true) end
+-      http.get = function(h, p, path, options) return exchange(name, p, "GET", path, true) end
++      http.generic_request = function(h, p, method, path, options) return request(method, path, false) end
++      http.head = function(h, p, path, options) return request("HEAD", path, true) end
++      http.get = function(h, p, path, options) return request("GET", path, true) end
++      local service = setmetatable({ssl=function(h, p)
++        if uses_tls ~= nil then return uses_tls end
++        return shortport.ssl(h, p)
++      end}, {__index=shortport})
+       local env = setmetatable({SCRIPT_NAME=name, SCRIPT_TYPE="portrule",
+         require=function(module)
+           if module == "http" then return http end
++          if module == "shortport" then return service end
+           return require(module)
+         end}, {__index=_G})
+       local success, structured, rendered = pcall(function()
+@@ -76,11 +82,11 @@
+       if not success then
+         output[name] = {output="ERROR: Script execution failed"}
+       elseif structured ~= nil or rendered ~= nil then
+-        local text = rendered
+-        if text == nil then
+-          text = type(structured) == "string" and structured or stdnse.format_output(true, structured)
++        if rendered == nil and type(structured) == "table" then
++          output[name] = structured
++        else
++          output[name] = {output=rendered or structured or ""}
+         end
+-        output[name] = {output=text or ""}
+       end
+     end
+   end
+--- a/tests/test_hunt_nse_http.py
++++ b/tests/test_hunt_nse_http.py
+@@ -182,3 +182,18 @@
+     assert parsed.observations[0]["script_id"] == "http-methods"
+     assert "GET" in parsed.observations[0]["signals"]["methods"]
+     assert parsed.errors == ("nse_script_failed:http-trace:8008",)
++
++
++def test_native_structured_tables_keep_all_methods_and_header_signals():
++    xml = """<nmaprun><host><address addr='127.0.0.1' addrtype='ipv4'/><ports>
++    <port portid='8008' protocol='tcp'><state state='open'/><script id='nse_http'>
++    <table key='http-methods'><table key='Supported Methods'><elem>GET</elem><elem>HEAD</elem>
++    <elem>OPTIONS</elem><elem>POST</elem></table></table>
++    <table key='http-security-headers'><table key='X_Frame_Options'>
++    <elem>Header: X-Frame-Options: DENY</elem></table></table>
++    </script></port></ports></host></nmaprun>"""
++    parsed = NseCheckAdapter().parse(xml, expected_ports=(8008,),
++                                     expected_scripts=("http-methods", "http-security-headers"))
++    assert parsed.status == "succeeded" and not parsed.errors
++    assert parsed.observations[0]["signals"]["methods"] == ["GET", "HEAD", "OPTIONS", "POST"]
++    assert parsed.observations[1]["signals"]["mentioned_headers"] == ["x-frame-options"]
+--- a/tests/integration/test_hunt_nse_native.py
++++ b/tests/integration/test_hunt_nse_native.py
+@@ -152,3 +152,32 @@
+             assert result.actual_budget["http_requests"] == 0 and wire == []
+             assert "-sV" not in prepared.commands[0].argv
+     asyncio.run(run())
++
++
++def test_native_trace_check_preserves_positive_result_and_request_accounting():
++    require_native()
++    async def run():
++        def reply(method, path):
++            return (200, {}, b"TRACE / HTTP/1.1\r\n") if method == "TRACE" else (200, {}, b"")
++        async with http_fixture(reply) as (port, wire):
++            result, _ = await execute(port, ("http-trace",))
++            assert result.status == "success", (result.errors, result.observations)
++            assert result.observations[0]["signals"]["trace_enabled_reported"]
++            assert [m for m,_,_ in wire] == ["HEAD", "TRACE"]
++            assert result.actual_budget["http_requests"] == len(wire) == 2
++    asyncio.run(run())
++
++
++def test_native_https_to_http_redirect_reports_final_service_not_tls_heuristic(tmp_path):
++    require_native()
++    async def run():
++        async with http_fixture(lambda *_: (200, {"X-Frame-Options": "DENY"}, b"")) as (plain_port, plain_wire):
++            async with http_fixture(lambda *_: (302, {"Location": f"http://fixture.test:{plain_port}/"}, b""),
++                                    tls=tls_context(tmp_path)) as (port, tls_wire):
++                result, _ = await execute(port, ("http-security-headers",), scheme="https")
++                assert result.status == "success", (result.errors, result.observations)
++                row = result.observations[0]
++                assert row["port"] == plain_port and row["service_origin"].startswith("http://")
++                assert "strict-transport-security" not in row["signals"]["missing_headers"]
++                assert result.actual_budget["http_requests"] == len(plain_wire) + len(tls_wire) == 3
++    asyncio.run(run())
