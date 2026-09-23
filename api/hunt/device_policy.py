@@ -227,6 +227,7 @@ class DeviceHuntPolicyState:
             consecutive_health_failures=failures,
             circuit_breaker_threshold=self.circuit_breaker_threshold,
             traffic_frozen=frozen,
+            freeze_reason=freeze_reason,
             last_request_at=(
                 datetime.now(timezone.utc).isoformat()
                 if request_delta

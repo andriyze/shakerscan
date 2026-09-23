@@ -91,7 +91,8 @@ def require_worker_device_policy(run: Mapping[str, Any]) -> None:
 
 
 async def settle_device_traffic(conn: Any, run: Mapping[str, Any], requested: Mapping[str, int],
-                                actual: dict[str, int], *, status: str) -> None:
+                                actual: dict[str, int], *, status: str,
+                                health_observed: bool | None = None) -> None:
     """Settle device usage in the worker's existing terminal transaction."""
     reserved = int(requested.get("device_fragility_points") or 0)
     if not run["device_target_id"] or not reserved:
@@ -105,11 +106,18 @@ async def settle_device_traffic(conn: Any, run: Mapping[str, Any], requested: Ma
     cost = min(reserved, max(int(actual.get("device_fragility_points") or 0),
                              traffic_envelope(actual))) if observed else 0
     actual["device_fragility_points"] = cost
-    await record_device_traffic(conn, run, cost, status=status)
+    await record_device_traffic(conn, run, cost, status=status, health_observed=health_observed)
 
 
-async def record_device_traffic(conn: Any, run: Mapping[str, Any], cost: int, *, status: str) -> None:
-    """Update the existing policy from a settled, receipt-bound device cost."""
+async def record_device_traffic(conn: Any, run: Mapping[str, Any], cost: int, *, status: str,
+                               health_observed: bool | None = None) -> None:
+    """Update usage independently of a capability's health observation.
+
+    An explicit False means no health checkpoint: keep both prior failures and
+    freezes, rather than inventing either a health failure or a recovery. NSE
+    coverage outcomes (including optional omissions) are not device health tests.
+    Callers without an override retain the existing health semantics.
+    """
     if not run["device_target_id"] or not cost:
         return
     context = run["context_pack"]
@@ -117,7 +125,7 @@ async def record_device_traffic(conn: Any, run: Mapping[str, Any], cost: int, *,
     state = DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {})
     state = state.reconcile_adapter_state({}, {
         "device_http_requests_used": cost,
-        "health_observed": bool(cost),
+        "health_observed": bool(cost) if health_observed is None else health_observed,
         "health_failed": status in {"failed", "partial"},
     }, actual_fragility=cost, health_failed=status in {"failed", "partial"})
     context["device_policy_state"] = state.public_dict()

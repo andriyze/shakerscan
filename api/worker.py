@@ -21492,6 +21492,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 target, target_url = _worker_hunt_web_target(run, context, hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
+                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
                     subdomain_discovery=capability_name == "subdomains.discover",
                     scope_receipt_id=target.scope_receipt_id,
@@ -21695,7 +21696,8 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                         _worker_json_object(locked["budget_json"])
                     )
                 }
-                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
+                await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status,
+                                            health_observed=False if capability_name == "service.nse_check" else None)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,

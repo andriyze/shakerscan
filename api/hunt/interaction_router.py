@@ -1627,6 +1627,7 @@ async def _execute_hunt_capability_lifecycle(
                     network_target, target_url = web_hunt_target(run, authority_context, policy)
                     network_policy = ScanPolicy(
                         active_testing=bool(policy.get("active_testing")),
+                        allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
                         network_discovery=bool(policy.get("network_discovery")),
                         subdomain_discovery=name == "subdomains.discover",
                         scope_receipt_id=validated_scope_receipt_id,

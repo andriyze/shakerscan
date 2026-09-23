@@ -52,11 +52,12 @@ def test_nse_prepares_only_reviewed_scripts_and_bound_ports():
     argv = prepared.commands[0].argv
     assert argv[-1] == "172.31.32.220"
     assert argv[argv.index("-p") + 1] == "8008,8443"
-    assert argv[argv.index("--script") + 1] == "http-security-headers,ssl-enum-ciphers"
+    assert argv[argv.index("--script") + 1].endswith("nse_http.nse,+ssl-enum-ciphers")
+    assert "-sV" not in argv
     assert "--script-timeout" in argv and "--host-timeout" in argv
-    assert prepared.estimated_budget["http_requests"] == 8
+    assert prepared.estimated_budget["http_requests"] == 10
     assert prepared.estimated_budget["tcp_ports_attempted"] == 2
-    assert prepared.estimated_budget["device_fragility_points"] == 76
+    assert prepared.estimated_budget["device_fragility_points"] == 78
 
     for invalid in (
         {"ports": [8443], "scripts": ["vuln"]},
@@ -106,7 +107,7 @@ def test_nse_normalizes_a_real_hsts_misconfiguration_signal():
     assert observation["signals"]["missing_headers"] == ["strict-transport-security"]
 
 
-def test_nse_execution_reconciles_conservative_http_and_port_usage():
+def test_nse_does_not_invent_http_traffic_from_mocked_xml():
     parser = network_capability_adapter("service.nse_check")
     prepared = parser.prepare(target=TARGET, args={
         "ports": [8443], "scripts": ["ssl-enum-ciphers", "http-security-headers"],
@@ -130,9 +131,9 @@ def test_nse_execution_reconciles_conservative_http_and_port_usage():
     ))
     assert result.status == "success"
     assert called and called[0][0] == "nmap"
-    assert result.actual_budget["http_requests"] == 4
+    assert result.actual_budget["http_requests"] == 0
     assert result.actual_budget["tcp_ports_attempted"] == 1
-    assert result.actual_budget["device_fragility_points"] == 38
+    assert result.actual_budget["device_fragility_points"] == 34
     assert len(result.observations) == 2
 
 
@@ -255,3 +256,27 @@ def test_nse_nonzero_exit_keeps_partial_observations_and_examines_next_address()
     assert calls == ["192.0.2.10", "192.0.2.11"]
     assert result.status == "partial" and "nmap_exit_1" in result.errors
     assert len(result.observations) == 4
+
+
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+@pytest.mark.parametrize("scripts", [["ssl-enum-ciphers"], ["http-methods"], ["http-security-headers"]])
+@pytest.mark.parametrize("allow_write", [False, True])
+def test_nse_budget_survives_real_durable_reservation_without_worker_digest_drift(kind, scripts, allow_write):
+    from dataclasses import replace
+    from runtime.budget_reservations import DurableBudgetReservation
+    target = replace(TARGET, target_kind=kind)
+    prepared = network_capability_adapter("service.nse_check").prepare(
+        target=target, args={"ports": [8443], "scripts": scripts},
+        policy=replace(POLICY, allow_state_changing_http=allow_write),
+    )
+    # API admission and the worker both rebuild this mapping. The real durable
+    # ledger drops zero-valued requested dimensions; don't queue a different
+    # representation and then falsely reject the action at worker dispatch.
+    charges = {**prepared.estimated_budget, "agent_actions": 1, "active_actions": 1}
+    reservation = DurableBudgetReservation.request(owner_kind="hunt", owner_id="fixture",
+        capability_name="service.nse_check", amounts=charges)
+    assert dict(reservation.requested) == charges
+    running = reservation.reserve(lease_seconds=180).start(worker_id="fixture", lease_seconds=180)
+    settled = running.commit(actual={key: 0 for key in charges}, execution_receipt_hash="a" * 64)
+    assert settled.status == "committed"
+    assert all(value == 0 for value in settled.actual.values())

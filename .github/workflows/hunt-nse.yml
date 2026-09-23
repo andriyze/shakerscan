@@ -9,9 +9,15 @@ on:
       - 'tests/**nse*'
       - 'tests/integration/**nse*'
       - '.github/workflows/hunt-nse.yml'
+  merge_group:
   push:
-    branches: [claude/github-access-qqgoq6]
-    paths: ['.github/workflows/hunt-nse.yml']
+    branches: [main]
+    paths:
+      - 'api/capabilities/**'
+      - 'api/runtime/pinned_http_replay.py'
+      - 'tests/**nse*'
+      - 'tests/integration/**nse*'
+      - '.github/workflows/hunt-nse.yml'
 permissions:
   contents: read
 concurrency:
@@ -25,13 +31,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Capture exact source for implementation verification
-        run: git archive --format=zip HEAD -o /tmp/hunt-nse-source.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: hunt-nse-source
-          path: /tmp/hunt-nse-source.zip
-          retention-days: 1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -46,7 +45,7 @@ jobs:
         env:
           PYTHONPATH: .:api:scanner
           SHAKERSCAN_REQUIRE_NATIVE_NSE: '1'
-        run: python -m pytest -q tests/integration/test_hunt_nse_native.py --junitxml=/tmp/hunt-nse.xml
+        run: python -m pytest -q tests/integration/test_hunt_nse_native.py tests/test_hunt_nse_http.py tests/test_hunt_nse_capability.py --junitxml=/tmp/hunt-nse.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

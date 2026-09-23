@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+import json
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from xml.etree import ElementTree as ET
 
 from runtime.models import ParsedCapabilityResult, PreparedCommand, PreparedExecution, ScanPolicy, TargetBinding
 from .network_inputs import CapabilityInputError, _addresses, _ports, _require_network_policy
+from .nse_http_transport import HTTP_SCRIPT_LIMITS, http_envelope
 
 
 # Every ID is a reviewed, server-owned script shipped in the worker image. Do
@@ -47,6 +50,22 @@ def _signals(script_id: str, output: str) -> dict[str, Any]:
     return {}
 
 
+def _script_outputs(element):
+    script_id = element.attrib.get("id", "")
+    if script_id != "nse_http":
+        return [(script_id, element.attrib.get("output", ""))]
+    def text(node):
+        # Preserve installed NSE structured output (named tables plus scalar
+        # elements), not only an optional pre-rendered output string.
+        return " ".join(
+            ((child.attrib.get("key", "") + ": ") if child.attrib.get("key") else "")
+            + (text(child) if child.tag == "table" else child.text or "")
+            for child in node
+        )
+    return [(row.attrib.get("key", ""), row.findtext("elem[@key='output']") or text(row))
+            for row in element.findall("table")]
+
+
 class NseCheckAdapter:
     capability_name = "service.nse_check"
     adapter_name = "nmap"
@@ -65,35 +84,49 @@ class NseCheckAdapter:
             raise CapabilityInputError("NSE script is not in the server-approved allowlist")
         scripts = tuple(sorted(set(raw_scripts)))
         addresses = _addresses(target)
+        # Service checks must not secretly run -sV's additional HTTP/POST probes.
+        # HTTP schemes are detected through the metered bridge; force native TLS
+        # to examine explicitly selected nonstandard ports without a version scan.
+        execution_scripts = ([str(Path(__file__).with_name("nse_http.nse"))]
+                             if any(name in HTTP_SCRIPT_LIMITS for name in scripts) else [])
+        if "ssl-enum-ciphers" in scripts:
+            execution_scripts.append("+ssl-enum-ciphers")
+        sni = ("--script-args", "tls.servername=" + json.dumps(target.canonical_host or ""))
         commands = tuple(PreparedCommand(
             "nmap", (("-6",) if ipaddress.ip_address(address).version == 6 else ()) +
-                    ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason", "-v",
+                    ("-sT", "-Pn", "-n", "--reason", "-v",
                      "--max-retries", "1", "--max-parallelism", "1",
-                     "--host-timeout", "90s", "--script-timeout", "15s",
-                     "-p", ",".join(map(str, ports)), "--script", ",".join(scripts),
-                     "-oX", "-", address), address,
+                     "--host-timeout", "90s", "--script-timeout", "60s",
+                     "-p", ",".join(map(str, ports)), "--script", ",".join(execution_scripts),
+                     *sni, "-oX", "-", address), address,
         ) for address in addresses)
         normalized = {"target_id": target.target_id, "addresses": list(addresses),
-                      "ports": list(ports), "scripts": list(scripts)}
-        http_scripts = sum(item.startswith("http-") for item in scripts)
+                      "ports": list(ports), "scripts": list(scripts),
+                      "allow_state_changing_http": policy.allow_state_changing_http}
+        envelope = http_envelope(scripts, len(ports), allow_write=policy.allow_state_changing_http)
         tls_scripts = sum(item == "ssl-enum-ciphers" for item in scripts)
+        # Durable reservations omit zero grants. Use that canonical shape at
+        # both admission and worker reconstruction, including TLS-only checks.
         estimated_budget = {
             "hosts_attempted": len(addresses),
             "tcp_ports_attempted": len(addresses) * len(ports),
-            "http_requests": len(addresses) * len(ports) * http_scripts * 4,
+            **{key: len(addresses) * value for key, value in envelope.items() if value},
             "tool_wall_seconds": 90 * len(addresses),
         }
         if target.target_kind == "device":
-            # NSE may open many sockets per port. Charge a conservative device
-            # allowance even when its HTTP request count is zero (TLS checks).
+            # Native TLS still uses a device cost estimate, not a measured
+            # handshake count. The HTTP component is measured at execution.
             estimated_budget["device_fragility_points"] = (
-                len(addresses) * len(ports) * (2 + 4 * http_scripts + 32 * tls_scripts)
+                len(addresses) * (len(ports) * (2 + 32 * tls_scripts) + envelope["http_requests"])
             )
         return PreparedExecution(
             self.capability_name, self.adapter_name, self.adapter_version, commands,
             estimated_budget,
             PreparedExecution.digest_input(normalized),
-            {"approved_addresses": list(addresses), "ports": list(ports), "scripts": list(scripts)},
+            {"approved_addresses": list(addresses), "ports": list(ports), "scripts": list(scripts),
+             "http_target": target.canonical_dict(), "allow_state_changing_http": policy.allow_state_changing_http,
+             "http_accounting": "request_header_attempts", "http_transport": "frozen_address_bridge",
+             "device_non_http_accounting": "estimated_allowance"},
             self.parser_version,
         )
 
@@ -134,25 +167,24 @@ class NseCheckAdapter:
                         if element.attrib.get("exit") == "error":
                             errors.append("nmap_run_error")
                     elif event == "end" and element.tag == "script" and address and port:
-                        script_id = element.attrib.get("id", "")
-                        if script_id in NSE_SCRIPTS:
-                            script_output = element.attrib.get("output", "")
-                            failed = bool(re.match(
-                                r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
-                                script_output, re.I,
-                            ))
-                            if failed:
-                                errors.append(f"nse_script_failed:{script_id}:{port}")
-                            if not script_output.strip():
-                                errors.append(f"nse_script_no_output:{script_id}:{port}")
-                            observations.append({
-                                "kind": "nse_observation", "address": address, "port": port,
-                                "transport": "tcp", "script_id": script_id,
-                                "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
-                                "signals": {} if failed else _signals(script_id, script_output),
-                                "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
-                                "proof_state": "observation_only",
-                            })
+                        for script_id, script_output in _script_outputs(element):
+                            if script_id in NSE_SCRIPTS:
+                                failed = bool(re.match(
+                                    r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
+                                    script_output, re.I,
+                                ))
+                                if failed:
+                                    errors.append(f"nse_script_failed:{script_id}:{port}")
+                                if not script_output.strip():
+                                    errors.append(f"nse_script_no_output:{script_id}:{port}")
+                                observations.append({
+                                    "kind": "nse_observation", "address": address, "port": port,
+                                    "transport": "tcp", "script_id": script_id,
+                                    "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
+                                    "signals": {} if failed else _signals(script_id, script_output),
+                                    "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
+                                    "proof_state": "observation_only",
+                                })
                     elif event == "end" and element.tag == "port":
                         port = None
                     elif event == "end" and element.tag == "host":
