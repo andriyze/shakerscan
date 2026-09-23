@@ -98,6 +98,22 @@ class PublicClientTests(unittest.TestCase):
             call = fake_api.main.call_args.args[0]
             self.assertEqual(call[:4], ["--api-url", "https://private.example.com", "POST", "/public/check"])
 
+    def test_scan_uses_lan_ui_port_and_keeps_gateway_origin(self):
+        fake_scan = mock.Mock()
+        fake_scan.main.return_value = 0
+        args = argparse.Namespace(args=["https://honey.shakerscan.com"])
+        with mock.patch.object(cli, "apply_connection", return_value="http://172.31.33.93:8080"), \
+             mock.patch.object(cli, "load", return_value=fake_scan):
+            self.assertEqual(cli.cmd_scan(args), 0)
+        self.assertEqual(fake_scan.main.call_args.args[0][:4], [
+            "--api-url", "http://172.31.33.93:8080",
+            "--ui-url", "http://172.31.33.93:3000",
+        ])
+        self.assertEqual(cli.scan_ui_url("https://private.example.com"),
+                         "https://private.example.com")
+        self.assertEqual(cli.scan_ui_url("http://[::1]:8080"),
+                         "http://[::1]:3000")
+
     def test_check_prints_observations_and_limitations_with_summary(self):
         args = argparse.Namespace(target="example.com", json=False, timeout=None)
         data = {"summary": "One observation to review", "checks": [

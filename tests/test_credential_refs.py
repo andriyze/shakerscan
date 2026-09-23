@@ -5,6 +5,7 @@ import pytest
 from api.runtime.credential_refs import (
     CredentialReferenceError,
     select_hunt_principal_reference,
+    select_hunt_session_principal_reference,
     validate_generic_credential_references,
 )
 from api.runtime.credential_store import CredentialProfileMetadata
@@ -143,6 +144,42 @@ def test_hunt_principal_selection_is_exact_content_free_and_capability_bound():
     context["credential_refs"][0]["allowed_capabilities"] = ["web.probe"]
     with pytest.raises(CredentialReferenceError, match="exactly one usable"):
         select_hunt_principal_reference(context, "primary")
+
+
+@pytest.mark.parametrize("auth_kind", [
+    "form_login", "json_login", "oauth_client_credentials", "oauth_password",
+])
+def test_hunt_session_principal_admits_interactive_profile(auth_kind):
+    context = {"credential_refs": [{
+        "source": "credential_profiles",
+        "profile_id": "profile-a",
+        "profile_version": 2,
+        "principal_slot": "primary",
+        "auth_kind": auth_kind,
+        "allowed_capabilities": ["auth.session.establish"],
+    }]}
+    assert select_hunt_session_principal_reference(context, "primary") == {
+        "profile_id": "profile-a",
+        "profile_version": 2,
+        "principal_slot": "primary",
+    }
+
+
+def test_hunt_session_principal_rejects_basic_auth_before_worker_reservation():
+    context = {"credential_refs": [{
+        "source": "credential_profiles",
+        "profile_id": "profile-a",
+        "profile_version": 2,
+        "principal_slot": "primary",
+        "auth_kind": "basic_auth",
+        "allowed_capabilities": ["auth.session.establish"],
+    }]}
+    with pytest.raises(CredentialReferenceError, match="interactive HTTP profile"):
+        select_hunt_session_principal_reference(context, "primary")
+    context["credential_refs"][0]["auth_kind"] = "form_login"
+    context["credential_refs"][0]["allowed_capabilities"] = ["http.request"]
+    with pytest.raises(CredentialReferenceError, match="exactly one usable"):
+        select_hunt_session_principal_reference(context, "primary")
 
 
 def test_hunt_principal_selection_rejects_retired_replay_authority():

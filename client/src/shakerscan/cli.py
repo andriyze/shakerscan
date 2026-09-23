@@ -589,12 +589,23 @@ def cmd_api(args: argparse.Namespace) -> int:
     return int(load("_api_cli").main(["--api-url", url, *rest]))
 
 
+def scan_ui_url(api_url: str) -> str:
+    """Use the LAN UI port for a directly connected open-source engine."""
+    parts = urllib.parse.urlsplit(api_url)
+    if parts.scheme == "http" and parts.port == 8080:
+        host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        return urllib.parse.urlunsplit(("http", f"{host}:3000", "", "", ""))
+    return api_url
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     url = apply_connection(args)
     rest = list(args.args) or ["--help"]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    return int(load("_scan_cli").main(["--api-url", url, "--ui-url", url, *rest]))
+    return int(load("_scan_cli").main(["--api-url", url, "--ui-url", scan_ui_url(url), *rest]))
 
 
 # --- public checks ---------------------------------------------------------------------------

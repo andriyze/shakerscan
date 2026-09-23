@@ -20,6 +20,11 @@ GENERIC_CREDENTIAL_REF_KEYS = frozenset({
     "cookie_credential_id",
     "oauth_credential_profile_id",
 })
+INTERACTIVE_HTTP_CREDENTIAL_KINDS = frozenset({
+    "form_login", "json_login", "oauth_client_credentials", "oauth_password",
+})
+
+
 class CredentialReferenceError(ValueError):
     """A submitted opaque reference is missing, expired, misbound, or ambiguous."""
 
@@ -71,6 +76,30 @@ def select_hunt_principal_reference(
         "principal_slot": slot,
         "profile_version": profile_version,
     }
+
+
+def select_hunt_session_principal_reference(
+    context: Mapping[str, Any], value: Any,
+) -> dict[str, Any]:
+    """Reject unusable session profiles before reserving a worker action."""
+    selected = select_hunt_principal_reference(
+        context, value, capability="auth.session.establish",
+    )
+    if selected is None:
+        raise CredentialReferenceError(
+            "session establishment requires a managed principal"
+        )
+    matches = [
+        item for item in context.get("credential_refs") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("profile_id") or "") == selected["profile_id"]
+        and str(item.get("principal_slot") or "") == selected["principal_slot"]
+    ]
+    if len(matches) != 1 or matches[0].get("auth_kind") not in INTERACTIVE_HTTP_CREDENTIAL_KINDS:
+        raise CredentialReferenceError(
+            "session establishment requires an interactive HTTP profile"
+        )
+    return selected
 
 
 def _role_compatible(role: str, profile: CredentialProfileMetadata) -> bool:
