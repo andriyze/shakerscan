@@ -380,11 +380,12 @@ class HuntSkillLibrary:
         target_kind: str,
         allowed_capabilities: Iterable[str] | None = None,
     ) -> tuple[HuntSkillSpec, ...]:
-        """Return bindable skills whose complete prerequisite chain fits this authority.
+        """Return bindable methodologies compatible with the current Hunt.
 
-        The public catalog can call this without an allowlist to describe target-kind support.
-        Hunt start passes its already-derived policy allowlist, making the context-pack result
-        authoritative without letting a recommendation grant authority.
+        Suggestions are advisory. A skill whose full procedure needs authority the Hunt does not
+        currently have is still useful methodology: the planner can read it, execute the compatible
+        techniques, and report the unavailable technique as a coverage gap. Binding never grants
+        authority, so filtering the suggestion away only hides useful investigative knowledge.
         """
         available = set(allowed_capabilities) if allowed_capabilities is not None else None
         compatible: list[HuntSkillSpec] = []
@@ -393,12 +394,8 @@ class HuntSkillLibrary:
                 expanded = self.resolve_for_hunt([spec.skill_id], target_kind=target_kind)
             except HuntSkillError:
                 continue
-            if available is not None and any(
-                name not in available
-                for item in expanded
-                for name in item.capabilities
-            ):
-                continue
+            # Do not hide methodology merely because some of its techniques need capabilities
+            # outside the current envelope. Execution remains gated capability-by-capability.
             compatible.append(spec)
         return tuple(compatible)
 
@@ -696,18 +693,9 @@ def bind_skills_to_hunt(
             ),
         )
 
-    # Every capability a skill lists as required must survive the policy filter. Checking
-    # only that *something* survived let a session-testing skill bind to a passive,
-    # credential-free hunt with two of its five requirements, so the planner would follow a
-    # methodology it could not carry out and report the gap as a result.
-    available = set(allowed_capabilities)
-    for spec in specs:
-        withheld = [name for name in spec.capabilities if name not in available]
-        if withheld:
-            raise HuntSkillError(
-                f"skill {spec.skill_id} requires {', '.join(withheld)}, which this Hunt "
-                "policy withholds; grant the matching authority or choose another skill"
-            )
+    # Methodology is knowledge, not authority. Keep it bindable even when some techniques are
+    # unavailable in this Hunt; individual capability calls remain server-gated and the planner
+    # can continue with the compatible parts instead of losing the entire methodology.
     return BoundSkills(
         specs, allowed_capabilities, budget, skill_context_section(
             specs, requested=skill_ids, library=resolved_library,
