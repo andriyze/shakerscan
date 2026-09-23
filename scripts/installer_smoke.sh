@@ -46,7 +46,6 @@ required_files=(
   install/release-images.sh
   README.md
   AGENTS.md
-  CLAUDE.md
   .dockerignore
   scripts/shakerscan_mcp.py
   scripts/local_planner_adapter.py
