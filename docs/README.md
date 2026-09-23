@@ -1,97 +1,62 @@
-# Documentation Index
+# ShakerScan documentation
 
-**Reconciled:** 2026-08-29. This directory contains maintained product references, operating policy,
-release material, and active architecture. Point-in-time audits, completed prompts, implementation
-ledgers, and obsolete screenshots are kept in Git history rather than copied into the release docs.
-Code, database schemas, runtime receipts, and tests remain authoritative when a document disagrees.
+The root [README](../README.md) is intentionally a short operator quick start. This directory is
+for maintained engineering, architecture, and advanced-operation references.
 
-## Start Here
+Runtime behavior is authoritative in code, database migrations, tests, and the live API contracts.
+Point-in-time plans, release readiness notes, completed implementation diaries, and obsolete claims
+belong in Git history or immutable release notes rather than the active documentation set.
 
-| Document | Audience and purpose |
-|---|---|
-| [`../README.md`](../README.md) | Install, first scan, workflow selection, UI/CLI/API orientation, safety, and troubleshooting |
-| [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | Current text walkthrough for first run, findings, UI workflows, and agent requests |
-| [`../skills/README.md`](../skills/README.md) | Agent skill catalog, setup, and maintenance |
-| [`../AGENTS.md`](../AGENTS.md) | Compact, always-loaded coding-agent policy and operating decisions |
-| [`product-model.md`](product-model.md) | Canonical product names, natural-language routing, source labels, and compatibility terms |
-| [`functionality-reference.md`](functionality-reference.md) | Exhaustive product map plus generated code-surface inventory |
-| [`service-intelligence.md`](service-intelligence.md) | Exposure service inventory, vulnerability intelligence, service-specific activities, evidence, and Hunt handoff |
+## Core architecture
 
-## Product And Operations
+- [Product model](product-model.md) — canonical product names and boundaries.
+- [Functionality reference](functionality-reference.md) — exhaustive generated/current product map.
+- [AI-native architecture](ai-native-architecture-rfc.md) — Scan/Hunt architecture direction.
+- [Hunt architecture](hunt-architecture.md) — adaptive investigation model.
+- [DAST and ASM architecture](dast-asm-architecture.md) — deterministic Scan and attack-surface model.
+- [Service intelligence](service-intelligence.md) — service observations and investigation handoff.
+- [Multi-node architecture](multi-node-architecture.md) — distributed execution design.
 
-| Document | Purpose |
-|---|---|
-| [`proposed-next-steps.md`](proposed-next-steps.md) | Short future-only roadmap; completed plans move to the archive |
-| [`sbom.md`](sbom.md) | Signed release SBOMs, runtime/source-input coverage, SPDX/CycloneDX formats and verification |
-| [`release-readiness.md`](release-readiness.md) | Single release scope, stop-ship, validation, publishing, installer, and documentation checklist |
-| [`release-process.md`](release-process.md) | Enforced candidate, required exact-SHA physical gates, digest promotion, public smoke, and stable-channel sequence |
-| [`release-2.3.0-plan.md`](release-2.3.0-plan.md) | 2.3.0 plan and current Hunt-assisted investigation milestone; DAST holds its measured 4/9 baseline while Hunt efficacy remains release-gated |
-| [`hunt-architecture.md`](hunt-architecture.md) | Canonical Hunt product direction: human judgment, AI reasoning, deterministic execution and proof |
-| [`hunt-authorization-workflow.md`](hunt-authorization-workflow.md) | Supported GET authorization investigation flow, safety boundaries, limitations, and pending acceptance |
-| [`hunt-authorization-behavior.md`](hunt-authorization-behavior.md) | As-built selected-object authorization behavior: four-request comparison, candidate gating, live validation, and limits |
-| [`hunt-review-integrity.md`](hunt-review-integrity.md) | Evidence review/continuity model, offline investigation scorer, and the record-integrity CI gate |
-| [`hosted-connector.md`](hosted-connector.md) | Read-only hosted-workspace HTTPS/MCP preview connector; not an enabled release capability |
-| [`release-2.2.0-plan.md`](release-2.2.0-plan.md) | 2.2.0 audit verdicts and improvement plan: upgrade safety, the fifth image everywhere, DAST depth, release pipeline |
-| [`api-image-boundary.md`](api-image-boundary.md) | What the control-plane process executes and why the slim API image keeps Chromium and the Docker client but no scanner toolset |
-| [`browser-login-qa.md`](browser-login-qa.md) | Operator-authored `browser.login_check` capability: isolated authenticated context, DOM-marker verification, bounded read-only QA, and Scan/Hunt integration |
-| [`browser-session-integrity.md`](browser-session-integrity.md) | Why browser session materialization is not login verification, and the session-integrity guarantees the login QA helper relies on |
-| [`upgrade-and-rollback.md`](upgrade-and-rollback.md) | Backup, upgrade, verification, and rollback runbook for source and installer deployments |
-| [`multi-node-guide.md`](multi-node-guide.md) | Operate the supported outbound-HTTPS Fleet; WireGuard is preview-only |
-| [`releases/README.md`](releases/README.md) | Immutable release-note index, including published and failed/cancelled candidates |
-| [`releases/2.0.0.md`](releases/2.0.0.md) | Pending 2.0.0 notes and exact validation boundary |
-| [`releases/0.8.18.md`](releases/0.8.18.md) | Current stable-line release notes until 2.0.0 promotion succeeds |
-| [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) | Implemented DAST mechanisms mapped to OWASP categories |
-| [`E2E_TEST_PLAN.md`](E2E_TEST_PLAN.md) | Real-stack E2E contract, implemented/planned cases, and freshness rules |
-| [`hunt-investigation-evaluation.md`](hunt-investigation-evaluation.md) | Independent planner evaluation, hidden oracles, patched controls, exact-cost scoring, and limitations |
-| [`mcp.md`](mcp.md) | MCP's separate read-only Arsenal and state-changing target-bound Hunt trust levels |
-| [`client.md`](client.md) | The engine-less `shakerscan` client (pipx, uv, Homebrew): the MCP adapter and Hunt CLI, one command name with the launcher |
-| [`lan-access.md`](lan-access.md) | Trusted-LAN startup (`start --lan`, `--bind-host`): interface selection, what binds where, firewall guidance, and the laptop client commands |
-| [`clean-reinstall.md`](clean-reinstall.md) | Removing a local installation safely before reinstalling: what the cleanup script deletes, what it refuses to touch, and how to verify the result |
-| [`compatibility.md`](compatibility.md) | Internal legacy-input/read compatibility boundary; not a second product surface |
-| [`data-lifecycle-retention-and-portability-plan.md`](data-lifecycle-retention-and-portability-plan.md) | Implemented retention/export safety boundary and genuinely remaining lifecycle work |
+## Hunt and authenticated testing
 
-## Acceptance And Integrity Ledgers
+- [Hunt authorization behavior](hunt-authorization-behavior.md)
+- [Hunt authorization workflow](hunt-authorization-workflow.md)
+- [Hunt investigation evaluation](hunt-investigation-evaluation.md)
+- [Hunt review integrity](hunt-review-integrity.md)
+- [Authenticated assurance](authenticated-assurance.md)
+- [Browser login QA](browser-login-qa.md)
+- [Browser session integrity](browser-session-integrity.md)
 
-| Document | Purpose |
-|---|---|
-| [`ledgers/benchmark-integrity-ledger.md`](ledgers/benchmark-integrity-ledger.md) | Benchmark contamination, stale-fleet, scoring, and interpretation corrections |
-| [`ledgers/planner-evals-integrity-ledger.md`](ledgers/planner-evals-integrity-ledger.md) | Planner-evaluation limitations, invalidations, and rerun requirements |
+## Devices, AI, and model security
 
-## AI Security
+- [Connected-device security](connected-device-security.md)
+- [AI test workflows](AI_TEST_WORKFLOWS.md)
+- [AI boundary](ai-boundary-alpha.md)
+- [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
-| Document | Purpose |
-|---|---|
-| [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) | Generic AI workflows and optional Honey calibration contract |
-| [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) | Compatibility-only `/session*` boundary; prefer Hunt for new investigations |
-| [`model-intake-security-review-roadmap.md`](model-intake-security-review-roadmap.md) | Current Model Intake subject, trust, isolation, and acceptance boundary |
+## Operations
 
-## Architecture
+- [Client](client.md)
+- [LAN access](lan-access.md)
+- [Clean reinstall](clean-reinstall.md)
+- [Upgrade and rollback](upgrade-and-rollback.md)
+- [Release process](release-process.md)
+- [Release notes](releases/README.md)
+- [SBOM](sbom.md)
+- [MCP](mcp.md)
+- [Multi-node guide](multi-node-guide.md)
+- [Data lifecycle](data-lifecycle-retention-and-portability-plan.md)
 
-| Document | Status |
-|---|---|
-| [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) | Scan V2 and unified Hunt architecture, pinned baseline, migration boundary, and acceptance contract |
-| [`dast-asm-architecture.md`](dast-asm-architecture.md) | Current one-shot DAST, local scatter/gather, and Continuous ASM execution model |
-| [`connected-device-security.md`](connected-device-security.md) | Connected-device inventory, safe service assessment, policy evaluation, isolated execution, and web-origin handoff |
-| [`multi-node-architecture.md`](multi-node-architecture.md) | Implemented multi-node trust, transport, scheduling, lifecycle, evidence, and acceptance design authority |
-| [`ai-boundary-alpha.md`](ai-boundary-alpha.md) | Configured AI application security verification: controls, deterministic proof, and alpha boundaries |
-| [`authenticated-assurance.md`](authenticated-assurance.md) | Authenticated-scan profile and assurance preview: reuse decisions, trust boundaries, and remaining release gates |
-| [`decisions/README.md`](decisions/README.md) | Normative architecture-decision index |
+## Engineering references
 
-## Historical Archive
+- [End-to-end test plan](E2E_TEST_PLAN.md)
+- [API image boundary](api-image-boundary.md)
+- [Compatibility](compatibility.md)
+- [Hosted connector](hosted-connector.md)
+- [OWASP coverage matrix](owasp-coverage-matrix.md)
+- [Decisions](decisions/)
+- [Integrity ledgers](ledgers/)
+- [Generated contracts and inventories](generated/)
 
-Point-in-time audits, completed implementation ledgers, retired engines, and pre-V2 policy live under
-[`archive/`](archive/README.md). They are migration evidence, not current product instructions or
-release proof.
-
-## Maintenance Rule
-
-- Update a live document when behavior, schema, safety boundaries, or acceptance status changes.
-- Run `python3 scripts/generate_capability_inventory.py` after changing API, registry, CLI/wrapper,
-  Make/release-gate, runtime configuration, UI, skill/agent, adapter, scanner-module, or durable-table
-  surfaces; CI checks the generated block.
-- Remove point-in-time reviews, completed plans, execution prompts, and stale screenshots from the
-  maintained set; Git history and release tags preserve them when needed.
-- Update [`release-readiness.md`](release-readiness.md) when an audit blocker, validation gate, or
-  release/deployment prerequisite changes.
-- Never convert an old benchmark or E2E artifact into a current-build claim.
-- Keep benchmark hostnames, product nouns, answer-key routes, and expected findings out of detector inputs.
+Historical release plans and superseded operating documents are intentionally not maintained here.
+Use Git history or immutable release notes when investigating an older release.
