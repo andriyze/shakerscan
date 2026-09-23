@@ -105,7 +105,11 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     )
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
     assert suggestions[0]["auto_bound"] is False
+    assert suggestions[0]["execution"]["fully_executable"] is False
+    assert suggestions[0]["execution"]["unavailable_capabilities"]
     assert suggestions[0]["reason"].startswith("Objective matches:")
+    assert suggestions[0]["execution"]["fully_executable"] is True
+    assert suggestions[0]["execution"]["unavailable_capabilities"] == []
     assert "description" not in suggestions[0]
     assert "capabilities" not in suggestions[0]
 
