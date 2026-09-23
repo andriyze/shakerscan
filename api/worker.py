@@ -22255,6 +22255,10 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 resolved_routes.append(resolved_route)
             routes = resolved_routes
             authz_base = capability_input.get("origin") or routes[0]
+            selected_route_origins = tuple(
+                urllib.parse.urlunsplit((*urllib.parse.urlsplit(route)[:2], "", "", ""))
+                for route in routes
+            )
             primary_ref = str(capability_input["primary_session_ref"])
             secondary_ref = str(capability_input["secondary_session_ref"])
             if primary_ref == secondary_ref:
@@ -22278,6 +22282,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     owner_id=hunt_id,
                     target=target,
                     capability="authz.verify",
+                    selected_origins=selected_route_origins,
                 )
                 secondary_worker_session = await session_store.load_for_worker(
                     authority_conn,
@@ -22286,6 +22291,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     owner_id=hunt_id,
                     target=target,
                     capability="authz.verify",
+                    selected_origins=selected_route_origins,
                 )
             if (
                 worker_session.metadata.principal_slot != "primary"
@@ -22377,6 +22383,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                         owner_id=hunt_id,
                         target=target,
                         capability="http.request",
+                        selected_origins=(urllib.parse.urlunsplit(
+                            (*urllib.parse.urlsplit(capability_input.get("origin") or target_url)[:2], "", "", ""),
+                        ),),
                     )
                 trusted_headers = worker_session.headers()
                 principal_slot = worker_session.metadata.principal_slot

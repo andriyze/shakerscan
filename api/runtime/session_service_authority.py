@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 import uuid
 
@@ -60,6 +60,7 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 async def validate_session_service_use(
     conn: Any, *, target: TargetBinding, metadata: Any, capability: str,
+    selected_origins: Sequence[str] | None = None,
 ) -> None:
     """Check cross-service authority immediately before session decryption.
 
@@ -71,7 +72,13 @@ async def validate_session_service_use(
     """
     if metadata.owner_kind != "hunt":
         return
-    origins = {service_origin(o) for o in target.allowed_origins}
+    bound_origins = {service_origin(o) for o in target.allowed_origins}
+    origins = (
+        {service_origin(o) for o in selected_origins}
+        if selected_origins is not None else bound_origins
+    )
+    if not origins or not origins.issubset(bound_origins):
+        raise ValueError("session service selection is outside the target binding")
     if metadata.service_origin:
         if (urlsplit(service_origin(metadata.service_origin)).scheme == "https"
                 and any(urlsplit(origin).scheme == "http" for origin in origins)):
