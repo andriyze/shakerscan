@@ -134,6 +134,7 @@ class NetworkExecutionAdapter:
             // command_count,
         )
         status = "failed"
+        process_failed = False
 
         for command in prepared.commands:
             if cancelled():
@@ -188,15 +189,17 @@ class NetworkExecutionAdapter:
                 status = "cancelled"
                 errors.insert(0, "cancelled")
                 break
-            if streamed.returncode != 0 and not streamed.stdout.strip():
-                status = "failed"
+            if streamed.returncode != 0:
+                process_failed = True
+                partial = True
                 errors.insert(
                     0,
                     f"{prepared.adapter_name}_exit_{streamed.returncode}",
                 )
-                break
+                # A failed host must not discard its usable output or prevent
+                # examination of the other admitted addresses.
         else:
-            status = "partial" if partial else "success"
+            status = "failed" if process_failed and not observations else "partial" if partial else "success"
 
         actual: dict[str, int] = {}
         for dimension, reserved_amount in prepared.estimated_budget.items():

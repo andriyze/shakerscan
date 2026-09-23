@@ -66,7 +66,8 @@ class NseCheckAdapter:
         scripts = tuple(sorted(set(raw_scripts)))
         addresses = _addresses(target)
         commands = tuple(PreparedCommand(
-            "nmap", ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason",
+            "nmap", (("-6",) if ipaddress.ip_address(address).version == 6 else ()) +
+                    ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason", "-v",
                      "--max-retries", "1", "--max-parallelism", "1",
                      "--host-timeout", "90s", "--script-timeout", "15s",
                      "-p", ",".join(map(str, ports)), "--script", ",".join(scripts),
@@ -104,6 +105,7 @@ class NseCheckAdapter:
         errors: list[str] = []
         address = ""
         port: int | None = None
+        port_states: dict[int, str] = {}
         parser = ET.XMLPullParser(events=("start", "end"))
         try:
             content = str(output or "")
@@ -126,17 +128,28 @@ class NseCheckAdapter:
                             port = parsed_port if 1 <= parsed_port <= 65535 and element.attrib.get("protocol") == "tcp" else None
                         except ValueError:
                             port = None
+                    elif event == "start" and element.tag == "state" and port:
+                        port_states[port] = element.attrib.get("state", "unknown")
+                    elif event == "end" and element.tag == "finished":
+                        if element.attrib.get("exit") == "error":
+                            errors.append("nmap_run_error")
                     elif event == "end" and element.tag == "script" and address and port:
                         script_id = element.attrib.get("id", "")
                         if script_id in NSE_SCRIPTS:
                             script_output = element.attrib.get("output", "")
+                            failed = bool(re.match(
+                                r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
+                                script_output, re.I,
+                            ))
+                            if failed:
+                                errors.append(f"nse_script_failed:{script_id}:{port}")
                             if not script_output.strip():
                                 errors.append(f"nse_script_no_output:{script_id}:{port}")
                             observations.append({
                                 "kind": "nse_observation", "address": address, "port": port,
                                 "transport": "tcp", "script_id": script_id,
-                                "status": "reported" if script_output.strip() else "no_output",
-                                "signals": _signals(script_id, script_output),
+                                "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
+                                "signals": {} if failed else _signals(script_id, script_output),
                                 "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
                                 "proof_state": "observation_only",
                             })
@@ -147,15 +160,21 @@ class NseCheckAdapter:
             parser.close()
         except ET.ParseError as exc:
             errors.append(f"malformed_nmap_xml:{type(exc).__name__}")
-        # A requested check that produced no script element (closed or filtered
-        # port, script timeout, host down) is indeterminate, not a clean result.
+        # Silence is not proof that a script did not run: positive-only scripts
+        # also return nil on a normal response. Keep this coverage inconclusive,
+        # preserve other observations, and let the planner choose another check.
         reported = {(item["port"], item["script_id"]) for item in observations}
+        coverage = []
         for expected_port in expected_ports:
             for script_id in expected_scripts:
                 if (int(expected_port), script_id) not in reported:
-                    errors.append(f"nse_script_not_run:{script_id}:{int(expected_port)}")
+                    errors.append(f"nse_script_no_result:{script_id}:{int(expected_port)}")
+                    state = port_states.get(int(expected_port), "unknown")
+                    coverage.append({"port": int(expected_port), "script_id": script_id,
+                                     "status": "not_applicable" if state == "closed" else "inconclusive",
+                                     "port_state": state})
         partial = bool(timed_out or errors)
         return ParsedCapabilityResult(
             "partial" if partial else "succeeded", tuple(observations), partial,
-            bool(timed_out), tuple(errors[:20]), {"record_count": len(observations)},
+            bool(timed_out), tuple(errors[:20]), {"record_count": len(observations), "coverage_gaps": coverage},
         )

@@ -131,3 +131,12 @@ class PublicClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_scan_ui_url_preserves_reverse_proxy_authority_and_path():
+    for url in ("http://gateway.example:8080", "http://gateway.example:8080/shakerscan",
+                "http://192.168.1.10:8080/shakerscan", "http://8.8.8.8:8080",
+                "https://192.168.1.10:8080"):
+        assert cli.scan_ui_url(url) == url
+    assert cli.scan_ui_url("http://localhost:8080") == "http://localhost:3000"
+    assert cli.scan_ui_url("http://[fd00::10]:8080") == "http://[fd00::10]:3000"

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import os
 import re
@@ -590,10 +591,24 @@ def cmd_api(args: argparse.Namespace) -> int:
 
 
 def scan_ui_url(api_url: str) -> str:
-    """Use the LAN UI port for a directly connected open-source engine."""
+    """Recognize a bare local IP, not every reverse proxy listening on 8080.
+
+    Named gateways and path prefixes retain the configured URL. The forwarded
+    scan CLI's explicit --ui-url always wins for custom/private proxy layouts.
+    """
     parts = urllib.parse.urlsplit(api_url)
-    if parts.scheme == "http" and parts.port == 8080:
-        host = parts.hostname or ""
+    host = parts.hostname or ""
+    try:
+        address = ipaddress.ip_address(host)
+        local = address.is_loopback or any(address in network for network in (
+            ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("fc00::/7"),
+        ) if network.version == address.version)
+    except ValueError:
+        local = host.lower() == "localhost"
+    if (parts.scheme == "http" and parts.port == 8080 and local
+            and parts.path in {"", "/"} and not parts.query and not parts.fragment
+            and parts.username is None):
         if ":" in host:
             host = f"[{host}]"
         return urllib.parse.urlunsplit(("http", f"{host}:3000", "", "", ""))

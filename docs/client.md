@@ -129,6 +129,11 @@ stay closed to everything else. To go back to localhost-only on the server:
 `shakerscan restart --bind-host 127.0.0.1 --public-host localhost`. Networking details, multi-NIC
 selection and hand-written MCP registration are in [LAN access](lan-access.md).
 
+Scan links use port 3000 automatically for a direct private-IP or localhost API on
+port 8080. Named gateways and URL prefixes keep their configured origin. For a custom
+layout (including a reverse proxy on a private IP), specify the UI explicitly:
+`shakerscan scan --ui-url https://scanner.example.com https://authorized-app.example`.
+
 ### ShakerScan Enterprise (encrypted, with a token)
 
 An administrator creates a service token in the Enterprise console; it shows a one-time connect
