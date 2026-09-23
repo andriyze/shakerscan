@@ -63,7 +63,10 @@ try:
     from http_experiment import MAX_REDIRECT_HOPS
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
-    from runtime.credential_refs import CredentialReferenceError, select_hunt_principal_reference
+    from runtime.credential_refs import (
+        CredentialReferenceError, select_hunt_principal_reference,
+        select_hunt_session_principal_reference,
+    )
     from runtime.models import ScanPolicy, TargetBinding
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
     from runtime.reservation_store import PostgresBudgetReservationStore
@@ -82,7 +85,10 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..http_experiment import MAX_REDIRECT_HOPS
     from ..runtime.budget_reservations import DurableBudgetReservation
     from ..runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
-    from ..runtime.credential_refs import CredentialReferenceError, select_hunt_principal_reference
+    from ..runtime.credential_refs import (
+        CredentialReferenceError, select_hunt_principal_reference,
+        select_hunt_session_principal_reference,
+    )
     from ..runtime.models import ScanPolicy, TargetBinding
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
     from ..runtime.reservation_store import PostgresBudgetReservationStore
@@ -1488,6 +1494,13 @@ async def _execute_hunt_capability_lifecycle(
                 }
                 else "anonymous"
             )
+            if name == "auth.session.establish":
+                try:
+                    select_hunt_session_principal_reference(
+                        context, principal_slot,
+                    )
+                except CredentialReferenceError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             if name == "collections.replay_safe":
                 principal = _hunt_managed_principal_reference(
                     _hunt_json(run["context_pack"], {}), principal_slot,
