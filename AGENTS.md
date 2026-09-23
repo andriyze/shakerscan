@@ -39,6 +39,12 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 9. Preserve trustworthy partial output on timeout. Cancellation is distinct and stops execution.
 10. Reuse core concepts instead of adding parallel registries, ledgers, scope paths, candidate
     models, proof paths, or orchestration engines.
+11. Treat durable target knowledge as shared product state. Scan, Hunt, device assessment, service
+    intelligence, and imported request collections should enrich the same target understanding
+    instead of forcing each workflow to rediscover it.
+12. Optimize for investigation efficacy and operator flow. A capability is valuable when it helps
+    reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
+    or refusal paths that do not improve those outcomes.
 
 ## Environment and startup
 
