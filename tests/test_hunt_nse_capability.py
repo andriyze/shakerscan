@@ -134,3 +134,55 @@ def test_nse_execution_reconciles_conservative_http_and_port_usage():
     assert result.actual_budget["tcp_ports_attempted"] == 1
     assert result.actual_budget["device_fragility_points"] == 38
     assert len(result.observations) == 2
+
+
+def test_nse_keeps_observations_for_a_lan_host_that_reports_a_mac_address():
+    # nmap emits a MAC <address> after the IP for a directly attached host; it
+    # must not clear the scanned host and silently drop every observation.
+    parser = network_capability_adapter("service.nse_check")
+    xml = XML.replace(
+        "<address addr='172.31.32.220' addrtype='ipv4'/>",
+        "<address addr='172.31.32.220' addrtype='ipv4'/>"
+        "<address addr='AA:BB:CC:DD:EE:FF' addrtype='mac' vendor='Example'/>",
+    )
+    result = parser.parse(xml)
+    assert result.status == "succeeded"
+    assert [item["address"] for item in result.observations] == ["172.31.32.220"] * 2
+
+
+def test_nse_requested_script_that_never_ran_is_indeterminate_not_clean():
+    parser = network_capability_adapter("service.nse_check")
+    closed = """<?xml version='1.0'?>
+<nmaprun><host><address addr='172.31.32.220' addrtype='ipv4'/><ports>
+<port protocol='tcp' portid='8008'><state state='closed'/></port>
+</ports></host></nmaprun>"""
+    result = parser.parse(closed, expected_ports=[8008], expected_scripts=["http-methods"])
+    assert result.status == "partial" and result.partial
+    assert result.errors == ("nse_script_not_run:http-methods:8008",)
+    complete = parser.parse(XML, expected_ports=[8443],
+                            expected_scripts=["http-security-headers", "ssl-enum-ciphers"])
+    assert complete.status == "succeeded" and not complete.errors
+
+
+def test_nse_execution_marks_a_missing_script_result_partial():
+    parser = network_capability_adapter("service.nse_check")
+    prepared = parser.prepare(target=TARGET, args={
+        "ports": [8443, 8008], "scripts": ["ssl-enum-ciphers", "http-security-headers"],
+    }, policy=POLICY)
+
+    async def run_command(argv, **_kwargs):
+        return SimpleNamespace(stdout=XML, returncode=0, timed_out=False, partial=False,
+                               stdout_truncated=False, cancelled=False)
+
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=CAPABILITY_REGISTRY.require("service.nse_check"),
+            target=TARGET,
+            requested_budget={**prepared.estimated_budget, "agent_actions": 1, "active_actions": 1},
+        ),
+        NetworkExecutionAdapter(prepared=prepared, parser=parser, command_runner=run_command,
+                                max_stdout_bytes=10000, max_stderr_bytes=1000),
+        heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+    assert result.status != "success"
+    assert len(result.observations) == 2

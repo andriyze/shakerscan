@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from xml.etree import ElementTree as ET
 
 from runtime.models import ParsedCapabilityResult, PreparedCommand, PreparedExecution, ScanPolicy, TargetBinding
@@ -96,7 +96,10 @@ class NseCheckAdapter:
             self.parser_version,
         )
 
-    def parse(self, output: str, *, timed_out: bool = False) -> ParsedCapabilityResult:
+    def parse(
+        self, output: str, *, timed_out: bool = False,
+        expected_ports: Sequence[int] = (), expected_scripts: Sequence[str] = (),
+    ) -> ParsedCapabilityResult:
         observations: list[dict[str, Any]] = []
         errors: list[str] = []
         address = ""
@@ -108,6 +111,11 @@ class NseCheckAdapter:
                 parser.feed(content[offset:offset + 1024])
                 for event, element in parser.read_events():
                     if event == "start" and element.tag == "address":
+                        # A directly attached LAN host also carries a MAC address
+                        # element. Only an IP address identifies the scanned host;
+                        # other address types must not clear it.
+                        if element.attrib.get("addrtype") not in {"ipv4", "ipv6"}:
+                            continue
                         try:
                             address = str(ipaddress.ip_address(element.attrib.get("addr", "")))
                         except ValueError:
@@ -139,6 +147,13 @@ class NseCheckAdapter:
             parser.close()
         except ET.ParseError as exc:
             errors.append(f"malformed_nmap_xml:{type(exc).__name__}")
+        # A requested check that produced no script element (closed or filtered
+        # port, script timeout, host down) is indeterminate, not a clean result.
+        reported = {(item["port"], item["script_id"]) for item in observations}
+        for expected_port in expected_ports:
+            for script_id in expected_scripts:
+                if (int(expected_port), script_id) not in reported:
+                    errors.append(f"nse_script_not_run:{script_id}:{int(expected_port)}")
         partial = bool(timed_out or errors)
         return ParsedCapabilityResult(
             "partial" if partial else "succeeded", tuple(observations), partial,

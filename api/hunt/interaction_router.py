@@ -46,6 +46,7 @@ from .cancellation import (
 from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
 from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
+from .service_binding import collection_uses_service_origin
 from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
@@ -1563,6 +1564,14 @@ async def _execute_hunt_capability_lifecycle(
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
                 uses_service_origin = selected.allowed_origins != original.allowed_origins
+            elif name == "collections.replay_safe":
+                # Replay takes no planner origin; it follows the operator's collection
+                # binding, which may name another port on the same host. Anonymous replay
+                # to such a port is the same active act as http.request with an origin.
+                original, _ = web_hunt_target(run, context, policy)
+                uses_service_origin = collection_uses_service_origin(
+                    original, context, request.input.get("collection_id"),
+                )
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"

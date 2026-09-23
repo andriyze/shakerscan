@@ -164,6 +164,13 @@ class NetworkExecutionAdapter:
                 parse_kwargs["root_domain"] = str(
                     prepared.redacted_execution["root_domain"]
                 )
+            elif prepared.capability_name == "service.nse_check":
+                parse_kwargs["expected_ports"] = tuple(
+                    int(item) for item in prepared.redacted_execution.get("ports") or ()
+                )
+                parse_kwargs["expected_scripts"] = tuple(
+                    str(item) for item in prepared.redacted_execution.get("scripts") or ()
+                )
             parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
             observations.extend(dict(row) for row in parsed.observations)
             errors.extend(str(item) for item in parsed.errors)

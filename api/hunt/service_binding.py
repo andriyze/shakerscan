@@ -58,3 +58,17 @@ def collection_target(run: Mapping[str, Any], context: Mapping[str, Any],
 
 def service_origin_changed(target: TargetBinding, origin: Any) -> bool:
     return origin is not None and _origin_key(origin) not in {_origin_key(o) for o in target.allowed_origins}
+
+
+def collection_uses_service_origin(target: TargetBinding, context: Mapping[str, Any],
+                                   collection_id: Any) -> bool:
+    """Whether a bound collection reaches a service origin beyond the Hunt's own."""
+    wanted = str(collection_id or "")
+    bound = next((
+        item for item in context.get("request_collections") or []
+        if isinstance(item, Mapping) and wanted
+        and wanted in {str(item.get("collection_id") or ""), str(item.get("selection_id") or "")}
+    ), None)
+    return bound is not None and any(
+        service_origin_changed(target, origin) for origin in bound.get("allowed_origins") or ()
+    )
