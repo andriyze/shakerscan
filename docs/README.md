@@ -1,5 +1,7 @@
 # ShakerScan documentation
 
+**Status:** maintained documentation index; reviewed 2026-09-23.
+
 The root [README](../README.md) is intentionally a short operator quick start. This directory is
 for maintained engineering, architecture, and advanced-operation references.
 
