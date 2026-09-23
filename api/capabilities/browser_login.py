@@ -287,7 +287,8 @@ async def authenticated_browser_page(
                     # this helper admits exactly one login POST, never a retry.
                     raise ValueError("unsupported login redirect")
                 destination = _url(urljoin(url, locations[0]), origin)
-                if phase == "anonymous" and destination == workflow.login_url:
+                if (phase == "anonymous" and url == workflow.check_url
+                        and destination == workflow.login_url):
                     anonymous_redirect_to_login = True
                 elif not (write and phase == "login" and destination == workflow.check_url):
                     raise ValueError("redirect is outside the saved login workflow")
