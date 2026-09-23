@@ -38,10 +38,11 @@ jobs:
           patch = Path('.github/pr214-nse.patch')
           patch.write_text(patch.read_text().replace('\n diff --git ', '\ndiff --git '))
           subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], check=True)
+          subprocess.run(['git', 'apply', '.github/pr214-nse-output.patch'], check=True)
           expected = '''18104e4abc83d3b2392a5d13a07c7d23261d12c6 .github/workflows/hunt-nse.yml
           4f115c33e7751288e269ed3e5d467956fa8ec0ae api/capabilities/network.py
-          ffa24a475fab769656f7450043106b6dfb860a10 api/capabilities/nse.py
-          5218580bd6d6d977fc5117074d210f7dbe6be6ea api/capabilities/nse_http.nse
+          f1f4fddbc212ff421e2bfca1598d6cdc4ae43953 api/capabilities/nse.py
+          95cc4ea45cd68512fcf3c777f4c9318356b4b76d api/capabilities/nse_http.nse
           c7c16153193baeebd960834b5083dd177ed18db5 api/capabilities/nse_http_runtime.py
           84ad8097d85b46b3b68443d2ff353b96056152e0 api/capabilities/nse_http_transport.py
           1b8725d2a8fe4fafa9e23a36c6afb0541929714e api/hunt/interaction_router.py
@@ -50,9 +51,9 @@ jobs:
           96a336e4b227f331798452d8899aceea69954134 api/worker.py
           3dfc336890f1a3b1d3d04d5490ef42955528b853 docs/connected-device-security.md
           e0915811b96b1e1000f371892ae02e2c37e1801e install/MANIFEST.sha256
-          d34f88361fe901500b88dbf29eb7f412e341fbeb tests/integration/test_hunt_nse_native.py
+          7b7b3f2848578c011eb875a002e04c60a16017e9 tests/integration/test_hunt_nse_native.py
           de69fb0235a2b44d432abf544a60b935dd32a0c0 tests/test_hunt_nse_capability.py
-          60e0c604770dcfab924b211158c18c8390cab918 tests/test_hunt_nse_http.py'''
+          c847a7f6c24ad411f2fad2951a3368b861a54943 tests/test_hunt_nse_http.py'''
           paths = []
           for line in expected.splitlines():
               sha, path = line.split()
@@ -60,7 +61,7 @@ jobs:
               assert actual == sha, (path, actual, sha)
               paths.append(path)
           subprocess.run(['git', 'add', '--', *paths], check=True)
-          subprocess.run(['git', 'rm', '-f', '.github/pr214-nse.patch', '.github/workflows/pr214-nse-validation.yml'], check=True)
+          subprocess.run(['git', 'rm', '-f', '.github/pr214-nse.patch', '.github/pr214-nse-output.patch', '.github/workflows/pr214-nse-validation.yml'], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           PY
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
