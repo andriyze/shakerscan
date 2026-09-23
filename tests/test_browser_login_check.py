@@ -380,6 +380,7 @@ def test_contexts_do_not_reuse_authenticated_state_across_principals():
     {"Location": "//outside.test/private"},
     {"Location": "http://login-fixture.test/private"},
     {"Location": ORIGIN + ":8443/private"},
+    {"Location": "/other-local-route"},
     {"Location": "/account", "location": "https://outside.test/private"},
     {"Location": "\\\\outside.test/private"},
     {"Location": "\nhttps://outside.test/private"},

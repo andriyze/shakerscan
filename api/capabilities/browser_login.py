@@ -216,6 +216,7 @@ async def authenticated_browser_page(
     idle.set()
     login_done = asyncio.Event()
     started = asyncio.get_running_loop().time()
+    anonymous_redirect_to_login = False
 
     def fault(reason: str) -> None:
         nonlocal fatal_reason
@@ -233,6 +234,7 @@ async def authenticated_browser_page(
             fault("browser_route_failed")
 
     async def route_request(route: Any) -> None:
+        nonlocal anonymous_redirect_to_login
         request = route.request
         try:
             if fatal_reason or phase in {"closed", "settling"}:
@@ -284,12 +286,26 @@ async def authenticated_browser_page(
                     # A preserving redirect would re-submit credentials, while
                     # this helper admits exactly one login POST, never a retry.
                     raise ValueError("unsupported login redirect")
+                destination = _url(urljoin(url, locations[0]), origin)
+                if (phase == "anonymous" and url == workflow.check_url
+                        and destination == workflow.login_url):
+                    anonymous_redirect_to_login = True
+                elif not (write and phase == "login" and destination == workflow.check_url):
+                    raise ValueError("redirect is outside the saved login workflow")
             # Reject off-origin Location before Chromium sees the response,
             # independently of redirect interception in the browser build.
             receipt["responses_received"] += 1
             if write:
                 receipt["login_response_status"] = response.status
-            await route.fulfill(status=response.status, headers=headers, body=response.body)
+            if response.status in {301, 302, 303, 307, 308}:
+                # Chromium follows a fulfilled redirect outside the route handler,
+                # bypassing the pinned transport. Fulfill a terminal response and
+                # explicitly navigate only to the operator-saved destination.
+                headers = {key: value for key, value in headers.items()
+                           if key.lower() not in {"location", "content-length"}}
+                await route.fulfill(status=200, headers=headers, body=b"")
+            else:
+                await route.fulfill(status=response.status, headers=headers, body=response.body)
         except asyncio.CancelledError:
             fault("transport_cancelled")
             raise
@@ -356,6 +372,8 @@ async def authenticated_browser_page(
     async def anonymous_control(page: Any) -> None:
         """Check the same protected assertion without submitting credentials."""
         await page.goto(workflow.check_url, wait_until="domcontentloaded")
+        if anonymous_redirect_to_login:
+            await page.goto(workflow.login_url, wait_until="domcontentloaded")
         while True:
             check_health()
             state = await browser_authentication_state(page, workflow)
