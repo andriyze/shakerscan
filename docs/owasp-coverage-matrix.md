@@ -2,8 +2,7 @@
 
 **Status:** mechanism inventory reconciled 2026-08-29. This matrix records implemented check
 families, not accepted recall, precision, or proof depth. Candidate acceptance belongs in
-[`release-readiness.md`](release-readiness.md); future detector priorities are in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+the release workflow and current benchmark/evaluation artifacts.
 
 Scope: this maps the **DAST engine** (`scanner/scanner_tools/`) against the
 OWASP Top 10 (2021) and OWASP API Security Top 10 (2023). AI Gate and Model
