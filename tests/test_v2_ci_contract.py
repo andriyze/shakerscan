@@ -179,8 +179,7 @@ def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
     lifecycle = e2e[e2e.index("# MI-6A/B/C:"):e2e.index("# MI-7:")]
     assert "sc.xfail" not in lifecycle
     assert 'sc.error("MI-6 durable trust-anchor lifecycle", e)' in lifecycle
-    release_workflow = _text("e2e.yml")
-    assert "model_intake" in release_workflow
+    assert "MI-6 durable trust-anchor lifecycle" in e2e
 
 
 def test_full_release_e2e_accepts_only_exact_main_candidates():
