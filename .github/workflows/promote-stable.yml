@@ -51,7 +51,13 @@ jobs:
           gh release view "v${VERSION}" --json isPrerelease,isDraft --jq '(.isPrerelease == false) and (.isDraft == false)' | grep -qx true
           release_sha="$(gh release view "v${VERSION}" --json targetCommitish --jq .targetCommitish)"
           [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
-          gh release download "v${VERSION}" --pattern release-image-lock.env --output release-image-lock.env
+          # GitHub's tag-detail asset listing can lag behind a newly published release even
+          # while its direct asset URL is already available. Fetch the exact named asset;
+          # the digest bindings are checked against the public smoke receipt below.
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/release-image-lock.env" \
+            --output release-image-lock.env
           curl --fail --silent --show-error --location \
             --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
           echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
