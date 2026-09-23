@@ -1,0 +1,274 @@
+diff --git a/.github/workflows/hunt-nse.yml b/.github/workflows/hunt-nse.yml
+index 8e0c289..18104e4 100644
+--- a/.github/workflows/hunt-nse.yml
++++ b/.github/workflows/hunt-nse.yml
+@@ -11,0 +12 @@ on:
++  merge_group:
+@@ -13,2 +14,7 @@ on:
+-    branches: [claude/github-access-qqgoq6]
+-    paths: ['.github/workflows/hunt-nse.yml']
++    branches: [main]
++    paths:
++      - 'api/capabilities/**'
++      - 'api/runtime/pinned_http_replay.py'
++      - 'tests/**nse*'
++      - 'tests/integration/**nse*'
++      - '.github/workflows/hunt-nse.yml'
+@@ -28,7 +33,0 @@ jobs:
+-      - name: Capture exact source for implementation verification
+-        run: git archive --format=zip HEAD -o /tmp/hunt-nse-source.zip
+-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+-        with:
+-          name: hunt-nse-source
+-          path: /tmp/hunt-nse-source.zip
+-          retention-days: 1
+@@ -49 +48 @@ jobs:
+-        run: python -m pytest -q tests/integration/test_hunt_nse_native.py --junitxml=/tmp/hunt-nse.xml
++        run: python -m pytest -q tests/integration/test_hunt_nse_native.py tests/test_hunt_nse_http.py tests/test_hunt_nse_capability.py --junitxml=/tmp/hunt-nse.xml
+ diff --git a/api/capabilities/network.py b/api/capabilities/network.py
+index a1f2f69..4f115c3 100644
+--- a/api/capabilities/network.py
++++ b/api/capabilities/network.py
+@@ -84 +84,10 @@ class NetworkExecutionAdapter:
+-    async def _run_command_with_heartbeats(
++    async def _run_command_with_heartbeats(self, command, **kwargs):
++        if self.capability_name != "service.nse_check":
++            return await self._run_process_with_heartbeats(command, **kwargs)
++        from .nse_http_runtime import NseCommandResult, command_transport
++        async with command_transport(self._prepared, command, heartbeat=kwargs["heartbeat"],
++                                     cancelled=kwargs["cancelled"]) as (bound_command, bridge):
++            process = await self._run_process_with_heartbeats(bound_command, **kwargs)
++        return NseCommandResult(process, bridge)
++
++    async def _run_process_with_heartbeats(
+@@ -137,0 +147 @@ class NetworkExecutionAdapter:
++        nse_http_actual = {"http_requests": 0, "state_changing_requests": 0}
+@@ -176 +186,10 @@ class NetworkExecutionAdapter:
+-            observations.extend(dict(row) for row in parsed.observations)
++            parsed_observations = parsed.observations
++            bridge = getattr(streamed, "nse_http", None)
++            if bridge is not None:
++                from .nse_http_runtime import decorate_observations
++                parsed_observations = decorate_observations(parsed_observations, bridge)
++                for key in nse_http_actual:
++                    nse_http_actual[key] += bridge.actual[key]
++                errors.extend(bridge.errors)
++                partial = partial or bool(bridge.errors)
++            observations.extend(dict(row) for row in parsed_observations)
+@@ -219,7 +238,10 @@ class NetworkExecutionAdapter:
+-            elif dimension in {"http_requests", "device_fragility_points"} and prepared.capability_name == "service.nse_check":
+-                # NSE does not expose a trustworthy per-request count. Charge the
+-                # conservative server-owned envelope for each command attempted.
+-                actual[dimension] = min(
+-                    reserved_amount,
+-                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
+-                )
++            elif prepared.capability_name == "service.nse_check":
++                if dimension in nse_http_actual:
++                    actual[dimension] = nse_http_actual[dimension]
++                elif dimension == "device_fragility_points":
++                    # Native connects/TLS retain an explicitly labelled cost
++                    # estimate; HTTP is measured and unused HTTP grant released.
++                    non_http = reserved_amount - int(prepared.estimated_budget.get("http_requests") or 0)
++                    actual[dimension] = ((non_http * attempted_commands + command_count - 1) // command_count
++                                         + nse_http_actual["http_requests"])
++
+diff --git a/api/capabilities/nse.py b/api/capabilities/nse.py
+index e7185df..ffa24a4 100644
+--- a/api/capabilities/nse.py
++++ b/api/capabilities/nse.py
+@@ -7,0 +8,2 @@ import re
++import json
++from pathlib import Path
+@@ -12,0 +15 @@ from .network_inputs import CapabilityInputError, _addresses, _ports, _require_n
++from .nse_http_transport import HTTP_SCRIPT_LIMITS, http_envelope
+@@ -49,0 +53,8 @@ def _signals(script_id: str, output: str) -> dict[str, Any]:
++def _script_outputs(element):
++    script_id = element.attrib.get("id", "")
++    if script_id != "nse_http":
++        return [(script_id, element.attrib.get("output", ""))]
++    return [(row.attrib.get("key", ""), row.findtext("elem[@key='output']", ""))
++            for row in element.findall("table")]
++
++
+@@ -67,0 +79,8 @@ class NseCheckAdapter:
++        # Service checks must not secretly run -sV's additional HTTP/POST probes.
++        # HTTP schemes are detected through the metered bridge; force native TLS
++        # to examine explicitly selected nonstandard ports without a version scan.
++        execution_scripts = ([str(Path(__file__).with_name("nse_http.nse"))]
++                             if any(name in HTTP_SCRIPT_LIMITS for name in scripts) else [])
++        if "ssl-enum-ciphers" in scripts:
++            execution_scripts.append("+ssl-enum-ciphers")
++        sni = ("--script-args", "tls.servername=" + json.dumps(target.canonical_host or ""))
+@@ -70 +89 @@ class NseCheckAdapter:
+-                    ("-sT", "-Pn", "-n", "-sV", "--version-light", "--reason", "-v",
++                    ("-sT", "-Pn", "-n", "--reason", "-v",
+@@ -72,3 +91,3 @@ class NseCheckAdapter:
+-                     "--host-timeout", "90s", "--script-timeout", "15s",
+-                     "-p", ",".join(map(str, ports)), "--script", ",".join(scripts),
+-                     "-oX", "-", address), address,
++                     "--host-timeout", "90s", "--script-timeout", "60s",
++                     "-p", ",".join(map(str, ports)), "--script", ",".join(execution_scripts),
++                     *sni, "-oX", "-", address), address,
+@@ -77,2 +96,3 @@ class NseCheckAdapter:
+-                      "ports": list(ports), "scripts": list(scripts)}
+-        http_scripts = sum(item.startswith("http-") for item in scripts)
++                      "ports": list(ports), "scripts": list(scripts),
++                      "allow_state_changing_http": policy.allow_state_changing_http}
++        envelope = http_envelope(scripts, len(ports), allow_write=policy.allow_state_changing_http)
+@@ -83 +103 @@ class NseCheckAdapter:
+-            "http_requests": len(addresses) * len(ports) * http_scripts * 4,
++            **{key: len(addresses) * value for key, value in envelope.items()},
+@@ -87,2 +107,2 @@ class NseCheckAdapter:
+-            # NSE may open many sockets per port. Charge a conservative device
+-            # allowance even when its HTTP request count is zero (TLS checks).
++            # Native TLS still uses a device cost estimate, not a measured
++            # handshake count. The HTTP component is measured at execution.
+@@ -90 +110 @@ class NseCheckAdapter:
+-                len(addresses) * len(ports) * (2 + 4 * http_scripts + 32 * tls_scripts)
++                len(addresses) * (len(ports) * (2 + 32 * tls_scripts) + envelope["http_requests"])
+@@ -96 +116,4 @@ class NseCheckAdapter:
+-            {"approved_addresses": list(addresses), "ports": list(ports), "scripts": list(scripts)},
++            {"approved_addresses": list(addresses), "ports": list(ports), "scripts": list(scripts),
++             "http_target": target.canonical_dict(), "allow_state_changing_http": policy.allow_state_changing_http,
++             "http_accounting": "request_header_attempts", "http_transport": "frozen_address_bridge",
++             "device_non_http_accounting": "estimated_allowance"},
+@@ -137,19 +160,18 @@ class NseCheckAdapter:
+-                        script_id = element.attrib.get("id", "")
+-                        if script_id in NSE_SCRIPTS:
+-                            script_output = element.attrib.get("output", "")
+-                            failed = bool(re.match(
+-                                r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
+-                                script_output, re.I,
+-                            ))
+-                            if failed:
+-                                errors.append(f"nse_script_failed:{script_id}:{port}")
+-                            if not script_output.strip():
+-                                errors.append(f"nse_script_no_output:{script_id}:{port}")
+-                            observations.append({
+-                                "kind": "nse_observation", "address": address, "port": port,
+-                                "transport": "tcp", "script_id": script_id,
+-                                "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
+-                                "signals": {} if failed else _signals(script_id, script_output),
+-                                "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
+-                                "proof_state": "observation_only",
+-                            })
++                        for script_id, script_output in _script_outputs(element):
++                            if script_id in NSE_SCRIPTS:
++                                failed = bool(re.match(
++                                    r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
++                                    script_output, re.I,
++                                ))
++                                if failed:
++                                    errors.append(f"nse_script_failed:{script_id}:{port}")
++                                if not script_output.strip():
++                                    errors.append(f"nse_script_no_output:{script_id}:{port}")
++                                observations.append({
++                                    "kind": "nse_observation", "address": address, "port": port,
++                                    "transport": "tcp", "script_id": script_id,
++                                    "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
++                                    "signals": {} if failed else _signals(script_id, script_output),
++                                    "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
++                                    "proof_state": "observation_only",
++                                })
+diff --git a/api/hunt/interaction_router.py b/api/hunt/interaction_router.py
+index 932710a..1b8725d 100644
+--- a/api/hunt/interaction_router.py
++++ b/api/hunt/interaction_router.py
+@@ -1629,0 +1630 @@ async def _execute_hunt_capability_lifecycle(
++                        allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
+diff --git a/api/runtime/capability_registry.py b/api/runtime/capability_registry.py
+index 91ac841..2d71b02 100644
+--- a/api/runtime/capability_registry.py
++++ b/api/runtime/capability_registry.py
+@@ -1057 +1057 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
+-                "http_requests": 48 * _NETWORK_ADDRESS_GRANT,
++                "http_requests": 52 * _NETWORK_ADDRESS_GRANT,
+diff --git a/api/runtime/pinned_http_replay.py b/api/runtime/pinned_http_replay.py
+index 471c80d..18038da 100644
+--- a/api/runtime/pinned_http_replay.py
++++ b/api/runtime/pinned_http_replay.py
+@@ -9 +9 @@ import ssl
+-from typing import Any
++from typing import Any, Awaitable, Callable
+@@ -100 +100,3 @@ class PinnedAiohttpReplayTransport:
+-                 auto_decompress: bool = False) -> None:
++                 auto_decompress: bool = False,
++                 before_request_headers: Callable[[str, str], Awaitable[None]] | None = None) -> None:
++        self.before_request_headers = before_request_headers
+@@ -174,0 +177,7 @@ class PinnedAiohttpReplayTransport:
++        traces = []
++        if self.before_request_headers is not None:
++            trace = aiohttp.TraceConfig()
++            async def before_headers(_session, _context, params):
++                await self.before_request_headers(params.method, str(params.url))
++            trace.on_request_headers_sent.append(before_headers)
++            traces.append(trace)
+@@ -177,0 +187 @@ class PinnedAiohttpReplayTransport:
++                trace_configs=traces,
+diff --git a/api/worker.py b/api/worker.py
+index a6f8c40..96a336e 100644
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -21494,0 +21495 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) ->
++                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
+diff --git a/docs/connected-device-security.md b/docs/connected-device-security.md
+index 107834f..3dfc336 100644
+--- a/docs/connected-device-security.md
++++ b/docs/connected-device-security.md
+@@ -433,0 +434,25 @@ inherit the canonical Hunt request and scan limits rather than applying a second
++
++### Hunt NSE transport and coverage
++
++`service.nse_check` retains the installed Nmap analyses for `http-methods`,
++`http-security-headers`, `http-trace`, and `ssl-enum-ciphers`. The HTTP analyses
++use the worker's pinned transport, preserving Host and TLS SNI on the frozen
++address. Same-asset HTTP/HTTPS redirects, including alternate ports and untrusted
++certificates, reuse existing network authority; no per-hop approval is created.
++A redirect to another asset is recorded as incomplete coverage, and other selected
++checks continue. Evidence includes the actual response service and redacted URL.
++
++HTTP discovery uses metered HEAD requests instead of an implicit `-sV` version
++scan. Native TLS enumeration is forced on the explicitly selected port, including
++nonstandard ports; broader fingerprinting remains `service.fingerprint`.
++HTTP budgets count every request-header attempt, including connection-library
++retries, detector requests, and permitted optional method probes. Unused HTTP
++allowances are released. Native port/TLS device cost is still an estimate, not a
++claim of exact handshake or packet counting.
++
++The method analysis can probe POST and an unknown method as negative controls.
++Those probes use the existing `allow_state_changing_http` permission and budget.
++Without it, Hunt preserves the available read-method observations and explains
++which optional probes were omitted instead of refusing the entire capability.
++An incomplete script is not a clean security result; observations remain unverified
++until a separate deterministic proof contract validates a finding.
+diff --git a/install/MANIFEST.sha256 b/install/MANIFEST.sha256
+index 0eb0707..e091581 100644
+--- a/install/MANIFEST.sha256
++++ b/install/MANIFEST.sha256
+@@ -53 +53 @@ aafb73c9b97e15635b4c9dea3f49225834d45b6b5a8594ee8d452644f36c36dd  api/runtime/bu
+-a162e6f4825c1e0d71f52cc530b9e8a69f3fe453d2db6de8d1905f603d2fce92  api/runtime/capability_registry.py
++e779a4f2957155c3e08ed7c61284d67a72ad71bb276cdd0d8d843478af6e1c8e  api/runtime/capability_registry.py
+diff --git a/tests/test_hunt_nse_capability.py b/tests/test_hunt_nse_capability.py
+index 4805abf..de69fb0 100644
+--- a/tests/test_hunt_nse_capability.py
++++ b/tests/test_hunt_nse_capability.py
+@@ -55 +55,2 @@ def test_nse_prepares_only_reviewed_scripts_and_bound_ports():
+-    assert argv[argv.index("--script") + 1] == "http-security-headers,ssl-enum-ciphers"
++    assert argv[argv.index("--script") + 1].endswith("nse_http.nse,+ssl-enum-ciphers")
++    assert "-sV" not in argv
+@@ -57 +58 @@ def test_nse_prepares_only_reviewed_scripts_and_bound_ports():
+-    assert prepared.estimated_budget["http_requests"] == 8
++    assert prepared.estimated_budget["http_requests"] == 10
+@@ -59 +60 @@ def test_nse_prepares_only_reviewed_scripts_and_bound_ports():
+-    assert prepared.estimated_budget["device_fragility_points"] == 76
++    assert prepared.estimated_budget["device_fragility_points"] == 78
+@@ -109 +110 @@ def test_nse_normalizes_a_real_hsts_misconfiguration_signal():
+-def test_nse_execution_reconciles_conservative_http_and_port_usage():
++def test_nse_does_not_invent_http_traffic_from_mocked_xml():
+@@ -133 +134 @@ def test_nse_execution_reconciles_conservative_http_and_port_usage():
+-    assert result.actual_budget["http_requests"] == 4
++    assert result.actual_budget["http_requests"] == 0
+@@ -135 +136 @@ def test_nse_execution_reconciles_conservative_http_and_port_usage():
+-    assert result.actual_budget["device_fragility_points"] == 38
++    assert result.actual_budget["device_fragility_points"] == 34
