@@ -29,8 +29,14 @@ class CapabilityInputError(ValueError):
 NETWORK_CAPABILITY_ADAPTERS = {
     "ports.discover": lambda: PortsDiscoverAdapter(),
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
+    "service.nse_check": lambda: _nse_check_adapter(),
     "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
 }
+
+
+def _nse_check_adapter():
+    from .nse import NseCheckAdapter
+    return NseCheckAdapter()
 
 
 def network_capability_adapter(name: str) -> Any:
@@ -200,6 +206,13 @@ class NetworkExecutionAdapter:
                         - 1
                     )
                     // command_count,
+                )
+            elif dimension in {"http_requests", "device_fragility_points"} and prepared.capability_name == "service.nse_check":
+                # NSE does not expose a trustworthy per-request count. Charge the
+                # conservative server-owned envelope for each command attempted.
+                actual[dimension] = min(
+                    reserved_amount,
+                    (reserved_amount * attempted_commands + command_count - 1) // command_count,
                 )
 
         return CapabilityAdapterResult(
