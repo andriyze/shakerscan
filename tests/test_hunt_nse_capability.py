@@ -78,6 +78,7 @@ def test_nse_parses_bounded_observations_without_echoing_target_output():
     assert result.status == "succeeded"
     assert len(result.observations) == 2
     assert result.observations[0]["port"] == 8443
+    assert all(item["status"] == "reported" for item in result.observations)
     assert result.observations[0]["signals"] == {"tls_versions": ["TLSv1.2"], "least_strength": "B"}
     assert result.observations[1]["signals"] == {"mentioned_headers": ["content-security-policy"]}
     assert "private-token" not in str(result.observations)
@@ -85,6 +86,14 @@ def test_nse_parses_bounded_observations_without_echoing_target_output():
     partial = parser.parse(XML + "<truncated", timed_out=True)
     assert partial.partial and partial.timed_out
     assert len(partial.observations) == 2
+
+
+def test_nse_empty_script_output_is_indeterminate():
+    parser = network_capability_adapter("service.nse_check")
+    xml = XML.replace("Content-Security-Policy: private-token-DO-NOT-LEAK", "")
+    result = parser.parse(xml)
+    assert result.observations[1]["status"] == "no_output"
+    assert result.observations[1]["signals"] == {"mentioned_headers": []}
 
 
 def test_nse_execution_reconciles_conservative_http_and_port_usage():

@@ -120,6 +120,7 @@ class NseCheckAdapter:
                             observations.append({
                                 "kind": "nse_observation", "address": address, "port": port,
                                 "transport": "tcp", "script_id": script_id,
+                                "status": "reported" if script_output.strip() else "no_output",
                                 "signals": _signals(script_id, script_output),
                                 "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),
                                 "proof_state": "observation_only",
