@@ -112,6 +112,9 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     assert suggestions[0]["execution"]["unavailable_capabilities"] == []
     assert "description" not in suggestions[0]
     assert "capabilities" not in suggestions[0]
+    assert set(suggestions[0]["execution"]) == {
+        "fully_executable", "unavailable_capabilities",
+    }
 
 
 def test_suggestions_do_not_hide_methodology_when_authority_is_narrow(library):
