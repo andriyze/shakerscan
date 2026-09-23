@@ -31,7 +31,6 @@ belong in Git history or immutable release notes rather than the active document
 
 - [Connected-device security](connected-device-security.md)
 - [AI test workflows](AI_TEST_WORKFLOWS.md)
-- [AI boundary](ai-boundary-alpha.md)
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
 ## Operations
