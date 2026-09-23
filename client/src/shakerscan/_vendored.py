@@ -21,7 +21,7 @@ RUNTIME_SCRIPTS = {
     "_scan_cli": "scan_cli.py",
 }
 # The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
-KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md", "CLAUDE.md": "CLAUDE.md"}
+KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md"}
 
 
 def repository_scripts() -> Path | None:
