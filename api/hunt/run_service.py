@@ -350,6 +350,22 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
     accounting = dict(raw_accounting) if has_accounting else {}
     reservation_id = str(accounting.get("reservation_id") or "") or None
     settlement_status = str(accounting.get("settlement_status") or "legacy")
+    # Older worker records stored a committed reservation alongside the accounting
+    # object. Recover its exact settlement only when the action has a receipt and
+    # the worker's terminal reservation state agrees with the completed action.
+    if (
+        has_accounting
+        and not reservation_id
+        and settlement_status == "legacy"
+        and item.get("status") == "completed"
+        and item.get("receipt_id")
+        and result_summary.get("budget_reservation_state") == "committed"
+        and str(result_summary.get("receipt_id") or "") == str(item["receipt_id"])
+        and isinstance(accounting.get("actual"), Mapping)
+    ):
+        reservation_id = str(result_summary.get("budget_reservation_id") or "") or None
+        if reservation_id:
+            settlement_status = "succeeded"
     has_measured_actual = isinstance(accounting.get("actual"), Mapping)
     has_exact_accounting = bool(
         reservation_id and settlement_status == "succeeded" and has_measured_actual
@@ -397,6 +413,8 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
             "ok": (
                 result_summary.get("ok")
                 if isinstance(result_summary.get("ok"), bool)
+                else result_summary.get("status") == "success"
+                if has_exact_accounting and item.get("status") == "completed"
                 else None
             ),
             "partial": result_summary.get("partial") is True,

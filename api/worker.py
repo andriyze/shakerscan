@@ -120,6 +120,7 @@ from hunt.capability_reservations import (
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from hunt.deterministic_findings import materialize_verified_hunt_findings
+from hunt.worker_accounting import worker_hunt_budget_accounting
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.auth_session_store import (
     AuthSessionStoreError,
@@ -19257,35 +19258,6 @@ def _worker_json_object(value: Any) -> dict[str, Any]:
     return json_object_field(value)
 
 
-def _worker_hunt_budget_accounting(
-    reserved: Mapping[str, Any],
-    actual: Mapping[str, Any],
-    used_after_reconciliation: Mapping[str, Any],
-    *,
-    charge_basis: str = "capability_reported_settlement",
-) -> dict[str, Any]:
-    normalized_reserved = {
-        str(key): max(0, int(value)) for key, value in reserved.items()
-    }
-    normalized_actual = {
-        str(key): max(0, int(value)) for key, value in actual.items()
-    }
-    return {
-        "schema_version": "hunt-budget-settlement/v1",
-        "charge_basis": charge_basis,
-        "reserved": normalized_reserved,
-        "actual": normalized_actual,
-        "released": {
-            key: max(0, amount - int(normalized_actual.get(key) or 0))
-            for key, amount in normalized_reserved.items()
-        },
-        "used_after_reconciliation": {
-            str(key): max(0, int(value))
-            for key, value in used_after_reconciliation.items()
-        },
-    }
-
-
 def _worker_json_array(value: Any) -> list[Any]:
     return json_array_field(value)
 
@@ -19860,20 +19832,38 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     )
                     await conn.execute(
                         """UPDATE hunt_actions SET status=$2, result_summary=$3,
-                                  completed_at=NOW() WHERE id=$1""",
+                                  receipt_id=$4, completed_at=NOW() WHERE id=$1""",
                         uuid.UUID(action_id),
                         (
                             "completed"
-                            if terminal.status == "committed"
+                            if terminal.status == "committed" and receipt.status in {"success", "succeeded"}
+                            else "partial"
+                            if receipt.partial
                             else "cancelled"
                             if receipt.status == "cancelled"
                             else "failed"
                         ),
                         json.dumps({
                             "reservation_id": reservation_id,
+                            "budget_reservation_id": reservation_id,
+                            "budget_reservation_state": terminal.status,
+                            "receipt_id": receipt.receipt_id,
                             "receipt_hash": receipt.receipt_hash,
                             "status": receipt.status,
+                            "ok": receipt.status in {"success", "succeeded"},
+                            "partial": receipt.partial,
+                            "timed_out": receipt.timed_out,
+                            "observation_count": len(receipt.observations),
+                            "budget_consumed": dict(terminal.actual),
+                            "budget_accounting": worker_hunt_budget_accounting(
+                                latest.record.requested,
+                                terminal.actual,
+                                settled_ledger,
+                                reservation_id=reservation_id,
+                                settlement_status="succeeded",
+                            ),
                         }),
+                        uuid.UUID(receipt.receipt_id),
                     )
 
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
@@ -20827,10 +20817,12 @@ async def process_canonical_scanner_capability_job(
                     "record_count": len(observations),
                     "parser_errors": parser_errors, "verified_finding_ids": verified_finding_ids,
                     "budget_consumed": dict(terminal.actual),
-                    "budget_accounting": _worker_hunt_budget_accounting(
+                    "budget_accounting": worker_hunt_budget_accounting(
                         latest.record.requested,
                         terminal.actual,
                         reconciled,
+                        reservation_id=reservation_id,
+                        settlement_status="succeeded",
                     ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
@@ -21294,14 +21286,19 @@ async def process_canonical_browser_capability_job(job_data: dict[str, Any]) -> 
                 )
                 action_result = {
                     "status": execution.status,
+                    "ok": execution.status == "success",
+                    "partial": execution.partial,
+                    "timed_out": execution.timed_out,
                     "error": parser_errors[0] if parser_errors else None,
                     "record_count": len(observations),
                     "parser_errors": parser_errors,
                     "budget_consumed": dict(terminal.actual),
-                    "budget_accounting": _worker_hunt_budget_accounting(
+                    "budget_accounting": worker_hunt_budget_accounting(
                         latest.record.requested,
                         terminal.actual,
                         reconciled,
+                        reservation_id=reservation_id,
+                        settlement_status="succeeded",
                     ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
@@ -21755,14 +21752,19 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                 )
                 action_result = {
                     "status": status,
+                    "ok": status == "success",
+                    "partial": action_status == "partial",
+                    "timed_out": timed_out,
                     "error": error,
                     "record_count": len(observations),
                     "parser_errors": parser_errors[:20],
                     "budget_consumed": dict(terminal.actual),
-                    "budget_accounting": _worker_hunt_budget_accounting(
+                    "budget_accounting": worker_hunt_budget_accounting(
                         latest.record.requested,
                         terminal.actual,
                         reconciled,
+                        reservation_id=reservation_id,
+                        settlement_status="succeeded",
                     ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
@@ -22674,10 +22676,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     "record_count": len(observations),
                     "parser_errors": parser_errors[:20],
                     "budget_consumed": dict(terminal.actual),
-                    "budget_accounting": _worker_hunt_budget_accounting(
+                    "budget_accounting": worker_hunt_budget_accounting(
                         latest.record.requested,
                         terminal.actual,
                         reconciled,
+                        reservation_id=reservation_id,
+                        settlement_status="succeeded",
                     ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
