@@ -38,11 +38,11 @@ jobs:
           patch = Path('.github/pr214-nse.patch')
           patch.write_text(patch.read_text().replace('\n diff --git ', '\ndiff --git '))
           subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], check=True)
-          subprocess.run(['git', 'apply', '.github/pr214-nse-output.patch'], check=True)
-          subprocess.run(['git', 'apply', '.github/pr214-nse-health.patch'], check=True)
+          for suffix in ('output', 'health', 'reservation'):
+              subprocess.run(['git', 'apply', f'.github/pr214-nse-{suffix}.patch'], check=True)
           expected = '''18104e4abc83d3b2392a5d13a07c7d23261d12c6 .github/workflows/hunt-nse.yml
           4f115c33e7751288e269ed3e5d467956fa8ec0ae api/capabilities/network.py
-          f1f4fddbc212ff421e2bfca1598d6cdc4ae43953 api/capabilities/nse.py
+          688938b6b90a6835d9785919d5e2039f55d890e8 api/capabilities/nse.py
           95cc4ea45cd68512fcf3c777f4c9318356b4b76d api/capabilities/nse_http.nse
           c7c16153193baeebd960834b5083dd177ed18db5 api/capabilities/nse_http_runtime.py
           84ad8097d85b46b3b68443d2ff353b96056152e0 api/capabilities/nse_http_transport.py
@@ -54,8 +54,8 @@ jobs:
           29d5e5d83c87a882c44ea8a54bab02ee0cd4c83e api/worker.py
           a8c6ada4591518183e3d7c2b19a2412c69a30921 docs/connected-device-security.md
           e0915811b96b1e1000f371892ae02e2c37e1801e install/MANIFEST.sha256
-          7b7b3f2848578c011eb875a002e04c60a16017e9 tests/integration/test_hunt_nse_native.py
-          de69fb0235a2b44d432abf544a60b935dd32a0c0 tests/test_hunt_nse_capability.py
+          e1df35afa8487929b4c1cbc87429bc593a90a6c0 tests/integration/test_hunt_nse_native.py
+          a0d92335abc3d76538522a487a64ff0cf15233f4 tests/test_hunt_nse_capability.py
           c847a7f6c24ad411f2fad2951a3368b861a54943 tests/test_hunt_nse_http.py
           729e473ecc1cb81bbe97f2317b1aeaf7a88fb9ed tests/test_hunt_nse_device_health.py'''
           paths = []
@@ -65,7 +65,8 @@ jobs:
               assert actual == sha, (path, actual, sha)
               paths.append(path)
           subprocess.run(['git', 'add', '--', *paths], check=True)
-          subprocess.run(['git', 'rm', '-f', '.github/pr214-nse.patch', '.github/pr214-nse-output.patch', '.github/pr214-nse-health.patch', '.github/workflows/pr214-nse-validation.yml'], check=True)
+          temporary = ['.github/pr214-nse.patch', '.github/pr214-nse-output.patch', '.github/pr214-nse-health.patch', '.github/pr214-nse-reservation.patch', '.github/workflows/pr214-nse-validation.yml']
+          subprocess.run(['git', 'rm', '-f', *temporary], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           PY
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -78,7 +79,7 @@ jobs:
           python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends nmap
-      - name: Native analyses, real pinned HTTP and device continuation tests
+      - name: Native analyses, real pinned HTTP, durable settlement and device continuation
         env:
           PYTHONPATH: .:api:scanner
           SHAKERSCAN_REQUIRE_NATIVE_NSE: '1'
