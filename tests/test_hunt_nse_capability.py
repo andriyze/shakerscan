@@ -92,6 +92,8 @@ def test_nse_empty_script_output_is_indeterminate():
     parser = network_capability_adapter("service.nse_check")
     xml = XML.replace("Content-Security-Policy: private-token-DO-NOT-LEAK", "")
     result = parser.parse(xml)
+    assert result.partial and result.status == "partial"
+    assert "nse_script_no_output:http-security-headers:8443" in result.errors
     assert result.observations[1]["status"] == "no_output"
     assert result.observations[1]["signals"] == {"mentioned_headers": []}
 

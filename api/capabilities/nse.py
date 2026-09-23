@@ -117,6 +117,8 @@ class NseCheckAdapter:
                         script_id = element.attrib.get("id", "")
                         if script_id in NSE_SCRIPTS:
                             script_output = element.attrib.get("output", "")
+                            if not script_output.strip():
+                                errors.append(f"nse_script_no_output:{script_id}:{port}")
                             observations.append({
                                 "kind": "nse_observation", "address": address, "port": port,
                                 "transport": "tcp", "script_id": script_id,
@@ -135,5 +137,5 @@ class NseCheckAdapter:
         partial = bool(timed_out or errors)
         return ParsedCapabilityResult(
             "partial" if partial else "succeeded", tuple(observations), partial,
-            bool(timed_out), tuple(errors), {"record_count": len(observations)},
+            bool(timed_out), tuple(errors[:20]), {"record_count": len(observations)},
         )
