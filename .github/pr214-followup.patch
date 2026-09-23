@@ -1,0 +1,71 @@
+diff --git a/api/worker.py b/api/worker.py
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -108,6 +108,7 @@
+ from capabilities.tls import inspect_tls_binding
+ from capabilities.replay import ReplayExecutionAdapter, worker_hunt_replay_budget
+ from hunt.service_binding import registered_hunt_locator
++from hunt.verification_budget import record_budget_shortage
+ from capabilities.request_mutation import RequestMutationVerificationAdapter
+ from hunt.action_dispatcher import (
+     HUNT_ACTION_DISPATCHER,
+@@ -19728,21 +19729,19 @@
+                         ledger_after_settlement=consumed,
+                         receipt=None,
+                     )
+-                    dimension = next(iter(exc.shortages), "unknown")
+-                    await conn.execute(
+-                        """UPDATE hunt_runs SET status='budget_exhausted', stop_reason=$2,
+-                                  updated_at=NOW() WHERE id=$1""",
+-                        uuid.UUID(hunt_id), f"budget_exhausted:{dimension}",
++                    shortage = await record_budget_shortage(
++                        conn, hunt_id=uuid.UUID(hunt_id), limits=limits,
++                        used=consumed, shortages=exc.shortages,
+                     )
+                     await conn.execute(
+                         """UPDATE hunt_actions SET status='failed', completed_at=NOW(),
+                                   result_summary=$2 WHERE id=$1""",
+-                        uuid.UUID(action_id), json.dumps({"error": f"budget_exhausted:{dimension}"}),
++                        uuid.UUID(action_id), json.dumps(shortage),
+                     )
+                     result = {
+                         "job_id": job_id,
+                         "status": "failed",
+-                        "error": f"budget_exhausted:{dimension}",
++                        **shortage,
+                         "reservation_id": reservation_id,
+                         "budget_consumed": {},
+                         "durable_budget_settled": True,
+diff --git a/tests/test_hunt_replay_worker_lifecycle.py b/tests/test_hunt_replay_worker_lifecycle.py
+--- a/tests/test_hunt_replay_worker_lifecycle.py
++++ b/tests/test_hunt_replay_worker_lifecycle.py
+@@ -27,6 +27,7 @@
+ from hunt.service_binding import collection_uses_service_origin, registered_hunt_locator
+ from hunt.target_binding import web_hunt_target
+ from hunt.worker_accounting import worker_hunt_budget_accounting
++from hunt.verification_budget import record_budget_shortage
+ from runtime.budget_reservations import DurableBudgetReservation
+ from runtime.budgets import BudgetExceeded
+ from runtime.capability_registry import CAPABILITY_REGISTRY
+@@ -246,9 +247,20 @@
+                               active_limit=active_limit)
+             result = await execute(conn)
+             if active_limit == 0 and alternate:
+-                assert result["error"] == "budget_exhausted:active_actions", result
++                assert result["error"] == "budget_insufficient_for_action:active_actions", result
++                assert conn.run["status"] == "active"
+                 assert wire == []
+                 assert conn.run["budget_used_json"].get("active_actions", 0) == 0
++                # A zero action-specific ceiling must not lock the entire Hunt:
++                # a read on its registered service still admits normally.
++                fn = admission(conn)
++                fn.__globals__["require_device_admission"] = noop
++                life = Lifecycle("http.request")
++                life.specification = CAPABILITY_REGISTRY.require("http.request")
++                life.placement = life.specification.hunt_executor
++                next_action = await fn(str(HUNT), "http.request", SimpleNamespace(
++                    input={"path": "/"}, idempotency_key="after-unaffordable-replay"), life)
++                assert conn.actions[next_action["action_id"]]["status"] == "reserved"
+             else:
+                 assert result["status"] == "success", result
+                 assert len(wire) == 1 and wire[0].startswith(b"GET /probe ")
