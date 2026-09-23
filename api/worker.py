@@ -106,7 +106,7 @@ from capabilities.inline import (
 from capabilities.scanner import ScannerExecutionAdapter
 from capabilities.scan import DeterministicScanExecutionAdapter
 from capabilities.tls import inspect_tls_binding
-from capabilities.replay import ReplayExecutionAdapter
+from capabilities.replay import ReplayExecutionAdapter, hunt_replay_additional_budget
 from capabilities.request_mutation import RequestMutationVerificationAdapter
 from hunt.action_dispatcher import (
     HUNT_ACTION_DISPATCHER,
@@ -19693,14 +19693,11 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     "target_binding_digest": target.digest,
                 }, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             })
-        additional_budget = {
-            "agent_actions": 1,
-            "tool_wall_seconds": max(
-                1, min(int(job_data.get("tool_wall_seconds") or 60), 300),
-            ),
-        }
-        if run["device_target_id"]:
-            additional_budget["device_fragility_points"] = len(plan.requests)
+        additional_budget = hunt_replay_additional_budget(
+            wall_seconds=int(job_data.get("tool_wall_seconds") or 60),
+            device_requests=len(plan.requests) if run["device_target_id"] else 0,
+            managed_principal=bool(credential_profile_id),
+        )
         requested_budget = replay_reservation_budget(plan, additional_budget)
         requested = DurableBudgetReservation.request(
             owner_kind="hunt",

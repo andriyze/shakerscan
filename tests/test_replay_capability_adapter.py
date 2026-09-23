@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scanner"))
 
-from capabilities.replay import ReplayExecutionAdapter
+from capabilities.replay import ReplayExecutionAdapter, hunt_replay_additional_budget
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.models import TargetBinding
@@ -58,10 +58,12 @@ def _plan():
     )
 
 
-def _execute(*, cancelled: bool):
+def _execute(*, cancelled: bool, managed_principal: bool = False):
     plan = _plan()
     transport = Transport()
-    additional = {"agent_actions": 1, "tool_wall_seconds": 60}
+    additional = hunt_replay_additional_budget(
+        wall_seconds=60, managed_principal=managed_principal,
+    )
     requested = replay_reservation_budget(plan, additional)
     specification = CAPABILITY_REGISTRY.require("collections.replay_safe")
     adapter = ReplayExecutionAdapter(
@@ -75,11 +77,13 @@ def _execute(*, cancelled: bool):
             "limits": {
                 "http_requests": 25,
                 "agent_actions": 5,
+                "active_actions": 5,
                 "tool_wall_seconds": 300,
             },
             "consumed": {
                 "http_requests": 0,
                 "agent_actions": 0,
+                "active_actions": 0,
                 "tool_wall_seconds": 0,
             },
             "transport": transport,
@@ -122,3 +126,18 @@ def test_replay_adapter_owns_pre_send_cancellation_and_settlement():
     assert adapter.outcome.reservation.status == "failed"
     assert result.actual_budget["http_requests"] == 0
     assert result.actual_budget["agent_actions"] == 1
+
+
+def test_credentialed_hunt_replay_settles_active_action_dimension():
+    anonymous, anonymous_adapter, _ = _execute(cancelled=False)
+    credentialed, credentialed_adapter, _ = _execute(
+        cancelled=False, managed_principal=True,
+    )
+
+    assert "active_actions" not in anonymous_adapter.outcome.reservation.requested
+    assert "active_actions" not in anonymous.actual_budget
+    assert "active_actions" not in anonymous_adapter.outcome.reservation.actual
+    assert credentialed.status == "success"
+    assert credentialed_adapter.outcome.reservation.requested["active_actions"] == 1
+    assert credentialed.actual_budget["active_actions"] == 1
+    assert credentialed_adapter.outcome.reservation.actual["active_actions"] == 1
