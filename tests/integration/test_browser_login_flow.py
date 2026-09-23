@@ -26,7 +26,8 @@ ORIGIN = "http://127.0.0.1:8765"
 
 @pytest.mark.parametrize("storage", ["cookie", "local_storage"])
 @pytest.mark.parametrize("mode", ["fixed_qa", "expiry"])
-def test_real_login_protected_navigation_and_expiry(storage, mode):
+@pytest.mark.parametrize("decoded_gzip_response", [False, True])
+def test_real_login_protected_navigation_and_expiry(storage, mode, decoded_gzip_response):
     async def scenario():
         from playwright.async_api import async_playwright
 
@@ -44,6 +45,10 @@ document.querySelector('#sign-in').onclick=async()=>{
         async def transport(request, phase):
             path = request.url.removeprefix(ORIGIN)
             headers = {"Content-Type": "text/html"}
+            if decoded_gzip_response:
+                # The pinned HTTP sender has already decoded the gzip body,
+                # while its response headers still describe the wire encoding.
+                headers["Content-Encoding"] = "gzip"
             if path == "/login":
                 return bl.BrowserLoginResponse(200, headers, login)
             if path == "/session" and request.method == "POST":

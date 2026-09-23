@@ -144,7 +144,10 @@ def _response_headers(values: Mapping[str, str]) -> dict[str, str]:
         result[lowered] = value
     connection_fields = {name.strip().lower() for name in result.get("connection", "").split(",")}
     for name in connection_fields | {
-        "content-length", "transfer-encoding", "connection", "keep-alive",
+        # Pinned HTTP replay returns decoded bytes. Replaying the origin's
+        # Content-Encoding would make Chromium try to decompress them again,
+        # breaking JavaScript-rendered login pages that serve gzip assets.
+        "content-length", "content-encoding", "transfer-encoding", "connection", "keep-alive",
         "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade",
     }:
         result.pop(name, None)
