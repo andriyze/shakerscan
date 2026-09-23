@@ -39,6 +39,7 @@ jobs:
           patch.write_text(patch.read_text().replace('\n diff --git ', '\ndiff --git '))
           subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], check=True)
           subprocess.run(['git', 'apply', '.github/pr214-nse-output.patch'], check=True)
+          subprocess.run(['git', 'apply', '.github/pr214-nse-health.patch'], check=True)
           expected = '''18104e4abc83d3b2392a5d13a07c7d23261d12c6 .github/workflows/hunt-nse.yml
           4f115c33e7751288e269ed3e5d467956fa8ec0ae api/capabilities/network.py
           f1f4fddbc212ff421e2bfca1598d6cdc4ae43953 api/capabilities/nse.py
@@ -46,14 +47,17 @@ jobs:
           c7c16153193baeebd960834b5083dd177ed18db5 api/capabilities/nse_http_runtime.py
           84ad8097d85b46b3b68443d2ff353b96056152e0 api/capabilities/nse_http_transport.py
           1b8725d2a8fe4fafa9e23a36c6afb0541929714e api/hunt/interaction_router.py
+          93ec9e3f6be18607424fc740a164e8a841588b63 api/hunt/device_traffic.py
+          a8e3eade0c52fce54ce4048320522192fafecda1 api/hunt/device_policy.py
           2d71b027d9ac47d722e84429202d11b1094e9451 api/runtime/capability_registry.py
           18038da496983e4bd777659d9dd8ad065a78a209 api/runtime/pinned_http_replay.py
-          96a336e4b227f331798452d8899aceea69954134 api/worker.py
-          3dfc336890f1a3b1d3d04d5490ef42955528b853 docs/connected-device-security.md
+          29d5e5d83c87a882c44ea8a54bab02ee0cd4c83e api/worker.py
+          a8c6ada4591518183e3d7c2b19a2412c69a30921 docs/connected-device-security.md
           e0915811b96b1e1000f371892ae02e2c37e1801e install/MANIFEST.sha256
           7b7b3f2848578c011eb875a002e04c60a16017e9 tests/integration/test_hunt_nse_native.py
           de69fb0235a2b44d432abf544a60b935dd32a0c0 tests/test_hunt_nse_capability.py
-          c847a7f6c24ad411f2fad2951a3368b861a54943 tests/test_hunt_nse_http.py'''
+          c847a7f6c24ad411f2fad2951a3368b861a54943 tests/test_hunt_nse_http.py
+          729e473ecc1cb81bbe97f2317b1aeaf7a88fb9ed tests/test_hunt_nse_device_health.py'''
           paths = []
           for line in expected.splitlines():
               sha, path = line.split()
@@ -61,7 +65,7 @@ jobs:
               assert actual == sha, (path, actual, sha)
               paths.append(path)
           subprocess.run(['git', 'add', '--', *paths], check=True)
-          subprocess.run(['git', 'rm', '-f', '.github/pr214-nse.patch', '.github/pr214-nse-output.patch', '.github/workflows/pr214-nse-validation.yml'], check=True)
+          subprocess.run(['git', 'rm', '-f', '.github/pr214-nse.patch', '.github/pr214-nse-output.patch', '.github/pr214-nse-health.patch', '.github/workflows/pr214-nse-validation.yml'], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           PY
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -74,12 +78,12 @@ jobs:
           python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends nmap
-      - name: Native analyses and real pinned HTTP tests
+      - name: Native analyses, real pinned HTTP and device continuation tests
         env:
           PYTHONPATH: .:api:scanner
           SHAKERSCAN_REQUIRE_NATIVE_NSE: '1'
         run: |
-          python -m pytest -q tests/integration/test_hunt_nse_native.py tests/test_hunt_nse_http.py tests/test_hunt_nse_capability.py --junitxml=/tmp/nse-native.xml
+          python -m pytest -q tests/integration/test_hunt_nse_native.py tests/test_hunt_nse_http.py tests/test_hunt_nse_capability.py tests/test_hunt_nse_device_health.py tests/test_hunt_device_traffic.py --junitxml=/tmp/nse-native.xml
       - name: Install Chromium for the full suite
         run: python -m playwright install --with-deps chromium
       - name: Complete partitioned Python suite
