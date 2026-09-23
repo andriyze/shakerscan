@@ -50,7 +50,7 @@ jobs:
           96a336e4b227f331798452d8899aceea69954134 api/worker.py
           3dfc336890f1a3b1d3d04d5490ef42955528b853 docs/connected-device-security.md
           e0915811b96b1e1000f371892ae02e2c37e1801e install/MANIFEST.sha256
-          65dd56ab8ee4147e47af6cac854ba6074bba7143 tests/integration/test_hunt_nse_native.py
+          d34f88361fe901500b88dbf29eb7f412e341fbeb tests/integration/test_hunt_nse_native.py
           de69fb0235a2b44d432abf544a60b935dd32a0c0 tests/test_hunt_nse_capability.py
           60e0c604770dcfab924b211158c18c8390cab918 tests/test_hunt_nse_http.py'''
           paths = []
