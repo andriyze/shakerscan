@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from xml.etree import ElementTree as ET
 
 from runtime.models import ParsedCapabilityResult, PreparedCommand, PreparedExecution, ScanPolicy, TargetBinding
+from .network_inputs import CapabilityInputError, _addresses, _ports, _require_network_policy
 
 
 # Every ID is a reviewed, server-owned script shipped in the worker image. Do
@@ -53,8 +54,6 @@ class NseCheckAdapter:
     parser_version = "nmap-nse-observation/v1"
 
     def prepare(self, *, target: TargetBinding, args: Mapping[str, Any], policy: ScanPolicy) -> PreparedExecution:
-        from .network import CapabilityInputError, _addresses, _ports, _require_network_policy
-
         _require_network_policy(policy)
         if set(args) - {"ports", "scripts"}:
             raise CapabilityInputError("NSE accepts only ports and server-approved scripts")
