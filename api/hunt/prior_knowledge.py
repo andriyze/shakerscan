@@ -107,10 +107,6 @@ async def web_prior_knowledge(conn: Any, target_id: Any) -> dict[str, Any]:
         "AND COALESCE(status,'') NOT IN ('verified', 'refuted', 'withdrawn')",
         target_id,
     )
-    service_contexts = await conn.fetchval(
-        "SELECT count(*) FROM exposure_service_contexts WHERE target_kind='web' AND target_id=$1",
-        target_id,
-    )
     by_status = _counts(endpoints_by_status, "test_status")
     by_severity = _counts(findings_by_severity, "severity")
     return _pack(
@@ -122,7 +118,6 @@ async def web_prior_knowledge(conn: Any, target_id: Any) -> dict[str, Any]:
         findings_active=sum(by_severity.values()),
         already_verified=int(verified or 0),
         open_candidates=int(candidates_open or 0),
-        service_contexts=int(service_contexts or 0),
         last_scan=last_scan,
     )
 
@@ -158,7 +153,6 @@ async def device_prior_knowledge(conn: Any, device_target_id: Any) -> dict[str, 
         findings_active=sum(by_severity.values()),
         already_verified=int(verified or 0),
         open_candidates=0,
-        service_contexts=int(services or 0),
         last_scan=last_scan,
     )
     pack.pop("endpoints", None)
@@ -176,7 +170,6 @@ def _pack(
     findings_active: int,
     already_verified: int,
     open_candidates: int,
-    service_contexts: int,
     last_scan: Any,
 ) -> dict[str, Any]:
     """Shape one census. Counts only -- never rows, URLs, payloads or secret material."""
@@ -203,7 +196,6 @@ def _pack(
             "by_severity": dict(findings_by_severity),
         },
         "open_candidates": open_candidates,
-        "service_contexts": service_contexts,
         "last_completed_scan": {"id": scan_id, "completed_at": completed_at},
         "query_kinds": [
             "endpoints", "findings", "candidates", "principals", "notes", "receipts",
