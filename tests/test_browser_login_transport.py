@@ -1,6 +1,7 @@
 """Local wire tests for the browser action's existing pinned transport boundary."""
 import asyncio
 from dataclasses import replace
+import gzip
 import ssl
 
 import pytest
@@ -12,7 +13,8 @@ from scanner.scanner_tools.request_replay import ReplayRequest
 from scanner.scanner_tools import browser_profile as bp
 
 
-async def send_fixture(chunks, *, headers=b"", strict=False, declared_length=None):
+async def send_fixture(chunks, *, headers=b"", strict=False, declared_length=None,
+                       auto_decompress=False):
     async def serve(reader, writer):
         try:
             await reader.readuntil(b"\r\n\r\n")
@@ -34,7 +36,8 @@ async def send_fixture(chunks, *, headers=b"", strict=False, declared_length=Non
                           allowed_addresses=("127.0.0.1",))
     request = ReplayRequest("fixture", 1, "fixture", "", "GET", origin + "/", (), b"", "raw", "none", False)
     try:
-        return await PinnedAiohttpReplayTransport(verify_tls=True, reject_duplicate_response_headers=strict).send(
+        return await PinnedAiohttpReplayTransport(verify_tls=True, reject_duplicate_response_headers=strict,
+                                                  auto_decompress=auto_decompress).send(
             request, target=target, timeout_seconds=2, follow_redirects=False)
     finally:
         server.close()
@@ -45,6 +48,24 @@ def test_chunked_delivery_is_read_to_eof_instead_of_silently_truncated():
     result = asyncio.run(send_fixture([b"first", b"second", b"third"]))
     assert result.response_body == b"firstsecondthird"
     assert result.connected_address == "127.0.0.1"
+
+
+def test_browser_replay_decodes_gzip_before_fulfilling_chromium_route():
+    html = b"<html><body><div id='login'>Login</div></body></html>"
+    encoded = gzip.compress(html)
+    headers = b"Content-Encoding: gzip\r\nContent-Type: text/html\r\n"
+    raw = asyncio.run(send_fixture([encoded], headers=headers))
+    decoded = asyncio.run(send_fixture([encoded], headers=headers, auto_decompress=True))
+    assert raw.response_body == encoded
+    assert decoded.response_body == html
+    assert decoded.response_headers["Content-Encoding"] == "gzip"
+
+
+def test_decoded_browser_replay_still_enforces_body_limit():
+    encoded = gzip.compress(b"x" * (MAX_REPLAY_RESPONSE_BODY_BYTES + 1))
+    with pytest.raises(ReplayExecutionError, match="capture limit"):
+        asyncio.run(send_fixture([encoded], headers=b"Content-Encoding: gzip\r\n",
+                                 auto_decompress=True))
 
 
 @pytest.mark.parametrize("headers", [

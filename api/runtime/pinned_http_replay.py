@@ -96,9 +96,13 @@ class PinnedAiohttpReplayTransport:
 
     def __init__(self, *, verify_tls: bool = False,
                  reject_duplicate_response_headers: bool = False,
-                 tolerate_incomplete_body: bool = False) -> None:
+                 tolerate_incomplete_body: bool = False,
+                 auto_decompress: bool = False) -> None:
         self.verify_tls = verify_tls
         self.reject_duplicate_response_headers = reject_duplicate_response_headers
+        # Exact collection replay preserves wire bytes. Browser login is the
+        # sole caller that opts into decoded bytes for Playwright route.fulfill.
+        self.auto_decompress = auto_decompress
         # When set, a body read cut short after a valid status line keeps the
         # bytes already received instead of failing the whole capture. Content
         # disclosure detection wants this (a truncated directory index is still
@@ -173,7 +177,7 @@ class PinnedAiohttpReplayTransport:
                 connector=connector,
                 timeout=timeout,
                 trust_env=False,
-                auto_decompress=False,
+                auto_decompress=self.auto_decompress,
                 skip_auto_headers={"User-Agent", "Accept", "Accept-Encoding"},
             ) as client:
                 async with client.request(
