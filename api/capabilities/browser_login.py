@@ -399,11 +399,24 @@ async def authenticated_browser_page(
                 raise fail("login_submission_not_observed")
             if receipt["login_response_status"] >= 400:
                 raise fail("authentication_rejected")
-            # An intercepted form redirect may not advance Chromium's page.
-            # Check the operator-configured protected URL explicitly; the
-            # post-QA recheck below proves the browser session persists.
+            # A script-driven login may set storage and navigate after the
+            # intercepted POST has settled. Give that bounded navigation time
+            # to commit before forcing the protected check URL; otherwise the
+            # explicit navigation can cancel the login script mid-continuation.
+            # Intercepted form redirects may not advance the page at all, so
+            # the protected URL remains an explicit fallback.
             phase = "verify"
-            await page.goto(workflow.check_url, wait_until="domcontentloaded")
+            if hasattr(page, "wait_for_url"):
+                from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+                try:
+                    await page.wait_for_url(
+                        workflow.check_url, wait_until="domcontentloaded",
+                        timeout=min(1_000, max(250, workflow.timeout_ms // 5)),
+                    )
+                except PlaywrightTimeoutError:
+                    await page.goto(workflow.check_url, wait_until="domcontentloaded")
+            else:
+                await page.goto(workflow.check_url, wait_until="domcontentloaded")
             await verify(page)
         phase = "read_only"
         receipt.update(status="authenticated", authentication_verified=True)
