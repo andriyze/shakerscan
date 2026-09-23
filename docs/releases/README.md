@@ -3,7 +3,7 @@
 Release notes are immutable historical records for the version named in each file. They may use the
 product vocabulary and support boundary of that release; do not rewrite old notes to resemble the
 current product. For current behavior use `../functionality-reference.md`, and for publication state
-use `../release-readiness.md` plus `RELEASES.md` at the repository root.
+use `../release-process.md` plus `RELEASES.md` at the repository root.
 
 ## 2.5 line
 
