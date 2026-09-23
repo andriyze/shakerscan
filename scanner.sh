@@ -3335,7 +3335,7 @@ start_agent() {
             codex|claude|opencode)
                 if command_exists "$agent"; then
                     echo "Starting $agent in $SCRIPT_DIR"
-                    echo "This lets the agent read README.md, AGENTS.md, skills/, and .claude/."
+                    echo "This lets the agent read README.md, AGENTS.md, CLAUDE.md, skills/, and .claude/."
                     echo "Research planner: this agent session (no stored AI provider required)."
                     cd "$SCRIPT_DIR"
                     export SHAKERSCAN_AGENT_NAME="$agent"
