@@ -49,7 +49,7 @@ from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
-from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory
+from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory, worker_result_errors
 try:
     from action_scope import _decode_json_value
     from ai_gate.targets.widget_playwright import logger
@@ -3064,11 +3064,7 @@ async def _execute_hunt_capability_lifecycle(
                 )
                 if isinstance(item, Mapping)
             ),
-            errors=(
-                (str(result.get("error")),)
-                if isinstance(result, Mapping) and result.get("error")
-                else ()
-            ),
+            errors=worker_result_errors(result) if isinstance(result, Mapping) else (),
             actual_budget=(
                 dict(result.get("budget_consumed") or {})
                 if isinstance(result, Mapping)

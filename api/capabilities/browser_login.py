@@ -322,7 +322,12 @@ async def authenticated_browser_page(
             if state in {"requires_user_action", "authentication_rejected", "out_of_scope"}:
                 raise fail(state)
             if state == "verification_unavailable":
-                raise fail("verification_incomplete")
+                # Chromium can briefly destroy the old DOM context while a
+                # login redirect commits. Let the enclosing workflow timeout
+                # bound that transition; never treat an unavailable assertion
+                # as authenticated.
+                await asyncio.sleep(0.05)
+                continue
             status = receipt["login_response_status"]
             if status is not None and status >= 400:
                 raise fail("authentication_rejected")

@@ -351,6 +351,7 @@ class PortsDiscoverAdapter:
     def parse(self, output: str, *, timed_out: bool = False) -> ParsedCapabilityResult:
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
+        seen_ports: set[tuple[str, int]] = set()
         for line in str(output or "").splitlines():
             line = line.strip()
             if not line:
@@ -361,8 +362,10 @@ class PortsDiscoverAdapter:
                 port = int(row.get("port"))
                 if not 1 <= port <= 65_535:
                     raise ValueError("invalid port")
-                observations.append({"kind": "open_port", "address": address, "port": port,
-                                     "transport": "tcp"})
+                if (address, port) not in seen_ports:
+                    seen_ports.add((address, port))
+                    observations.append({"kind": "open_port", "address": address, "port": port,
+                                         "transport": "tcp"})
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 errors.append(f"malformed_naabu_record:{type(exc).__name__}")
         partial = bool(timed_out or errors)

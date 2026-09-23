@@ -172,6 +172,25 @@ def test_success_observes_login_and_rechecks_protected_page_without_exporting_se
     assert browser.closed
 
 
+def test_login_verification_retries_transient_navigation_context_loss(monkeypatch):
+    browser = Browser()
+    original_visible = Locator.is_visible
+    failed_once = False
+
+    async def visible(self):
+        nonlocal failed_once
+        if self.page.browser.authenticated and not failed_once:
+            failed_once = True
+            raise RuntimeError("navigation replaced the document context")
+        return await original_visible(self)
+
+    monkeypatch.setattr(Locator, "is_visible", visible)
+    receipt = execute(browser)
+    assert failed_once
+    assert receipt["authentication_verified"] is True
+    assert receipt["qa_completed"] is True
+
+
 @pytest.mark.parametrize("change", [
     {"origin": "https://user:secret@login-fixture.test"},
     {"login_url": "https://other.test/login"}, {"submit_url": ORIGIN + "/session#fragment"},

@@ -135,6 +135,21 @@ def test_naabu_timeout_preserves_valid_jsonl_records():
     assert parsed.errors
 
 
+def test_naabu_repeated_wire_records_count_as_one_open_port():
+    output = "\n".join((
+        '{"ip":"192.0.2.10","port":8008}',
+        '{"ip":"192.0.2.10","port":8008}',
+        '{"ip":"192.0.2.10","port":8060}',
+    ))
+    parsed = PortsDiscoverAdapter().parse(output)
+
+    assert parsed.status == "succeeded"
+    assert [(row["address"], row["port"]) for row in parsed.observations] == [
+        ("192.0.2.10", 8008), ("192.0.2.10", 8060),
+    ]
+    assert parsed.metadata["record_count"] == 2
+
+
 def test_nmap_xml_parser_normalizes_service_observations_and_partial_timeout():
     xml = """<?xml version='1.0'?>
 <nmaprun><host><address addr='192.0.2.10' addrtype='ipv4'/><ports>
