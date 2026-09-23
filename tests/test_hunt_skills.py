@@ -422,20 +422,21 @@ def test_the_privileged_rule_has_one_owner():
         assert policy.is_privileged(credentials_requested=False) is True, field
 
 
-# --- binding must deliver the whole methodology, not part of it --------------------------
+# --- methodology remains useful even when only part is executable -----------------------
 
-def test_binding_is_refused_when_any_required_capability_is_withheld(library):
-    """A skill bound with part of its requirements would have the planner follow a
-    methodology it cannot carry out, then report the shortfall as a result."""
+def test_binding_keeps_methodology_when_some_required_capabilities_are_withheld(library):
+    """Binding is knowledge selection, not an authority grant. The planner may use the
+    compatible techniques while capability execution continues to enforce the Hunt envelope."""
     session_skill = library.require("skill.web.session-cookie-token-and-jwt-testing")
     passive_only = (
         "browser.interact", "browser.navigate", "http.request", "web.crawl", "web.probe",
     )
-    with pytest.raises(HuntSkillError, match="withholds"):
-        bind_skills_to_hunt(
-            [session_skill.skill_id], target_kind="web",
-            allowed_capabilities=passive_only, budget=None, library=library,
-        )
+    bound = bind_skills_to_hunt(
+        [session_skill.skill_id], target_kind="web",
+        allowed_capabilities=passive_only, budget=None, library=library,
+    )
+    assert any(spec.skill_id == session_skill.skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == passive_only
 
 
 def test_a_skill_whose_requirements_are_all_passive_still_binds_passively(library):
