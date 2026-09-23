@@ -1,7 +1,7 @@
 # Service Intelligence
 
-**Status:** implemented initial read-only inventory and investigation workflow.
-**Reconciled:** 2026-09-17. This document separates shipped behavior from follow-on work.
+**Status:** maintained service-intelligence and Hunt-integration reference.
+**Reconciled:** 2026-09-23. This document describes current behavior and known coverage gaps.
 
 ## Purpose and operator workflow
 
@@ -89,9 +89,10 @@ candidates. Limits and source failures remain visible. Device history reflects i
 service inventory, not a newly materialized all-time service-history database. Missing older entries
 or an incomplete scan never resolve a finding or establish clean posture.
 
-Historical **Hunt-only network outputs** are not backfilled into the Scan observation store. Hunt
-can read this feature and launch existing capabilities, but automatic persistence of those legacy
-outputs into the same projection remains follow-on work. Raw banners, response bodies, credential
+Historical **Hunt-only network outputs** are not yet backfilled into the Scan observation store. Hunt
+can read the shared target/service knowledge and launch existing capabilities, but Hunt-produced
+service observations still need a canonical durable ingestion path so a later Scan or Hunt sees the
+same history without replaying discovery. Raw banners, response bodies, credential
 values and private manifest storage paths are not returned. Application origins strip paths, query
 strings and fragments and reject embedded credentials.
 
@@ -106,7 +107,7 @@ never be used as scope authorization. Registry risk/approval fields are descript
 Hunt queries accept `kind=service_intelligence`, optional `filter.id`, `limit` (1–500) and `cursor`.
 A cursor cannot move to another target/filter and is rejected when the evidence snapshot changes.
 
-## Acceptance and remaining work
+## Acceptance and current gaps
 
 Focused Python tests cover ownership, exact origins, nonstandard ports, port-only hints, ambiguous
 backends, UDP uncertainty, changed device locators, stale identity, private-data projection, advisory
@@ -125,7 +126,8 @@ npm --prefix ui run test:unit
 cd ui && npx playwright test tests/browser/service-intelligence.spec.ts
 ```
 
-Follow-on scope: durable cross-Scan/Hunt service-history ingestion; reviewed CVE-specific verifier
-bindings and result feedback; live/offline-refresh KEV and EPSS provenance; additional protocol
-adapters; separately governed credential assessment; and evidence-backed consequential attack paths.
-None of these is implied by a populated service table or a public exploit reference.
+Current gaps are intentionally explicit: durable cross-Scan/Hunt service-history ingestion; reviewed
+CVE-specific verifier bindings and result feedback; live/offline-refresh KEV and EPSS provenance;
+additional protocol adapters; separately governed credential assessment; and evidence-backed
+consequential attack paths. These are product gaps, not promises implied by a populated service table
+or a public exploit reference.
