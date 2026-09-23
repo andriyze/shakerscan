@@ -757,8 +757,7 @@ Today a finding exposes a three-state proof level — `verified` (deterministic 
 deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
-never render as *verified*. Future proof-state hardening is tracked in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+never render as *verified*. Future proof-state changes belong in the proof contracts and focused architecture/decision records.
 
 ### 11.1 AI Gate
 
