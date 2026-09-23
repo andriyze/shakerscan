@@ -1287,6 +1287,20 @@ def _hunt_nonexecuting_actual(
     return actual
 
 
+def _worker_replay_actual(
+    requested: Mapping[str, int], result: Mapping[str, Any],
+) -> dict[str, int]:
+    """Report only replay charges the worker says it settled in its ledger."""
+    measured = result.get("budget_consumed")
+    if not isinstance(measured, Mapping):
+        return {}
+    return {
+        dimension: min(int(limit), max(0, int(measured[dimension])))
+        for dimension, limit in requested.items()
+        if dimension in measured
+    }
+
+
 async def _execute_hunt_capability_lifecycle(
     hunt_id: str,
     name: str,
@@ -2512,6 +2526,10 @@ async def _execute_hunt_capability_lifecycle(
             for dimension, amount in measured.items():
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
+            if worker_managed_budget:
+                actual_charges = _worker_replay_actual(
+                    charges, receipt_payload if isinstance(receipt_payload, Mapping) else {},
+                )
             if capability_execution is not None:
                 actual_charges = dict(capability_execution.actual_budget)
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
@@ -2535,7 +2553,7 @@ async def _execute_hunt_capability_lifecycle(
                 ):
                     if dimension in charges:
                         actual_charges[dimension] = int(charges[dimension])
-            if status == "blocked":
+            if status == "blocked" and not worker_managed_budget:
                 actual_charges = _hunt_blocked_actual(
                     charges,
                     actual_charges,
@@ -2582,7 +2600,7 @@ async def _execute_hunt_capability_lifecycle(
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), 1 + followed,
                 )
-            elif name == "collections.replay_safe" and isinstance(receipt_payload, dict):
+            elif name == "collections.replay_safe" and not worker_managed_budget and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
