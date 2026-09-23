@@ -25,6 +25,26 @@ candidates, and proof. Do not start a second in-server reasoning loop.
    no `skill_ids` is normal. Methodologies guide investigation; they do not grant or reduce
    authority.
 
+A compact set of contract-valid shapes is kept below so agents and CI can detect contract drift.
+These are shapes, not recommended zero-budget templates; replace the example policy/budgets with the
+operator-authorized values and server-advertised defaults for the real investigation.
+
+```json
+{"schema_version":"hunt-start/v2","target_id":"registered-target-id","target_kind":"web","goal":"Investigate the authorized web target.","budget_profile":"balanced","policy":{"active_testing":false,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":false},"budgets":{"max_active_actions":0,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+```
+
+```json
+{"schema_version":"hunt-start/v2","target_id":"registered-api-target-id","target_kind":"api","goal":"Compare authorization between two approved principals.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":12,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{"primary_credential_profile_id":"primary-profile-id","secondary_credential_profile_id":"secondary-profile-id"},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+```
+
+```json
+{"schema_version":"hunt-start/v2","target_id":"registered-network-target-id","target_kind":"network","goal":"Investigate the authorized network target.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":4,"max_tcp_ports":100,"max_udp_ports":20,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+```
+
+```json
+{"schema_version":"hunt-start/v2","target_id":"registered-device-target-id","target_kind":"device","goal":"Investigate the authorized connected device.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":1,"max_tcp_ports":100,"max_udp_ports":20,"max_device_fragility_points":40,"max_oob_interactions":0},"credential_refs":{"ssh_credential_profile_id":"ssh-profile-id"},"capabilities":[],"request_collection_ids":["saved-device-selection-id"],"skill_ids":[]}
+```
+
 The exact `hunt-start/v2` fields come from `GET /hunts/contract`. A normal planner should not
 pre-fill zero-valued ceilings merely to make a request look explicit: doing so can accidentally
 turn a usable Hunt into a no-op. Supply a lower ceiling only when the operator or investigation
