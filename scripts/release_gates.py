@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run named release/test gates from the roadmap.
 
-The gate names intentionally match docs/proposed-next-steps.md. Each gate is a
+Gate names are stable release contracts. Each gate is a
 focused pytest slice over existing deterministic tests; this script is the stable
 entry point CI, agents, and operators can call without remembering selectors.
 """
