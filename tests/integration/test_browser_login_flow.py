@@ -24,6 +24,62 @@ pytestmark = pytest.mark.skipif(not CHROMIUM, reason="explicit installed Chromiu
 ORIGIN = "http://127.0.0.1:8765"
 
 
+def test_real_login_follows_only_saved_redirect_destinations():
+    """Fulfilled redirects must re-enter the pinned browser route before login."""
+    async def scenario():
+        from playwright.async_api import async_playwright
+
+        login = b'''<div id="root"></div><script>
+document.getElementById('root').innerHTML='<form action="/login" method="post"><input id="username" name="username"><input id="password" name="password" type="password"><button id="submit" type="submit">Sign in</button></form>';
+</script>'''
+        calls = []
+
+        async def transport(request, phase):
+            path = request.url.removeprefix(ORIGIN)
+            calls.append((phase, request.method, path))
+            if path == "/dashboard" and phase == "anonymous":
+                return bl.BrowserLoginResponse(303, {"Location": "/login"}, b"")
+            if path == "/login" and request.method == "GET":
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/html"}, login)
+            if path == "/login" and request.method == "POST":
+                return bl.BrowserLoginResponse(303, {
+                    "Location": "/dashboard", "Set-Cookie": "session=synthetic; Path=/",
+                }, b"")
+            if path == "/dashboard":
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/html"},
+                                               b'<div id="authenticated">okay</div>')
+            return bl.BrowserLoginResponse(404, {}, b"")
+
+        workflow = bl.BrowserLoginWorkflow(
+            origin=ORIGIN, login_url=ORIGIN + "/login", submit_url=ORIGIN + "/login",
+            check_url=ORIGIN + "/dashboard", username_selector="#username",
+            password_selector="#password", submit_selector="#submit",
+            authenticated_selector="#authenticated", rejected_selector="#rejected",
+            timeout_ms=5_000,
+        )
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(executable_path=CHROMIUM, headless=True,
+                args=["--no-sandbox", "--disable-background-networking"])
+            try:
+                receipt = await bl.run_browser_login_checks(
+                    browser, workflow=workflow,
+                    values=bl.BrowserLoginValues("synthetic-user", "synthetic-password"),
+                    transport=transport,
+                    checks=(bl.BrowserReadOnlyCheck(workflow.check_url, "#authenticated"),),
+                )
+            finally:
+                await browser.close()
+        assert receipt["status"] == "completed"
+        assert receipt["anonymous_check_verified"] is True
+        assert receipt["login_response_status"] == 303
+        assert receipt["checks_completed"] == 1
+        assert ("anonymous", "GET", "/login") in calls
+        assert ("login", "POST", "/login") in calls
+        assert all(path in {"/login", "/dashboard"} for _, _, path in calls)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("storage", ["cookie", "local_storage"])
 @pytest.mark.parametrize("mode", ["fixed_qa", "expiry"])
 @pytest.mark.parametrize("decoded_gzip_response", [False, True])
