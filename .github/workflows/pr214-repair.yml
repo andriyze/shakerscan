@@ -1,0 +1,22 @@
+name: PR 214 repair workspace
+on:
+  push:
+    branches: [claude/github-access-qqgoq6]
+    paths: [.github/workflows/pr214-repair.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Export the exact source for local repair and testing
+        run: git archive --format=zip HEAD -o /tmp/pr214-source.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr214-source
+          path: /tmp/pr214-source.zip
+          retention-days: 1
