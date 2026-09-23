@@ -33,8 +33,14 @@ def _signals(script_id: str, output: str) -> dict[str, Any]:
         match = re.search(r"Supported Methods:\s*([A-Z ,]+)", output)
         return {"methods": sorted(set(re.findall(r"\b[A-Z]{3,12}\b", match.group(1)))) if match else []}
     if script_id == "http-security-headers":
-        lowered = output.lower()
-        return {"mentioned_headers": [name for name in _HEADER_NAMES if name in lowered]}
+        lowered = output.lower().replace("_", "-")
+        mentioned = [name for name in _HEADER_NAMES if name in lowered]
+        missing = []
+        if "hsts not configured" in lowered:
+            missing.append("strict-transport-security")
+            if "strict-transport-security" not in mentioned:
+                mentioned.append("strict-transport-security")
+        return {"mentioned_headers": mentioned, "missing_headers": missing}
     if script_id == "http-trace":
         return {"trace_enabled_reported": bool(re.search(r"TRACE\s+(?:is\s+)?enabled", output, re.I))}
     return {}

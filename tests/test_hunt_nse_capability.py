@@ -80,7 +80,7 @@ def test_nse_parses_bounded_observations_without_echoing_target_output():
     assert result.observations[0]["port"] == 8443
     assert all(item["status"] == "reported" for item in result.observations)
     assert result.observations[0]["signals"] == {"tls_versions": ["TLSv1.2"], "least_strength": "B"}
-    assert result.observations[1]["signals"] == {"mentioned_headers": ["content-security-policy"]}
+    assert result.observations[1]["signals"] == {"mentioned_headers": ["content-security-policy"], "missing_headers": []}
     assert "private-token" not in str(result.observations)
     assert all(item["proof_state"] == "observation_only" for item in result.observations)
     partial = parser.parse(XML + "<truncated", timed_out=True)
@@ -95,7 +95,15 @@ def test_nse_empty_script_output_is_indeterminate():
     assert result.partial and result.status == "partial"
     assert "nse_script_no_output:http-security-headers:8443" in result.errors
     assert result.observations[1]["status"] == "no_output"
-    assert result.observations[1]["signals"] == {"mentioned_headers": []}
+    assert result.observations[1]["signals"] == {"mentioned_headers": [], "missing_headers": []}
+
+
+def test_nse_normalizes_a_real_hsts_misconfiguration_signal():
+    parser = network_capability_adapter("service.nse_check")
+    xml = XML.replace("Content-Security-Policy: private-token-DO-NOT-LEAK",
+                      "Strict_Transport_Security: HSTS not configured in HTTPS Server")
+    observation = parser.parse(xml).observations[1]
+    assert observation["signals"]["missing_headers"] == ["strict-transport-security"]
 
 
 def test_nse_execution_reconciles_conservative_http_and_port_usage():
