@@ -99,4 +99,4 @@ release candidate:
    preserved.
 
 The complete pre-release and post-publish sequence is maintained in
-[`../docs/release-readiness.md`](../docs/release-readiness.md).
+the release workflow and immutable release notes.
