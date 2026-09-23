@@ -31,7 +31,7 @@ VENDORED = {
 # The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
 # workspace by the client's `agent` command against the connected instance. `.claude` is
 # carried as `claude` so no hidden directory has to survive packaging.
-KIT = {"skills": "_kit/skills", ".claude": "_kit/claude", "AGENTS.md": "_kit/AGENTS.md", "CLAUDE.md": "_kit/CLAUDE.md"}
+KIT = {"skills": "_kit/skills", ".claude": "_kit/claude", "AGENTS.md": "_kit/AGENTS.md"}
 REPOSITORY_MARKERS = ("VERSION", "scanner.sh")
 
 

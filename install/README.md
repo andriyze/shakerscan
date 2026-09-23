@@ -26,12 +26,10 @@ The hosted root path should serve `index.sh` as plain text or shell script conte
 - `VERSION`
 - `README.md`
 - `AGENTS.md`
-- `CLAUDE.md`
 - `skills/`
 - `.claude/`
 
-The full `docs/` tree is intentionally not part of the minimal runtime. Installed README, AGENTS,
-CLAUDE, and skill files must therefore use public GitHub links when they refer to engineering
+The full `docs/` tree is intentionally not part of the minimal runtime. Installed README, AGENTS, and skill files must therefore use public GitHub links when they refer to engineering
 references outside this package.
 
 The installed skills include the general ShakerScan workflow plus interactive security sessions,
@@ -47,7 +45,7 @@ requires an authorized target and an expiring target-bound approval. Set
 Operations execution globally.
 
 Re-running the install command upgrades the installed runtime files in place. It refreshes
-`scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`, `CLAUDE.md`,
+`scanner.sh`, `docker-compose.release.yml`, `VERSION`, `README.md`, `AGENTS.md`,
 `skills/`, and `.claude/`; keeps `.env`, `results`, and Docker volumes; then starts ShakerScan.
 Prebuilt starts pull Docker Hub images by default; set `SHAKERSCAN_PULL_IMAGES=0` to skip that pull.
 Run `shakerscan backup` before upgrading. The supported database restore and previous-image procedure
@@ -101,4 +99,4 @@ release candidate:
    preserved.
 
 The complete pre-release and post-publish sequence is maintained in
-[`../docs/release-readiness.md`](../docs/release-readiness.md).
+the release workflow and immutable release notes.

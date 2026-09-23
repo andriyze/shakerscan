@@ -39,6 +39,12 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 9. Preserve trustworthy partial output on timeout. Cancellation is distinct and stops execution.
 10. Reuse core concepts instead of adding parallel registries, ledgers, scope paths, candidate
     models, proof paths, or orchestration engines.
+11. Treat durable target knowledge as shared product state. Scan, Hunt, device assessment, service
+    intelligence, and imported request collections should enrich the same target understanding
+    instead of forcing each workflow to rediscover it.
+12. Optimize for investigation efficacy and operator flow. A capability is valuable when it helps
+    reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
+    or refusal paths that do not improve those outcomes.
 
 ## Environment and startup
 
@@ -70,11 +76,11 @@ through `shakerscan api`, `shakerscan scan`, `shakerscan hunt` and the MCP tools
 connected person's identity and role; a route the instance keeps closed answers with a refusal
 that names what is missing, so report it and choose another path rather than retrying.
 
-If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. The hosted SaaS client is
-also named `shakerscan` (Homebrew installs it at `/opt/homebrew/bin/shakerscan`) and has no `api`,
-`hunt` or `connect` subcommand; if `shakerscan api` answers `Unknown command`, you are running
-that client, not this launcher. Never invent removed wrapper commands; inspect
-`shakerscan --help` or `./scanner.sh help`.
+If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. The pipx/Homebrew client is
+also named `shakerscan` and supports public checks plus configured-instance API, Hunt, MCP, and
+connection workflows. The full local engine launcher additionally owns Docker lifecycle commands.
+Do not infer capabilities from an old client/launcher split; inspect `shakerscan --help`, the live
+server contracts, or `./scanner.sh help` before declaring an operation unavailable.
 
 ## Default agent behavior
 

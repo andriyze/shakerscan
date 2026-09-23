@@ -310,7 +310,7 @@ losing leads — not when every URL carries a label.
 
 ## Workstream-to-phase mapping
 
-The 2.3.0 architecture workstreams (`release-2.3.0-plan.md`) are this vision's phases:
+The implementation should continue through these phases:
 
 | Vision phase | Plan workstream | State |
 |---|---|---|

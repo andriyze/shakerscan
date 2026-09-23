@@ -260,7 +260,7 @@ def client_document(path: Path, version: str, source_sha: str, repository: str, 
     require(bool(metadata.get("Requires-Python")), "missing client Python requirement")
     prefix = "shakerscan/" if wheel else f"shakerscan-{version}/src/shakerscan/"
     packaged = {name[len(prefix):]: sha256(data) for name, data in files.items() if name.startswith(prefix)}
-    for name in ("__init__.py", "_mcp.py", "_v2_cli.py", "_api_cli.py", "_scan_cli.py", "_kit/AGENTS.md", "_kit/CLAUDE.md"):
+    for name in ("__init__.py", "_mcp.py", "_v2_cli.py", "_api_cli.py", "_scan_cli.py", "_kit/AGENTS.md"):
         require(name in packaged, f"client is missing packaged {name}")
     for directory in ("_kit/skills/", "_kit/claude/"):
         require(any(n.startswith(directory) for n in packaged), f"client is missing {directory}")

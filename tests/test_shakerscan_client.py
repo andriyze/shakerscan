@@ -68,7 +68,6 @@ def test_the_build_vendors_the_runtime_scripts_and_the_agent_kit(tmp_path):
     assert wheel[str(ROOT / "AGENTS.md")] == "shakerscan/_kit/AGENTS.md"
     sdist = hatch_build.plan_force_include("sdist", CLIENT)
     assert sdist[str(scripts / "v2_cli.py")] == "src/shakerscan/_v2_cli.py"
-    assert sdist[str(ROOT / "CLAUDE.md")] == "src/shakerscan/_kit/CLAUDE.md"
     # An unpacked sdist has no repository beside it but carries the copies: nothing to map.
     unpacked = tmp_path / "shakerscan-0.0.0" / "src" / "shakerscan"
     unpacked.mkdir(parents=True)
@@ -467,10 +466,10 @@ def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch
     assert (workspace / ".claude" / "commands" / "scan.md").is_file()
     hook = workspace / ".claude" / "hooks" / "session-start.sh"
     assert hook.is_file() and os.access(hook, os.X_OK)
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        text = (workspace / name).read_text(encoding="utf-8")
-        assert text.startswith("# Connected ShakerScan instance") and "https://scanner.example.com" in text
-        assert "shakerscan api METHOD PATH" in text and "@AGENTS.md" in text if name == "CLAUDE.md" else True
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert text.startswith("# Connected ShakerScan instance") and "https://scanner.example.com" in text
+    assert "shakerscan api METHOD PATH" in text
+    assert not (workspace / "CLAUDE.md").exists()
     mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
     assert mcp["mcpServers"]["shakerscan"]["args"] == ["mcp"]
     assert mcp["mcpServers"]["shakerscan"]["command"].endswith("shakerscan")
@@ -492,12 +491,10 @@ def test_agent_works_against_an_open_source_engine_named_by_url(monkeypatch, tmp
     out = capsys.readouterr().out
     assert "instance:  http://192.168.1.50:8080 (an open-source engine reached by address" in out
     assert f"cd {workspace} && {cli.ENV_URL}=http://192.168.1.50:8080 {cli.ENV_ALLOW_REMOTE}=true opencode" in out
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        text = (workspace / name).read_text(encoding="utf-8")
-        assert text.startswith("# Remote ShakerScan engine") and "no credential and no per-person identity" in text
-    # The full operating guide follows the note; CLAUDE.md imports it rather than repeating it.
-    assert "## Authoritative references" in (workspace / "AGENTS.md").read_text(encoding="utf-8")
-    assert "@AGENTS.md" in (workspace / "CLAUDE.md").read_text(encoding="utf-8")
+    text = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert text.startswith("# Remote ShakerScan engine") and "no credential and no per-person identity" in text
+    assert "## Authoritative references" in text
+    assert not (workspace / "CLAUDE.md").exists()
     assert (workspace / "skills" / "shakerscan" / "SKILL.md").is_file()
     # The registrations carry the address so the agent's own MCP subprocess needs no environment.
     mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))

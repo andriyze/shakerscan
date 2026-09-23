@@ -593,7 +593,6 @@ printf '%s' "$locked_manifest" | grep -Eq '^[0-9a-f]{64}$' || \
     fail "release manifest does not match the digest published for v${release_version}"
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
-download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
 download "$REPO_RAW_BASE/.dockerignore" "$INSTALL_DIR/.dockerignore"
 download "$REPO_RAW_BASE/install/release-images.json" "$INSTALL_DIR/install/release-images.json"
 download "$REPO_RAW_BASE/install/release-images.sh" "$INSTALL_DIR/install/release-images.sh"

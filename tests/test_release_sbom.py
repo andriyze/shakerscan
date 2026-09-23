@@ -61,7 +61,7 @@ def make_client(directory, *, requires_dist="", mutate=None, omit=None):
     directory.mkdir(exist_ok=True)
     metadata = (f"Metadata-Version: 2.4\nName: shakerscan\nVersion: {VERSION}\nRequires-Python: >=3.10\n"
                 f"License-Expression: AGPL-3.0-only\n{requires_dist}\n").encode()
-    names = ["__init__.py", "_mcp.py", "_v2_cli.py", "_api_cli.py", "_scan_cli.py", "_kit/AGENTS.md", "_kit/CLAUDE.md",
+    names = ["__init__.py", "_mcp.py", "_v2_cli.py", "_api_cli.py", "_scan_cli.py", "_kit/AGENTS.md",
              "_kit/skills/example.md", "_kit/claude/settings.json"]
     package = {name: f"fixture: {name}\n".encode() for name in names if name != omit}
     wheel = directory / f"shakerscan-{VERSION}-py3-none-any.whl"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end DAST benchmark runner (proposed-next-steps.md §1).
+"""End-to-end DAST benchmark runner.
 
 Submits one deterministic Scan per target fixture with the benchmark's fixed V2 policy and budget,
 waits for completion, fetches the report,

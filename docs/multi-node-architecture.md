@@ -40,7 +40,7 @@ in code versus what this document specifies as net-new. It deliberately does not
 capability matrix (that lives in [dast-asm-architecture.md](dast-asm-architecture.md) and drifted when
 duplicated). Each "Built" row is anchored to a source symbol so it stays verifiable instead of
 becoming stale prose. For product priority and phased order, see
-[proposed-next-steps.md](proposed-next-steps.md).
+the current architecture and decision records.
 
 | Substrate piece | Status | Where (symbol) |
 |---|---|---|

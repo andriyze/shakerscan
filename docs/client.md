@@ -193,7 +193,7 @@ so both commands mean the same thing whichever channel put `shakerscan` on the P
 ## Work with an agent: `shakerscan agent`
 
 The open-source launcher's `shakerscan agent claude` starts the agent inside the runtime
-directory, where `AGENTS.md`, `CLAUDE.md`, the skills and the `.claude` commands (`/scan`,
+directory, where `AGENTS.md`, the skills and the `.claude` commands (`/scan`,
 `/findings`, `/status`, `/deep-hunt`, …) tell it how to work. The client does the same against
 the connected instance:
 

@@ -3,7 +3,7 @@
 **Status (reconciled 2026-08-29):** current implementation reference. This document describes the
 shipped local and broker execution model and its safety boundaries. Future fleet work belongs in
 [`multi-node-architecture.md`](multi-node-architecture.md); release gates belong in
-[`release-readiness.md`](release-readiness.md).
+[`release-process.md`](release-process.md).
 
 ## Purpose
 
@@ -196,5 +196,5 @@ A release claim for this architecture requires:
   parallel safety;
 - migration and rollback validation for durable inventory, attempts, schedules, and results.
 
-Future improvements belong in [`proposed-next-steps.md`](proposed-next-steps.md), not in this current
+Future improvements belong in focused architecture/decision documents, not in this current
 architecture reference.

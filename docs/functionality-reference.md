@@ -719,7 +719,7 @@ be backed by deterministic, cryptographic, parser-backed, protocol-backed, or re
 Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
 below); AI is never the sole authority for verified status or severity promotion. Operator workflows
 are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belongs only in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+the maintained architecture and evaluation documents.
 
 ### AI capability status quick read
 
@@ -757,8 +757,7 @@ Today a finding exposes a three-state proof level — `verified` (deterministic 
 deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
-never render as *verified*. Future proof-state hardening is tracked in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+never render as *verified*. Future proof-state changes belong in the proof contracts and focused architecture/decision records.
 
 ### 11.1 AI Gate
 
@@ -916,7 +915,7 @@ Evidence-backed findings can be saved via `POST /session/{id}/findings` (the com
 `ai_session`; the user-facing source label is **Interactive**). This is the engine behind the
 `/ai-security-session` compatibility skill. These findings remain unverified until deterministic
 proof establishes impact; see
-[`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
+the live `/session*` OpenAPI contract.
 
 ### 11.4 AI-assisted analysis of DAST findings
 
@@ -1153,7 +1152,7 @@ Base URL `http://localhost:8080`. Most structured POST/PATCH operations accept J
 control and discovery operations use query parameters or no body. FastAPI also serves the live schema
 at `/openapi.json`. The curated groups below explain product areas; §17 is the exhaustive generated
 method/path catalog. (See `api/api.py` for handlers. The agent-facing
-how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../AGENTS.md).)
+how-to with request bodies is in [`AGENTS.md`](../AGENTS.md).)
 
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
@@ -2939,16 +2938,16 @@ Scan feature or a second orchestration engine.
 
 | Topic | Document |
 |-------|----------|
-| Agent-facing API how-to (request bodies, examples) | [`CLAUDE.md`](../CLAUDE.md) · [`AGENTS.md`](../AGENTS.md) |
+| Agent-facing API how-to (request bodies, examples) | [`AGENTS.md`](../AGENTS.md) |
 | Getting started, install, product tour | [`README.md`](../README.md) |
 | AI-native V2 architecture and trust boundary | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) |
 | Scan execution/action/revision schemas | [`execution.py`](../api/scan/execution.py) · [`action_plan.py`](../api/scan/action_plan.py) · [`continuation.py`](../api/scan/continuation.py) |
 | Historical pre-V2 mode policy | [`archive/smart-scan-policy.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/smart-scan-policy.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
-| Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
-| Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
+| Product direction | [`product-model.md`](product-model.md) · architecture documents in this directory |
+| Release and publishing process | [`release-process.md`](release-process.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
-| Interactive session compatibility API | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
+| Interactive session compatibility API | Live `/session*` OpenAPI contract |
 | DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
 | Connected-device architecture, policies, and safety boundary | [`connected-device-security.md`](connected-device-security.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |
