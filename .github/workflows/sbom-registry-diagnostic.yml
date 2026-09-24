@@ -14,31 +14,31 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-      - name: Read immutable historical fixture
-        run: |
-          git fetch --depth=1 origin tag v2.4.0
-          git worktree add --detach "$RUNNER_TEMP/sbom-fixture" 'v2.4.0^{commit}'
-          python3 -m pip install 'PyYAML==6.0.3' 'packaging==25.0'
-      - name: Inspect each pinned supporting service without pulling or running images
+      - name: Inspect public MinIO identities without pulling or running images
         run: |
           python3 - <<'PY'
-          import json, os, re, subprocess
-          from pathlib import Path
-          from scripts.release_sbom_coverage import supporting_images, service_platforms
-          root = Path(os.environ['RUNNER_TEMP']) / 'sbom-fixture'
-          inventory = json.loads((root / 'install/release-images.json').read_text())
-          failures = []
-          for service in supporting_images(root / 'docker-compose.release.yml', inventory):
-              reference = service['image_reference']
-              print('Inspecting', service['image'], reference, flush=True)
-              result = subprocess.run(['docker', 'buildx', 'imagetools', 'inspect', reference, '--raw'], capture_output=True, text=True, timeout=180)
-              if result.returncode:
-                  detail = re.sub(r'(?i)bearer\s+\S+', 'Bearer [REDACTED]', result.stderr)
-                  detail = re.sub(r'https?://\S+', '[registry URL]', detail)
-                  print('Registry failure:', result.returncode, detail[-2000:], flush=True)
-                  failures.append(service['image'])
-              else:
-                  print('Platforms:', service_platforms(json.loads(result.stdout)), flush=True)
-          if failures:
-              raise SystemExit('Unresolved pinned images: ' + ', '.join(failures))
+          import hashlib, json, re, subprocess, urllib.error, urllib.parse, urllib.request
+          identities = [
+              ('minio', 'RELEASE.2025-04-22T22-12-26Z', 'sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e'),
+              ('mc', 'RELEASE.2025-04-16T18-13-26Z', 'sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3'),
+          ]
+          accept = ', '.join(['application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json', 'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'])
+          for name, tag, digest in identities:
+              for ref in [f'quay.io/minio/{name}:{tag}', f'docker.io/minio/{name}@{digest}']:
+                  p = subprocess.run(['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw'], capture_output=True, text=True, timeout=180)
+                  print('Identity', ref, 'exit', p.returncode, flush=True)
+                  if p.returncode == 0:
+                      print('Body digest', hashlib.sha256(p.stdout.encode()).hexdigest(), flush=True)
+                  else:
+                      detail = re.sub(r'(?i)bearer\s+\S+', '[REDACTED]', p.stderr)
+                      print(re.sub(r'https?://\S+', '[registry URL]', detail)[-1600:], flush=True)
+              url = f'https://quay.io/v2/minio/{name}/manifests/{digest}'
+              for method in ['HEAD', 'GET']:
+                  request = urllib.request.Request(url, headers={'Accept': accept}, method=method)
+                  try:
+                      with urllib.request.urlopen(request, timeout=60) as response:
+                          content = response.read(4 * 1024 * 1024)
+                          print('Anonymous', name, method, response.status, 'content digest', hashlib.sha256(content).hexdigest(), flush=True)
+                  except urllib.error.HTTPError as error:
+                      print('Anonymous', name, method, error.code, 'challenge', error.headers.get('WWW-Authenticate'), flush=True)
           PY
