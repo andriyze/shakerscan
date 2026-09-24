@@ -8,8 +8,8 @@ or granting, removing, or resizing authority. Runtime policy still controls ever
 Skills are published with an honest support level. ShakerScan has no capability for several
 adapters the upstream library assumes (out-of-band callbacks, concurrent batches, raw single
 connections, file upload, log observation), so those skills are listed as ``partial`` and
-cannot be bound. Discovering that mid-run, after the planner has committed to a procedure it
-cannot execute, is the failure this replaces.
+remain selectable for their useful executable parts. Missing executors are reported separately
+from permissions withheld by a run; neither turns an untested technique into a result.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ SKILL_LIBRARY_SCHEMA = "hunt-skill/v2"
 LIBRARY_DOCUMENT_FILES = frozenset({"README.md"})
 SUPPORT_LEVELS = frozenset({"supported", "partial", "reference"})
 # Only these may be bound to a run. The others are published for reading.
-BINDABLE_SUPPORT = frozenset({"supported"})
+BINDABLE_SUPPORT = frozenset({"supported", "partial"})
 MAX_SKILLS_PER_HUNT = 12
 MAX_CONTEXT_SKILL_SUGGESTIONS = 3
 _SUGGESTION_STOP_WORDS = frozenset({
@@ -40,8 +40,8 @@ _SUGGESTION_STOP_WORDS = frozenset({
     "investigate", "security", "target", "test", "testing", "the", "this", "web",
     "with",
 })
-# Budget dimensions a skill may lower. Deliberately a subset of the hunt budget: a skill
-# declares testing cost, not run topology.
+# Advisory methodology cost dimensions. These never resize the saved Hunt budget or
+# turn methodology selection into another execution limit.
 SKILL_BUDGET_DIMENSIONS = frozenset({
     "max_http_requests",
     "max_duration_seconds",
@@ -99,7 +99,18 @@ class HuntSkillSpec:
 
     @property
     def bindable(self) -> bool:
-        return self.support in BINDABLE_SUPPORT
+        return self.support in BINDABLE_SUPPORT and bool(self.capabilities)
+
+    @property
+    def applicable_target_kinds(self) -> frozenset[str]:
+        """Web methodology also applies to an observed interface on a network/device asset.
+
+        This is a knowledge selection rule, not a capability or scope rule. A read or bind
+        cannot create an HTTP service, change the asset kind, or grant a web-only executor.
+        """
+        if self.skill_id.startswith("skill.web.") and self.target_kinds & {"web", "api"}:
+            return self.target_kinds | {"network", "device"}
+        return self.target_kinds
 
     def catalog_entry(self) -> dict[str, Any]:
         """Small routing record suitable for listing the complete catalog."""
@@ -110,7 +121,7 @@ class HuntSkillSpec:
             "phase": self.phase,
             "support": self.support,
             "bindable": self.bindable,
-            "target_kinds": sorted(self.target_kinds),
+            "target_kinds": sorted(self.applicable_target_kinds),
             "methodology_url": f"/hunt/skills/{self.skill_id}",
         }
 
@@ -128,7 +139,7 @@ class HuntSkillSpec:
             "risk": self.risk,
             "support": self.support,
             "bindable": self.bindable,
-            "target_kinds": sorted(self.target_kinds),
+            "target_kinds": sorted(self.applicable_target_kinds),
             "capabilities": list(self.capabilities),
             "optional_capabilities": list(self.optional_capabilities),
             "missing_capabilities": list(self.missing_capabilities),
@@ -359,13 +370,13 @@ class HuntSkillLibrary:
         specs = tuple(self._by_id.values())
         if target_kind:
             kind = str(target_kind).strip().lower()
-            specs = tuple(item for item in specs if kind in item.target_kinds)
+            specs = tuple(item for item in specs if kind in item.applicable_target_kinds)
         if support:
             specs = tuple(item for item in specs if item.support == support)
         return tuple(sorted(specs, key=lambda item: item.skill_id))
 
     def bindable(self, *, target_kind: str | None = None) -> tuple[HuntSkillSpec, ...]:
-        return self.list(target_kind=target_kind, support="supported")
+        return tuple(spec for spec in self.list(target_kind=target_kind) if spec.bindable)
 
     @staticmethod
     def _routing_terms(value: str) -> frozenset[str]:
@@ -414,6 +425,13 @@ class HuntSkillLibrary:
             if allowed is not None and name not in allowed
         ))
 
+    def missing_executors(self, skill_id: str, *, target_kind: str) -> list[str]:
+        """Declared implementation gaps, including prerequisites; not missing permission."""
+        return list(dict.fromkeys(
+            name for spec in self.resolve_for_hunt([skill_id], target_kind=target_kind)
+            for name in spec.missing_capabilities
+        ))
+
     def suggest(
         self,
         *,
@@ -421,6 +439,7 @@ class HuntSkillLibrary:
         target_kind: str,
         allowed_capabilities: Iterable[str] | None = None,
         signals: Iterable[str] = (),
+        priority_signals: Iterable[str] = (),
         exclude: Iterable[str] = (),
         limit: int = MAX_CONTEXT_SKILL_SUGGESTIONS,
     ) -> tuple[dict[str, Any], ...]:
@@ -433,8 +452,20 @@ class HuntSkillLibrary:
         # Iterable callers may supply a generator. Snapshot it once so every suggestion
         # describes the same authority instead of consuming it on the first result.
         allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
+        signals = tuple(str(item) for item in signals)
+        priority_signals = tuple(str(item) for item in priority_signals)
+        surface_terms = set(re.findall(
+            r"[a-z0-9]+", (goal + " " + " ".join((*signals, *priority_signals))).lower(),
+        ))
+        web_surface_observed = bool(surface_terms & {
+            "http", "https", "web", "api", "graphql", "jwt", "oauth", "oidc", "saml",
+            "html", "javascript", "browser", "upload", "wordpress", "form", "login",
+            "xss", "csrf", "idor", "bola", "websocket", "sse", "grpc",
+        })
         goal_terms = self._routing_terms(goal)
-        signal_terms = self._routing_terms(" ".join(str(item) for item in signals))
+        signal_terms = self._routing_terms(" ".join(signals))
+        priority_terms = self._routing_terms(" ".join(str(item) for item in priority_signals))
+        signal_terms |= priority_terms
         query_terms = goal_terms | signal_terms
         excluded = {str(item) for item in exclude}
         ranked: list[
@@ -444,6 +475,11 @@ class HuntSkillLibrary:
             target_kind=target_kind, allowed_capabilities=allowed,
         ):
             if spec.skill_id in excluded:
+                continue
+            if (target_kind in {"device", "network"} and target_kind not in spec.target_kinds
+                    and not web_surface_observed):
+                # Do not invent a web surface from an asset label alone. Explicit reads/binds
+                # stay available when the operator is investigating such an interface.
                 continue
             routing_text = " ".join((
                 spec.skill_id, spec.name, spec.title, spec.description,
@@ -459,6 +495,7 @@ class HuntSkillLibrary:
                 len(query_terms & skill_terms)
                 + (3 * len(goal_terms & routing_terms))
                 + (5 * len(signal_terms & routing_terms))
+                + (12 * len(priority_terms & skill_terms))
             )
             ranked.append((score, spec, matched_goal, matched_signals))
 
@@ -467,6 +504,7 @@ class HuntSkillLibrary:
         if not selected:
             # A broad objective still benefits from an explicit baseline. Never silently bind it.
             baseline_order = (
+                "skill.network.service-protocol-and-device-investigation",
                 "skill.web.http-baselining-replay-and-differential-analysis",
                 "skill.web.stateful-crawling-content-and-parameter-discovery",
                 "skill.web.api-inventory-openapi-and-contract-testing",
@@ -484,16 +522,26 @@ class HuntSkillLibrary:
             unavailable = self.withheld_capabilities(
                 spec.skill_id, target_kind=target_kind, allowed_capabilities=allowed,
             )
+            missing = self.missing_executors(spec.skill_id, target_kind=target_kind)
             suggestions.append({
                 "skill_id": spec.skill_id,
                 "title": spec.title,
                 "reason": reason,
                 "methodology_url": f"/hunt/skills/{spec.skill_id}",
+                # The Hunt-scoped read is a precondition of bind and is a POST, not a
+                # GET on methodology_url. Advertise both the endpoint and the method so
+                # a planner does not have to discover the 405 (or the read-before-bind
+                # rejection) by trial.
+                "read_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/read",
+                "read_method": "POST",
                 "bind_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/bind",
+                "bind_method": "POST",
+                "bind_requires_read": True,
                 "auto_bound": False,
                 "execution": {
-                    "fully_executable": not unavailable,
-                    "unavailable_capabilities": list(unavailable),
+                    "fully_executable": not unavailable and not missing,
+                    "unavailable_capabilities": list(dict.fromkeys([*unavailable, *missing])),
+                    "missing_capabilities": missing,
                 },
             })
         return tuple(suggestions)
@@ -529,7 +577,7 @@ class HuntSkillLibrary:
                 raise HuntSkillError(
                     f"skill {skill_id} cannot be bound to a hunt ({detail})"
                 )
-            if str(target_kind).strip().lower() not in spec.target_kinds:
+            if str(target_kind).strip().lower() not in spec.applicable_target_kinds:
                 raise HuntSkillError(
                     f"skill {skill_id} does not support target kind {target_kind}"
                 )
@@ -545,7 +593,7 @@ class HuntSkillLibrary:
                 if any(item.skill_id == required for item in expanded):
                     continue
                 prerequisite = self.require(required)
-                if str(target_kind).strip().lower() not in prerequisite.target_kinds:
+                if str(target_kind).strip().lower() not in prerequisite.applicable_target_kinds:
                     raise HuntSkillError(
                         f"skill {spec.skill_id} requires {required}, which does not "
                         f"support target kind {target_kind}"
@@ -805,8 +853,9 @@ def skill_context_section(
             "instruction": (
                 "Do not read the whole catalog. Fetch one suggested methodology only when "
                 "its evidence trigger is relevant, then bind it explicitly if used. "
-                "Skip techniques needing a bound skill's withheld_capabilities, continue "
-                "compatible work, and report untested techniques as coverage gaps, never "
+                "Skip techniques needing a bound skill's withheld_capabilities or "
+                "missing_capabilities, continue compatible work, and report untested techniques "
+                "as coverage gaps, never "
                 "findings or clean results. Runtime checks still apply to every capability call."
             ),
         },
@@ -821,6 +870,10 @@ def skill_context_section(
                 "withheld_capabilities": resolved_library.withheld_capabilities(
                     spec.skill_id, target_kind=target_kind, allowed_capabilities=allowed,
                 ),
+                "missing_capabilities": resolved_library.missing_executors(
+                    spec.skill_id, target_kind=target_kind,
+                ),
+                "support": spec.support,
                 # False marks a prerequisite the server added, so the planner can tell what
                 # it chose from what it inherited.
                 "requested": spec.skill_id in chosen,

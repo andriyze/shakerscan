@@ -60,9 +60,9 @@ def test_support_level_matches_the_declared_gap(library):
             assert spec.missing_capabilities
 
 
-def test_only_supported_skills_are_bindable(library):
+def test_supported_and_useful_partial_skills_are_bindable(library):
     for spec in library.list():
-        assert spec.bindable is (spec.support == "supported")
+        assert spec.bindable is (spec.support in {"supported", "partial"} and bool(spec.capabilities))
 
 
 def test_no_skill_can_reach_shell_or_planner_supplied_argv(library):
@@ -111,7 +111,7 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     assert "description" not in suggestions[0]
     assert "capabilities" not in suggestions[0]
     assert set(suggestions[0]["execution"]) == {
-        "fully_executable", "unavailable_capabilities",
+        "fully_executable", "unavailable_capabilities", "missing_capabilities",
     }
 
 
@@ -172,10 +172,14 @@ def test_binding_methodology_preserves_the_run_authority_and_budget(library):
     assert "body_sha256" in bound.context_section["bound"][0]
 
 
-def test_a_partial_skill_cannot_be_bound_to_a_hunt(library):
-    partial = next(s for s in library.list(support="partial"))
-    with pytest.raises(HuntSkillError, match="cannot be bound"):
-        library.resolve_for_hunt([partial.skill_id], target_kind="web")
+def test_a_partial_skill_keeps_its_available_parts_and_declared_gaps(library):
+    partial = next(s for s in library.list(target_kind="web", support="partial") if s.capabilities)
+    bound = bind_skills_to_hunt([partial.skill_id], target_kind="web",
+                               allowed_capabilities=("http.request",), budget=None, library=library)
+    entry = next(row for row in bound.context_section["bound"] if row["skill_id"] == partial.skill_id)
+    assert entry["support"] == "partial"
+    assert set(partial.missing_capabilities) <= set(entry["missing_capabilities"])
+    assert bound.allowed_capabilities == ("http.request",)
 
 
 def test_a_reference_skill_cannot_be_bound_to_a_hunt(library):
@@ -208,7 +212,7 @@ def test_binding_more_skills_than_the_cap_is_refused(library):
 def test_a_skill_cannot_be_bound_to_the_wrong_target_kind(library):
     web_skill = library.bindable(target_kind="web")[0]
     with pytest.raises(HuntSkillError, match="does not support target kind"):
-        library.resolve_for_hunt([web_skill.skill_id], target_kind="device")
+        library.resolve_for_hunt([web_skill.skill_id], target_kind="model")
 
 
 def test_an_unknown_skill_is_refused(library):
@@ -319,7 +323,7 @@ def test_a_deferred_technique_must_say_what_it_needs():
 
 def test_a_skill_cannot_require_one_that_is_not_bindable():
     unbindable = _spec(
-        id="skill.web.gap", name="gap", support="partial",
+        id="skill.web.gap", name="gap", support="partial", capabilities=[],
         missing_capabilities=["oob.allocate"],
     )
     dependent = _spec(id="skill.web.dependent", requires_skills=["skill.web.gap"])

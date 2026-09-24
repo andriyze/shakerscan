@@ -173,6 +173,13 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "skill_id": _SKILL_RE.pattern,
         },
         "skill_catalog": "/hunt/skills",
+        "budget_amendments": {
+            "schema_version": "hunt-budget-amendment/v1",
+            "url_template": "/hunts/{hunt_id}/budget-amendments",
+            "operator_requested_only": True,
+            "limits_are_totals": True,
+            "preserves_usage_and_authority": True,
+        },
         "budget_profiles": {
             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
         },

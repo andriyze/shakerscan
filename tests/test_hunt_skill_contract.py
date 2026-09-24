@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import re
@@ -17,7 +18,20 @@ from hunt.start_contract import (  # noqa: E402
 )
 
 
+from hunt.run_router import apply_standing_authorization  # noqa: E402
+
+
 SKILL = ROOT / "skills" / "hunt" / "SKILL.md"
+
+
+async def _authorized_target(target_id):
+    assert target_id.startswith("registered-")
+    return {"approval_receipt_id": "approval-from-server", "scope_receipt_id": "scope-from-server"}
+
+
+def _public_contract(example):
+    payload = asyncio.run(apply_standing_authorization(example, _authorized_target))
+    return normalize_hunt_start_payload(payload)
 
 
 def _json_examples() -> list[dict]:
@@ -28,7 +42,7 @@ def _json_examples() -> list[dict]:
 
 
 def test_every_hunt_skill_json_example_satisfies_hunt_start_v2():
-    contracts = [normalize_hunt_start_payload(item) for item in _json_examples()]
+    contracts = [_public_contract(item) for item in _json_examples()]
     assert {contract.target_kind for contract in contracts} == {
         "web", "api", "network", "device",
     }
@@ -68,3 +82,34 @@ def test_skill_does_not_claim_the_server_infers_authority_fields():
     ):
         assert required in source
 
+
+
+def test_public_examples_use_defaults_and_server_resolved_authorization():
+    for example in _json_examples():
+        assert example["budgets"] == {}
+        assert "approval_receipt_id" not in example["policy"]
+        contract = _public_contract(example)
+        if example["policy"]["active_testing"]:
+            assert contract.policy.approval_receipt_id == "approval-from-server"
+            assert contract.policy.authorization_confirmed is True
+            assert contract.resolved_budget["max_active_actions"] > 0
+        else:
+            assert contract.policy.approval_receipt_id is None
+            assert contract.resolved_budget["max_active_actions"] == 0
+            assert contract.resolved_budget["max_state_changing_requests"] == 0
+
+
+def test_active_examples_without_authorization_are_not_silently_admitted():
+    for example in _json_examples():
+        if example["policy"]["active_testing"]:
+            payload = asyncio.run(apply_standing_authorization(example, None))
+            with pytest.raises(HuntStartContractError):
+                normalize_hunt_start_payload(payload)
+
+
+def test_hunt_guidance_distinguishes_consent_from_repeated_prompts_and_submission():
+    source = SKILL.read_text()
+    assert "Without standing authorization, obtain explicit target-specific operator authorization" in source
+    assert "record it once" in source
+    assert "submission-only request" in source and "end-to-end Hunt" in source
+    assert "report its ID and stop. Do not poll" not in source

@@ -1,0 +1,99 @@
+'use client'
+
+import { useRef, useState } from 'react'
+import { HUNT_BUDGET_DIMENSIONS } from '@/lib/huntContract.generated'
+import { amendHuntBudget, getHuntV2, resumeHuntV2, type HuntV2 } from '@/lib/huntV2'
+import { Button, Card, Field, Select } from '@/components/ui'
+
+/** An explicit operator edit, never an automatic retry that expands the budget. */
+export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; onChanged: (value: HuntV2) => void }) {
+  const [dimension, setDimension] = useState('max_http_requests')
+  const [total, setTotal] = useState('')
+  const [resume, setResume] = useState(true)
+  const [busyAction, setBusyAction] = useState<'extend' | 'refresh' | 'resume' | null>(null)
+  const busy = busyAction !== null
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const attempt = useRef<{ signature: string; key: string } | null>(null)
+  const canExtend = ['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at
+  const options = HUNT_BUDGET_DIMENSIONS.filter((item) => (hunt.budget_amendable_dimensions || []).includes(item.name))
+  const current = hunt.budget[dimension] ?? 0
+  const parsed = Number(total)
+  const valid = /^\d+$/.test(total) && Number.isSafeInteger(parsed) && parsed > current
+    && options.some((item) => item.name === dimension)
+
+  async function extend() {
+    if (!canExtend || !valid || busy) return
+    const revision = hunt.budget_revision ?? 0
+    const resumeRequested = hunt.status === 'budget_exhausted' && resume
+    const signature = JSON.stringify([hunt.hunt_id, revision, dimension, parsed, resumeRequested])
+    const key = attempt.current?.signature === signature ? attempt.current.key : crypto.randomUUID()
+    attempt.current = { signature, key }
+    setBusyAction('extend')
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await amendHuntBudget(hunt.hunt_id, {
+        limits: { [dimension]: parsed }, expected_revision: revision,
+        idempotency_key: key, operator_confirmed: true, resume: resumeRequested,
+        reason: 'Operator extended a total limit in the Hunt UI',
+      })
+      // Retain the same retry key until the update and refreshed state are both received.
+      const refreshed = await getHuntV2(hunt.hunt_id)
+      onChanged(refreshed)
+      attempt.current = null
+      setTotal('')
+      setMessage(result.device_traffic_frozen
+        ? 'Budget updated. The device traffic pause remains in effect.'
+        : result.status === 'budget_exhausted'
+          ? 'Budget updated. Resume this Hunt when you are ready.'
+        : 'Budget updated. Your agent can continue this same Hunt; no action was started automatically.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not extend Hunt budget')
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  if (!canExtend || options.length === 0) return null
+  return (
+    <Card role="region" aria-label="Hunt budget extension" className="space-y-3 p-5">
+      <h2 className="font-medium text-white">Extend this Hunt&apos;s budget</h2>
+      <p className="text-xs text-gray-400">Set a new total limit, not an additional allowance. Existing usage, identities and permissions stay in place.</p>
+      <p className="text-xs text-gray-500">Budget revision {hunt.budget_revision ?? 0}. Per-action limits, device pacing and health pauses still apply.</p>
+      <Field label="Budget dimension">
+        <Select aria-label="Budget dimension" value={dimension} disabled={busy} onChange={(event) => { setDimension(event.target.value); setTotal(''); setError(null) }}>
+          {options.map((item) => <option key={item.name} value={item.name}>{item.label}</option>)}
+        </Select>
+      </Field>
+      <Field label={`New total (current limit: ${current.toLocaleString()})`}>
+        <input aria-label="New total budget" type="number" min={current + 1} step="1" value={total} disabled={busy}
+          onChange={(event) => setTotal(event.target.value)}
+          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white" />
+      </Field>
+      {hunt.status === 'budget_exhausted' && (
+        <label className="flex items-start gap-2 text-xs text-gray-300">
+          <input type="checkbox" checked={resume} disabled={busy} onChange={(event) => setResume(event.target.checked)} />
+          Allow my agent to resume this exhausted Hunt after the exhausted limit is increased.
+        </label>
+      )}
+      {error && <p role="alert" className="text-xs text-red-300">{error} Refresh the Hunt if another operator changed its budget.</p>}
+      {message && <p role="status" aria-label="Budget result" className="text-xs text-emerald-300">{message}</p>}
+      {error && <Button variant="secondary" loading={busyAction === 'refresh'} disabled={busy} onClick={async () => {
+        setBusyAction('refresh'); setMessage(null)
+        try { onChanged(await getHuntV2(hunt.hunt_id)); setError(null); attempt.current = null }
+        catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not refresh Hunt') }
+        finally { setBusyAction(null) }
+      }}>Refresh budget</Button>}
+      {hunt.status === 'budget_exhausted' && (hunt.budget_revision ?? 0) > 0 && (
+        <Button variant="secondary" loading={busyAction === 'resume'} disabled={busy} onClick={async () => {
+          setBusyAction('resume'); setError(null); setMessage(null)
+          try { onChanged(await resumeHuntV2(hunt.hunt_id)); setMessage('Hunt resumed. Your agent can continue with the existing limits.') }
+          catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not resume Hunt') }
+          finally { setBusyAction(null) }
+        }}>Resume with current budget</Button>
+      )}
+      <Button onClick={extend} loading={busyAction === 'extend'} disabled={!valid || busy}>Extend budget</Button>
+    </Card>
+  )
+}

@@ -1,82 +1,38 @@
----
-id: core.evidence-validation
-title: "Core 04 \u2014 Evidence Validation and Finding Promotion"
-version: 2.0.0
-kind: core_policy
-applies_to: all_skills
----
+# Hunt evidence and verification
 
-# Core 04 — Evidence Validation and Finding Promotion
+Observations, hypotheses, evidence-backed candidates and verified findings are different things.
+A successful capability or a completed methodology is not automatically a vulnerability finding.
+Only the server's applicable deterministic proof contract marks a result verified.
 
-## Purpose
+## Evidence for a hypothesis
 
-Separate observations, hypotheses, validation, confirmed findings, attack paths, and reports. Prevent scanner alerts, reflections, errors, or model guesses from being presented as vulnerabilities.
+Record the real source action/evidence references, actual service origin, selected principal,
+object ownership, timestamp and observed outcome. Preserve the changed variable, stable baseline,
+negative controls and repetition when needed. A matching version/banner, one response-length
+difference or one slow response is not sufficient proof.
 
-## Hypothesis lifecycle
+Keep partial observations from interrupted actions when they are useful. Never describe the
+interrupted test as completed, or missing evidence as a negative finding. Normalize summaries
+without discarding provenance; keep secret values out of planner-visible notes and output.
 
-```text
-candidate -> eligible -> planned -> executed -> observed
-observed -> rejected | inconclusive | validation_required
-validation_required -> false_positive | confirmed
-confirmed -> reported -> regression_created -> retested
-```
+## Request verification, do not manufacture it
 
-Transitions are append-only events. The current state is derived from the event history.
+Use `POST /hunts/{hunt_id}/candidates` for evidence-linked leads and the live family-specific
+verification path for proof. `candidate.verify` is not a universal verifier. SQL, XSS and
+principal-differential operations have their own supported contracts and limitations.
 
-## Evidence hierarchy
+The desired proof below is a validation strategy, not a promise that the runtime implements it:
+interleaved timing controls, authenticated identity comparisons, browser execution, independently
+observed state or correlated callbacks must come from actual supported evidence sources. A
+methodology mentioning server logs or OOB events does not create an executor for collecting them.
 
-From weakest to strongest:
+## Interpret and report
 
-1. Static indicator or version/banner match.
-2. Single tool alert or response anomaly.
-3. Reproducible differential against a stable baseline.
-4. Independent confirmation with a negative control.
-5. Authoritative state, identity, ownership, callback, browser-execution, or server-log proof.
-6. Demonstrated bounded attack-path edge.
+Separate reproduced impact from plausible-but-untested consequences. Group findings only when
+the failing control and remediation actually match; keep different principal and asset boundaries.
+Every demonstrated attack-chain edge needs retained evidence; speculative edges stay labelled.
+Missing or withheld techniques are coverage gaps, not findings or proof of safety.
 
-Each skill declares its minimum promotion gate and required evidence extension.
-
-## Finding promotion
-
-A candidate may become `confirmed` only when:
-
-- Scope and approval decisions are valid for every evidence-producing action.
-- Raw request/response or equivalent primary artifacts exist.
-- The baseline is stable and relevant to the same identity and state.
-- The changed variable is explicit.
-- Skill-specific positive conditions are met.
-- Required negative controls and confirmation runs pass.
-- False-positive controls are addressed.
-- Demonstrated impact is separated from likely or untested consequences.
-- The evidence validator, not the probing skill, records the promotion event.
-
-## Evidence records
-
-Evidence is immutable and content-addressed. Redactions create derived artifacts without deleting the protected original. Each record binds engagement, policy revision, target, identity, test plan, action, tool version, timestamps, hashes, and storage references.
-
-## Timing evidence
-
-Timing claims require interleaved controls, enough samples for the declared noise level, a minimal delay, and a repeatable distribution shift. One slow request is not confirmation.
-
-## Out-of-band evidence
-
-OOB events require a unique token, allocation record, exact probe correlation, protocol, timestamp, observed source metadata, and expiry. Reused or ambiguous callbacks are inconclusive.
-
-## Severity
-
-Severity must be based on demonstrated preconditions and impact in the authorized environment. Do not copy scanner severity. Record confidence separately from severity.
-
-## Root-cause deduplication
-
-Cluster findings only when they share the same failing control and remediation. Keep distinct authorization boundaries, parsers, trust zones, or deployment components separate even if the symptom looks similar.
-
-## Attack paths
-
-Every edge in an attack path must reference a confirmed finding or an explicitly modeled non-vulnerability capability. Speculative edges are labeled and excluded from demonstrated impact.
-
-## Schemas
-
-- `../schemas/hypothesis.schema.json`
-- `../schemas/evidence-record.schema.json`
-- `../schemas/execution-result.schema.json`
-- `../schemas/finding.schema.json`
+An old verified finding is useful prior knowledge, not a reason to refuse an explicit retest.
+Changed builds, locators, principals or a larger chain can justify fresh evidence. Preserve the
+historical result and record the new observation rather than silently rewriting history.

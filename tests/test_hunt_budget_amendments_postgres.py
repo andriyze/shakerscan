@@ -1,0 +1,132 @@
+"""Budget amendment transaction, replay and ownership acceptance in real PostgreSQL."""
+
+import asyncio
+import json
+import os
+from pathlib import Path
+import re
+from urllib.parse import urlsplit
+import uuid
+
+import pytest
+from fastapi import HTTPException
+
+from api.hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
+from api.hunt.run_service import HuntRunService
+from api.hunt.start_contract import HuntBudget
+from api.runtime.budgets import reserve_budget_snapshot, reconcile_budget_snapshot
+from tests.test_hunt_budget_amendments import run_row, request
+
+
+DSN = os.environ.get("HUNT_TEST_POSTGRES_DSN")
+pytestmark = pytest.mark.skipif(not DSN, reason="disposable PostgreSQL DSN not configured")
+
+
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+@pytest.mark.asyncio
+async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(kind):
+    import asyncpg
+    assert urlsplit(DSN).hostname in {"localhost", "127.0.0.1", "::1", "postgres"}
+    schema = "hunt_budget_" + uuid.uuid4().hex
+    conn = await asyncpg.connect(DSN)
+    pool = None
+    try:
+        await conn.execute(f'CREATE SCHEMA "{schema}"; SET search_path TO "{schema}"')
+        await conn.execute("CREATE TABLE targets(id UUID PRIMARY KEY); CREATE TABLE device_targets(id UUID PRIMARY KEY)")
+        ddl = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+        hunt_ddl = re.search(r"CREATE TABLE hunt_runs \(.*?\n\);", ddl, re.S)[0]
+        # Exercise upgrading an existing pre-amendment table, then idempotent startup.
+        await conn.execute(hunt_ddl.replace("    budget_revision INTEGER NOT NULL DEFAULT 0,\n", ""))
+        await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
+        await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
+        run = run_row(kind)
+        target = run["target_id"]
+        await conn.execute(f"INSERT INTO {'device_targets' if kind == 'device' else 'targets'} VALUES($1)", target)
+        await conn.execute(
+            "INSERT INTO hunt_runs(id,target_kind,target_id,device_target_id,status,stop_reason,budget_json,budget_used_json,policy_json,context_pack) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)",
+            run["id"], kind, target if kind != "device" else None, target if kind == "device" else None,
+            run["status"], run["stop_reason"], json.dumps(run["budget_json"]), json.dumps(run["budget_used_json"]),
+            json.dumps(run["policy_json"]), json.dumps(run["context_pack"]),
+        )
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
+        service = HuntRunService(lambda: pool)
+        hunt_id = str(run["id"])
+        # Hold the same lock used by worker settlement while a budget change arrives.
+        # The amendment must read the committed usage, not overwrite a stale snapshot.
+        async with conn.transaction():
+            await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"])
+            pending = asyncio.create_task(service.amend_budget(hunt_id, request(resume=False)))
+            await asyncio.sleep(0.05)
+            assert not pending.done(), "amendment must serialize on the existing Hunt row lock"
+            held = {**run["budget_used_json"], "http_requests": 100}
+            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2::jsonb WHERE id=$1", run["id"], json.dumps(held))
+        result = await asyncio.wait_for(pending, timeout=5)
+        assert result["budget_used"] == held and result["amendment"]["used_snapshot"] == held
+        assert result["status"] == "budget_exhausted" and result["budget"]["max_tcp_ports"] == 65_535
+        resumed = await service.resume(hunt_id)
+        assert resumed["status"] == "active" and resumed["budget_revision"] == 1
+        assert resumed["budget_used"] == held
+        # Settle a previously admitted hold after the extension using the existing ledger math.
+        async with conn.transaction():
+            latest = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"]))
+            consumed = json.loads(latest["budget_used_json"])
+            settled = reconcile_budget_snapshot(consumed, {"http_requests": 50}, {"http_requests": 10})
+            limits = HuntBudget(**json.loads(latest["budget_json"])).ledger_limits()
+            charged = reserve_budget_snapshot(limits, settled, {"tcp_ports_attempted": 55_535})
+            await conn.execute("UPDATE hunt_runs SET budget_used_json=$2::jsonb WHERE id=$1", run["id"], json.dumps(charged))
+        assert charged["tcp_ports_attempted"] == 65_535 and charged["http_requests"] == 60
+        await pool.close()
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
+        restarted = HuntRunService(lambda: pool)
+        repeated = await restarted.amend_budget(hunt_id, request(resume=False))
+        assert repeated["replayed"] and repeated["amendment"] == result["amendment"]
+        assert repeated["budget_used"] == charged
+        # Two operators use the same observed revision; only one may win.
+        concurrent = await asyncio.gather(*[
+            restarted.amend_budget(hunt_id, request(expected_revision=1, idempotency_key=f"operator-{n}",
+                                                   limits={"max_tcp_ports": 70_000 + n}))
+            for n in range(2)
+        ], return_exceptions=True)
+        assert sum(isinstance(value, HTTPException) and value.status_code == 409 for value in concurrent) == 1
+        assert await conn.fetchval("SELECT count(*) FROM hunt_budget_amendments") == 2
+        persisted = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1", run["id"]))
+        assert json.loads(persisted["policy_json"]) == {**run["policy_json"], "budget": json.loads(persisted["budget_json"])}
+        assert json.loads(persisted["context_pack"])["hunt_start_contract"] == run["context_pack"]["hunt_start_contract"]
+        history = await restarted.budget_amendments(hunt_id, limit=1)
+        assert history["has_more"] and history["next_revision"] == 1
+        # An exhausted Hunt remains cancellable; the actual service must cascade to its
+        # child jobs and never return their still-live reservations to the available budget.
+        await conn.execute("""CREATE TABLE scans (
+            id UUID PRIMARY KEY, run_kind TEXT, status TEXT, error_message TEXT,
+            completed_at TIMESTAMPTZ, progress INTEGER, current_phase TEXT,
+            options JSONB, parent_scan_id UUID);
+            CREATE TABLE hunt_cancellable_jobs (
+            hunt_id UUID, job_id TEXT, signal_state TEXT, cancel_requested_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ);
+        """)
+        child = uuid.uuid4()
+        await conn.execute(
+            "INSERT INTO scans(id,run_kind,status,options) VALUES($1,'device_probe','running',$2::jsonb)",
+            child, json.dumps({"hunt_dispatch": {"hunt_id": hunt_id}}),
+        )
+        await conn.execute("UPDATE hunt_runs SET status='budget_exhausted' WHERE id=$1", run["id"])
+        cancelled = await restarted.cancel(hunt_id)
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["cancelled_scan_ids"] == [str(child)]
+        assert cancelled["budget_used"] == charged
+        assert await conn.fetchval("SELECT status FROM scans WHERE id=$1", child) == "cancelling"
+        # Cancellation wins over a later replay and over any new extension.
+        assert (await restarted.amend_budget(hunt_id, request(resume=False)))["status"] == "cancelled"
+        with pytest.raises(HTTPException, match="unfinished"):
+            await restarted.amend_budget(hunt_id, request(expected_revision=2, idempotency_key="after-cancel", limits={"max_tcp_ports": 80_000}))
+        with pytest.raises(HTTPException) as missing:
+            await restarted.budget_amendments(str(uuid.uuid4()))
+        assert missing.value.status_code == 404
+        await conn.execute(f"DELETE FROM {'device_targets' if kind == 'device' else 'targets'} WHERE id=$1", target)
+        assert await conn.fetchval("SELECT count(*) FROM hunt_budget_amendments") == 0
+    finally:
+        if pool is not None:
+            await pool.close()
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.close()

@@ -356,6 +356,7 @@ async def list_findings(
     ai_target_id: Optional[str] = None,
     device_target_id: Optional[str] = None,
     scan_id: Optional[str] = None,
+    hunt_id: Optional[str] = None,
     root_domain: Optional[str] = None,
     verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
     verification_mode: Optional[str] = Query(None, pattern="^(deterministic|ai_driven)$"),
@@ -388,7 +389,7 @@ async def list_findings(
     # full, unfiltered result set with no indication the filter did nothing.
     allowed_params = {
         "severity", "status", "source_type", "target_id", "ai_target_id", "device_target_id",
-        "scan_id", "root_domain", "verification_verdict", "verification_mode",
+        "scan_id", "hunt_id", "root_domain", "verification_verdict", "verification_mode",
         "verified_only", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
@@ -468,6 +469,18 @@ async def list_findings(
         if scan_id:
             query += f" AND f.scan_id = ${param_idx}"
             params.append(uuid.UUID(scan_id))
+            param_idx += 1
+
+        if hunt_id:
+            # A Hunt-created finding stores its originating run in findings.hunt_run_id.
+            # Expose it under the caller-facing ``hunt_id`` name so "what did this Hunt
+            # produce?" is answerable, symmetric with scan_id.
+            try:
+                hunt_uuid = uuid.UUID(str(hunt_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="hunt_id must be a UUID")
+            query += f" AND f.hunt_run_id = ${param_idx}"
+            params.append(hunt_uuid)
             param_idx += 1
 
         if root_domain:

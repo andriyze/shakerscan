@@ -98,6 +98,15 @@ jobs:
           python3 tests/e2e/run_e2e.py --area all \
             --scorecard artifacts/e2e-scorecard.json
 
+      - name: Require executed trust-anchor lifecycle passes
+        run: |
+          python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \
+            --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+            --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+            --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+            --require-pass 'model_intake:MI-6C deactivated durable anchor stops verification' \
+            > artifacts/e2e-actual-assertions.json
+
       # The E2E gate proves the stack works end to end; it does not measure how much
       # the scanner actually finds. `expected_recall` -- how many of Juice Shop's known
       # vulnerability classes the engine reaches -- was produced only by whoever

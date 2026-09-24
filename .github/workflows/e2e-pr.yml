@@ -130,11 +130,16 @@ jobs:
       - name: Report actual assertions and validate E2E completeness
         if: ${{ always() && steps.changes.outputs.backend == 'true' }}
         run: |
+          mkdir -p artifacts
           python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \
             --require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt \
             --require-check 'dast:D-2 retains request-based SQLi result' \
             --require-check 'dast:D-3 retains request-based XSS result' \
             --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
+            --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+            --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+            --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+            --require-pass 'model_intake:MI-6C deactivated durable anchor stops verification' \
             > artifacts/e2e-actual-assertions.json
 
       - name: Resolve the built images and the active vulnerability waivers

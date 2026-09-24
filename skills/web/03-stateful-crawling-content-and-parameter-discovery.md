@@ -4,7 +4,7 @@ name: stateful-crawling-content-and-parameter-discovery
 title: 03. Stateful Crawling, Content, and Parameter Discovery
 description: Discover routes, forms, methods, parameters, files, and state transitions through browser-assisted
   crawling and context-aware content discovery.
-version: 2.1.0
+version: 2.2.0
 kind: discovery
 phase: discovery
 risk: low_to_medium
@@ -69,7 +69,8 @@ what can execute. This methodology never changes scope, approvals, or budgets.
 ## Start from evidence
 
 Query known endpoints, graph nodes/edges, scans, and open candidates first. Page using
-`next_cursor`; prioritize untested or stale surfaces and avoid re-proving settled findings.
+`next_cursor`; prioritize untested or stale surfaces. Revisit prior findings when the operator requests a retest,
+when the deployment/principal changed, or when investigating a larger chain.
 Use `web.crawl` for broad inventory and `browser.navigate` for a specific page or SPA fragment.
 
 ## Explore browser state

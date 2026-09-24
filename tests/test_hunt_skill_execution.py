@@ -40,6 +40,7 @@ def test_execution_metadata_matches_the_supplied_authority(library, authority):
     assert suggestion["execution"] == {
         "fully_executable": not missing,
         "unavailable_capabilities": missing,
+        "missing_capabilities": [],
     }
     assert "methodology" not in suggestion
     assert "capabilities" not in suggestion
@@ -73,4 +74,5 @@ def test_prerequisite_gaps_are_reported_without_hiding_the_methodology(library):
     assert suggestion["execution"] == {
         "fully_executable": False,
         "unavailable_capabilities": missing,
+        "missing_capabilities": [],
     }

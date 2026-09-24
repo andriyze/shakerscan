@@ -126,6 +126,7 @@ class NseCheckAdapter:
             {"approved_addresses": list(addresses), "ports": list(ports), "scripts": list(scripts),
              "http_target": target.canonical_dict(), "allow_state_changing_http": policy.allow_state_changing_http,
              "http_accounting": "request_header_attempts", "http_transport": "frozen_address_bridge",
+             "redirect_policy": "same_frozen_asset_anonymous",
              "device_non_http_accounting": "estimated_allowance"},
             self.parser_version,
         )

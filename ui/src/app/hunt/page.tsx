@@ -42,6 +42,7 @@ import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
+import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
 import { usableWebTargets } from '@/lib/targetChoices'
 
 type TargetChoice = {
@@ -818,7 +819,7 @@ function HuntContent() {
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Budget</span>
-                  <span className="text-white">{hunt.budget_profile}</span>
+                  <span className="text-white">{hunt.budget_profile}{(hunt.budget_revision ?? 0) > 0 ? ' (amended)' : ''}</span>
                 </div>
                 <div className="rounded bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Capability calls</span>
@@ -886,13 +887,15 @@ function HuntContent() {
                 <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
                 The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
               </div>
-              {['active', 'awaiting_planner'].includes(hunt.status) && (
+              {['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at && (
                 <Button variant="danger" onClick={cancel}>Cancel session</Button>
               )}
               <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
                 Back to launcher and history
               </Link>
             </Card>
+
+            <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
 
             <Card className="space-y-4 p-5">
               <div>

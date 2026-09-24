@@ -51,6 +51,10 @@ class SBOMError(ValueError):
     """Invalid or incomplete release evidence; publication must stop."""
 
 
+class SBOMCommandError(SBOMError):
+    """An external retrieval command failed; never an integrity-validation error."""
+
+
 def require(condition: object, message: str) -> None:
     if not condition:
         raise SBOMError(message)
@@ -115,16 +119,32 @@ def validate_spdx(document: dict) -> None:
     require(any(r.get("spdxElementId") == "SPDXRef-DOCUMENT" and r.get("relationshipType") == "DESCRIBES" for r in relationships), "SPDX document does not describe a subject")
 
 
-def run_json(args: list[str]) -> dict:
+def run_json(args: list[str], *, expected_digest: str | None = None) -> dict:
+    if expected_digest is not None:
+        require(DIGEST.fullmatch(expected_digest), "invalid expected manifest digest")
     for attempt in range(3):
         try:
             result = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            if expected_digest is not None:
+                require("sha256:" + sha256(result.stdout) == expected_digest,
+                        "retrieved manifest content does not match its pinned digest")
             value = json.loads(result.stdout)
             require(isinstance(value, dict), "tool returned no JSON object")
             return value
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             if attempt == 2:
-                raise SBOMError(f"command failed after three attempts: {' '.join(args[:4])}") from None
+                # Classify only; raw registry stderr may contain signed URLs or credentials.
+                detail = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "command error"
+                raw = getattr(exc, "stderr", None) or b""
+                text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                if isinstance(exc, subprocess.CalledProcessError):
+                    if re.search(r"(?i)\b(?:401|403|unauthorized|insufficient_scope)\b|pull access denied", text):
+                        detail = "registry authentication/access rejected"
+                    elif re.search(r"(?i)\b429\b|toomanyrequests|too many requests", text):
+                        detail = "registry rate limit"
+                    elif re.search(r"(?i)\b404\b|manifest unknown|manifest_unknown", text):
+                        detail = "registry manifest unavailable"
+                raise SBOMCommandError(f"command failed after three attempts: {' '.join(args[:4])} ({detail})") from None
             time.sleep(2 ** attempt)
     raise AssertionError("unreachable")
 

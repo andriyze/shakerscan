@@ -11,6 +11,11 @@ import uuid
 
 from fastapi import HTTPException
 
+from .budget_amendments import (
+    HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment, read_amendments,
+    require_resume_headroom,
+)
+
 from .skills import (
     MAX_CONTEXT_SKILL_SUGGESTIONS,
     MAX_SKILLS_PER_HUNT,
@@ -77,6 +82,7 @@ HUNT_SKILL_USAGE_STATES = frozenset({"used", "completed", "deferred"})
 _SKILL_SIGNAL_KEYS = frozenset({
     "auth", "authentication", "content_type", "endpoint", "endpoints", "framework",
     "frameworks", "protocol", "protocols", "route", "routes", "service", "services",
+    "service_name", "product", "tunnel",
     "stack", "tags", "technologies", "technology",
 })
 
@@ -141,7 +147,12 @@ def _skill_signal_values(context: Mapping[str, Any]) -> tuple[str, ...]:
         if isinstance(node, Mapping):
             for raw_key, child in node.items():
                 name = str(raw_key).strip().lower()
-                if name in _SKILL_SIGNAL_KEYS:
+                if name in {"skills", "capabilities", "policy", "budget"}:
+                    continue  # Suggestions and schemas are not observed target evidence.
+                if name in {"web_origin", "service_origin"} and isinstance(child, str):
+                    if child.startswith(("http://", "https://")) and "http" not in values:
+                        values.append("http")  # A surface signal, not a raw target URL.
+                elif name in _SKILL_SIGNAL_KEYS:
                     visit(child, key=name, depth=depth + 1)
                 elif isinstance(child, (Mapping, list, tuple)):
                     visit(child, key=name, depth=depth + 1)
@@ -498,6 +509,9 @@ def public_hunt_run(
         "budget_profile": item.get("budget_profile"),
         "policy": policy,
         "budget": _decode_json(item.get("budget_json"), {}),
+        "budget_revision": int(item.get("budget_revision") or 0),
+        "budget_amendable_dimensions": amendable_dimensions({**item, "policy_json": policy}),
+        "budget_amendments_url": f"/hunts/{item.get('id')}/budget-amendments",
         "budget_used": _decode_json(item.get("budget_used_json"), {}),
         "final_debrief": _decode_json(item.get("final_debrief"), {}),
         "created_at": item.get("created_at"),
@@ -594,6 +608,18 @@ class HuntRunService:
         ]
         return result
 
+    async def amend_budget(self, hunt_id: str, request: HuntBudgetAmendmentRequest) -> dict[str, Any]:
+        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                return await apply_budget_amendment(connection, hunt_uuid, request)
+
+    async def budget_amendments(self, hunt_id: str, *, after_revision: int = 0, limit: int = 50) -> dict[str, Any]:
+        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+        async with self._pool().acquire() as connection:
+            await hunt_run_or_404(connection, hunt_id)
+            return await read_amendments(connection, hunt_uuid, after_revision=after_revision, limit=limit)
+
     async def skill_suggestions(
         self, hunt_id: str, *, signals: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -604,11 +630,14 @@ class HuntRunService:
         context = _decode_json(item.get("context_pack"), {})
         policy = _decode_json(item.get("policy_json"), {})
         allowed = [str(name) for name in policy.get("allowed_capabilities") or []]
-        bounded_signals = list(_skill_signal_values(context))
-        for signal in signals or []:
+        # The caller's newest evidence must not be silently discarded behind 40 old labels.
+        bounded_signals: list[str] = []
+        seen_signals: set[str] = set()
+        for signal in [*(signals or []), *_skill_signal_values(context)]:
             text = _bounded_text(signal, maximum=160)
-            if text and text not in bounded_signals and len(bounded_signals) < 40:
+            if text and text.casefold() not in seen_signals and len(bounded_signals) < 40:
                 bounded_signals.append(text)
+                seen_signals.add(text.casefold())
         requested = _requested_skill_ids(context)
         specs = skill_library().resolve_for_hunt(
             requested, target_kind=str(item.get("target_kind") or "web"),
@@ -616,6 +645,7 @@ class HuntRunService:
         suggestions = skill_library().suggest(
             goal=str(item.get("objective") or ""),
             signals=bounded_signals,
+            priority_signals=tuple(_bounded_text(signal, maximum=160) for signal in (signals or [])[:20]),
             target_kind=str(item.get("target_kind") or "web"),
             allowed_capabilities=allowed,
             exclude=(spec.skill_id for spec in specs),
@@ -655,7 +685,7 @@ class HuntRunService:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
-                if str(row["target_kind"]) not in spec.target_kinds:
+                if str(row["target_kind"]) not in spec.applicable_target_kinds:
                     raise HTTPException(
                         status_code=422,
                         detail="Methodology does not support this Hunt target kind",
@@ -913,6 +943,11 @@ class HuntRunService:
         hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
         async with self._pool().acquire() as connection:
             row = await hunt_run_or_404(connection, hunt_id)
+            budget_history = (
+                await read_amendments(connection, hunt_uuid, limit=MAX_EXPORT_ROWS)
+                if int(dict(row).get("budget_revision") or 0) else
+                {"amendments": [], "has_more": False, "next_revision": None}
+            )
             actions = await connection.fetch(
                 """SELECT id, capability_name, status, input_summary,
                           result_summary, receipt_id, started_at, completed_at
@@ -951,7 +986,7 @@ class HuntRunService:
                 "includes": [
                     "objective", "bound_skills", "policy", "budgets",
                     "planner_capability_inputs", "action_outcomes", "receipt_references",
-                    "persisted_notes", "final_debrief", "http_transactions",
+                    "persisted_notes", "final_debrief", "http_transactions", "budget_amendments",
                 ],
                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],
                 "detail": (
@@ -963,6 +998,7 @@ class HuntRunService:
                 "residual_secret_risk": True,
             },
             "hunt": run,
+            "budget_amendments": budget_history,
             "decision_trace": [public_hunt_action_trace(action) for action in actions],
             "methodology_trace": [
                 public_hunt_skill_event(event) for event in skill_events
@@ -1133,7 +1169,8 @@ class HuntRunService:
             row = await connection.fetchrow(
                 """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
                           completed_at=NOW(), updated_at=NOW()
-                   WHERE id=$1 AND status IN ('created','active','awaiting_planner')
+                   WHERE id=$1 AND status IN ('created','active','awaiting_planner','budget_exhausted')
+                     AND completed_at IS NULL
                    RETURNING *""",
                 run_uuid,
             )
@@ -1221,20 +1258,21 @@ class HuntRunService:
 
     async def resume(self, hunt_id: str) -> dict[str, Any]:
         async with self._pool().acquire() as connection:
-            row = await connection.fetchrow(
-                """UPDATE hunt_runs SET status='active', stop_reason=NULL,
-                          updated_at=NOW()
-                   WHERE id=$1 AND status='awaiting_planner' RETURNING *""",
-                _uuid_or_400(hunt_id, "hunt id"),
-            )
-            if not row:
-                row = await hunt_run_or_404(connection, hunt_id)
+            async with connection.transaction():
+                row = await hunt_run_or_404(connection, hunt_id, for_update=True)
+                if row.get("completed_at") is not None or row["status"] not in {
+                    "active", "awaiting_planner", "budget_exhausted",
+                }:
+                    raise HTTPException(409, detail=f"Hunt is {row['status']} and cannot resume")
+                if row["status"] == "budget_exhausted":
+                    require_resume_headroom(dict(row))
                 if row["status"] != "active":
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Hunt is {row['status']} and cannot resume",
+                    row = await connection.fetchrow(
+                        "UPDATE hunt_runs SET status='active',stop_reason=NULL,updated_at=NOW() "
+                        "WHERE id=$1 RETURNING *", _uuid_or_400(hunt_id, "hunt id"),
                     )
         return public_hunt_run(row)
+
 
 
 __all__ = [

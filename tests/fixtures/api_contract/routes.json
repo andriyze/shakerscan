@@ -1500,6 +1500,20 @@
     "name": "skip_authorization_investigation"
   },
   {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_budget_amendments"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "methods": [
+      "POST"
+    ],
+    "name": "amend_hunt_budget"
+  },
+  {
     "path": "/hunts/{hunt_id}/cancel",
     "methods": [
       "POST"

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
+from .budget_amendments import HuntBudgetAmendmentRequest
 from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
@@ -418,6 +419,19 @@ async def cancel_hunt(hunt_id: str):
 @router.post("/hunts/{hunt_id}/resume")
 async def resume_hunt(hunt_id: str):
     return await _service().resume(hunt_id)
+
+
+@router.post("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
+async def amend_hunt_budget(hunt_id: str, request: HuntBudgetAmendmentRequest):
+    """Apply explicit operator-selected total limits, without granting permissions."""
+    return await _service().amend_budget(hunt_id, request)
+
+
+@router.get("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
+async def get_hunt_budget_amendments(
+    hunt_id: str, after_revision: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+):
+    return await _service().budget_amendments(hunt_id, after_revision=after_revision, limit=limit)
 
 
 __all__ = [

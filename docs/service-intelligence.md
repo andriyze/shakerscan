@@ -54,6 +54,12 @@ CVE descriptions and references are untrusted evidence data, not planner instruc
   origins/backends remain target-scoped. Existing Exposure endpoint relationships are also fixed to
   use owning target plus exact origin/path instead of root domain/path.
 - Read-only Hunt query projection, service-ID filtering and snapshot/target-bound pagination cursors.
+- Hunt observations from settled `ports.discover`, `service.fingerprint`, `web.probe`,
+  `http.request` and `collections.replay_safe` receipts now feed the same projection as Scan
+  evidence. The existing reservation store persists those content-hashed receipts atomically with
+  action settlement. Reads validate owner, action, receipt, budget, frozen addresses and service
+  host before normalizing; they never trust Redis replies, planner notes or result summaries.
+  The source Hunt and action remain linked in evidence/history and the UI.
 
 ## Deliberate execution boundaries
 
@@ -89,12 +95,19 @@ candidates. Limits and source failures remain visible. Device history reflects i
 service inventory, not a newly materialized all-time service-history database. Missing older entries
 or an incomplete scan never resolve a finding or establish clean posture.
 
-Historical **Hunt-only network outputs** are not yet backfilled into the Scan observation store. Hunt
-can read the shared target/service knowledge and launch existing capabilities, but Hunt-produced
-service observations still need a canonical durable ingestion path so a later Scan or Hunt sees the
-same history without replaying discovery. Raw banners, response bodies, credential
-values and private manifest storage paths are not returned. Application origins strip paths, query
-strings and fragments and reject embedded credentials.
+Hunt history covers up to 12 recent supported, settled receipts per target, with a 2 MiB /
+2,000-observation read budget per receipt. Partial, failed and cancelled actions can retain
+positive service evidence without being reported as completed tests. Retries reference the same
+canonical action; reads do not create another ledger or duplicate observations. Existing owner /
+receipt deletion and retention remove that source from the projection. Device locator changes
+remain historical; changed web locators do not silently rebind old Hunt observations. HTTP
+fingerprints without a recorded backend address remain explicitly unattributed to an IP.
+
+Older Hunt output without a matching canonical durable receipt is not imported or treated as
+verified history. This is a bounded shared read model over persisted evidence, not an unlimited
+materialized service-history database. No all-time backfill or new Scan planning behavior is
+implied. Raw banners, response bodies, credential values and private manifest paths are not returned.
+Application origins strip paths, query strings and fragments and reject embedded credentials.
 
 ## API
 
@@ -120,13 +133,14 @@ Run the focused suite:
 
 ```sh
 python -m pytest -q tests/test_service_intelligence.py tests/test_service_intelligence_routes.py \
-  tests/test_service_intelligence_postgres.py
+  tests/test_service_intelligence_postgres.py tests/test_hunt_service_sources.py \
+  tests/test_hunt_service_sources_postgres.py
 npm --prefix ui run test:unit
 # With the UI running and Chromium installed:
 cd ui && npx playwright test tests/browser/service-intelligence.spec.ts
 ```
 
-Current gaps are intentionally explicit: durable cross-Scan/Hunt service-history ingestion; reviewed
+Current gaps are intentionally explicit: all-time service-history materialization and legacy backfill; reviewed
 CVE-specific verifier bindings and result feedback; live/offline-refresh KEV and EPSS provenance;
 additional protocol adapters; separately governed credential assessment; and evidence-backed
 consequential attack paths. These are product gaps, not promises implied by a populated service table

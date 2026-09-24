@@ -96,11 +96,13 @@ server contracts, or `./scanner.sh help` before declaring an operation unavailab
 - Use current server contracts instead of client-side copies of families or ceilings.
 - Preserve unrelated worktree changes and use non-destructive repository operations.
 
-### Submission terminal condition
+### Submission-only requests and end-to-end investigations
 
-After submitting any Scan, device scan, AI Gate run, Model Intake scan, discovery run, or queued ASM
-action, report its ID and browser-facing UI link, then stop. Do **not** poll or wait unless the user
-explicitly asks to monitor or check later. Jobs may take minutes or hours.
+For a submission-only Scan, device, AI Gate, Model Intake, discovery, or ASM request, report the ID
+and UI link, then stop. An explicit end-to-end Hunt is different: use bounded status checks for its
+queued child actions, collect evidence, and continue toward the objective without requesting a new
+command at every queue boundary. Respect cancellation and deadlines; checkpoint incomplete work if
+the planner session cannot continue. Never claim that queued work has completed.
 
 For batches, report `queued_count`, `failed_count`, and per-target errors. Never claim the requested
 count was queued; `status: partial` means only some submissions succeeded.
@@ -266,9 +268,15 @@ must not be mistaken for the same access-control baseline. A failed identity com
 inconclusive, not a reason to abandon other authorized Hunt work. Service reuse does not grant
 another asset's authority, waive traffic budgets, or turn a successful request into proof.
 
+`service.nse_check` has a deliberate anonymous-discovery exception: its HTTP analyses may follow
+same-frozen-asset redirects across ports/schemes under the existing active/network authorization.
+Every hop is pinned and metered; this bridge never loads credentials or changes the Hunt's selected
+origins. The exception does not apply to credentialed HTTP/session replay or to another asset.
+
 ### Progressive methodologies
 
-The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.
+Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
+the library. Native protocol messages remain unavailable unless a live executor supports them.
 Do not preload them all or spend the context window on an index dump.
 
 1. Start with no methodology.
@@ -278,10 +286,11 @@ Do not preload them all or spend the context window on an index dump.
 5. Bind only when used and record usage/completion/deferral.
 
 These are descriptive context controls. They never grant, remove, narrow, widen, or resize scope,
-capabilities, policy, approval, or budget. Binding keeps supported methodologies available even
+capabilities, policy, approval, or budget. Binding keeps supported and useful partial methodologies available even
 when this Hunt cannot execute every technique. Each bound skill reports `withheld_capabilities`
-for required capabilities, including prerequisites, outside the saved Hunt capability set. Skip
-techniques needing those capabilities, continue compatible work, and report the omissions as
+for required capabilities outside the saved Hunt capability set and `missing_capabilities` for
+declared executor gaps, including prerequisites. Skip those techniques, continue compatible work,
+and report the omissions as
 coverage gaps, never findings or clean results. An empty list is not proof that a technique ran;
 credentials, scope, approvals, budgets, and runtime checks still apply to each action. Do not claim
 a passive methodology fences an otherwise broader run.
@@ -294,8 +303,13 @@ existing evidence. Artifact/JavaScript inspection uses bounded capabilities, not
 Count attempted, admitted/executed, successful, rejected, and indeterminate actions separately. A
 missing/malformed result is not success. Report settled actual usage separately from ceilings.
 
-Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Cancellation
-is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
+Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Before
+finalizing, an operator may explicitly extend the same unfinished Hunt through
+`/hunts/{id}/budget-amendments`: read the current revision, set new total limits, and reuse the same
+idempotency key on retries. Never increase limits automatically. `resume` allows the planner to
+continue only when the reported exhausted dimension has headroom; it does not execute traffic,
+clear device pauses, change permissions, or reset usage. The admission snapshot remains historical.
+Cancellation is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
 decision record and debrief, never hidden chain-of-thought. Requests-only export stays separate.
 
 ## Product boundaries

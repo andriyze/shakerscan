@@ -3,6 +3,9 @@
 Only the worker constructs this transport, from its revalidated prepared command.
 The NSE process can select a saved port and script, not an address or credential.
 Same-asset service redirects reuse the admitted network authority and frozen IP.
+This anonymous discovery bridge is an explicit exception to credentialed HTTP's
+selected-origin redirect rule: it never loads sessions, accepts credential headers,
+changes the Hunt binding, or admits another host/address. Every hop is metered.
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ class NseHttpTransport:
         self.limits = http_envelope(scripts, len(ports), allow_write=allow_write)
         self.actual = {key: 0 for key in self.limits}
         self.errors: list[str] = []
+        self.coverage_gaps: list[dict[str, Any]] = []
         self.exchanges: list[dict[str, Any]] = []
         self.services: dict[int, str | None] = {}
         self.lock = asyncio.Lock()
@@ -80,12 +84,22 @@ class NseHttpTransport:
             self.errors.append(code)
         return {"error": code, "header": {}, "rawheader": [], "body_base64": ""}
 
+    def _skip_optional_method(self, *, port: int, script: str, method: str) -> dict[str, Any]:
+        # A technique the operator did not request is not a transport/script error.
+        # Keep the upstream bridge's no-response shape, but retain the reason separately.
+        gap = {"script_id": script, "port": port, "method": method,
+               "status": "not_requested", "reason": "nse_optional_method_not_authorized"}
+        if gap not in self.coverage_gaps:
+            self.coverage_gaps.append(gap)
+        return {"error": gap["reason"], "skipped": True, "header": {},
+                "rawheader": [], "body_base64": ""}
+
     async def _send(self, url: str, method: str, *, port: int, script: str, phase: str) -> dict[str, Any]:
         if self.closed or self.cancelled():
             raise asyncio.CancelledError
         changing = method not in READ_METHODS
         if changing and not self.allow_write:
-            return self._error("nse_optional_method_not_authorized")
+            return self._skip_optional_method(port=port, script=script, method=method)
         attempt = {"script_id": script, "requested_port": port, "method": method,
                    "url": redact_url(url), "phase": phase, "http_requests": 0,
                    "state_changing_requests": 0, "address": self.target.allowed_addresses[0]}
@@ -167,6 +181,10 @@ class NseHttpTransport:
                 or not isinstance(method, str) or not re.fullmatch(r"[A-Z]{3,12}", method)):
             return self._error("nse_invalid_bridge_request")
         async with self.lock:
+            if self.closed or self.cancelled():
+                raise asyncio.CancelledError
+            if method not in READ_METHODS and not self.allow_write:
+                return self._skip_optional_method(port=port, script=script, method=method)
             base = await self.service(port, script)
             if base is None:
                 return self._error("nse_http_service_unavailable")

@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 178,
+  "component_schema_count": 179,
   "component_schema_sha256": {
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
@@ -85,6 +85,7 @@
     "FleetNodeJoinRequest": "44d4c55086f9ec1ee5b0c771d8b6ce39b7f7af890cf8f148eb074b7e9cae9da0",
     "FleetScaleRequest": "78e53605ce3941f5f47a4246ccf758ce51f46bb4a1803fa9db036f563caafafe",
     "HTTPValidationError": "7373c21f1389312367e27e440140ba11d587693c56d8aa27249b36d3f58c10c6",
+    "HuntBudgetAmendmentRequest": "e370fa6d5eff780ab95d6f0c41842f27deb7cb7447cd7a177899e0dcc0f9c070",
     "HuntCandidateRequest": "7a890f858641b412dd5b74a13342c278a09b816d10c4980b8225c58994231972",
     "HuntCandidateUpdateRequest": "d8bf357f06e099fa5b57be30706a1bc654509f14c1c01f3281f9e22a86ab8568",
     "HuntCandidateVerifyRequest": "112cf562326c66072257c087dc2226b394ac6b7379296d3c3e5ad125a59847aa",
@@ -184,9 +185,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e6635041a8399b41ef78550ae0347ddbd7d358df1619bc17e86d7eccbe0d3daa",
+  "contract_sha256": "fc77528e7991e00c25109f396132de0162f4b399cf69566b451eb86aad910da0",
   "openapi": "3.1.0",
-  "operation_count": 417,
+  "operation_count": 419,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1587,7 +1588,7 @@
     "GET /findings": {
       "deprecated": false,
       "operation_id": "list_findings_findings_get",
-      "parameters_sha256": "8e91c0c1a45fb6eb37bc0a723e6693718acfab4ebc276f4a4584a0368c31c22c",
+      "parameters_sha256": "764f7609a41545380f7611078e877e973764f173058e58ae5d2f195d3d8abbcd",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -1801,6 +1802,21 @@
       "deprecated": false,
       "operation_id": "authorization_reproduction_hunts__hunt_id__authorization_investigations__proposal_id__reproduction_get",
       "parameters_sha256": "0131713ab8c447c9772da310f80ff3c0e9c59f93e6222963c987e0c5639a5811",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
+    "GET /hunts/{hunt_id}/budget-amendments": {
+      "deprecated": false,
+      "operation_id": "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get",
+      "parameters_sha256": "8691a2939af17ed0714e5100735bc08cf44937617bbbb2b6151cbf36de9479e6",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -4463,6 +4479,21 @@
         "Hunt"
       ]
     },
+    "POST /hunts/{hunt_id}/budget-amendments": {
+      "deprecated": false,
+      "operation_id": "amend_hunt_budget_hunts__hunt_id__budget_amendments_post",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": "64b307b7c7364a6acbc4b331d289fa3836655f2cde4fc6fdd93110aa1907b70c",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "Hunt"
+      ]
+    },
     "POST /hunts/{hunt_id}/cancel": {
       "deprecated": false,
       "operation_id": "cancel_hunt_hunts__hunt_id__cancel_post",
@@ -5714,6 +5745,7 @@
       "GET /hunts/{hunt_id}",
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}",
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
+      "GET /hunts/{hunt_id}/budget-amendments",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
@@ -5721,6 +5753,7 @@
       "POST /hunts/{hunt_id}/authorization-investigations",
       "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve",
       "POST /hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
+      "POST /hunts/{hunt_id}/budget-amendments",
       "POST /hunts/{hunt_id}/cancel",
       "POST /hunts/{hunt_id}/candidates",
       "POST /hunts/{hunt_id}/candidates/{candidate_id}/verify",

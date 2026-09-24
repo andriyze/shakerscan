@@ -145,6 +145,7 @@ class NetworkExecutionAdapter:
         status = "failed"
         process_failed = False
         nse_http_actual = {"http_requests": 0, "state_changing_requests": 0}
+        coverage_gaps: list[dict[str, Any]] = []
 
         for command in prepared.commands:
             if cancelled():
@@ -184,6 +185,8 @@ class NetworkExecutionAdapter:
                 )
             parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
             parsed_observations = parsed.observations
+            if prepared.capability_name == "service.nse_check":
+                coverage_gaps.extend(dict(gap) for gap in parsed.metadata.get("coverage_gaps", ()))
             bridge = getattr(streamed, "nse_http", None)
             if bridge is not None:
                 from .nse_http_runtime import decorate_observations
@@ -191,6 +194,7 @@ class NetworkExecutionAdapter:
                 for key in nse_http_actual:
                     nse_http_actual[key] += bridge.actual[key]
                 errors.extend(bridge.errors)
+                coverage_gaps.extend(dict(gap) for gap in bridge.coverage_gaps)
                 partial = partial or bool(bridge.errors)
             observations.extend(dict(row) for row in parsed_observations)
             errors.extend(str(item) for item in parsed.errors)
@@ -255,7 +259,10 @@ class NetworkExecutionAdapter:
             timed_out=timed_out,
             execution_started=attempted_commands > 0,
             parser_version=prepared.parser_version,
-            redacted_execution=dict(prepared.redacted_execution),
+            redacted_execution={
+                **dict(prepared.redacted_execution),
+                **({"coverage_gaps": coverage_gaps} if coverage_gaps else {}),
+            },
         )
 
 

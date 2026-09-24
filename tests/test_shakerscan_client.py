@@ -649,3 +649,35 @@ def test_doctor_fails_when_the_health_probe_fails_even_if_the_catalogue_answers(
     assert "engine:   ShakerScan API is unavailable: <health probe failed>" in out
     assert "mcp:      1 tools" in out
     assert code != 0, "a failed health probe must not exit zero"
+
+
+@pytest.mark.parametrize("authenticated", [False, True])
+def test_reconnected_workspace_retires_old_claude_note(tmp_path, authenticated):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_note = "# Connected ShakerScan instance\nhttps://old.example\n@AGENTS.md\n"
+    (workspace / "CLAUDE.md").write_text(old_note)
+    cli.prepare_workspace(workspace, "https://new.example", "operator", "shakerscan",
+                          authenticated=authenticated)
+    assert not (workspace / "CLAUDE.md").exists()
+    guide = (workspace / "AGENTS.md").read_text()
+    assert "https://new.example" in guide and "https://old.example" not in guide
+    backup, = workspace.glob(".shakerscan-retired-CLAUDE-*.bak")
+    assert backup.read_text() == old_note
+    cli.prepare_workspace(workspace, "https://new.example", "operator", "shakerscan",
+                          authenticated=authenticated)
+    assert len(list(workspace.glob(".shakerscan-retired-CLAUDE-*.bak"))) == 1
+
+
+def test_workspace_legacy_symlink_is_moved_without_touching_target(tmp_path):
+    outside = tmp_path / "operator.md"
+    outside.write_text("private operator guide")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").symlink_to(outside)
+    cli.prepare_workspace(workspace, "http://new.example:8080", "operator", "shakerscan",
+                          authenticated=False)
+    assert not (workspace / "CLAUDE.md").is_symlink()
+    assert outside.read_text() == "private operator guide"
+    backup, = workspace.glob(".shakerscan-retired-CLAUDE-*.bak")
+    assert backup.is_symlink()

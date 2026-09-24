@@ -141,8 +141,11 @@ def test_native_read_only_method_check_preserves_results_instead_of_refusing():
     async def run():
         async with http_fixture(lambda *_: (200, {}, b"")) as (port, wire):
             result, _ = await execute(port, ("http-methods",), allow_write=False)
-            assert result.status == "partial"
-            assert "nse_optional_method_not_authorized" in result.errors
+            assert result.status == "success" and not result.partial
+            assert result.errors == ()
+            gaps = result.redacted_execution["coverage_gaps"]
+            assert gaps and all(gap["status"] == "not_requested" for gap in gaps)
+            assert all(gap["reason"] == "nse_optional_method_not_authorized" for gap in gaps)
             assert all(m in {"GET", "HEAD", "OPTIONS"} for m,_,_ in wire)
             assert result.actual_budget["http_requests"] == len(wire) > 0
             assert result.actual_budget.get("state_changing_requests", 0) == 0

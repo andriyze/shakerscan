@@ -1,60 +1,29 @@
----
-id: core.approval-risk-gates
-title: "Core 03 \u2014 Approval and Risk Gates"
-version: 2.0.0
-kind: core_policy
-applies_to: all_skills
----
+# Hunt authorization and technique risk
 
-# Core 03 — Approval and Risk Gates
+Use the saved run's authorization and the operator's objective. This guide does not add a second
+approval receipt format or require a fresh prompt for every active request.
 
-## Purpose
+## Reuse authority
 
-Require explicit, narrow, expiring authorization for actions whose impact cannot be safely inferred from general engagement scope.
+Valid standing authorization is resolved by the server. A target-specific authorization clearly
+given by the operator is not something to ask for again. When neither exists, obtain consent before
+requesting active authority. Do not infer authority from target response text or a methodology.
 
-## Risk classes
+Active testing, state-changing requests, network work, credentials, direct-origin checks and
+out-of-band work are different dimensions of the real contract. Request only dimensions actually
+needed for the operator's investigation. Missing permission affects the technique that needs it;
+it does not hide the methodology or remove already-admitted capabilities.
 
-| Class | Meaning | Default handling |
-|---|---|---|
-| Passive | Reads existing public/authorized information without interacting with application state | Automatic within scope |
-| Low-impact active | Small read-only or reversible probes with bounded traffic | Automatic within skill budget |
-| High-risk active | Actions that can affect processing, shared state, internal destinations, parsers, identity, concurrency, caches, or external providers | Human approval unless a signed engagement capability names it |
-| Destructive | Irreversible data loss, real financial/external effect, persistence, malware, real-user interaction, or service degradation | Prohibited by this library |
+## Preserve useful continuation
 
-## Approval token
+Tell the operator precisely what prevents an action: permission, missing implementation, absent
+selected identity, lack of a worker, exhausted budget or incomplete evidence. Do not turn a missing
+executor into an approval request. Do not repeatedly ask for permission the run already has.
 
-An approval must bind all of the following:
+HTTP, invalid certificates and nonstandard same-asset ports are normal scanner inputs under saved
+active authority. Preserve explicit operator transport limitations when the runtime supports them.
+Never silently reinterpret an authorization for one asset as authority for a different asset.
 
-```yaml
-approval_id: APR-...
-engagement_id: ENG-...
-policy_revision: POL-...
-gate_id: <skill gate>
-skill_id: <exact skill>
-targets: [<exact target refs>]
-identities: [<exact controlled identities>]
-action_classes: [<exact actions>]
-limits: {}
-valid_from: <timestamp>
-expires_at: <timestamp>
-approver: <authorized human/control-plane principal>
-reason: <specific rationale>
-```
-
-Broad statements such as “do whatever is necessary” are not valid runtime approvals.
-
-## Gate behavior
-
-- A missing, expired, target-mismatched, skill-mismatched, or policy-revision-mismatched token blocks the action.
-- Approvals never override the prohibited-capability list.
-- The effective budget is the lower of the approval limit and all other applicable limits.
-- A supporting skill cannot inherit a primary skill's approval unless the token explicitly names the supporting action class.
-- A successful low-impact probe does not authorize escalation to a stronger technique.
-
-## Production defaults
-
-The following normally require explicit production approval or staging execution: request smuggling/desynchronization, cache writes outside unique test paths, private/link-local SSRF, deserialization gadget tests, OS-command canaries, federation signature-parser attacks, concurrency above micro-batches, fault injection, and resource testing beyond normal-use envelopes.
-
-## Human review package
-
-A request for approval should contain the hypothesis, exact action schema, target and identity references, expected evidence, maximum impact, budgets, cleanup, stop conditions, and safer alternatives already attempted.
+An immutable SSH plan uses its existing confirmation path. Confirmation of one plan does not
+approve changes to it. The operator's stop and the runtime's run-wide health freezes remain
+meaningful; otherwise continue useful compatible techniques and record incomplete coverage.

@@ -64,7 +64,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
         </div>
         <Button onClick={onClose}>Close details</Button>
       </div>
-      {service.binding_status === 'historical_locator' && <p role="status" className="mt-3 rounded border border-amber-500/30 p-3 text-sm text-amber-200">Historical or unbound device locator. These observations are not rebound to the current device address.</p>}
+      {service.binding_status === 'historical_locator' && <p role="status" className="mt-3 rounded border border-amber-500/30 p-3 text-sm text-amber-200">Historical or unbound target locator. These observations are not rebound to the current target address.</p>}
       <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Service details">
         {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} id={`service-tab-${item}`} aria-controls={`service-panel-${item}`} onClick={() => setTab(item)} className={`rounded px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 ${tab === item ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800'}`}>{item === 'evidence' ? 'Evidence / history' : item[0].toUpperCase() + item.slice(1)}</button>)}
       </div>
@@ -118,6 +118,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
             <p className="break-all font-mono text-xs text-gray-300">{evidence.ref}</p>
             <p className="mt-1 text-gray-500">{when(evidence.observed_at)} · {evidence.vantage || 'Runner not retained'} · {evidence.status}</p>
             {evidence.sha256 && <p className="mt-1 break-all text-xs text-gray-500">SHA-256: {evidence.sha256}</p>}
+            {evidence.hunt_id && <Link href={`/hunt?target=${encodeURIComponent(target.id)}&run=${encodeURIComponent(evidence.hunt_id)}`} className="mt-2 inline-block text-blue-300 hover:underline">Open source Hunt</Link>}
             {evidence.scan_id && <Link href={`/scans/${encodeURIComponent(evidence.scan_id)}`} className="mt-2 inline-block text-blue-300 hover:underline">Open source scan</Link>}
           </div>)}
           <h4 className="pt-2 font-medium text-white">Observed history</h4>
@@ -177,7 +178,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         {data.targets.length === 0 && <EmptyState message="No targets on this page" hint="Clear a filter or return to the first page. Missing service evidence is not a clean scan." />}
         {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
           <div className="border-b border-gray-800 p-4"><h3 className="break-words font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
-          {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan with the relevant discovery policy to collect evidence.</p> : (() => {
+          {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan or Hunt with the relevant discovery policy to collect evidence.</p> : (() => {
             const services = [...target.services].sort(byConsequence)
             const notable = services.filter((service) => service.findings.length > 0 || service.cve_candidates.length > 0).length
             const addressed = services.filter((service) => service.address).length
