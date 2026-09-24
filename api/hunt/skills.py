@@ -414,6 +414,9 @@ class HuntSkillLibrary:
         observations collected later in the run. They influence ranking only: they cannot bind
         a skill, grant a capability, or modify scope.
         """
+        # Iterable callers may supply a generator. Snapshot it once so every suggestion
+        # describes the same authority instead of consuming it on the first result.
+        allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
         goal_terms = self._routing_terms(goal)
         signal_terms = self._routing_terms(" ".join(str(item) for item in signals))
         query_terms = goal_terms | signal_terms
@@ -422,7 +425,7 @@ class HuntSkillLibrary:
             tuple[int, HuntSkillSpec, tuple[str, ...], tuple[str, ...]]
         ] = []
         for spec in self.available_for_hunt(
-            target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+            target_kind=target_kind, allowed_capabilities=allowed,
         ):
             if spec.skill_id in excluded:
                 continue
@@ -462,7 +465,6 @@ class HuntSkillLibrary:
                 reason = "Objective matches: " + ", ".join(matched_goal[:4])
             else:
                 reason = "Baseline methodology for initial surface discovery"
-            allowed = set(allowed_capabilities) if allowed_capabilities is not None else None
             required = tuple(dict.fromkeys(
                 name for item in self.resolve_for_hunt([spec.skill_id], target_kind=target_kind)
                 for name in item.capabilities

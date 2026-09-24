@@ -105,8 +105,6 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     )
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
     assert suggestions[0]["auto_bound"] is False
-    assert suggestions[0]["execution"]["fully_executable"] is False
-    assert suggestions[0]["execution"]["unavailable_capabilities"]
     assert suggestions[0]["reason"].startswith("Objective matches:")
     assert suggestions[0]["execution"]["fully_executable"] is True
     assert suggestions[0]["execution"]["unavailable_capabilities"] == []
@@ -125,6 +123,8 @@ def test_suggestions_do_not_hide_methodology_when_authority_is_narrow(library):
     )
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
     assert suggestions[0]["auto_bound"] is False
+    assert suggestions[0]["execution"]["fully_executable"] is False
+    assert suggestions[0]["execution"]["unavailable_capabilities"]
 
 
 def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
