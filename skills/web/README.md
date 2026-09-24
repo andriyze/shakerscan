@@ -4,10 +4,12 @@ Testing methodology a Hunt can bind, served by `GET /hunt/skills` and delivered 
 the run's context pack.
 
 A skill is methodology plus a declaration of the capabilities it needs. It is **not** an execution
-path, an authority, or a safety fence. Binding validates that every required capability already
-survived policy filtering; otherwise it is rejected. It does not grant, remove, narrow, widen, or
-resize the Hunt's capabilities, policy, approval, scope, or budget. `api/hunt/contracts.py` remains
-the sole authority on what may run.
+path, an authority, or a safety fence. Binding retains supported methodology even when some
+required capabilities are absent from the Hunt's saved capability set. Each bound skill reports
+`withheld_capabilities`, including prerequisite requirements. Skip techniques that need them,
+continue compatible work, and report untested techniques as coverage gaps, never findings or clean
+results. Binding does not grant, remove, narrow, widen, or resize capabilities, policy, approval,
+scope, or budget. Individual actions still pass through the runtime's execution checks.
 
 ## Provenance
 

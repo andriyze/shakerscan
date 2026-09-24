@@ -1,9 +1,9 @@
 """The Hunt skill library: methodology the planner reads, bound to real capabilities.
 
 A skill is testing methodology plus a declaration of which capabilities it needs. It is not
-a new execution path, a second registry, or an authority. Binding validates that the Hunt's
-existing authority can execute the methodology, but does not grant, remove, or resize that
-authority. ``api/hunt/contracts.py`` remains the sole authority on what a run may call.
+a new execution path, a second registry, or an authority. Binding reports which required
+capabilities the Hunt withholds, including prerequisites, without rejecting useful methodology
+or granting, removing, or resizing authority. Runtime policy still controls every capability call.
 
 Skills are published with an honest support level. ShakerScan has no capability for several
 adapters the upstream library assumes (out-of-band callbacks, concurrent batches, raw single
@@ -398,6 +398,22 @@ class HuntSkillLibrary:
             compatible.append(spec)
         return tuple(compatible)
 
+    def withheld_capabilities(
+        self, skill_id: str, *, target_kind: str,
+        allowed_capabilities: Iterable[str] | None,
+    ) -> list[str]:
+        """Required capabilities absent from a known envelope, including prerequisites.
+
+        None is an unfiltered catalog view, not an authority grant. Runtime callers supply
+        the Hunt's saved capability set; an explicitly empty set withholds every requirement.
+        """
+        allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
+        specs = self.resolve_for_hunt([skill_id], target_kind=target_kind)
+        return list(dict.fromkeys(
+            name for spec in specs for name in spec.capabilities
+            if allowed is not None and name not in allowed
+        ))
+
     def suggest(
         self,
         *,
@@ -465,13 +481,8 @@ class HuntSkillLibrary:
                 reason = "Objective matches: " + ", ".join(matched_goal[:4])
             else:
                 reason = "Baseline methodology for initial surface discovery"
-            required = tuple(dict.fromkeys(
-                name for item in self.resolve_for_hunt([spec.skill_id], target_kind=target_kind)
-                for name in item.capabilities
-            ))
-            unavailable = (
-                tuple(name for name in required if name not in allowed)
-                if allowed is not None else ()
+            unavailable = self.withheld_capabilities(
+                spec.skill_id, target_kind=target_kind, allowed_capabilities=allowed,
             )
             suggestions.append({
                 "skill_id": spec.skill_id,
@@ -689,11 +700,12 @@ def bind_skills_to_hunt(
 ) -> BoundSkills:
     """Resolve methodology against an already-decided authority envelope.
 
-    Binding is descriptive and auditable. It verifies that every required capability is already
-    allowed, but preserves the Hunt capability manifest and budget exactly. Methodology must not
-    become a second authority system or turn a later adaptive choice into a privilege change.
+    Binding is descriptive and auditable. Required capabilities outside the saved envelope are
+    reported per skill, while the Hunt capability manifest and budget are preserved exactly.
+    Missing requirements are coverage gaps, not a reason to reject the whole methodology.
     """
     resolved_library = library or skill_library()
+    skill_ids = tuple(skill_ids)
     specs = resolved_library.resolve_for_hunt(
         skill_ids, target_kind=target_kind,
     )
@@ -752,13 +764,15 @@ def skill_context_section(
     target_kind: str = "web",
     allowed_capabilities: Iterable[str] | None = None,
     goal: str = "",
+    signals: Iterable[str] = (),
 ) -> dict[str, Any]:
     """The planner-facing skill block written into a run's context pack."""
     resolved_library = library or skill_library()
     resolved_specs = tuple(specs)
     chosen = {str(item) for item in requested}
+    allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
     available = resolved_library.available_for_hunt(
-        target_kind=target_kind, allowed_capabilities=allowed_capabilities,
+        target_kind=target_kind, allowed_capabilities=allowed,
     )
     suggested = [
         {
@@ -768,8 +782,8 @@ def skill_context_section(
             ),
         }
         for item in resolved_library.suggest(
-            goal=goal, target_kind=target_kind,
-            allowed_capabilities=allowed_capabilities,
+            goal=goal, target_kind=target_kind, signals=signals,
+            allowed_capabilities=allowed,
             exclude=(spec.skill_id for spec in resolved_specs),
         )
     ]
@@ -790,7 +804,10 @@ def skill_context_section(
             "maximum": MAX_SKILLS_PER_HUNT,
             "instruction": (
                 "Do not read the whole catalog. Fetch one suggested methodology only when "
-                "its evidence trigger is relevant, then bind it explicitly if used."
+                "its evidence trigger is relevant, then bind it explicitly if used. "
+                "Skip techniques needing a bound skill's withheld_capabilities, continue "
+                "compatible work, and report untested techniques as coverage gaps, never "
+                "findings or clean results. Runtime checks still apply to every capability call."
             ),
         },
         "suggested": suggested,
@@ -801,6 +818,9 @@ def skill_context_section(
                 "version": spec.version,
                 "body_sha256": spec.body_sha256,
                 "phase": spec.phase,
+                "withheld_capabilities": resolved_library.withheld_capabilities(
+                    spec.skill_id, target_kind=target_kind, allowed_capabilities=allowed,
+                ),
                 # False marks a prerequisite the server added, so the planner can tell what
                 # it chose from what it inherited.
                 "requested": spec.skill_id in chosen,

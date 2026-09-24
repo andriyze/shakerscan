@@ -70,8 +70,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   advisory entries and loads no methodology body.
 - If one suggestion is relevant, load exactly that one with
   `POST /hunts/{hunt_id}/skills/{skill_id}/read`, review its prerequisites, then bind it with
-  `/bind`. Never read the whole catalog. Binding validates existing authority; it cannot add or
-  remove capabilities, change scope, or resize the Hunt budget.
+  `/bind`. Never read the whole catalog. Binding reports `withheld_capabilities` per bound skill,
+  including prerequisite requirements; it cannot add or remove capabilities, change scope, or
+  resize the Hunt budget. Skip techniques needing withheld capabilities and continue compatible
+  work. Report those untested techniques as coverage gaps, not findings or clean results. An empty
+  list is not execution proof and does not bypass the remaining runtime checks.
 - Do not describe binding as narrowing, sandboxing, or fencing the Hunt. To reduce authority, start
   a new Hunt with a smaller policy/capability contract; methodology binding cannot do that.
 - Record evidenced methodology use or completion at
@@ -84,9 +87,10 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   sink signals, and decoded JWT claims. Use `artifact.inspect` only for one necessary redacted
   byte window. Neither capability returns discovered token values, and neither justifies using a
   discovered credential.
-- If a useful methodology needs authority the user did not grant, keep it unbound or ask for that
-  authority; never enable active, network, credential, direct-origin, state-changing, or OOB
-  permission merely to satisfy a methodology.
+- If a technique needs authority the user did not grant, skip that technique while using the
+  methodology's compatible parts. Ask for additional authority only when needed for the objective;
+  never enable active, network, credential, direct-origin, state-changing, or OOB permission merely
+  to satisfy a methodology.
 
 - Query context with `POST /hunts/{hunt_id}/query` before sending new traffic.
   Follow `next_cursor` with the same kind and filters while `has_more` is true; the page limit
