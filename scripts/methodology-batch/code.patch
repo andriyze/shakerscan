@@ -1,0 +1,127 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 68d4395..5e98f1c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -275,7 +275,8 @@ origins. The exception does not apply to credentialed HTTP/session replay or to
+ 
+ ### Progressive methodologies
+ 
+-The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.
++Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
++the library. Native protocol messages remain unavailable unless a live executor supports them.
+ Do not preload them all or spend the context window on an index dump.
+ 
+ 1. Start with no methodology.
+diff --git a/api/hunt/skills.py b/api/hunt/skills.py
+index 9167920..d3b4236 100644
+--- a/api/hunt/skills.py
++++ b/api/hunt/skills.py
+@@ -40,8 +40,8 @@ _SUGGESTION_STOP_WORDS = frozenset({
+     "investigate", "security", "target", "test", "testing", "the", "this", "web",
+     "with",
+ })
+-# Budget dimensions a skill may lower. Deliberately a subset of the hunt budget: a skill
+-# declares testing cost, not run topology.
++# Advisory methodology cost dimensions. These never resize the saved Hunt budget or
++# turn methodology selection into another execution limit.
+ SKILL_BUDGET_DIMENSIONS = frozenset({
+     "max_http_requests",
+     "max_duration_seconds",
+@@ -453,11 +453,14 @@ class HuntSkillLibrary:
+         # describes the same authority instead of consuming it on the first result.
+         allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
+         signals = tuple(str(item) for item in signals)
+-        surface_terms = set(re.findall(r"[a-z0-9]+", (goal + " " + " ".join(signals)).lower()))
++        priority_signals = tuple(str(item) for item in priority_signals)
++        surface_terms = set(re.findall(
++            r"[a-z0-9]+", (goal + " " + " ".join((*signals, *priority_signals))).lower(),
++        ))
+         web_surface_observed = bool(surface_terms & {
+             "http", "https", "web", "api", "graphql", "jwt", "oauth", "oidc", "saml",
+             "html", "javascript", "browser", "upload", "wordpress", "form", "login",
+-            "xss", "csrf", "idor", "bola",
++            "xss", "csrf", "idor", "bola", "websocket", "sse", "grpc",
+         })
+         goal_terms = self._routing_terms(goal)
+         signal_terms = self._routing_terms(" ".join(signals))
+@@ -501,6 +504,7 @@ class HuntSkillLibrary:
+         if not selected:
+             # A broad objective still benefits from an explicit baseline. Never silently bind it.
+             baseline_order = (
++                "skill.network.service-protocol-and-device-investigation",
+                 "skill.web.http-baselining-replay-and-differential-analysis",
+                 "skill.web.stateful-crawling-content-and-parameter-discovery",
+                 "skill.web.api-inventory-openapi-and-contract-testing",
+diff --git a/install/index.html b/install/index.html
+index 9732223..7c8319d 100644
+--- a/install/index.html
++++ b/install/index.html
+@@ -739,6 +739,7 @@ for skill_file in \
+     29-web-llm-and-ai-feature-security-testing.md \
+     30-scanner-orchestration-evidence-chaining-and-regression.md \
+     31-edge-waf-and-origin-exposure-validation.md \
++    32-service-protocol-and-device-investigation.md \
+     README.md; do
+     download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
+ done
+diff --git a/install/index.sh b/install/index.sh
+index 9732223..7c8319d 100644
+--- a/install/index.sh
++++ b/install/index.sh
+@@ -739,6 +739,7 @@ for skill_file in \
+     29-web-llm-and-ai-feature-security-testing.md \
+     30-scanner-orchestration-evidence-chaining-and-regression.md \
+     31-edge-waf-and-origin-exposure-validation.md \
++    32-service-protocol-and-device-investigation.md \
+     README.md; do
+     download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
+ done
+diff --git a/tests/test_hunt_methodology_routing.py b/tests/test_hunt_methodology_routing.py
+index 75a5adf..615a2d6 100644
+--- a/tests/test_hunt_methodology_routing.py
++++ b/tests/test_hunt_methodology_routing.py
+@@ -43,7 +43,8 @@ def test_partial_methodology_preserves_the_existing_authority_and_budget(library
+ 
+ @pytest.mark.parametrize("kind", ["device", "network"])
+ def test_web_methodology_is_suggested_for_observed_interface_not_asset_label(library, kind):
+-    assert library.suggest(goal="Investigate", target_kind=kind) == ()
++    baseline = library.suggest(goal="Investigate", target_kind=kind)
++    assert baseline and all(not item["skill_id"].startswith("skill.web.") for item in baseline)
+     suggestion = library.suggest(goal="Investigate", target_kind=kind, signals=["graphql"])[0]
+     assert suggestion["skill_id"] == GRAPHQL
+     assert kind in library.require(GRAPHQL).catalog_entry()["target_kinds"]
+diff --git a/tests/test_hunt_skills.py b/tests/test_hunt_skills.py
+index e1f0040..1db926f 100644
+--- a/tests/test_hunt_skills.py
++++ b/tests/test_hunt_skills.py
+@@ -173,7 +173,7 @@ def test_binding_methodology_preserves_the_run_authority_and_budget(library):
+ 
+ 
+ def test_a_partial_skill_keeps_its_available_parts_and_declared_gaps(library):
+-    partial = next(s for s in library.list(support="partial") if s.capabilities)
++    partial = next(s for s in library.list(target_kind="web", support="partial") if s.capabilities)
+     bound = bind_skills_to_hunt([partial.skill_id], target_kind="web",
+                                allowed_capabilities=("http.request",), budget=None, library=library)
+     entry = next(row for row in bound.context_section["bound"] if row["skill_id"] == partial.skill_id)
+diff --git a/tests/test_release_image_contract.py b/tests/test_release_image_contract.py
+index d121fb1..83932f4 100644
+--- a/tests/test_release_image_contract.py
++++ b/tests/test_release_image_contract.py
+@@ -313,7 +313,7 @@ def test_release_api_image_contains_hunt_methodology_catalog():
+ 
+     assert "COPY skills/web /app/skills/web" in dockerfile
+     assert (ROOT / "skills" / "web" / "README.md").is_file()
+-    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 31
++    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 32
+ 
+ 
+ def test_fresh_installer_downloads_every_hunt_methodology_asset():
+@@ -325,7 +325,7 @@ def test_fresh_installer_downloads_every_hunt_methodology_asset():
+         path.relative_to(ROOT / "skills" / "web").as_posix()
+         for path in (ROOT / "skills" / "web").rglob("*.md")
+     ]
+-    assert len(assets) == 39
++    assert len(assets) == 40
+     for installer in installers:
+         assert 'mkdir -p "$INSTALL_STAGE/skills/web/core"' in installer
+         for relative in assets:
