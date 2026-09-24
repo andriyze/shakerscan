@@ -1,0 +1,66 @@
+name: Validate launcher reconciliation
+on:
+  push:
+    branches: [feat/launcher-rebuild-ergonomics]
+    paths: ['.github/workflows/pr112-reconcile.yml', '.github/ci/pr112-*.py']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Reconstruct current integration with reviewed launcher repairs
+        run: |
+          cp .github/ci/pr112-reconcile.py "$RUNNER_TEMP/reconcile.py"
+          cp .github/ci/pr112-acceptance.py "$RUNNER_TEMP/acceptance.py"
+          git fetch --depth=1 origin 32759d73552722d4f89763c517a621c72634ca65
+          git checkout --detach 32759d73552722d4f89763c517a621c72634ca65
+          python3 "$RUNNER_TEMP/reconcile.py"
+          cp "$RUNNER_TEMP/acceptance.py" tests/test_launcher_rebuild_ergonomics.py
+          python3 scripts/generate_install_manifest.py
+          git add README.md scanner.sh install/MANIFEST.sha256 tests/test_launcher_rebuild_ergonomics.py
+          git diff --cached --check
+          test "$(git write-tree)" = d5fdbc3abd55230fc0ae863ae8b25caa7d7bf46e
+          bash -n scanner.sh
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Validate with locked dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+          python -m pytest -q tests/test_launcher_rebuild_ergonomics.py tests/test_runtime_hardening.py --junitxml="$RUNNER_TEMP/launcher-tests.xml"
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
+      - name: Export verified blobs without moving branches or publishing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          entries = []
+          for name in ['README.md', 'scanner.sh', 'install/MANIFEST.sha256', 'tests/test_launcher_rebuild_ergonomics.py']:
+              data = Path(name).read_bytes()
+              expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              request = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'})
+              response = subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs', '--input', '-'], input=request.encode())
+              actual = json.loads(response)['sha']
+              assert actual == expected
+              entries.append({'path': name, 'mode': '100755' if name == 'scanner.sh' else '100644', 'type': 'blob', 'sha': actual})
+          Path(os.environ['RUNNER_TEMP'], 'verified-tree-entries.json').write_text(json.dumps(entries, indent=2))
+          print(json.dumps(entries))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: launcher-reconciliation-validation
+          path: |
+            ${{ runner.temp }}/launcher-tests.xml
+            ${{ runner.temp }}/verified-tree-entries.json
+          if-no-files-found: error
+          retention-days: 14
