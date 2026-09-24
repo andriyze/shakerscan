@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 import uuid
 
+from .hunt_service_sources import hunt_service_sources
 from .service_actions import hunt_handoff, service_activities
 from .service_intel import enrich_service, snapshot_summary
 from .service_inventory import SCHEMA_VERSION, attach_findings, build_inventory, object_value, origin, text
@@ -129,6 +130,10 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
                     "kind": "device_service", "address": row.get("observed_address") or row.get("scanned_locator"),
                 }],
             })
+    hunt_sources, hunt_warnings, hunt_truncated = await hunt_service_sources(conn, target)
+    sources.extend(hunt_sources)
+    warnings.extend(hunt_warnings)
+    source_truncated = source_truncated or hunt_truncated
     services, rejected = build_inventory(target, sources)
     if len(services) > MAX_SERVICES:
         source_truncated = True
@@ -136,7 +141,7 @@ async def target_inventory(conn: Any, target: dict[str, Any], snapshot: dict[str
     if rejected:
         warnings.append(f"{rejected} malformed or non-positive service observations were omitted.")
     if source_truncated:
-        warnings.append("The retained-evidence window is truncated; narrow to a target or inspect its source scans.")
+        warnings.append("The retained-evidence window is truncated; narrow to a target or inspect its source Scans and Hunts.")
     # The column name is server-selected, never user-supplied SQL.
     owner = "device_target_id" if target["kind"] == "device" else "target_id"
     finding_rows = await conn.fetch(
@@ -174,7 +179,7 @@ async def service_page(conn: Any, *, target_kind: str, target_id: uuid.UUID | No
         "intelligence": snapshot_summary(snapshot),
         "limitations": [
             "This view reads existing evidence only; it performs no scans, logins or exploit execution.",
-            "Web history is bounded to 12 recent canonical Scan actions per target; historical Hunt-only output is not imported.",
+            "Web history is bounded to 12 canonical Scan actions and 12 settled Hunt receipts per target. Hunt output without a validated durable receipt is not imported.",
             "A missing service, CVE match or linked finding does not establish a clean assessment.",
         ],
     }

@@ -36,8 +36,9 @@ A missing executor is a capability gap, not an authorization problem.
   credential handling, accounting, cancellation, and evidence. Visibility alone is not implementation.
 - [ ] Add deliberate operator budget/resource amendments, including complete port-range work,
   additional selected identities, and request collections. Preserve earlier action snapshots/history.
-- [ ] Persist normalized Hunt service observations into shared durable knowledge with idempotent
-  ingestion, provenance, asset-generation checks, and deletion/retention integration.
+- [x] Reuse normalized Hunt service observations in shared durable knowledge through canonical
+  settlement receipts, with idempotent action identity, provenance, locator checks and existing
+  owner/receipt deletion and retention. No duplicate store or write-on-read backfill.
 - [ ] Improve the investigation frontier: unresolved leads, untested work, explicit coverage gaps,
   freshness, and requested retests. Prior proof is not a ban on retesting or investigating a chain.
 - [ ] Make HTTPS-to-HTTP credential consequences visible and test actual synthetic transmission,
@@ -64,3 +65,17 @@ Local validation: 271 affected tests passed across both repository import layout
 Generated contracts, inventory, install manifest, documentation policy, module size, installed import
 closure and canonical target transport passed. Native Nmap and full locked-dependency acceptance
 run separately in CI; local success is not a production or physical-device certification.
+
+
+## Shared evidence continuation
+
+Implemented: `service_intelligence` now projects canonical persisted Hunt receipts alongside Scan
+and device evidence. This reuses the existing atomic settlement store rather than adding a second
+ledger or write-on-read backfill. Ownership/hash/budget validation, positive partial output, frozen
+address checks, historical locator handling, no raw content exposure, and source-Hunt links are
+covered by focused tests. Real PostgreSQL persistence/join/deletion checks run in the existing Hunt
+record-integrity workflow. Reads remain bounded and publish truncation/invalid-source warnings.
+
+This closes the supported-receipt reuse loop, not unlimited history or legacy reconstruction.
+Output without a canonical settled receipt remains an explicit gap; Scan planning is unchanged.
+Budget/resource amendments, browser/replay execution and methodology-body adaptation remain open.

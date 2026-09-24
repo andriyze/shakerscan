@@ -28,6 +28,10 @@ async def test_target_pagination_and_historical_device_locator_in_real_postgres(
             product text,version text,cpe text,encrypted boolean,web_origin text,first_seen_at timestamptz,last_seen_at timestamptz,metadata_json jsonb);
           CREATE TEMP TABLE scan_capability_actions (scan_id uuid,action_id text,capability_name text,action_digest text,result_digest text,
             result_json jsonb,status text,worker_id text,finished_at timestamptz);
+          CREATE TEMP TABLE hunt_runs (id uuid,target_id uuid,device_target_id uuid,target_kind text,created_at timestamptz,context_pack jsonb);
+          CREATE TEMP TABLE hunt_actions (id uuid,hunt_run_id uuid,capability_name text,status text,receipt_id uuid);
+          CREATE TEMP TABLE budget_reservations (id text,owner_kind text,owner_id text,action_id text,action_digest text,
+            capability_name text,status text,state_json jsonb,state_digest text,receipt_json jsonb,finished_at timestamptz);
           CREATE TEMP TABLE findings (id uuid,target_id uuid,device_target_id uuid,url text,title text,severity text,status text,
             last_verification_verdict text,last_seen_at timestamptz,evidence jsonb);
         """)

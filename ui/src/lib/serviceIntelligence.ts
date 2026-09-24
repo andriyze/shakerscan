@@ -3,6 +3,7 @@ import { API_URL, getApiErrorMessage } from './apiConfig'
 export interface ServiceEvidence {
   ref: string
   scan_id: string | null
+  hunt_id?: string | null
   action_id: string | null
   sha256: string | null
   observed_at: string | null

@@ -198,6 +198,7 @@ def build_inventory(target: Mapping[str, Any], sources: list[dict[str, Any]], *,
         evidence = {
             "ref": text(source.get("ref"), 200),
             "scan_id": text(source.get("scan_id"), 80) or None,
+            "hunt_id": text(source.get("hunt_id"), 80) or None,
             "action_id": text(source.get("action_id"), 200) or None,
             "sha256": text(source.get("sha256"), 64) or None,
             "observed_at": observed_at,
@@ -228,13 +229,14 @@ def build_inventory(target: Mapping[str, Any], sources: list[dict[str, Any]], *,
         record["evidence"] = record["evidence"][-MAX_EVIDENCE:]
         record["history"] = record["history"][-MAX_HISTORY:]
         record["observation_status"] = evidence["status"]
+        record["historical_locator"] = bool(source.get("historical_locator"))
     for record in services.values():
         last_seen, identified = timestamp(record["last_seen_at"]), timestamp(record["identity_observed_at"])
         record["freshness"] = "unknown" if last_seen is None else "stale" if now - last_seen > STALE_AFTER else "recent"
         record["identity_stale"] = identified is None or now - identified > STALE_AFTER
         record["presence"] = "observed_open" if record["state"] == "open" else "inconclusive" if record["state"] in {"open|filtered", "unknown"} else "not_observed"
         record["binding_status"] = "observation_only"
-        if target["kind"] == "device" and record.get("locator_generation") != target.get("locator_generation"):
+        if record.pop("historical_locator", False) or (target["kind"] == "device" and record.get("locator_generation") != target.get("locator_generation")):
             record["binding_status"] = "historical_locator"
         record["findings"] = []
         record["cve_candidates"] = []
