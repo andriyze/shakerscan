@@ -28,6 +28,18 @@ def test_graphql_signal_selects_partial_graphql_methodology_with_honest_gaps(lib
     assert "methodology" not in suggestion
 
 
+def test_suggestion_advertises_the_read_before_bind_precondition_and_methods(library):
+    # A planner must POST the Hunt-scoped read before it may bind, and both read and
+    # bind are POST (not a GET on methodology_url). The suggestion should say so
+    # instead of forcing the planner to discover the 405 / read-before-bind rejection.
+    suggestion = library.suggest(goal="Investigate", target_kind="web", signals=["graphql"])[0]
+    assert suggestion["bind_requires_read"] is True
+    assert suggestion["read_method"] == "POST"
+    assert suggestion["bind_method"] == "POST"
+    assert suggestion["read_url"].endswith(f"/skills/{suggestion['skill_id']}/read")
+    assert "{hunt_id}" in suggestion["read_url"]
+
+
 @pytest.mark.parametrize("kind", ["web", "api", "device", "network"])
 def test_partial_methodology_preserves_the_existing_authority_and_budget(library, kind):
     allowed, budget = ("http.request",), object()

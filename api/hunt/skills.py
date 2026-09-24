@@ -528,7 +528,15 @@ class HuntSkillLibrary:
                 "title": spec.title,
                 "reason": reason,
                 "methodology_url": f"/hunt/skills/{spec.skill_id}",
+                # The Hunt-scoped read is a precondition of bind and is a POST, not a
+                # GET on methodology_url. Advertise both the endpoint and the method so
+                # a planner does not have to discover the 405 (or the read-before-bind
+                # rejection) by trial.
+                "read_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/read",
+                "read_method": "POST",
                 "bind_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/bind",
+                "bind_method": "POST",
+                "bind_requires_read": True,
                 "auto_bound": False,
                 "execution": {
                     "fully_executable": not unavailable and not missing,

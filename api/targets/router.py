@@ -1107,6 +1107,40 @@ async def list_target_principals(target_id: str, include_inactive: bool = False)
     }
 
 
+async def _resolve_target_credential_profile_ref(
+    conn: Any, target_uuid: uuid.UUID, ref: Any,
+) -> Optional[str]:
+    """Resolve a principal's credential_profile reference to a canonical profile NAME.
+
+    Slot derivation joins principals to credential profiles by name
+    (``sync_legacy_web_credential_by_name``), so a name is required for the second
+    (``user2``) principal to be recognised as the ``secondary`` slot. Operators and
+    agents naturally reach for the profile id instead; accept either spelling, and
+    reject an unresolvable reference loudly rather than silently leaving the
+    principal — and the BOLA slot it was meant to establish — unwired.
+    """
+    text = str(ref or "").strip()
+    if not text:
+        return None
+    row = await conn.fetchrow(
+        """SELECT name FROM target_credential_profiles
+           WHERE target_id=$1 AND (lower(name)=lower($2) OR id::text=$2)
+           ORDER BY is_active DESC LIMIT 1""",
+        target_uuid,
+        text,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"credential_profile '{text}' does not match any credential profile "
+                "on this target. Pass the profile name (or id) from "
+                "GET /targets/{target_id}/credential-profiles."
+            ),
+        )
+    return str(row["name"])
+
+
 @router.post("/targets/{target_id}/principals")
 async def create_target_principal(target_id: str, request: TargetPrincipalCreate):
     """Create or update a target principal identity without storing raw credentials."""
@@ -1120,6 +1154,9 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
             async with conn.transaction():
                 if not await conn.fetchrow("SELECT 1 FROM targets WHERE id = $1", target_uuid):
                     raise HTTPException(status_code=404, detail="Target not found")
+                credential_profile = await _resolve_target_credential_profile_ref(
+                    conn, target_uuid, request.credential_profile,
+                )
                 row = await conn.fetchrow(
                     """
                     INSERT INTO target_principals (
@@ -1140,7 +1177,7 @@ async def create_target_principal(target_id: str, request: TargetPrincipalCreate
                     role,
                     request.tenant_id,
                     auth_state,
-                    str(request.credential_profile or "").strip() or None,
+                    credential_profile,
                     bool(request.is_active),
                     json.dumps(metadata),
                 )
@@ -1239,8 +1276,11 @@ async def update_target_principal(target_id: str, principal_id: str, request: Ta
     if request.auth_state is not None:
         values.append(_normalize_target_auth_state(request.auth_state))
         updates.append(f"auth_state = ${len(values)}")
+    credential_profile_index: int | None = None
     if request.credential_profile is not None:
         values.append(str(request.credential_profile).strip() or None)
+        # Resolved to a canonical profile name inside the transaction; see below.
+        credential_profile_index = len(values) - 1
         updates.append(f"credential_profile = ${len(values)}")
     if request.metadata_json is not None:
         values.append(json.dumps(_redact_agent_payload(request.metadata_json or {})))
@@ -1254,6 +1294,12 @@ async def update_target_principal(target_id: str, principal_id: str, request: Ta
     async with _pool().acquire() as conn:
         try:
             async with conn.transaction():
+                if credential_profile_index is not None:
+                    values[credential_profile_index] = (
+                        await _resolve_target_credential_profile_ref(
+                            conn, target_uuid, values[credential_profile_index],
+                        )
+                    )
                 previous = await conn.fetchrow(
                     "SELECT credential_profile FROM target_principals WHERE id=$1 AND target_id=$2",
                     principal_uuid,
