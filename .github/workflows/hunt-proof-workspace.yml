@@ -1,30 +1,177 @@
-name: Hunt proof development workspace
+name: Hunt proof exact-tree validation
 on:
   push:
     branches: [diagnostics/hunt-proof-workspace]
     paths: [.github/workflows/hunt-proof-workspace.yml]
 permissions:
   contents: read
+env:
+  SOURCE_BASE: d5c9955a11cb88322324e06efc61fd5e965df547
+  EXPECTED_TREE: ceb175bfab0cf9bbe131eea637b202ff624657e5
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: hunt_records
+          POSTGRES_PASSWORD: hunt-records-disposable-ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hunt_records"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HUNT_TEST_POSTGRES_DSN: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: d5c9955a11cb88322324e06efc61fd5e965df547
+          fetch-depth: 0
           persist-credentials: false
-      - name: Export tracked source only
+      - name: Assemble only the reviewed product patch
+        shell: bash
         run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/hunt-proof-workspace"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/hunt-proof-workspace/source.tar.gz" HEAD
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/hunt-proof-workspace/identity.txt"
-          cd "$RUNNER_TEMP/hunt-proof-workspace"
-          sha256sum source.tar.gz > SHA256SUMS
+          set -euo pipefail
+          for n in 1 2 3 4; do
+            git show "$GITHUB_SHA:.github/diagnostics/hunt-proof-$n.patch"
+          done > "$RUNNER_TEMP/product.patch"
+          git checkout --detach "$SOURCE_BASE"
+          git apply --check "$RUNNER_TEMP/product.patch"
+          git apply --index "$RUNNER_TEMP/product.patch"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+      - name: Generate derived files and verify exact content
+        run: |
+          python scripts/generate_capability_inventory.py
+          python scripts/generate_install_manifest.py
+          git add docs/functionality-reference.md install/MANIFEST.sha256
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git diff --cached --check
+          mkdir -p "$RUNNER_TEMP/proof-results"
+          git diff --cached --stat > "$RUNNER_TEMP/proof-results/diff-stat.txt"
+          printf '%s\n' "$SOURCE_BASE" "$EXPECTED_TREE" > "$RUNNER_TEMP/proof-results/identity.txt"
+      - name: Actual HTTP proof and real PostgreSQL regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          for test in test_authz_replay_routing test_authz_capability test_authz_investigation_acceptance test_authz_selected_objects test_collection_authz_bfla test_hunt_deterministic_findings test_hunt_http_capability test_hunt_authz_proof_materialization; do
+            python -m pytest -q "tests/$test.py" --junitxml="$RUNNER_TEMP/proof-results/$test.xml"
+          done
+          python - <<'PY'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'proof-results'
+          reports = list(path.glob('*.xml'))
+          assert len(reports) == 8, 'Every focused suite must report'
+          totals = dict(tests=0, failures=0, errors=0, skipped=0)
+          for report in reports:
+              root = ET.parse(report).getroot()
+              for suite in ([root] if root.tag == 'testsuite' else root.findall('testsuite')):
+                  for key in totals:
+                      totals[key] += int(suite.get(key, 0))
+          assert totals['tests'] > 0 and not any(totals[k] for k in ('failures','errors','skipped')), totals
+          (path / 'totals.json').write_text(json.dumps(totals, indent=2) + '\n')
+          print(totals)
+          PY
+      - name: Generated, installed and architectural checks
+        run: |
+          python scripts/generate_capability_inventory.py --check
+          python scripts/generate_install_manifest.py --check
+          python scripts/generate_scan_contract.py --check
+          python scripts/generate_hunt_contract.py --check
+          python scripts/check_installed_import_closure.py
+          python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
+          python scripts/check_surface_dispositions.py
+          python scripts/check_scan_target_transport.py
+          python scripts/check_hunt_methodologies.py
+          git diff --exit-code
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: hunt-proof-validation
+          path: ${{ runner.temp }}/proof-results/
+          if-no-files-found: warn
+          retention-days: 7
+  objects:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reassemble the validated tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in 1 2 3 4; do
+            git show "$GITHUB_SHA:.github/diagnostics/hunt-proof-$n.patch"
+          done > "$RUNNER_TEMP/product.patch"
+          git checkout --detach "$SOURCE_BASE"
+          git apply --index "$RUNNER_TEMP/product.patch"
+          python3 scripts/generate_capability_inventory.py
+          python3 scripts/generate_install_manifest.py
+          git add docs/functionality-reference.md install/MANIFEST.sha256
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+      - name: Store reviewed Git objects only, without changing any ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          def git(*args):
+              return subprocess.check_output(['git', *args]).decode().strip()
+          def post(endpoint, payload):
+              req = urllib.request.Request(
+                  'https://api.github.com/repos/andriyze/shakerscan/git/' + endpoint,
+                  data=json.dumps(payload).encode(), method='POST', headers={
+                      'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                      'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  })
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+          base, expected = os.environ['SOURCE_BASE'], os.environ['EXPECTED_TREE']
+          assert git('write-tree') == expected
+          elements = []
+          for line in git('diff','--cached','--name-status').splitlines():
+              status, name = line.split('\t')
+              assert status in ('A','M') and not name.startswith('.github/diagnostics/')
+              assert name != '.github/workflows/hunt-proof-workspace.yml'
+              mode, local_sha, _ = git('ls-files','-s','--',name).split(maxsplit=2)
+              raw = subprocess.check_output(['git','show',':'+name])
+              blob = post('blobs', {'content':base64.b64encode(raw).decode(), 'encoding':'base64'})
+              assert blob['sha'] == local_sha
+              elements.append({'path':name,'mode':mode,'type':'blob','sha':local_sha})
+          assert len(elements) == 18
+          tree = post('trees', {'base_tree':git('rev-parse',base+'^{tree}'),'tree':elements})
+          assert tree['sha'] == expected
+          commit = post('commits', {
+              'message':'fix(hunt): route authorization replays and persist canonical proof as findings',
+              'tree':expected, 'parents':[base],
+              'author':{'name':'ChatGPT','email':'noreply@openai.com'},
+          })
+          receipt = {'commit_sha':commit['sha'],'tree_sha':expected,'parent_sha':base,
+                     'files':elements,'ref_updated':False,'full_stack_acceptance':'pending'}
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'publication'
+          path.mkdir()
+          (path/'commit.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps({k:v for k,v in receipt.items() if k != 'files'},indent=2))
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: hunt-proof-source-d5c9955
-          path: ${{ runner.temp }}/hunt-proof-workspace/
+          name: hunt-proof-commit
+          path: ${{ runner.temp }}/publication/commit.json
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
