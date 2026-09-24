@@ -177,3 +177,27 @@ remove a shipped component. No automatic “not affected” claims are generated
 - SPDX 2.3 schema: https://github.com/spdx/spdx-spec/blob/v2.3/schemas/spdx-schema.json
 - CycloneDX 1.6 schemas: https://github.com/CycloneDX/specification/tree/1.6/schema
 - GitHub verification: https://cli.github.com/manual/gh_attestation_verify
+
+## Exact-content recovery for retired MinIO registry references
+
+Stage-two cataloging first tries the original pinned Compose reference. For the two reviewed MinIO
+server/client digests, an unavailable primary registry may be read through the matching
+`ghcr.io/teableio/minio` or `ghcr.io/teableio/minio-mc` mirror. The raw index must hash to the **original
+SHA-256**, and both architecture-specific catalogs still use the platform digests from that index.
+No mutable tag, alternate version, skipped service or unverified index is accepted. An integrity
+failure is not retried through a mirror. All prior completeness and coverage checks remain blocking.
+
+The source plan and each affected catalog retain the original `image_reference` and explicitly add
+`retrieval_reference`; generated Syft documents describe the actual retrieval source. Offline bundle
+validation checks that this is one of the two exact reviewed source/mirror pairs and that plan and
+catalog agree. First-party images and other digests receive no mirror exception.
+
+[Independent content verification](https://github.com/andriyze/shakerscan/actions/runs/36032207153)
+downloaded both original indexes, the amd64/arm64 manifests, configurations and every image layer,
+verifying their sizes and hashes (180,152,816 distinct bytes across the two images). Mirror publication
+is documented in [Teable's version manifest](https://github.com/teableio/teable-deployment/blob/main/versions.yaml),
+Git blob `749d0038cf6aaf9aa3c4f46f7afe897ef841dc06`. That statement alone was not used as proof of bytes.
+
+This is SBOM retrieval recovery, not a Compose default migration or a new release certification.
+Optional artifact-profile deployments using the inaccessible original references remain tracked in
+[#218](https://github.com/andriyze/shakerscan/issues/218); existing operator image overrides are unchanged.

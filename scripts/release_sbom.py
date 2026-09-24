@@ -51,6 +51,10 @@ class SBOMError(ValueError):
     """Invalid or incomplete release evidence; publication must stop."""
 
 
+class SBOMCommandError(SBOMError):
+    """An external retrieval command failed; never an integrity-validation error."""
+
+
 def require(condition: object, message: str) -> None:
     if not condition:
         raise SBOMError(message)
@@ -115,10 +119,15 @@ def validate_spdx(document: dict) -> None:
     require(any(r.get("spdxElementId") == "SPDXRef-DOCUMENT" and r.get("relationshipType") == "DESCRIBES" for r in relationships), "SPDX document does not describe a subject")
 
 
-def run_json(args: list[str]) -> dict:
+def run_json(args: list[str], *, expected_digest: str | None = None) -> dict:
+    if expected_digest is not None:
+        require(DIGEST.fullmatch(expected_digest), "invalid expected manifest digest")
     for attempt in range(3):
         try:
             result = subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            if expected_digest is not None:
+                require("sha256:" + sha256(result.stdout) == expected_digest,
+                        "retrieved manifest content does not match its pinned digest")
             value = json.loads(result.stdout)
             require(isinstance(value, dict), "tool returned no JSON object")
             return value
@@ -135,7 +144,7 @@ def run_json(args: list[str]) -> dict:
                         detail = "registry rate limit"
                     elif re.search(r"(?i)\b404\b|manifest unknown|manifest_unknown", text):
                         detail = "registry manifest unavailable"
-                raise SBOMError(f"command failed after three attempts: {' '.join(args[:4])} ({detail})") from None
+                raise SBOMCommandError(f"command failed after three attempts: {' '.join(args[:4])} ({detail})") from None
             time.sleep(2 ** attempt)
     raise AssertionError("unreachable")
 

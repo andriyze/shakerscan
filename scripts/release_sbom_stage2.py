@@ -132,16 +132,52 @@ def source_identity(root: Path, expected: str) -> None:
     require(not changed.strip(), "source checkout has modified tracked files")
 
 
+# Retrieval-only mirrors for two already-pinned, unchanged MinIO artifacts. Independent
+# verification downloaded each original index, both platform manifests and every blob:
+# https://github.com/andriyze/shakerscan/actions/runs/36032207153
+# This is not a generic registry fallback, image upgrade or trust in mutable mirror tags.
+SUPPORTING_MIRRORS = {
+    "quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e":
+        "ghcr.io/teableio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
+    "quay.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3":
+        "ghcr.io/teableio/minio-mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3",
+}
+
+
+def validate_retrieval_reference(subject: dict) -> str:
+    """The source/Compose identity remains unchanged; record its actual retrieval origin."""
+    original = subject["image_reference"]
+    retrieval = subject.get("retrieval_reference", original)
+    if retrieval != original:
+        require(SUPPORTING_MIRRORS.get(original) == retrieval,
+                "unapproved or changed-digest supporting-image retrieval")
+        require(subject.get("scope", "supporting-service-runtime") == "supporting-service-runtime",
+                "first-party images cannot use supporting-image mirrors")
+    return retrieval
+
+
 def supporting_service_platforms(service: dict) -> dict[str, str]:
-    """Identify the unavailable immutable dependency without changing or omitting it."""
+    """Resolve the exact artifact; only known byte-identical mirrors may restore retrieval."""
     repository, digest = coverage.canonical_image(service["image_reference"])
     reference = repository + "@" + digest
     print(f"Inspecting supporting image {reference}", flush=True)
+    mirror = SUPPORTING_MIRRORS.get(reference)
     try:
-        document = sbom.run_json(["docker", "buildx", "imagetools", "inspect", reference, "--raw"])
+        try:
+            # Preserve the existing generic path. Reviewed mirror identities additionally
+            # verify raw manifest bytes, so a registry cannot change a pinned subject.
+            kwargs = {"expected_digest": digest} if mirror else {}
+            document = sbom.run_json(["docker", "buildx", "imagetools", "inspect", reference, "--raw"], **kwargs)
+        except sbom.SBOMCommandError:
+            if mirror is None:
+                raise
+            print(f"Primary retrieval unavailable; verifying identical content from {mirror}", flush=True)
+            document = sbom.run_json(["docker", "buildx", "imagetools", "inspect", mirror, "--raw"],
+                                     expected_digest=digest)
+            service["retrieval_reference"] = mirror
         return coverage.service_platforms(document)
     except sbom.SBOMError as exc:
-        # The reference is canonical and contains no credentials, mutable tag or query string.
+        # No integrity error is retried through a mirror. Raw stderr is never exposed.
         raise sbom.SBOMError(f"Cannot inventory supporting image {reference}: {exc}") from None
 
 
@@ -183,7 +219,7 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
             for platform, digest in platforms.items():
                 subjects.append(dict(service, scope="supporting-service-runtime", platform=platform, platform_digest=digest))
         for subject in subjects:
-            reference = subject["image_reference"].split("@")[0] + "@" + subject["platform_digest"]
+            reference = validate_retrieval_reference(subject).split("@")[0] + "@" + subject["platform_digest"]
             print(f"Cataloging {subject['image']} {subject['platform']} by digest", flush=True)
             # Sequential, bounded working directories avoid retaining all multi-GB images.
             with tempfile.TemporaryDirectory() as temporary:
@@ -197,7 +233,9 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
                     report["buildkit_purls_not_in_independent"] = sorted(coverage.spdx_purls(original) - coverage.spdx_purls(spdx))
                 reports.append(report)
                 pair = document_pair(documents, "shakerscan-" + index["version"] + "-runtime-" + subject["image"].replace("_", "-") + "-" + subject["platform"].replace("/", "-"), spdx, cdx, tool)
-                extra.append({k: subject[k] for k in ("image", "image_reference", "index_digest", "platform", "platform_digest", "scope")} | pair)
+                retrieval = ({"retrieval_reference": subject["retrieval_reference"]}
+                             if "retrieval_reference" in subject else {})
+                extra.append({k: subject[k] for k in ("image", "image_reference", "index_digest", "platform", "platform_digest", "scope")} | pair | retrieval)
         spdx, cdx, inputs = build_input_documents(root, index)
         extra.append({"scope": "source-lock-resolution"} | document_pair(documents, "shakerscan-" + index["version"] + "-build-inputs", spdx, cdx, tool))
         plan["inputs"] = inputs
@@ -270,6 +308,7 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
     build_inputs = 0
     bindings = {a["image"]: (a["image_reference"], a["index_digest"], "first-party-runtime") for a in index["artifacts"]} if index["kind"] == "engine" else {}
     for service in plan.get("supporting_services", []):
+        validate_retrieval_reference(service)
         require(service["image"] not in bindings, "duplicate supporting-service identity")
         bindings[service["image"]] = (service["image_reference"], service["index_digest"], "supporting-service-runtime")
     for catalog in extension.get("catalogs", []):
@@ -293,6 +332,12 @@ def verify_extension(directory: Path, index: dict) -> set[str]:
                 continue
             require(catalog.get("scope") in ("first-party-runtime", "supporting-service-runtime"), "invalid runtime catalog scope")
             require(bindings.get(catalog.get("image")) == (catalog.get("image_reference"), catalog.get("index_digest"), catalog.get("scope")), "runtime image differs from release/Compose binding")
+            validate_retrieval_reference(catalog)
+            planned = next((s for s in plan.get("supporting_services", [])
+                            if s["image"] == catalog.get("image")), catalog)
+            require(catalog.get("retrieval_reference", catalog["image_reference"]) ==
+                    planned.get("retrieval_reference", planned["image_reference"]),
+                    "runtime retrieval differs from source plan")
             subject = (catalog.get("image"), catalog.get("platform"), catalog.get("platform_digest"))
             require(subject[1] in sbom.PLATFORMS and isinstance(subject[2], str) and sbom.DIGEST.fullmatch(subject[2]), "invalid runtime subject")
             require(catalog.get("image_reference", "").endswith("@" + catalog.get("index_digest", "invalid")), "runtime index mismatch")
