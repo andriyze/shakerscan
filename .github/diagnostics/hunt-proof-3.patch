@@ -1,0 +1,431 @@
+diff --git a/skills/web/09-authorization-idor-bola-bfla-and-property-level-testing.md b/skills/web/09-authorization-idor-bola-bfla-and-property-level-testing.md
+index 77ceab2..1e891f6 100644
+--- a/skills/web/09-authorization-idor-bola-bfla-and-property-level-testing.md
++++ b/skills/web/09-authorization-idor-bola-bfla-and-property-level-testing.md
+@@ -142,6 +142,28 @@ Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques`
+ metadata. A name in the library is not a guarantee that every technique below is executable;
+ match the actual operation, request shape and evidence requirements to the live schema.
+ 
++### Complete an observed read-access lead
++
++When a relevant object read has evidence and two selected principals, establish their opaque
++sessions with `auth.session.establish` and invoke `authz.verify` rather than ending with a
++candidate count. Supply the actual caller-scoped collection/listing and its observed item route
++on the same service. Preserve parent/tenant identifiers and the method/query shape from the
++capture. Use retained collections or authorized reads to resolve a missing route; do not invent
++an ownership listing or an entitlement rule.
++
++The current collection verifier funds one producer and one replay per call. Keep its routes
++focused on this lead, not the whole crawl inventory. A pair of concrete object URLs with no
++listing selects the separate two-object comparison: useful cross-access evidence, but not by
++itself proof that the access violates entitlement. An inconclusive result here is not a session
++failure; read its reason and seek the missing evidence without restarting the Hunt or asking for
++the same authorization again. Continue other compatible work when that evidence is unavailable.
++
++On completed verification, inspect the canonical receipt and `verified_finding_ids`, then read
++the persisted findings. A successful request or candidate submission is not proof completion.
++Reuse the same action idempotency key after a lost response; a deliberate retest gets a new key.
++Record the proof, refutation, or exact unresolved evidence gap. Do not change budgets or count an
++unverified candidate as a verified result just to finish the lead.
++
+ ## Core security hypotheses
+ 
+ - A peer can read or modify another user's object by changing an identifier.
+diff --git a/tests/e2e/hunt_authz_proof.py b/tests/e2e/hunt_authz_proof.py
+new file mode 100644
+index 0000000..2d9b3dc
+--- /dev/null
++++ b/tests/e2e/hunt_authz_proof.py
+@@ -0,0 +1,115 @@
++"""Assisted authorization proof through the real API, queue, worker and database.
++
++Known vulnerable/protected/shared fixture routes test proof completion, not AI
++route discovery, a Juice Shop answer key, or a claim about recall improvement.
++"""
++from __future__ import annotations
++
++
++def run(harness, scorecard, *, authority, start_payload, fixture_base: str, nonce: str) -> None:
++    hunt_id = ""
++    try:
++        target_id, scope_id, approval_id = authority(risk_tier="credential")
++        profiles = {}
++        for slot, token in (("primary", "authz-token-a"), ("secondary", "authz-token-b")):
++            status, created = harness.post("/credential-profiles", {
++                "target_kind": "web", "target_id": target_id,
++                "name": f"Hunt proof {slot} {nonce}",
++                "auth_kind": "authorization_header", "principal_slot": slot,
++                "principal_label": f"proof-{slot}", "secret": f"Bearer {token}",
++                "allowed_capabilities": ["auth.session.establish", "authz.verify"],
++                "created_by": "hunt-e2e",
++            })
++            profile_id = str((created.get("profile") or {}).get("id") or "")
++            if status != 201 or not profile_id:
++                raise RuntimeError(f"proof profile setup failed: status={status}")
++            profiles[f"{slot}_credential_profile_id"] = profile_id
++        payload = start_payload(target_id, active=True, goal="Assisted authorization proof completion",
++            scope_id=scope_id, approval_id=approval_id, credential_refs=profiles,
++            capabilities=["auth.session.establish", "authz.verify"], budget_profile="balanced")
++        # Five actual actions: two sessions, one positive, and two negative controls.
++        # Reserve headroom so exhaustion does not replace the subject of this test.
++        payload["budgets"]["max_active_actions"] = 8
++        status, started = harness.post("/hunts", payload)
++        hunt_id = str(started.get("hunt_id") or "")
++        if status != 200 or not hunt_id:
++            raise RuntimeError(f"proof Hunt setup failed: status={status}")
++
++        def call(name, body):
++            status, response = harness.post(f"/hunts/{hunt_id}/capabilities/{name}", body, timeout=180)
++            result = response.get("result") or {}
++            if status != 200 or result.get("status") not in {"success", "partial"} or not result.get("receipt_id"):
++                raise RuntimeError(f"proof action failed: {name} status={status} result={result}")
++            return response, result
++
++        sessions = {}
++        for slot in ("primary", "secondary"):
++            _, result = call("auth.session.establish", {
++                "idempotency_key": f"proof-session-{slot}-{nonce}", "input": {"as_principal": slot},
++            })
++            ref = str((result.get("session") or {}).get("session_ref") or "")
++            if not ref:
++                raise RuntimeError(f"proof session missing: {slot}")
++            sessions[f"{slot}_session_ref"] = ref
++
++        def request(key, routes):
++            return {"idempotency_key": f"proof-{key}-{nonce}",
++                    "input": {**sessions, "routes": [fixture_base + path for path in routes]}}
++
++        body = request("positive", ["/authz/vuln/orders", "/authz/vuln/orders/1001"])
++        response, result = call("authz.verify", body)
++        ids = result.get("verified_finding_ids") or []
++        finding = harness.get(f"/findings/{ids[0]}") if len(ids) == 1 else {}
++        row = finding.get("finding", finding)
++        per_hunt = harness_findings(harness, hunt_id)
++        before = harness.get(f"/hunts/{hunt_id}").get("budget_used")
++        replay, repeated = call("authz.verify", body)
++        after = harness.get(f"/hunts/{hunt_id}").get("budget_used")
++        current = harness.get(f"/findings/{ids[0]}") if len(ids) == 1 else {}
++        current_row = current.get("finding", current)
++        receipt = result.get("receipt") or {}
++        observation = next((item for item in receipt.get("observations", [])
++                            if item.get("kind") == "authz_differential"), {})
++        scorecard.check(
++            "H-19 authorization proof materializes into a Hunt-attributed finding",
++            len(ids) == 1 and observation.get("proof_state") == "verified"
++            and row.get("last_verification_verdict") == "exploited"
++            and row.get("is_verified") is True and row.get("proof_state") == "verified"
++            and str(row.get("hunt_run_id")) == hunt_id and row.get("cwe") == "CWE-639"
++            and any(str(item.get("id")) == ids[0] for item in per_hunt)
++            and repeated.get("verified_finding_ids") == ids
++            and repeated.get("receipt_id") == result.get("receipt_id")
++            and replay.get("action_id") == response.get("action_id")
++            and before == after and before is not None
++            and current_row.get("verification_count") == row.get("verification_count")
++            and int(row.get("verification_count") or 0) >= 1,
++            f"hunt={hunt_id} ids={ids} proof={observation.get('proof_state')} "
++            f"attributed={row.get('hunt_run_id')} replay={replay.get('idempotent_replay')}",
++        )
++
++        controls = []
++        for key, routes in (("protected", ["/authz/safe/orders", "/authz/safe/orders/1001"]),
++                            ("shared", ["/authz/public/directory", "/authz/public/directory/7001"])):
++            _, control = call("authz.verify", request(key, routes))
++            observations = (control.get("receipt") or {}).get("observations") or []
++            differentials = [item for item in observations if item.get("kind") == "authz_differential"]
++            controls.append(bool(differentials) and not control.get("verified_finding_ids")
++                            and all(item.get("proof_state") != "verified" for item in differentials))
++        scorecard.check(
++            "H-20 protected and shared objects remain unverified",
++            all(controls) and len(controls) == 2
++            and {str(item.get("id")) for item in harness_findings(harness, hunt_id)} == set(ids),
++            f"hunt={hunt_id} protected/shared={controls}",
++        )
++    except Exception as exc:
++        scorecard.error("H-19 through H-20 canonical authorization proof acceptance", exc)
++    finally:
++        if hunt_id:
++            harness.post(f"/hunts/{hunt_id}/finish", {
++                "summary": "Assisted authorization proof acceptance completed; not a discovery benchmark.",
++                "next_actions": [],
++            })
++
++
++def harness_findings(harness, hunt_id: str) -> list[dict]:
++    return harness.get(f"/findings?hunt_id={hunt_id}&verified_only=true&limit=100").get("findings") or []
+diff --git a/tests/e2e/run_e2e.py b/tests/e2e/run_e2e.py
+index 6a0293a..01d10ff 100644
+--- a/tests/e2e/run_e2e.py
++++ b/tests/e2e/run_e2e.py
+@@ -2010,6 +2010,13 @@ def run_hunt() -> H.Scorecard:
+                     "next_actions": [],
+                 })
+ 
++    try:
++        from . import hunt_authz_proof
++    except ImportError:  # plain-script runner uses its own directory on sys.path
++        import hunt_authz_proof
++    hunt_authz_proof.run(H, sc, authority=_hunt_fixture_authority,
++        start_payload=_hunt_start_payload, fixture_base=FIXTURES_BASE, nonce=_RUN_NONCE)
++
+     return sc
+ 
+ 
+diff --git a/tests/test_authz_replay_routing.py b/tests/test_authz_replay_routing.py
+new file mode 100644
+index 0000000..1f3d271
+--- /dev/null
++++ b/tests/test_authz_replay_routing.py
+@@ -0,0 +1,253 @@
++"""Exercise routing helpers and the actual producer/consumer adapter functions.
++
++The adapter definitions are extracted from the production module to avoid loading
++unrelated subprocess/scanner integrations. No network request or proof validator
++runs here: these are isolated routing tests, not end-to-end verification acceptance.
++"""
++from __future__ import annotations
++
++import ast
++import copy
++from pathlib import Path
++import re
++import sys
++from typing import Any
++import urllib.parse
++from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "scanner"))
++
++from scanner_tools.authz_replay_routing import (
++    prioritize_replay_candidates,
++    select_replay_identifier,
++)
++
++FUNCTIONS = {
++    "_replace_discovered_consumer_id", "_resource_replay_candidates",
++    "_safe_scalar_id", "_resource_identifier_name", "_is_resource_identifier_name",
++    "_is_resource_placeholder_segment", "_is_probable_id_param",
++    "_path_with_resource_id", "_collection_item_base_path",
++}
++CONSTANTS = {"BOLA_RESOURCE_ID_KEYS", "QUERY_ID_PARAM_EXCLUSIONS"}
++
++
++@pytest.fixture(scope="module")
++def adapters():
++    path = ROOT / "scanner/scanner_tools/access_control_checks.py"
++    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
++    selected = []
++    found = set()
++    for node in tree.body:
++        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in FUNCTIONS:
++            selected.append(node)
++            found.add(node.name)
++        elif isinstance(node, ast.Assign):
++            names = {target.id for target in node.targets if isinstance(target, ast.Name)}
++            if names & CONSTANTS:
++                selected.append(node)
++                found.update(names & CONSTANTS)
++    assert found == FUNCTIONS | CONSTANTS, "Production routing definitions changed; update this test."
++    namespace = {
++        "__name__": "scanner_tools._authz_routing_test",
++        "__package__": "scanner_tools",
++        "Any": Any, "re": re, "urllib": urllib,
++        "parse_qsl": parse_qsl, "urlencode": urlencode,
++        "urlsplit": urlsplit, "urlunsplit": urlunsplit,
++    }
++    exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
++    return namespace
++
++
++@pytest.mark.parametrize("path,key,expected", [
++    ("/api/tenants/7/invoices/8", "id", "/api/tenants/7/invoices/101"),
++    ("/api/tenants/7/invoices/8", "invoice_id", "/api/tenants/7/invoices/101"),
++    ("/api/tenants/7/invoices/8", "tenantId", "/api/tenants/101/invoices/8"),
++    ("/api/tenants/7/invoices/8", "object_id", "/api/tenants/7/invoices/101"),
++    ("/api/tenants/7/invoices/8", "uuid", "/api/tenants/7/invoices/101"),
++    ("/api/tenants/7/invoices/8", "uid", "/api/tenants/7/invoices/101"),
++    ("/api/tenants/{tenantId}/invoices/{invoiceId}", "invoiceId",
++     "/api/tenants/{tenantId}/invoices/101"),
++    ("/api/tenants/{tenantId}/invoices/{invoiceId}", "tenantId",
++     "/api/tenants/101/invoices/{invoiceId}"),
++    ("/api/tenants/7/invoices?id=8&expand=lines", "id",
++     "/api/tenants/7/invoices?id=101&expand=lines"),
++    ("/api/tenants/7/invoices?invoiceId=8&expand=lines", "invoiceId",
++     "/api/tenants/7/invoices?invoiceId=101&expand=lines"),
++    ("/api/invoices/8?owner_id=7", "id", "/api/invoices/101?owner_id=7"),
++    ("/api/invoices/8?owner_id=7", "owner_id", "/api/invoices/8?owner_id=101"),
++    ("/api/invoices?tenantId=7&id=8", "id", "/api/invoices?tenantId=7&id=101"),
++    ("/api/invoices?owner_id=7&invoiceId=8", "invoice_id",
++     "/api/invoices?owner_id=7&invoiceId=101"),
++    ("/api/invoices/8?invoiceId=7", "invoice_id", "/api/invoices/8?invoiceId=101"),
++    ("/api/companies/7/invoices/8", "companyId", "/api/companies/101/invoices/8"),
++    ("/api/addresses/7/invoices/8", "address_id", "/api/addresses/101/invoices/8"),
++    ("/api/tenants/7/invoices/8/", "id", "/api/tenants/7/invoices/101/"),
++])
++def test_only_intended_identifier_changes(adapters, path, key, expected):
++    result = adapters["_replace_discovered_consumer_id"](
++        "https://app.test" + path, "101", object_id_key=key,
++    )
++    assert result["url"] == "https://app.test" + expected
++    assert result["custom_endpoint"] == "GET " + expected
++    assert result["method"] == "GET"
++
++
++@pytest.mark.parametrize("value", ["8", "507f1f77bcf86cd799439011", "550e8400-e29b-41d4-a716-446655440000", "object_123456"])
++def test_supported_child_identifier_shapes_preserve_parent(adapters, value):
++    result = adapters["_replace_discovered_consumer_id"](
++        "https://app.test/api/tenants/7/invoices/" + value, "101",
++    )
++    assert result["url"] == "https://app.test/api/tenants/7/invoices/101"
++
++
++@pytest.mark.parametrize("segment", ["{id}", ":id", "<id>", "$id", "%7Bid%7D", "{invoiceId}"])
++def test_child_placeholders_preserve_parent(adapters, segment):
++    result = adapters["_replace_discovered_consumer_id"](
++        "https://app.test/api/tenants/7/invoices/" + segment, "101",
++    )
++    assert result["url"] == "https://app.test/api/tenants/7/invoices/101"
++
++
++@pytest.mark.parametrize("url", [
++    "https://app.test/api/invoices",
++    "https://app.test/api/invoices?sessionId=8",
++    "https://app.test/api/invoices?csrf_id=8",
++    "https://app.test/api/invoices?tokenId=8",
++    "https://app.test/api/invoices/8#fragment",
++    "https://[broken/api/invoices/8",
++])
++def test_previous_ineligible_shapes_stay_ineligible(adapters, url):
++    assert adapters["_replace_discovered_consumer_id"](url, "101") is None
++
++
++def test_empty_reference_does_not_create_candidate(adapters):
++    assert adapters["_replace_discovered_consumer_id"]("https://app.test/api/invoices/8", "") is None
++    assert adapters["_resource_replay_candidates"]("https://app.test/api/invoices", {}) == []
++
++
++def _candidates(adapters, producer="https://app.test/api/invoices", templates=(), key="id"):
++    return adapters["_resource_replay_candidates"](
++        producer, {"object_id": "101", "object_id_key": key},
++        consumer_templates=list(templates),
++    )
++
++
++def test_related_consumer_wins_single_replay_budget(adapters):
++    candidates = _candidates(adapters, templates=[
++        "https://app.test/api/users/7", "https://app.test/api/invoices/8",
++    ])
++    assert candidates[0]["url"] == "https://app.test/api/invoices/101"
++    assert candidates[0]["source"] == "discovered_consumer_template"
++    assert any(row["url"] == "https://app.test/api/users/101" for row in candidates)
++
++
++def test_related_route_beyond_old_five_template_cutoff_is_not_starved(adapters):
++    distractions = [f"https://app.test/api/{name}/7" for name in
++                    ("users", "projects", "cards", "vehicles", "reports", "baskets", "orders")]
++    candidates = _candidates(adapters, templates=distractions + ["https://app.test/api/invoices/8"])
++    assert candidates[0]["url"] == "https://app.test/api/invoices/101"
++    assert candidates[0]["source"] == "discovered_consumer_template"
++    assert len(candidates) == 6
++
++
++def test_synthesized_related_path_beats_unrelated_observed_path(adapters):
++    candidates = _candidates(adapters, templates=["https://app.test/api/users/7"])
++    assert candidates[0]["url"] == "https://app.test/api/invoices/101"
++    assert any(row["source"] == "discovered_consumer_template" for row in candidates if "source" in row)
++
++
++@pytest.mark.parametrize("suffix", ["all", "list", "mine", "owned", "history"])
++def test_listing_action_does_not_become_item_parent(adapters, suffix):
++    candidates = _candidates(adapters, producer=f"https://app.test/api/invoices/{suffix}")
++    assert candidates[0]["url"] == "https://app.test/api/invoices/101"
++
++
++def test_observed_query_consumer_is_not_replaced_by_a_guessed_path(adapters):
++    candidates = _candidates(adapters, templates=[
++        "https://app.test/api/users/7", "https://app.test/api/invoices?id=8&expand=lines",
++    ])
++    assert candidates[0]["url"] == "https://app.test/api/invoices?id=101&expand=lines"
++
++
++def test_typed_foreign_key_can_prefer_its_observed_resource(adapters):
++    candidates = _candidates(adapters, templates=[
++        "https://app.test/api/invoices/8", "https://app.test/api/users/7",
++    ], key="user_id")
++    assert candidates[0]["url"] == "https://app.test/api/users/101"
++
++
++def test_same_parent_resource_is_preferred_over_same_noun_elsewhere(adapters):
++    candidates = _candidates(adapters, producer="https://app.test/api/tenants/7/invoices", templates=[
++        "https://app.test/other/invoices/8", "https://app.test/api/tenants/7/invoices/8",
++    ])
++    assert candidates[0]["url"] == "https://app.test/api/tenants/7/invoices/101"
++
++
++@pytest.mark.parametrize("origin", ["http://192.0.2.10:8080", "https://device.test:8443", "http://[2001:db8::1]:8080"])
++def test_http_nonstandard_ports_and_ipv6_are_not_new_restrictions(adapters, origin):
++    candidates = _candidates(adapters, producer=origin + "/api/invoices", templates=[
++        origin + "/api/users/7", origin + "/api/invoices/8",
++    ])
++    assert candidates[0]["url"] == origin + "/api/invoices/101"
++
++
++def test_different_origin_is_fallback_not_a_scope_grant(adapters):
++    candidates = _candidates(adapters, templates=[
++        "https://other.test/api/invoices/8", "https://app.test/api/invoices/8",
++    ])
++    assert candidates[0]["url"] == "https://app.test/api/invoices/101"
++    assert any(row["url"].startswith("https://other.test/") for row in candidates)
++    assert all("verified" not in row and "proof_state" not in row for row in candidates)
++
++
++def test_default_port_origin_equivalence(adapters):
++    candidates = _candidates(adapters, templates=["https://app.test:443/api/invoices/8"])
++    assert candidates[0]["url"] == "https://app.test:443/api/invoices/101"
++
++
++def test_templates_and_reference_are_not_mutated(adapters):
++    templates = ["https://app.test/api/users/7", "https://app.test/api/invoices/8"]
++    ref = {"object_id": "101", "object_id_key": "id", "sensitive_fields": ["amount"]}
++    original = copy.deepcopy((templates, ref))
++    adapters["_resource_replay_candidates"]("https://app.test/api/invoices", ref, consumer_templates=templates)
++    assert (templates, ref) == original
++
++
++def test_duplicate_candidates_are_removed_before_final_cap(adapters):
++    candidates = _candidates(adapters, templates=["https://app.test/api/invoices/8"] * 12)
++    assert len({row["url"] for row in candidates}) == len(candidates)
++    assert len(candidates) <= 6
++
++
++def test_ordering_retains_every_candidate_and_does_not_mutate_evidence():
++    candidates = [
++        {"url": "https://app.test/api/users/101", "object_id_location": "path", "source": "discovered_consumer_template"},
++        {"url": "https://app.test/api/invoices/101", "object_id_location": "path"},
++        {"url": "https://other.test/api/invoices/101", "object_id_location": "path"},
++    ]
++    original = copy.deepcopy(candidates)
++    result = prioritize_replay_candidates("https://app.test/api/invoices", candidates, object_id="101")
++    assert result[0] == candidates[1]
++    assert len(result) == len(candidates)
++    assert all(row in result for row in candidates)
++    assert candidates == original
++
++
++def test_unknown_relationship_retains_stable_order():
++    candidates = [
++        {"url": "https://app.test/a/101", "object_id_location": "path"},
++        {"url": "https://app.test/b/101", "object_id_location": "path"},
++    ]
++    assert prioritize_replay_candidates("https://app.test/c", candidates, object_id="101") == candidates
++
++
++def test_invalid_producer_never_claims_a_better_route():
++    candidates = [{"url": "https://app.test/api/invoices/101", "object_id_location": "path"}]
++    assert prioritize_replay_candidates("https://[bad", candidates, object_id="101") == candidates
++
++
++def test_no_eligible_identifier_is_not_invented():
++    assert select_replay_identifier(["", "api", "invoices"], [], [], []) is None
