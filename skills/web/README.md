@@ -14,20 +14,20 @@ scope, or budget. Individual actions still pass through the runtime's execution 
 
 ## Provenance
 
-Skills 01–30 are adapted from the `web-security-agent-skills` v2 library. Most bodies retain
-upstream methodology; skills 03 and 14 now describe the current runtime directly. The live Hunt
-capability schemas take precedence over upstream adapter names and package-schema references.
-The frontmatter was rewritten into ShakerScan's vocabulary:
+Skills 01–30 retain the upstream `web-security-agent-skills` v2 testing hypotheses, technique
+modules, test matrices, false-positive controls and references. Their execution instructions are
+adapted to the canonical Hunt API; there is no separate upstream action schema or policy compiler.
+The shared [execution guide](core/02-tool-execution-safety.md) documents current operation limits.
+Core guides are ShakerScan runtime guidance, not an additional approval/budget engine.
 
-- Upstream adapter ids became capability names from `api/runtime/capability_registry.py`.
-- Upstream budget fields became hunt budget dimensions.
-- `policy.evaluate`, `approval.request`, `report.generate` and `regression.create` became
-  `server_enforced`: ShakerScan applies them to every action, so naming them as a skill requirement
-  would imply the planner holds authority it never has.
-- The upstream `shell.allowlisted` adapter was dropped everywhere. ShakerScan does not expose shell
-  or planner-supplied argv as a capability.
+Skill 31 is the local edge/origin methodology. Skill 32 adds native service/device investigation
+through the existing library and capabilities; arbitrary protocol exchanges remain an explicit gap.
+The historical `skills/web` installation location now includes this native service methodology;
+its declared target kinds and ID distinguish it from web-interface knowledge.
 
-Skill 31 was authored here.
+Frontmatter declares real planner-visible capabilities, missing implementations and advisory
+budget hints. Server-enforced labels describe responsibilities, not planner-callable operations.
+The methodology never grants authority or changes the Hunt's saved resource limits.
 
 ## Support levels
 
@@ -62,6 +62,7 @@ methodology. Capability names in `missing_capabilities` are not callable API ope
 
 ## Updating
 
-Re-import from an upstream release by regenerating the frontmatter against the live capability
-registry. The loader validates every declaration at startup: an unknown capability, a server-only
+Do not overwrite the adapted execution guidance when importing upstream techniques. Update
+frontmatter against the live capability registry, preserve useful investigation content, and run
+`python scripts/check_hunt_methodologies.py` plus the Hunt methodology tests. The loader validates every declaration at startup: an unknown capability, a server-only
 one, or a `supported` skill with a missing requirement fails closed rather than being published.

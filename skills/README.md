@@ -40,13 +40,13 @@ session hook automatically.
 | [`device-hunt`](device-hunt/SKILL.md) | Compatibility entry point for older Device Hunt wording; delegates to canonical Hunt with a device target |
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
-The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: 31 focused
-web-testing playbooks with routing metadata, capability requirements, evidence gates, and honest
-runtime support levels. It is not one agent skill to load wholesale. A Hunt normally starts with no
-methodology selected, receives at most three compact suggestions, and loads one complete method only
-when objective or observed-stack evidence makes it relevant. Binding validates that the Hunt already
-has the method's required capabilities; it neither grants nor narrows authority and must not be used
-as a safety fence. Partial and reference entries remain readable but cannot be bound.
+The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: web-testing
+playbooks plus native service/device investigation, with routing metadata and explicit execution
+gaps. It is not a skill to load wholesale. Start with the objective and retained evidence, receive
+compact suggestions, and read a relevant method when needed. Useful partial methods can be bound;
+reference guidance stays readable. Binding never changes the run's scope, capabilities or budgets.
+Missing executor and withheld-capability lists explain untested techniques without discarding the
+whole method or treating a skipped check as a finding or clean result.
 
 Each modern skill is a directory with:
 
@@ -102,10 +102,10 @@ After changing a skill, command, agent, API, CLI, or UI surface:
 python3 scripts/generate_capability_inventory.py
 ```
 
-Validate each skill directory with:
+Validate the shipped methodology integration from a source checkout with:
 
 ```bash
-python3 /path/to/skill-creator/scripts/quick_validate.py skills/shakerscan
+python3 scripts/check_hunt_methodologies.py
 ```
 
 Do not put credentials, target-specific secrets, benchmark answer keys, or unverified vulnerability

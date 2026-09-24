@@ -275,7 +275,8 @@ origins. The exception does not apply to credentialed HTTP/session replay or to 
 
 ### Progressive methodologies
 
-The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.
+Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
+the library. Native protocol messages remain unavailable unless a live executor supports them.
 Do not preload them all or spend the context window on an index dump.
 
 1. Start with no methodology.

@@ -1,69 +1,35 @@
----
-id: core.engagement-state
-title: "Core 05 \u2014 Engagement State Contract"
-version: 2.0.0
-kind: core_policy
-applies_to: all_skills
----
+# Shared Hunt investigation state
 
-# Core 05 — Engagement State Contract
+Use the existing registered asset, run, action, credential and evidence stores. The methodology
+library does not create a parallel engagement database or an independently mutable policy object.
 
-## Purpose
+## Read before rediscovery
 
-Provide a model-independent source of truth for assets, identities, sessions, objects, requests, hypotheses, plans, actions, evidence, findings, approvals, and runtime counters.
+`POST /hunts/{hunt_id}/query` exposes supported retained knowledge such as endpoints, findings,
+candidates, principals, hypotheses, receipts, graph context and service intelligence. Follow
+`next_cursor` with unchanged filters; page size is not total inventory size. An unavailable or
+truncated source is not an empty or complete inventory.
 
-## Required entities
+Shared service intelligence includes supported persisted Hunt receipts alongside Scan/device
+observations. Keep source action/Hunt/Scan IDs, evidence hashes, observed time and locator context.
+Partial positive service observations remain useful without being called completed tests.
 
-```text
-Engagement
-PolicyRevision
-ApprovalToken
-Asset / Origin / Service
-Identity / Role / Tenant / Session
-Object / Owner / LifecycleState
-Endpoint / Parameter / Workflow
-RequestArtifact / ResponseArtifact / BrowserTrace / OOBEvent
-Hypothesis / TestPlan / Action / ToolResult
-EvidenceRecord / ValidationRecord / Finding / AttackPath / RegressionTest
-```
+## Principal and resource continuity
 
-## Identity and object binding
+Use saved references; workers resolve encrypted values. Keep principal, object owner and service
+origin explicit when comparing requests. A fresh browser context is not persistent state across
+calls. Reproduce necessary read-only steps together when the live browser capability supports it.
 
-Every authenticated request, browser context, token, object, and state-verification action must be labeled with controlled identity, role, tenant, and ownership where known. Authorization testing without identity-object provenance is inconclusive.
+Do not silently attach another identity, request collection or address to an existing action.
+Use an implemented operator amendment path when advertised; otherwise describe that product gap
+and retain the investigation state. Methodology binding does not make such an amendment.
 
-## Read/write discipline
+## History and deletion
 
-Each skill manifest declares state it may read and write. The control plane enforces these declarations. Specialist skills normally write plans, observations, evidence, and hypothesis events but cannot write confirmed findings, policy, approvals, or tool permissions.
+Retry an identical action using its original idempotency key; a changed action gets a new key.
+Read settled accounting rather than inventing usage from elapsed time or a profile ceiling.
+Corrections and retests retain provenance. Normal retention/deletion policies apply to stored
+observations; a UI summary is not a second owner of protected evidence.
 
-## Immutability and provenance
-
-- Raw artifacts, policy revisions, approval tokens, action records, and evidence records are immutable.
-- Corrections append a superseding record; they do not rewrite history.
-- Every derived summary references its source artifacts and transformation version.
-- Store content hashes and timestamps for reproducibility.
-
-## Session safety
-
-Sessions are opaque references. The model receives labels and capabilities, not raw cookies or tokens. Adapters verify freshness and refresh legitimate anti-CSRF, nonce, timestamp, or one-time values through authorized workflows.
-
-## Concurrent execution
-
-Use optimistic versioning or locks for mutable test objects and budget counters. An action plan records the state version it assumed. The executor rejects or replans stale state rather than applying a mutation to an unexpected object state.
-
-## Redaction views
-
-Maintain at least:
-
-- Protected raw artifact view for authorized operators.
-- Redacted analyst/model view.
-- Report-safe view.
-
-Redaction must preserve the security-relevant structure and evidence references.
-
-## Retention and cleanup
-
-Track retention deadlines, test uploads, synthetic records, cache entries, callback tokens, and cleanup status. Cleanup is a recorded action and never silently destroys primary evidence needed by policy.
-
-## Schema
-
-- `../schemas/engagement-state.schema.json`
+Use `GET /hunts/{hunt_id}/record` for the explicit investigation record. A terminal report includes
+completed evidence, unresolved leads, skipped portions and the actual stop reason.

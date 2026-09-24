@@ -43,7 +43,8 @@ def test_partial_methodology_preserves_the_existing_authority_and_budget(library
 
 @pytest.mark.parametrize("kind", ["device", "network"])
 def test_web_methodology_is_suggested_for_observed_interface_not_asset_label(library, kind):
-    assert library.suggest(goal="Investigate", target_kind=kind) == ()
+    baseline = library.suggest(goal="Investigate", target_kind=kind)
+    assert baseline and all(not item["skill_id"].startswith("skill.web.") for item in baseline)
     suggestion = library.suggest(goal="Investigate", target_kind=kind, signals=["graphql"])[0]
     assert suggestion["skill_id"] == GRAPHQL
     assert kind in library.require(GRAPHQL).catalog_entry()["target_kinds"]

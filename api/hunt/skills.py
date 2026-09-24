@@ -40,8 +40,8 @@ _SUGGESTION_STOP_WORDS = frozenset({
     "investigate", "security", "target", "test", "testing", "the", "this", "web",
     "with",
 })
-# Budget dimensions a skill may lower. Deliberately a subset of the hunt budget: a skill
-# declares testing cost, not run topology.
+# Advisory methodology cost dimensions. These never resize the saved Hunt budget or
+# turn methodology selection into another execution limit.
 SKILL_BUDGET_DIMENSIONS = frozenset({
     "max_http_requests",
     "max_duration_seconds",
@@ -453,11 +453,14 @@ class HuntSkillLibrary:
         # describes the same authority instead of consuming it on the first result.
         allowed = frozenset(allowed_capabilities) if allowed_capabilities is not None else None
         signals = tuple(str(item) for item in signals)
-        surface_terms = set(re.findall(r"[a-z0-9]+", (goal + " " + " ".join(signals)).lower()))
+        priority_signals = tuple(str(item) for item in priority_signals)
+        surface_terms = set(re.findall(
+            r"[a-z0-9]+", (goal + " " + " ".join((*signals, *priority_signals))).lower(),
+        ))
         web_surface_observed = bool(surface_terms & {
             "http", "https", "web", "api", "graphql", "jwt", "oauth", "oidc", "saml",
             "html", "javascript", "browser", "upload", "wordpress", "form", "login",
-            "xss", "csrf", "idor", "bola",
+            "xss", "csrf", "idor", "bola", "websocket", "sse", "grpc",
         })
         goal_terms = self._routing_terms(goal)
         signal_terms = self._routing_terms(" ".join(signals))
@@ -501,6 +504,7 @@ class HuntSkillLibrary:
         if not selected:
             # A broad objective still benefits from an explicit baseline. Never silently bind it.
             baseline_order = (
+                "skill.network.service-protocol-and-device-investigation",
                 "skill.web.http-baselining-replay-and-differential-analysis",
                 "skill.web.stateful-crawling-content-and-parameter-discovery",
                 "skill.web.api-inventory-openapi-and-contract-testing",

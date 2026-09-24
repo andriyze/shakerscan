@@ -23,11 +23,11 @@ A missing executor is a capability gap, not an authorization problem.
   credentialed HTTP, expand the saved Hunt binding, or authorize a foreign asset.
 - [x] Make useful partial methodologies selectable with explicit missing-executor and permission
   gaps. A missing technique must not discard the entire methodology or be called a clean test.
-- [ ] Let web/interface knowledge apply to appropriate device and network services without granting
+- [x] Let web/interface knowledge apply to appropriate device and network services without granting
   their capabilities. Integrate device/protocol methodology discovery rather than adding an engine.
 - [x] Prioritize fresh caller signals, normalize retained service observations, and prevent older
   context from crowding out an explicitly requested new direction.
-- [ ] Adapt the methodology bodies to real ShakerScan contracts. Preserve hypotheses, pivots,
+- [x] Adapt the methodology bodies to real ShakerScan contracts. Preserve hypotheses, pivots,
   evidence interpretation, and false-positive checks; remove nonexistent upstream adapter/schema
   instructions and duplicated approval/budget machinery.
 - [ ] Distinguish submission-only requests from end-to-end Hunts. Follow queued child results during
@@ -79,3 +79,21 @@ record-integrity workflow. Reads remain bounded and publish truncation/invalid-s
 This closes the supported-receipt reuse loop, not unlimited history or legacy reconstruction.
 Output without a canonical settled receipt remains an explicit gap; Scan planning is unchanged.
 Budget/resource amendments, browser/replay execution and methodology-body adaptation remain open.
+
+## Methodology integration continuation
+
+All 28 remaining upstream-style execution sections now reference the canonical Hunt API and
+current shared core guidance rather than nonexistent package schemas or a second approval/budget
+engine. Testing hypotheses, technique modules, focused test matrices, false-positive controls,
+remediation and source references are retained. Previously adapted crawl/SQL guidance is aligned
+with requested retests and partial methodology binding.
+
+Native service/device methodology is discoverable through the same library and installed agent
+kit. MQTT, SSH, SMB, SNMP, UPnP and DLNA signals guide retained-evidence/fingerprint checks and
+web-interface pivots. Arbitrary native protocol messages remain explicit executor gaps; this is
+methodology integration, not implementation of a generic packet or protocol executor.
+
+The integration check and regression tests cover dead links, retired execution contracts,
+declaration/body agreement, all delivered body hashes, protocol selection/read/bind/pivot,
+priority-only web signals, installation and unchanged run authority. Independent vulnerability
+recall measurements, general workflow execution and operator amendments remain open.

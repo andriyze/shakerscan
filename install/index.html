@@ -739,6 +739,7 @@ for skill_file in \
     29-web-llm-and-ai-feature-security-testing.md \
     30-scanner-orchestration-evidence-chaining-and-regression.md \
     31-edge-waf-and-origin-exposure-validation.md \
+    32-service-protocol-and-device-investigation.md \
     README.md; do
     download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
 done

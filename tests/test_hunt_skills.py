@@ -173,7 +173,7 @@ def test_binding_methodology_preserves_the_run_authority_and_budget(library):
 
 
 def test_a_partial_skill_keeps_its_available_parts_and_declared_gaps(library):
-    partial = next(s for s in library.list(support="partial") if s.capabilities)
+    partial = next(s for s in library.list(target_kind="web", support="partial") if s.capabilities)
     bound = bind_skills_to_hunt([partial.skill_id], target_kind="web",
                                allowed_capabilities=("http.request",), budget=None, library=library)
     entry = next(row for row in bound.context_section["bound"] if row["skill_id"] == partial.skill_id)

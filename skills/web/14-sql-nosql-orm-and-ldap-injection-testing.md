@@ -4,7 +4,7 @@ name: sql-nosql-orm-and-ldap-injection-testing
 title: 14. SQL, NoSQL, ORM, and LDAP Injection Testing
 description: Detect and safely validate query-language injection across SQL, NoSQL, ORM, search, LDAP,
   and structured-filter contexts using baseline-driven canaries.
-version: 2.1.0
+version: 2.2.0
 kind: specialist
 phase: active_testing
 risk: medium_to_high
@@ -106,6 +106,6 @@ to establish query-structure escape.
 
 ## Skill use and handoff
 
-Read the HTTP-baselining prerequisite when using it. Bind this methodology only when its required
-capabilities are already permitted; record `used` or `completed` with the actual same-Hunt action ID.
+Read the HTTP-baselining prerequisite when using it. Binding retains this methodology even when a technique is unavailable;
+use its compatible parts and report missing or withheld work as coverage gaps; record `used` or `completed` with the actual same-Hunt action ID.
 Report the unresolved interpreter/context, smallest next useful test, and coverage limitations.
