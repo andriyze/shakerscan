@@ -157,3 +157,40 @@ def test_a_staged_path_cannot_escape_the_installation_directory(tmp_path):
     source = INSTALLER.read_text(encoding="utf-8")
     prune_block = source[source.index("while IFS= read -r retired_relative"):]
     assert "/*|*..*) continue ;;" in prune_block[:600]
+
+
+def test_retired_claude_guide_is_removed_even_without_an_old_manifest(tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
+    old = "# Connected ShakerScan instance\nold.example\n@AGENTS.md\n"
+    (install / "CLAUDE.md").write_text(old)
+    (install / ".env").write_text("LOCAL=kept\n")
+    _install(tmp_path, ["AGENTS.md"])
+    assert not (install / "CLAUDE.md").exists()
+    backups = list(install.glob(".shakerscan-retired-CLAUDE.*"))
+    assert len(backups) == 1 and backups[0].read_text() == old
+    assert (install / ".env").read_text() == "LOCAL=kept\n"
+    _install(tmp_path, ["AGENTS.md"])
+    assert len(list(install.glob(".shakerscan-retired-CLAUDE.*"))) == 1
+
+
+def test_manifest_owned_claude_guide_is_retired_on_upgrade(tmp_path):
+    install = _install(tmp_path, ["AGENTS.md", "CLAUDE.md"])
+    (install / "CLAUDE.md").write_text("@AGENTS.md\n# operator addition\n")
+    _install(tmp_path, ["AGENTS.md"])
+    assert not (install / "CLAUDE.md").exists()
+    backup, = install.glob(".shakerscan-retired-CLAUDE.*")
+    assert "operator addition" in backup.read_text()
+
+
+def test_installer_retires_legacy_symlink_not_its_destination(tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
+    outside = tmp_path / "operator-guide.md"
+    outside.write_text("operator-owned\n")
+    (install / "CLAUDE.md").symlink_to(outside)
+    _install(tmp_path, ["AGENTS.md"])
+    assert not (install / "CLAUDE.md").is_symlink()
+    assert outside.read_text() == "operator-owned\n"
+    backup, = install.glob(".shakerscan-retired-CLAUDE.*")
+    assert backup.is_symlink()

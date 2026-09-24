@@ -121,6 +121,11 @@ def test_read_only_authority_skips_optional_writes_but_keeps_read_checks():
             assert (await client.request(call(port, "GET")))["status"] == 200
             assert [m for m,_,_ in wire] == ["HEAD", "GET"]
             assert client.actual["state_changing_requests"] == 0
+            assert client.errors == []
+            assert {gap["method"] for gap in client.coverage_gaps} == {"POST", "ZZZZ"}
+            assert all(gap["status"] == "not_requested" for gap in client.coverage_gaps)
+            row = decorate_observations([{"port": port, "script_id": "http-methods"}], client)[0]
+            assert row["coverage_gaps"] == client.coverage_gaps
     asyncio.run(run())
 
 
@@ -197,3 +202,29 @@ def test_native_structured_tables_keep_all_methods_and_header_signals():
     assert parsed.status == "succeeded" and not parsed.errors
     assert parsed.observations[0]["signals"]["methods"] == ["GET", "HEAD", "OPTIONS", "POST"]
     assert parsed.observations[1]["signals"]["mentioned_headers"] == ["x-frame-options"]
+
+
+def test_skipped_optional_method_does_not_send_detection_traffic_or_consume_budget():
+    async def run():
+        async with http_fixture() as (port, wire):
+            client = bridge(port, allow_write=False)
+            for _ in range(2):
+                assert (await client.request(call(port, "POST")))["skipped"] is True
+            assert wire == [] and client.exchanges == []
+            assert client.actual == {"http_requests": 0, "state_changing_requests": 0}
+            assert len(client.coverage_gaps) == 1 and client.errors == []
+    asyncio.run(run())
+
+
+def test_anonymous_redirect_exception_does_not_accept_credentials_or_mutate_binding():
+    async def run():
+        async with http_fixture() as (other, final_wire):
+            async with http_fixture(lambda *_: (302, {"Location": f"http://fixture.test:{other}/"}, b"")) as (port, _):
+                client = bridge(port, scripts=("http-security-headers",))
+                before = client.target
+                response = await client.request({**call(port, "HEAD", "http-security-headers", redirects=True),
+                                                 "headers": {"Authorization": "Bearer never-send-this"}})
+                assert response["status"] == 200 and final_wire
+                assert client.target == before
+                assert not any(b"Authorization:" in raw or b"never-send-this" in raw for _, _, raw in final_wire)
+    asyncio.run(run())

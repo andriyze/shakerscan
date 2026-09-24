@@ -1296,6 +1296,10 @@ jobs:
             --require-check 'dast:D-2 retains request-based SQLi result' \
             --require-check 'dast:D-3 retains request-based XSS result' \
             --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
+            --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+            --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+            --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+            --require-pass 'model_intake:MI-6C deactivated durable anchor stops verification' \
             > artifacts/certification/e2e-actual-assertions.json
 
       - name: Build exact-digest preservation receipt

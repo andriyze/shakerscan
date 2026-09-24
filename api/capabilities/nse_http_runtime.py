@@ -99,6 +99,10 @@ def decorate_observations(observations, bridge: NseHttpTransport | None):
     for item in observations:
         item = dict(item)
         key = (item["port"], item["script_id"])
+        gaps = [dict(gap) for gap in bridge.coverage_gaps
+                if (gap["port"], gap["script_id"]) == key]
+        if gaps:
+            item["coverage_gaps"] = gaps
         exchanges = grouped.pop(key, [])
         if exchanges:
             item["http_exchanges"] = exchanges

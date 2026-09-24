@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -430,6 +431,23 @@ def _copy_tree(source: Path, target: Path) -> None:
     shutil.copytree(source, target)
 
 
+def _retire_legacy_agent_guide(workspace: Path) -> None:
+    """Remove stale guide precedence without losing operator edits or following links."""
+    legacy = workspace / "CLAUDE.md"
+    if not legacy.is_file() and not legacy.is_symlink():
+        return
+    fd, backup_name = tempfile.mkstemp(
+        prefix=".shakerscan-retired-CLAUDE-", suffix=".bak", dir=workspace,
+    )
+    os.close(fd)
+    backup = Path(backup_name)
+    try:
+        legacy.replace(backup)  # Moves the symlink itself, never its destination.
+    except OSError:
+        backup.unlink(missing_ok=True)
+        raise
+
+
 def prepare_workspace(
     workspace: Path, url: str, who: str, executable: str, *, authenticated: bool = True,
 ) -> list[str]:
@@ -476,6 +494,7 @@ def prepare_workspace(
         encoding="utf-8",
     )
     written.append("opencode.json")
+    _retire_legacy_agent_guide(workspace)
     return written
 
 

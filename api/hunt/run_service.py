@@ -77,6 +77,7 @@ HUNT_SKILL_USAGE_STATES = frozenset({"used", "completed", "deferred"})
 _SKILL_SIGNAL_KEYS = frozenset({
     "auth", "authentication", "content_type", "endpoint", "endpoints", "framework",
     "frameworks", "protocol", "protocols", "route", "routes", "service", "services",
+    "service_name", "product", "tunnel",
     "stack", "tags", "technologies", "technology",
 })
 
@@ -141,7 +142,12 @@ def _skill_signal_values(context: Mapping[str, Any]) -> tuple[str, ...]:
         if isinstance(node, Mapping):
             for raw_key, child in node.items():
                 name = str(raw_key).strip().lower()
-                if name in _SKILL_SIGNAL_KEYS:
+                if name in {"skills", "capabilities", "policy", "budget"}:
+                    continue  # Suggestions and schemas are not observed target evidence.
+                if name in {"web_origin", "service_origin"} and isinstance(child, str):
+                    if child.startswith(("http://", "https://")) and "http" not in values:
+                        values.append("http")  # A surface signal, not a raw target URL.
+                elif name in _SKILL_SIGNAL_KEYS:
                     visit(child, key=name, depth=depth + 1)
                 elif isinstance(child, (Mapping, list, tuple)):
                     visit(child, key=name, depth=depth + 1)
@@ -604,11 +610,14 @@ class HuntRunService:
         context = _decode_json(item.get("context_pack"), {})
         policy = _decode_json(item.get("policy_json"), {})
         allowed = [str(name) for name in policy.get("allowed_capabilities") or []]
-        bounded_signals = list(_skill_signal_values(context))
-        for signal in signals or []:
+        # The caller's newest evidence must not be silently discarded behind 40 old labels.
+        bounded_signals: list[str] = []
+        seen_signals: set[str] = set()
+        for signal in [*(signals or []), *_skill_signal_values(context)]:
             text = _bounded_text(signal, maximum=160)
-            if text and text not in bounded_signals and len(bounded_signals) < 40:
+            if text and text.casefold() not in seen_signals and len(bounded_signals) < 40:
                 bounded_signals.append(text)
+                seen_signals.add(text.casefold())
         requested = _requested_skill_ids(context)
         specs = skill_library().resolve_for_hunt(
             requested, target_kind=str(item.get("target_kind") or "web"),
@@ -616,6 +625,7 @@ class HuntRunService:
         suggestions = skill_library().suggest(
             goal=str(item.get("objective") or ""),
             signals=bounded_signals,
+            priority_signals=tuple(_bounded_text(signal, maximum=160) for signal in (signals or [])[:20]),
             target_kind=str(item.get("target_kind") or "web"),
             allowed_capabilities=allowed,
             exclude=(spec.skill_id for spec in specs),
@@ -655,7 +665,7 @@ class HuntRunService:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await hunt_run_or_404(connection, hunt_id, for_update=True)
-                if str(row["target_kind"]) not in spec.target_kinds:
+                if str(row["target_kind"]) not in spec.applicable_target_kinds:
                     raise HTTPException(
                         status_code=422,
                         detail="Methodology does not support this Hunt target kind",

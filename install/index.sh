@@ -172,8 +172,19 @@ prune_retired_files() {
     # it with the new one, after which previous and staged are identical and nothing is ever pruned.
     previous="$1"
     staged="$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
-    [ -f "$previous" ] || return 0
     [ -f "$staged" ] || return 0
+    # Also migrate pre-manifest installs and agent-workspace leftovers. A stale
+    # CLAUDE.md can shadow the current AGENTS.md or retain an old instance note.
+    # Retire only this top-level instruction file, in the candidate tree; keep
+    # its bytes (or symlink) under a non-loaded name so local edits are not lost.
+    if ! grep -Fxq -- 'CLAUDE.md' "$staged"; then
+        legacy_guide="$INSTALL_STAGE/CLAUDE.md"
+        if [ -f "$legacy_guide" ] || [ -L "$legacy_guide" ]; then
+            retired_guide="$(mktemp "$INSTALL_STAGE/.shakerscan-retired-CLAUDE.XXXXXX")"
+            mv -f -- "$legacy_guide" "$retired_guide"
+        fi
+    fi
+    [ -f "$previous" ] || return 0
     while IFS= read -r retired_relative; do
         [ -n "$retired_relative" ] || continue
         # Refuse anything that could escape the installation directory, whatever a previous

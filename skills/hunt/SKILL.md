@@ -21,28 +21,32 @@ candidates, and proof. Do not start a second in-server reasoning loop.
 4. Reuse standing target authorization. When the target already has valid standing authorization,
    let ShakerScan resolve the target-bound approval; do not ask the operator to repeat approval or
    make them find/copy a receipt ID. Never invent authority or a receipt.
-5. Start `POST /hunts`, then read the returned context pack and capability schemas. Starting with
+5. Without standing authorization, obtain explicit target-specific operator authorization before
+   requesting active authority. A clear authorization already given in this conversation counts;
+   record it once through the target authorization workflow rather than asking again.
+6. Start `POST /hunts`, then read the returned context pack and capability schemas. Starting with
    no `skill_ids` is normal. Methodologies guide investigation; they do not grant or reduce
    authority.
 
-A compact set of contract-valid shapes is kept below so agents and CI can detect contract drift.
-These are shapes, not recommended zero-budget templates; replace the example policy/budgets with the
-operator-authorized values and server-advertised defaults for the real investigation.
+These public start examples are checked through standing-authorization resolution before the
+internal contract is validated. Active examples assume the operator has already authorized the
+registered target. Empty budgets use the server's profile defaults; policy automatically zeros
+unrequested permissions. Profile and collection IDs select resources, not new authority.
 
 ```json
-{"schema_version":"hunt-start/v2","target_id":"registered-target-id","target_kind":"web","goal":"Investigate the authorized web target.","budget_profile":"balanced","policy":{"active_testing":false,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":false},"budgets":{"max_active_actions":0,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+{"schema_version":"hunt-start/v2","target_id":"registered-target-id","target_kind":"web","goal":"Investigate the authorized web target.","budget_profile":"balanced","policy":{"active_testing":false,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false},"budgets":{},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
 ```
 
 ```json
-{"schema_version":"hunt-start/v2","target_id":"registered-api-target-id","target_kind":"api","goal":"Compare authorization between two approved principals.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":12,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{"primary_credential_profile_id":"primary-profile-id","secondary_credential_profile_id":"secondary-profile-id"},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+{"schema_version":"hunt-start/v2","target_id":"registered-api-target-id","target_kind":"api","goal":"Compare authorization between two approved principals.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false},"budgets":{},"credential_refs":{"primary_credential_profile_id":"primary-profile-id","secondary_credential_profile_id":"secondary-profile-id"},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
 ```
 
 ```json
-{"schema_version":"hunt-start/v2","target_id":"registered-network-target-id","target_kind":"network","goal":"Investigate the authorized network target.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":4,"max_tcp_ports":100,"max_udp_ports":20,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+{"schema_version":"hunt-start/v2","target_id":"registered-network-target-id","target_kind":"network","goal":"Investigate the authorized network target.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false},"budgets":{},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
 ```
 
 ```json
-{"schema_version":"hunt-start/v2","target_id":"registered-device-target-id","target_kind":"device","goal":"Investigate the authorized connected device.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":1,"max_tcp_ports":100,"max_udp_ports":20,"max_device_fragility_points":40,"max_oob_interactions":0},"credential_refs":{"ssh_credential_profile_id":"ssh-profile-id"},"capabilities":[],"request_collection_ids":["saved-device-selection-id"],"skill_ids":[]}
+{"schema_version":"hunt-start/v2","target_id":"registered-device-target-id","target_kind":"device","goal":"Investigate the authorized connected device.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false},"budgets":{},"credential_refs":{"ssh_credential_profile_id":"ssh-profile-id"},"capabilities":[],"request_collection_ids":["saved-device-selection-id"],"skill_ids":[]}
 ```
 
 The exact `hunt-start/v2` fields come from `GET /hunts/contract`. A normal planner should not
@@ -71,8 +75,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
 - If one suggestion is relevant, load exactly that one with
   `POST /hunts/{hunt_id}/skills/{skill_id}/read`, review its prerequisites, then bind it with
   `/bind`. Never read the whole catalog. Binding reports `withheld_capabilities` per bound skill,
-  including prerequisite requirements; it cannot add or remove capabilities, change scope, or
-  resize the Hunt budget. Skip techniques needing withheld capabilities and continue compatible
+  including prerequisite requirements, and `missing_capabilities` for executor gaps. Useful partial
+  methodologies remain selectable. Binding cannot add/remove capabilities, change scope, or resize
+  the Hunt budget. Skip techniques needing unavailable capabilities and continue compatible
   work. Report those untested techniques as coverage gaps, not findings or clean results. An empty
   list is not execution proof and does not bypass the remaining runtime checks.
 - Do not describe binding as narrowing, sandboxing, or fencing the Hunt. To reduce authority, start
@@ -116,8 +121,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Silence or `open|filtered` is inconclusive. Preserve pacing, fragility limits, circuit breakers,
   exact-device origin pinning, and separate user confirmation through
   `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm` for immutable SSH plans.
-- If a capability queues a Scan or verifier, report its ID and stop. Do not poll unless the user
-  explicitly asks later.
+- For a submission-only request, report the queued Scan/verifier ID and stop. For an explicitly
+  requested end-to-end Hunt, follow the child action with bounded status checks, collect its result,
+  and continue the investigation; do not ask for another command at each queue boundary. Respect
+  cancellation and the run deadline. If this planner session cannot remain active, save a checkpoint
+  and state what is still running instead of claiming the investigation is finished.
 
 Request collections are redacted inventories. Postman scripts, HAR responses, and external
 OpenAPI references never execute. Use only collection/request IDs returned by ShakerScan; do not
@@ -157,7 +165,8 @@ actions. Cancel with `/cancel`; resume only when the server reports an awaiting-
 
 Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
 expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,
-or any budget is exhausted. Preserve partial observations and name material coverage gaps.
+or no useful authorized action fits the remaining budget. An exhausted optional dimension need not
+stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
 An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
 reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
 
