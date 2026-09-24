@@ -1,0 +1,476 @@
+diff --git a/.github/workflows/e2e-pr.yml b/.github/workflows/e2e-pr.yml
+index dbac520..4225018 100644
+--- a/.github/workflows/e2e-pr.yml
++++ b/.github/workflows/e2e-pr.yml
+@@ -136,6 +136,8 @@ jobs:
+             --require-check 'dast:D-2 retains request-based SQLi result' \
+             --require-check 'dast:D-3 retains request-based XSS result' \
+             --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
++            --require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding' \
++            --require-pass 'hunt:H-20 protected and shared objects remain unverified' \
+             --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+             --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+             --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+diff --git a/.github/workflows/e2e.yml b/.github/workflows/e2e.yml
+index afa643d..95acf32 100644
+--- a/.github/workflows/e2e.yml
++++ b/.github/workflows/e2e.yml
+@@ -101,6 +101,8 @@ jobs:
+       - name: Require executed trust-anchor lifecycle passes
+         run: |
+           python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \
++            --require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding' \
++            --require-pass 'hunt:H-20 protected and shared objects remain unverified' \
+             --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+             --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+             --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+diff --git a/.github/workflows/hunt-record-integrity.yml b/.github/workflows/hunt-record-integrity.yml
+index 23d12b3..b4cbd0c 100644
+--- a/.github/workflows/hunt-record-integrity.yml
++++ b/.github/workflows/hunt-record-integrity.yml
+@@ -83,6 +83,11 @@ jobs:
+             tests/test_hunt_budget_amendments_postgres.py \
+             tests/test_service_intelligence_postgres.py
+           python scripts/check_module_size.py
++      - name: Canonical authorization proof and real PostgreSQL materialization
++        run: |
++          test -n "$HUNT_TEST_POSTGRES_DSN"
++          python -m pytest -q --junitxml=artifacts/hunt-authz-proof.xml \
++            tests/test_hunt_authz_proof_materialization.py
+       - name: Retain the test result for this exact revision
+         if: always()
+         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+@@ -91,6 +96,7 @@ jobs:
+           path: |
+             artifacts/hunt-records.xml
+             artifacts/hunt-services.xml
++            artifacts/hunt-authz-proof.xml
+           if-no-files-found: error
+           retention-days: 14
+   review-ui:
+diff --git a/.github/workflows/release-candidate.yml b/.github/workflows/release-candidate.yml
+index d3ecfd1..f8b41fe 100644
+--- a/.github/workflows/release-candidate.yml
++++ b/.github/workflows/release-candidate.yml
+@@ -1296,6 +1296,8 @@ jobs:
+             --require-check 'dast:D-2 retains request-based SQLi result' \
+             --require-check 'dast:D-3 retains request-based XSS result' \
+             --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
++            --require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding' \
++            --require-pass 'hunt:H-20 protected and shared objects remain unverified' \
+             --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
+             --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
+             --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
+diff --git a/api/hunt/authz_findings.py b/api/hunt/authz_findings.py
+new file mode 100644
+index 0000000..5131ac0
+--- /dev/null
++++ b/api/hunt/authz_findings.py
+@@ -0,0 +1,92 @@
++"""Project settled authorization proof into Hunt's existing finding persistence.
++
++Scan and Hunt use the same pure finding projection. This module adds ownership,
++receipt provenance and endpoint identity, not a verifier or an entitlement rule.
++"""
++from __future__ import annotations
++
++import hashlib
++from typing import Any
++from urllib.parse import urlsplit
++from uuid import UUID
++
++try:
++    from runtime.receipts import CapabilityReceipt
++    from scan.finalizer import canonical_authz_findings
++except ModuleNotFoundError:
++    from ..runtime.receipts import CapabilityReceipt
++    from ..scan.finalizer import canonical_authz_findings
++
++try:
++    from findings import templated_finding_identity
++except ModuleNotFoundError:
++    from scanner.findings import templated_finding_identity
++
++
++def _origin(value: str) -> tuple[str, str, int] | None:
++    try:
++        parsed = urlsplit(value)
++        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
++                or parsed.username is not None or parsed.password is not None or parsed.fragment):
++            return None
++        return parsed.scheme, parsed.hostname.lower().rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)
++    except (ValueError, TypeError):
++        return None
++
++
++def authz_finding_records(
++    capability_receipt: Any, *, hunt_id: UUID, action_id: UUID,
++    target_id: UUID, receipt_id: UUID, allowed_origins: tuple[str, ...],
++    target_kind: str = "web",
++) -> list[dict[str, Any]]:
++    """Accept only this Hunt's canonical receipt, never the caller's loose flags.
++
++    The worker calls this inside its locked atomic settlement. Reading history
++    or replaying a settled action does not call it or create verification rows.
++    Selected-object observations remain inconclusive under the shared predicate.
++    """
++    if capability_receipt is None:
++        return []
++    try:
++        receipt = CapabilityReceipt.from_dict(
++            capability_receipt.public_dict() if hasattr(capability_receipt, "public_dict")
++            else capability_receipt,
++        )
++    except (ValueError, TypeError, KeyError, AttributeError):
++        return []
++    if (receipt.capability_name != "authz.verify" or receipt.hunt_id != str(hunt_id)
++            or receipt.target_id != str(target_id) or receipt.receipt_id != str(receipt_id)
++            or receipt.redacted_execution.get("target_kind") != target_kind
++            or receipt.scan_id is not None or receipt.validation_id is not None
++            or receipt.status not in {"succeeded", "partial"}
++            or receipt.budget_reservation_state not in {"committed", "failed"}
++            or not receipt.worker_id or not receipt.budget_reservation_id):
++        return []
++    origins = {_origin(value) for value in allowed_origins} - {None}
++    reference = {"schema_version": "capability-receipt-reference/v1",
++                 "receipt_id": receipt.receipt_id, "receipt_hash": receipt.receipt_hash}
++    records = []
++    for finding in canonical_authz_findings(receipt.observations, receipt=reference):
++        evidence = dict(finding["evidence"])
++        if (not origins or _origin(finding["url"]) not in origins
++                or _origin(evidence["producer_url"]) not in origins):
++            continue
++        identity = templated_finding_identity(finding)
++        if not identity:
++            continue
++        proof = finding["proof_contract_v2"]
++        evidence.update({
++            "schema_version": "hunt-deterministic-finding/v1",
++            "authoritative": True, "proof_state": "verified", "finding_verdict": "verified",
++            "hunt_id": str(hunt_id), "source_action_id": str(action_id),
++            "tool_receipt_id": str(receipt_id), "method": "GET",
++            "proof_contract_v2": proof,
++        })
++        records.append({
++            "fingerprint": "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16],
++            "url": finding["url"], "title": finding["title"],
++            "description": finding["description"], "evidence": evidence,
++            "tool": finding["tool"], "cwe": finding["cwe"], "finding_type": "bola",
++            "verdict_reason": finding["verification_reason"], "contract_id": proof["contract_id"],
++        })
++    return records
+diff --git a/api/hunt/deterministic_findings.py b/api/hunt/deterministic_findings.py
+index 799c0b2..4ae14d0 100644
+--- a/api/hunt/deterministic_findings.py
++++ b/api/hunt/deterministic_findings.py
+@@ -137,24 +137,12 @@ def verified_xss_observations(
+     return accepted
+ 
+ 
+-async def materialize_verified_hunt_findings(
+-    conn: Any,
+-    hunt_id: uuid.UUID,
+-    action_id: uuid.UUID,
+-    target_id: uuid.UUID,
+-    target_url: str,
+-    capability_name: str,
+-    receipt_id: uuid.UUID,
+-    capability_input: Mapping[str, Any],
+-    observations: Any,
+-    *, target_kind: str = "web",
+-) -> list[str]:
+-    """Persist proof-bearing capability output without trusting planner fields."""
+-    if capability_name != "xss.verify":
+-        return []
+-    target_column = "device_target_id" if target_kind == "device" else "target_id"
+-    target_table = "device_targets" if target_kind == "device" else "targets"
+-    findings: list[str] = []
++def _xss_finding_records(
++    hunt_id: uuid.UUID, action_id: uuid.UUID, target_url: str,
++    capability_name: str, receipt_id: uuid.UUID,
++    capability_input: Mapping[str, Any], observations: Any,
++) -> list[dict[str, Any]]:
++    records: list[dict[str, Any]] = []
+     method = str(capability_input.get("method") or "GET").strip().upper()
+     if not method.isalpha() or not 3 <= len(method) <= 12:
+         method = "GET"
+@@ -197,6 +185,48 @@ async def materialize_verified_hunt_findings(
+             verifier=capability_name,
+             dom_marker_executed=proof.get("dom_marker_executed") if browser_proof else None,
+         )
++        records.append({
++            "fingerprint": fingerprint, "url": proof["url"], "evidence": evidence,
++            "title": "Verified cross-site scripting", "description": description,
++            "tool": tool, "cwe": "CWE-79", "finding_type": "xss",
++            "verdict_reason": verdict_reason, "contract_id": proof_contract.split("/", 1)[0],
++        })
++    return records
++
++
++async def materialize_verified_hunt_findings(
++    conn: Any,
++    hunt_id: uuid.UUID,
++    action_id: uuid.UUID,
++    target_id: uuid.UUID,
++    target_url: str,
++    capability_name: str,
++    receipt_id: uuid.UUID,
++    capability_input: Mapping[str, Any],
++    observations: Any,
++    *, target_kind: str = "web", capability_receipt: Any = None,
++    allowed_origins: tuple[str, ...] = (),
++) -> list[str]:
++    """Persist receipt-backed verifier outputs through one finding/verification path.
++
++    Caller holds the Hunt row lock and settlement transaction. Action redelivery
++    uses the settled result; it must not invoke materialization a second time.
++    """
++    if capability_name == "xss.verify":
++        records = _xss_finding_records(hunt_id, action_id, target_url, capability_name,
++                                      receipt_id, capability_input, observations)
++    elif capability_name == "authz.verify":
++        from .authz_findings import authz_finding_records
++        records = authz_finding_records(capability_receipt, hunt_id=hunt_id,
++            action_id=action_id, target_id=target_id, receipt_id=receipt_id,
++            allowed_origins=allowed_origins or (target_url,), target_kind=target_kind)
++    else:
++        return []
++    target_column = "device_target_id" if target_kind == "device" else "target_id"
++    target_table = "device_targets" if target_kind == "device" else "targets"
++    findings: list[str] = []
++    for record in records:
++        evidence = record["evidence"]
+         finding_id = await conn.fetchval(
+             f"""INSERT INTO findings (
+                    {target_column}, hunt_run_id, fingerprint, title, description,
+@@ -204,9 +234,9 @@ async def materialize_verified_hunt_findings(
+                    last_verification_status, last_verification_verdict,
+                    last_verification_confidence, last_verified_at, verification_count
+                ) VALUES (
+-                   $1,$2,$3,'Verified cross-site scripting',
++                   $1,$2,$3,$8,
+                    $6,
+-                   'high',NULL,$7,'CWE-79',$4,$5::jsonb,'deep_hunt','active',
++                   'high',NULL,$7,$9,$4,$5::jsonb,'deep_hunt','active',
+                    'still_vulnerable','exploited',1.0,NOW(),1
+                ) ON CONFLICT ({target_column}, fingerprint) WHERE {target_column} IS NOT NULL
+                DO UPDATE SET
+@@ -224,11 +254,13 @@ async def materialize_verified_hunt_findings(
+                RETURNING id""",
+             target_id,
+             hunt_id,
+-            fingerprint,
+-            proof["url"],
++            record["fingerprint"],
++            record["url"],
+             json.dumps(evidence),
+-            description,
+-            tool,
++            record["description"],
++            record["tool"],
++            record["title"],
++            record["cwe"],
+         )
+         await conn.execute(
+             f"""INSERT INTO finding_verifications (
+@@ -238,17 +270,18 @@ async def materialize_verified_hunt_findings(
+                    contract_version, proof_basis, started_at, completed_at, updated_at
+                ) VALUES (
+                    $1,$2,$3,'completed','success','exploited',
+-                   $6,'xss',$4,$4,$5::jsonb,1.0,
++                   $6,$8,$4,$4,$5::jsonb,1.0,
+                    'deterministic',$7,
+                    'v1','tool_execution',NOW(),NOW(),NOW()
+                )""",
+             finding_id,
+             target_id,
+             f"hunt_v2:{hunt_id}"[:120],
+-            proof["url"],
++            record["url"],
+             json.dumps(evidence),
+-            verdict_reason,
+-            proof_contract.split("/", 1)[0],
++            record["verdict_reason"],
++            record["contract_id"],
++            record["finding_type"],
+         )
+         findings.append(str(finding_id))
+     if findings:
+diff --git a/api/scan/finalizer.py b/api/scan/finalizer.py
+index 970fbea..5be0301 100644
+--- a/api/scan/finalizer.py
++++ b/api/scan/finalizer.py
+@@ -242,6 +242,65 @@ def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
+     return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
+ 
+ 
++def canonical_authz_findings(
++    observations: Sequence[Mapping[str, Any]], *, receipt: Mapping[str, Any],
++) -> list[dict[str, Any]]:
++    """Shared pure projection of canonical authorization proof for Scan and Hunt.
++
++    This is the existing Scan predicate and finding shape, not another verifier.
++    Callers must supply worker-owned, receipt-bound observations; planner claims
++    and selected-object access evidence are not deterministic authorization proof.
++    """
++    findings: list[dict[str, Any]] = []
++    for item in observations:
++        if not isinstance(item, Mapping):
++            continue
++        kind = item.get("kind")
++        if (
++            kind == "authz_differential"
++            and item.get("proof_state") == "verified"
++            and item.get("proof_type") == "cross_principal_replay"
++            and item.get("principal_contexts_distinct") is True
++            and item.get("object_absent_from_secondary_listing") is True
++            and item.get("responses_equivalent") is True
++        ):
++            finding = _base_finding(
++                tool="smart_authz",
++                title="Verified broken object authorization",
++                severity="high",
++                cwe="CWE-639",
++                url=item.get("consumer_url"),
++                evidence={
++                    "url": item.get("consumer_url"),
++                    "producer_url": item.get("producer_url"),
++                    "resource_id_sha256": item.get("resource_id_sha256"),
++                    "owner_status": item.get("owner_status"),
++                    "attacker_status": item.get("attacker_status"),
++                    "accepted_principal_responses": dict(
++                        item.get("accepted_principal_responses") or {}
++                    ),
++                    "distinct_principal_control": True,
++                    "object_id_absent_from_attacker_listing": True,
++                    "responses_equivalent": True,
++                    "proof_type": "cross_principal_replay",
++                    "canonical_capability": "authz.verify",
++                    "capability_receipt": receipt,
++                },
++            )
++            finding.update({
++                "verified": True,
++                "suspected": False,
++                "needs_verification": False,
++                "proof_state": "verified",
++                "proof_contract_v2": _canonical_proof_contract_v2(
++                    capability_name="authz.verify", kind=str(kind), receipt=receipt,
++                ),
++                "verification_reason": "Cross-principal owner-object replay proof satisfied",
++            })
++            findings.append(finding)
++    return findings
++
++
+ def _findings_for_action(
+     result: CapabilityResultReference,
+     observations: Sequence[Mapping[str, Any]],
+@@ -765,48 +824,8 @@ def _findings_for_action(
+                 ),
+             })
+             findings.append(finding)
+-        elif (
+-            kind == "authz_differential"
+-            and item.get("proof_state") == "verified"
+-            and item.get("proof_type") == "cross_principal_replay"
+-            and item.get("principal_contexts_distinct") is True
+-            and item.get("object_absent_from_secondary_listing") is True
+-            and item.get("responses_equivalent") is True
+-        ):
+-            finding = _base_finding(
+-                tool="smart_authz",
+-                title="Verified broken object authorization",
+-                severity="high",
+-                cwe="CWE-639",
+-                url=item.get("consumer_url"),
+-                evidence={
+-                    "url": item.get("consumer_url"),
+-                    "producer_url": item.get("producer_url"),
+-                    "resource_id_sha256": item.get("resource_id_sha256"),
+-                    "owner_status": item.get("owner_status"),
+-                    "attacker_status": item.get("attacker_status"),
+-                    "accepted_principal_responses": dict(
+-                        item.get("accepted_principal_responses") or {}
+-                    ),
+-                    "distinct_principal_control": True,
+-                    "object_id_absent_from_attacker_listing": True,
+-                    "responses_equivalent": True,
+-                    "proof_type": "cross_principal_replay",
+-                    "canonical_capability": "authz.verify",
+-                    "capability_receipt": receipt,
+-                },
+-            )
+-            finding.update({
+-                "verified": True,
+-                "suspected": False,
+-                "needs_verification": False,
+-                "proof_state": "verified",
+-                "proof_contract_v2": _canonical_proof_contract_v2(
+-                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
+-                ),
+-                "verification_reason": "Cross-principal owner-object replay proof satisfied",
+-            })
+-            findings.append(finding)
++        elif kind == "authz_differential":
++            findings.extend(canonical_authz_findings([item], receipt=receipt))
+         elif kind == "tls_protocol":
+             tls_issues = (
+                 (item.get("certificate_expired") is True,
+diff --git a/api/worker.py b/api/worker.py
+index 29d5e5d..ee03a1c 100644
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -20021,6 +20021,7 @@ def _worker_terminal_network_result(
+     *,
+     job_id: str,
+     network_binding: str = "runtime_target_binding",
++    action_result: Mapping[str, Any] | None = None,
+ ) -> dict[str, Any]:
+     receipt = dict(stored.receipt or {})
+     partial = bool(receipt.get("partial"))
+@@ -20037,6 +20038,7 @@ def _worker_terminal_network_result(
+         if isinstance(item, Mapping)
+     ]
+     return {
++        "verified_finding_ids": list((action_result or {}).get("verified_finding_ids") or []),
+         "job_id": job_id,
+         "status": status,
+         "ok": status == "success",
+@@ -21943,6 +21945,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                 if stored.record.terminal:
+                     result = _worker_terminal_network_result(
+                         stored, job_id=job_id,
++                        action_result=_worker_json_object(action["result_summary"]),
+                     )
+                     return
+                 if stored.record.status == "running":
+@@ -22657,6 +22660,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                             settled_session.evidence_receipt_digest
+                         ),
+                     )
++                verified_finding_ids = await materialize_verified_hunt_findings(
++                    conn, hunt_id, action_id, uuid.UUID(target.target_id), target_url,
++                    capability_name, receipt_id, capability_input, observations,
++                    target_kind=target.target_kind, capability_receipt=capability_receipt,
++                    allowed_origins=target.allowed_origins,
++                )
+                 persisted = await reservation_store.persist_terminal(
+                     conn,
+                     previous=latest,
+@@ -22671,6 +22680,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                     json.dumps(current_used),
+                 )
+                 action_result = {
++                    "verified_finding_ids": verified_finding_ids,
+                     "status": status,
+                     "ok": status == "success",
+                     "error": error,
+@@ -22710,6 +22720,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                         "HTTP action changed before settlement"
+                     )
+         result = {
++            "verified_finding_ids": verified_finding_ids,
+             "job_id": job_id,
+             "status": status,
+             "ok": status == "success",
