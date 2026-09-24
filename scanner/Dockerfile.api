@@ -53,6 +53,7 @@ COPY --from=scanner-runtime /app/requirements.lock /app/requirements.lock
 COPY --from=scanner-runtime /app/entrypoint.sh /app/entrypoint.sh
 COPY --from=scanner-runtime /opt/model-intake-locks /opt/model-intake-locks
 COPY --from=scanner-runtime /opt/build-inputs/scanner.Dockerfile /opt/build-inputs/scanner.Dockerfile
+COPY --from=scanner-runtime /opt/build-inputs/apt_install.sh /opt/build-inputs/apt_install.sh
 COPY --from=scanner-runtime /opt/shakerscan/release-manifest.json /opt/shakerscan/release-manifest.json
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

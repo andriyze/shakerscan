@@ -14,8 +14,8 @@ FROM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0
 # Naabu supports both SYN and CONNECT discovery, and its Go packet-capture
 # dependency is compiled even though ShakerScan deliberately invokes CONNECT
 # mode for unprivileged, portable connected-device scans.
-RUN apt-get update && apt-get install -y --no-install-recommends libpcap-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
+    sh /tmp/apt_install.sh libpcap-dev
 
 # Install ProjectDiscovery tools + Gungnir (CT log scanner). Versions remain
 # immutable, while bounded retries tolerate transient DNS/module-proxy outages.
@@ -94,8 +94,10 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
 # --- Stage 2: Runtime with Playwright (Chromium) ---
 FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
-# System deps for network tooling and additional scanners
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System deps for network tooling and additional scanners. Retry with fresh signed
+# indexes when a mirror rotates between update and install; omit no packages.
+RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
+    sh /tmp/apt_install.sh \
     ca-certificates curl nmap openssl bind9-dnsutils jq git bash make gcc libpcap0.8 \
     iputils-ping dnsutils procps coreutils \
     nikto masscan \
@@ -103,8 +105,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dirb gobuster hydra medusa \
     dnsrecon \
     libcurl4-openssl-dev libssl-dev python3-dev python3-venv \
-    bsdmainutils \
- && rm -rf /var/lib/apt/lists/*
+    bsdmainutils
 
 # Copy Go binaries to /opt/tools
 COPY --from=go-builder /go/bin/tlsx /opt/tools/tlsx
@@ -347,6 +348,7 @@ RUN python3 -m pip uninstall -y --break-system-packages virtualenv && \
 # Keep the exact Dockerfile in the runtime fingerprint without placing this
 # self-referential copy ahead of expensive, otherwise cacheable tool layers.
 COPY scanner/Dockerfile /opt/build-inputs/scanner.Dockerfile
+COPY scanner/apt_install.sh /opt/build-inputs/apt_install.sh
 
 # Create config directories
 RUN mkdir -p /tmp/.config/subfinder && \

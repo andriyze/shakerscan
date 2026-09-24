@@ -130,6 +130,7 @@ jobs:
       - name: Report actual assertions and validate E2E completeness
         if: ${{ always() && steps.changes.outputs.backend == 'true' }}
         run: |
+          mkdir -p artifacts
           python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \
             --require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt \
             --require-check 'dast:D-2 retains request-based SQLi result' \
