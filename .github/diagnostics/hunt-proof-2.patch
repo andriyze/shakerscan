@@ -1,0 +1,337 @@
+diff --git a/docs/hunt-proof-completion.md b/docs/hunt-proof-completion.md
+new file mode 100644
+index 0000000..78953f4
+--- /dev/null
++++ b/docs/hunt-proof-completion.md
+@@ -0,0 +1,49 @@
++# Hunt authorization proof completion
++
++**Status:** Implemented follow-up; full-stack acceptance pending.
++
++This follow-up to #217 improves the existing read-only authorization path. It does not add a
++second scanner, change entitlement predicates, add permissions, or change execution budgets.
++
++## Implemented
++
++- Resource-aware replay routing preserves parent identifiers, prefers a matching consumer before
++  truncation, and prioritizes the canonical item route over collection action suffixes.
++- Hunt uses Scan's existing canonical authorization-proof projection. Only a valid settled receipt
++  for this Hunt, target, and target kind can feed the existing finding materializer.
++- The HTTP worker materializes proof, verification history, action result and measured budget in
++  its existing settlement transaction. Both initial responses and idempotent replays retain
++  `verified_finding_ids`; history reads do not create findings or rerun verification.
++- The methodology directs a supported lead toward its correct producer/consumer verification
++  path. Two concrete object reads without entitlement evidence remain observations, not proof.
++
++## Acceptance and interpretation
++
++The focused tests use real loopback HTTP with the production target-bound verifier, its existing
++validator, canonical receipts, the shared Scan finding projection, and Hunt persistence. Negative
++controls include protected access, intentionally shared sensitive objects, nonsensitive objects,
++identical/expired principals, and two-object access without a listing. Configured PostgreSQL tests
++exercise web/device ownership, atomic rollback, and verification history in a disposable schema.
++
++Built-stack H-19 establishes two managed sessions and executes `authz.verify` through the real
++API and worker, checks the persisted finding and per-Hunt listing, and repeats the same action key
++without another verification or budget charge. H-20 executes protected and shared controls. Both
++are required actual passes in PR, manual and release acceptance, not allowed skips or declared debt.
++
++These are assisted known-fixture proof-completion tests, not autonomous discovery, physical-device
++certification, or Juice Shop recall. Passing them must not be reported as a measured recall gain.
++The release must still pass normal final-head CI, including the complete Python and built-stack
++suites. A local run without PostgreSQL reports its missing-DSN skips separately.
++
++## Remaining efficacy work
++
++Run the observed Juice Shop leads with two principals through this path and retain their exact
++reasons and finding IDs. Evaluate deterministic Scan, assisted proof completion, and planner-driven
++Hunt separately against a held-out answer key with equal models, credentials, starting knowledge,
++and budgets. Count additional unique verified findings, conversion rate, operator interventions,
++and request/time cost, rather than candidates or HTTP successes.
++
++General child-result continuation, state-changing workflows, candidate-to-finding attribution
++through the separate family-proof workflow, historical service-replay projection, and richer
++investigation-frontier tracking are not implemented by this focused change. It does not rewrite
++sessions, grant new authority, or silently extend exhausted runs.
+diff --git a/scanner/scanner_tools/access_control_checks.py b/scanner/scanner_tools/access_control_checks.py
+index faf1f5c..d8f5e05 100644
+--- a/scanner/scanner_tools/access_control_checks.py
++++ b/scanner/scanner_tools/access_control_checks.py
+@@ -1981,8 +1981,12 @@ def _is_resource_placeholder_segment(segment: str) -> bool:
+     return False
+ 
+ 
+-def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any] | None:
+-    """Return a concrete replay candidate by applying ``object_id`` to a discovered route."""
++def _replace_discovered_consumer_id(
++    url: str, object_id: str, *, object_id_key: str = "id",
++) -> dict[str, Any] | None:
++    """Replace the selected resource ID, not an unrelated enclosing parent ID."""
++    from .authz_replay_routing import select_replay_identifier
++
+     if not object_id:
+         return None
+     try:
+@@ -1991,40 +1995,32 @@ def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any]
+         return None
+     if parsed.fragment:
+         return None
+-    path = parsed.path or "/"
+-    segments = path.split("/")
+-    changed = False
+-    object_id_location = "path"
+-    new_segments: list[str] = []
+-    for segment in segments:
+-        if not segment:
+-            new_segments.append(segment)
+-            continue
+-        decoded = urllib.parse.unquote(segment)
+-        if not changed and (_is_resource_placeholder_segment(segment) or _safe_scalar_id(decoded)):
+-            new_segments.append(urllib.parse.quote(str(object_id), safe=""))
+-            changed = True
+-        else:
+-            new_segments.append(segment)
+-
++    segments = (parsed.path or "/").split("/")
++    path_indices = [
++        index for index, segment in enumerate(segments)
++        if segment and (_is_resource_placeholder_segment(segment)
++                        or _safe_scalar_id(urllib.parse.unquote(segment)))
++    ]
+     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+-    new_pairs: list[tuple[str, str]] = []
+-    query_changed = False
+-    for key, value in query_pairs:
+-        value_is_placeholder = _is_resource_placeholder_segment(value)
+-        value_is_id = bool(_safe_scalar_id(value))
+-        if not changed and not query_changed and _is_probable_id_param(key) and (value == "" or value_is_placeholder or value_is_id):
+-            new_pairs.append((key, str(object_id)))
+-            query_changed = True
+-            object_id_location = "query"
+-        else:
+-            new_pairs.append((key, value))
+-
+-    if not changed and not query_changed:
++    query_indices = [
++        index for index, (key, value) in enumerate(query_pairs)
++        if _is_probable_id_param(key) and (
++            value == "" or _is_resource_placeholder_segment(value) or _safe_scalar_id(value)
++        )
++    ]
++    selected = select_replay_identifier(
++        segments, path_indices, query_pairs, query_indices, object_id_key=object_id_key,
++    )
++    if selected is None:
+         return None
++    object_id_location, index = selected
++    if object_id_location == "path":
++        segments[index] = urllib.parse.quote(str(object_id), safe="")
++    else:
++        query_pairs[index] = (query_pairs[index][0], str(object_id))
+ 
+-    new_path = "/".join(new_segments) or "/"
+-    query = urlencode(new_pairs, doseq=True)
++    new_path = "/".join(segments) or "/"
++    query = urlencode(query_pairs, doseq=True)
+     concrete_url = urlunsplit((parsed.scheme, parsed.netloc, new_path, query, ""))
+     custom_endpoint = f"GET {new_path}?{query}" if query else f"GET {new_path}"
+     return {
+@@ -2080,7 +2076,9 @@ def _resource_replay_candidates(
+     *,
+     consumer_templates: list[str] | None = None,
+ ) -> list[dict[str, Any]]:
+-    """Build read-safe candidate consumer URLs from a producer response reference."""
++    """Build read-safe candidates; spend the existing replay cap on related resources first."""
++    from .authz_replay_routing import prioritize_replay_candidates
++
+     object_id = str(ref.get("object_id") or "").strip()
+     object_key = str(ref.get("object_id_key") or "id")
+     if not object_id:
+@@ -2094,8 +2092,12 @@ def _resource_replay_candidates(
+     candidates: list[dict[str, Any]] = []
+     seen_urls: set[str] = set()
+ 
+-    for template_url in consumer_templates or []:
+-        candidate = _replace_discovered_consumer_id(template_url, object_id)
++    # The upstream inventory is bounded at 80. Rank before truncating: the
++    # first five unrelated templates must not hide the correct consumer.
++    for template_url in (consumer_templates or [])[:80]:
++        candidate = _replace_discovered_consumer_id(
++            template_url, object_id, object_id_key=object_key,
++        )
+         if not candidate:
+             continue
+         candidate_url = str(candidate.get("url") or "")
+@@ -2103,8 +2105,6 @@ def _resource_replay_candidates(
+             continue
+         candidates.append(candidate)
+         seen_urls.add(candidate_url)
+-        if len(candidates) >= 5:
+-            break
+ 
+     path_url = host + _path_with_resource_id(base_path, object_id)
+     if path_url not in seen_urls:
+@@ -2141,7 +2141,10 @@ def _resource_replay_candidates(
+             "object_id_location": "query",
+             "custom_endpoint": f"GET {base_path}?{query}",
+         })
+-    return candidates[:6]
++    return prioritize_replay_candidates(
++        producer_url, candidates, object_id=object_id, object_id_key=object_key,
++        item_base_path=item_base_path,
++    )[:6]
+ 
+ 
+ def _rank_authz_producer_url(url: str) -> int:
+diff --git a/scanner/scanner_tools/authz_replay_routing.py b/scanner/scanner_tools/authz_replay_routing.py
+new file mode 100644
+index 0000000..6e4a2f8
+--- /dev/null
++++ b/scanner/scanner_tools/authz_replay_routing.py
+@@ -0,0 +1,146 @@
++"""Resource-aware ordering for the existing bounded authorization verifier.
++
++These helpers choose which existing candidate to try first. They do not infer
++ownership, grant scope, add HTTP requests, or decide whether a finding is proven.
++Identifier eligibility remains owned by access_control_checks' existing parsers.
++"""
++from __future__ import annotations
++
++import re
++from typing import Any, Literal, Mapping, Sequence
++from urllib.parse import unquote, urlsplit
++
++Location = tuple[Literal["path", "query"], int]
++_GENERIC_IDENTIFIERS = frozenset({"", "id", "uuid", "uid", "object", "resource"})
++
++
++def _resource_name(value: str) -> str:
++    """Comparable routing label, never an access-control assertion."""
++    value = unquote(str(value)).strip("{}<>:$ ")
++    value = re.sub(r"[^a-z0-9]", "", value.lower())
++    if value in _GENERIC_IDENTIFIERS:
++        return ""
++    for suffix in ("uuid", "id"):
++        if value.endswith(suffix):
++            value = value[:-len(suffix)]
++            break
++    if value in _GENERIC_IDENTIFIERS:
++        return ""
++    if value.endswith("ies") and len(value) > 3:
++        return value[:-3] + "y"
++    if value.endswith(("sses", "shes", "ches", "xes", "zes")):
++        return value[:-2]
++    if value.endswith("s") and not value.endswith(("ss", "us", "is")):
++        return value[:-1]
++    return value
++
++
++def select_replay_identifier(
++    path_segments: Sequence[str],
++    path_indices: Sequence[int],
++    query_pairs: Sequence[tuple[str, str]],
++    query_indices: Sequence[int],
++    *,
++    object_id_key: str = "id",
++) -> Location | None:
++    """Choose one already-eligible identifier, preserving other parent IDs.
++
++    Prefer a field-name match, then the deepest path identifier. A generic query
++    ID on a collection leaf outranks a parent path ID, e.g.
++    /tenants/7/invoices?id=8. A named parent reference such as tenant_id can still
++    intentionally select the parent. No eligible slot is invented by this helper.
++    """
++    hint = _resource_name(object_id_key)
++    matches: list[tuple[int, int, Location]] = []
++    if hint:
++        for index in path_indices:
++            own = _resource_name(path_segments[index])
++            previous = _resource_name(path_segments[index - 1]) if index else ""
++            score = 3 if own == hint else 2 if previous == hint else 0
++            if score:
++                matches.append((score, index, ("path", index)))
++        for index in query_indices:
++            if _resource_name(query_pairs[index][0]) == hint:
++                matches.append((3, len(path_segments) + index, ("query", index)))
++    if matches:
++        return max(matches, key=lambda item: (item[0], item[1]))[2]
++
++    # A non-generic query filter (e.g. owner_id) must not displace the concrete
++    # selected resource at /invoices/8 merely because the query follows the path.
++    generic_queries = [i for i in query_indices if not _resource_name(query_pairs[i][0])]
++    last_path = max(path_indices) if path_indices else None
++    if generic_queries and (
++        last_path is None or any(path_segments[last_path + 1:])
++    ):
++        return "query", generic_queries[0]
++    if last_path is not None:
++        return "path", last_path
++    if query_indices:
++        return "query", query_indices[0]
++    return None
++
++
++def _origin(url: str) -> tuple[str, str, int] | None:
++    try:
++        parsed = urlsplit(url)
++        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
++            return None
++        if parsed.username is not None or parsed.password is not None:
++            return None
++        return (parsed.scheme, parsed.hostname.lower().rstrip("."),
++                parsed.port or (443 if parsed.scheme == "https" else 80))
++    except (TypeError, ValueError):
++        return None
++
++
++def prioritize_replay_candidates(
++    producer_url: str,
++    candidates: Sequence[Mapping[str, Any]],
++    *,
++    object_id: str,
++    object_id_key: str = "id",
++    item_base_path: str | None = None,
++) -> list[dict[str, Any]]:
++    """Stable ordering before the existing cap, not another execution filter.
++
++    Observed consumers for this resource beat unrelated high-ranked routes.
++    An inferred direct item route also beats an unrelated observed template.
++    Foreign-key references may intentionally prefer a different resource family.
++    Every input candidate is returned; callers retain their existing bounds.
++    """
++    source_origin = _origin(producer_url)
++    try:
++        producer_path = urlsplit(producer_url).path.rstrip("/") or "/"
++    except (TypeError, ValueError):
++        return [dict(item) for item in candidates]
++    canonical_path = (item_base_path or producer_path).rstrip("/") or "/"
++    hint = _resource_name(object_id_key)
++    producer_noun = _resource_name(canonical_path.rsplit("/", 1)[-1])
++
++    def rank(item: Mapping[str, Any]) -> tuple[int, int, int]:
++        url = str(item.get("url") or "")
++        if source_origin is None or _origin(url) != source_origin:
++            return -1, -1, -1
++        try:
++            path = urlsplit(url).path.rstrip("/") or "/"
++        except ValueError:
++            return -1, -1, -1
++        segments = path.split("/")
++        selected_names = [
++            _resource_name(segments[i - 1])
++            for i, segment in enumerate(segments) if i and unquote(segment) == object_id
++        ] if item.get("object_id_location") == "path" else []
++        parent = path
++        if item.get("object_id_location") == "path" and unquote(segments[-1]) == object_id:
++            parent = path.rsplit("/", 1)[0] or "/"
++        leaf = _resource_name(parent.rsplit("/", 1)[-1])
++        field_match = int(bool(hint and hint in (*selected_names, leaf)))
++        topology = (
++            4 if parent == canonical_path else
++            3 if parent == producer_path else
++            1 if producer_noun and leaf == producer_noun else 0
++        )
++        observed = int(item.get("source") == "discovered_consumer_template")
++        return field_match, topology, observed
++
++    return [dict(item) for item in sorted(candidates, key=rank, reverse=True)]
