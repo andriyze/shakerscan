@@ -242,6 +242,65 @@ def _header_template_title(item: Mapping[str, Any]) -> tuple[str, str | None]:
     return str(item.get("name") or item.get("template_id") or "Template match")[:300], None
 
 
+def canonical_authz_findings(
+    observations: Sequence[Mapping[str, Any]], *, receipt: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Shared pure projection of canonical authorization proof for Scan and Hunt.
+
+    This is the existing Scan predicate and finding shape, not another verifier.
+    Callers must supply worker-owned, receipt-bound observations; planner claims
+    and selected-object access evidence are not deterministic authorization proof.
+    """
+    findings: list[dict[str, Any]] = []
+    for item in observations:
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("kind")
+        if (
+            kind == "authz_differential"
+            and item.get("proof_state") == "verified"
+            and item.get("proof_type") == "cross_principal_replay"
+            and item.get("principal_contexts_distinct") is True
+            and item.get("object_absent_from_secondary_listing") is True
+            and item.get("responses_equivalent") is True
+        ):
+            finding = _base_finding(
+                tool="smart_authz",
+                title="Verified broken object authorization",
+                severity="high",
+                cwe="CWE-639",
+                url=item.get("consumer_url"),
+                evidence={
+                    "url": item.get("consumer_url"),
+                    "producer_url": item.get("producer_url"),
+                    "resource_id_sha256": item.get("resource_id_sha256"),
+                    "owner_status": item.get("owner_status"),
+                    "attacker_status": item.get("attacker_status"),
+                    "accepted_principal_responses": dict(
+                        item.get("accepted_principal_responses") or {}
+                    ),
+                    "distinct_principal_control": True,
+                    "object_id_absent_from_attacker_listing": True,
+                    "responses_equivalent": True,
+                    "proof_type": "cross_principal_replay",
+                    "canonical_capability": "authz.verify",
+                    "capability_receipt": receipt,
+                },
+            )
+            finding.update({
+                "verified": True,
+                "suspected": False,
+                "needs_verification": False,
+                "proof_state": "verified",
+                "proof_contract_v2": _canonical_proof_contract_v2(
+                    capability_name="authz.verify", kind=str(kind), receipt=receipt,
+                ),
+                "verification_reason": "Cross-principal owner-object replay proof satisfied",
+            })
+            findings.append(finding)
+    return findings
+
+
 def _findings_for_action(
     result: CapabilityResultReference,
     observations: Sequence[Mapping[str, Any]],
@@ -765,48 +824,8 @@ def _findings_for_action(
                 ),
             })
             findings.append(finding)
-        elif (
-            kind == "authz_differential"
-            and item.get("proof_state") == "verified"
-            and item.get("proof_type") == "cross_principal_replay"
-            and item.get("principal_contexts_distinct") is True
-            and item.get("object_absent_from_secondary_listing") is True
-            and item.get("responses_equivalent") is True
-        ):
-            finding = _base_finding(
-                tool="smart_authz",
-                title="Verified broken object authorization",
-                severity="high",
-                cwe="CWE-639",
-                url=item.get("consumer_url"),
-                evidence={
-                    "url": item.get("consumer_url"),
-                    "producer_url": item.get("producer_url"),
-                    "resource_id_sha256": item.get("resource_id_sha256"),
-                    "owner_status": item.get("owner_status"),
-                    "attacker_status": item.get("attacker_status"),
-                    "accepted_principal_responses": dict(
-                        item.get("accepted_principal_responses") or {}
-                    ),
-                    "distinct_principal_control": True,
-                    "object_id_absent_from_attacker_listing": True,
-                    "responses_equivalent": True,
-                    "proof_type": "cross_principal_replay",
-                    "canonical_capability": "authz.verify",
-                    "capability_receipt": receipt,
-                },
-            )
-            finding.update({
-                "verified": True,
-                "suspected": False,
-                "needs_verification": False,
-                "proof_state": "verified",
-                "proof_contract_v2": _canonical_proof_contract_v2(
-                    capability_name=result.capability_name, kind=str(kind), receipt=receipt,
-                ),
-                "verification_reason": "Cross-principal owner-object replay proof satisfied",
-            })
-            findings.append(finding)
+        elif kind == "authz_differential":
+            findings.extend(canonical_authz_findings([item], receipt=receipt))
         elif kind == "tls_protocol":
             tls_issues = (
                 (item.get("certificate_expired") is True,

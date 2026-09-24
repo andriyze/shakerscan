@@ -20021,6 +20021,7 @@ def _worker_terminal_network_result(
     *,
     job_id: str,
     network_binding: str = "runtime_target_binding",
+    action_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     receipt = dict(stored.receipt or {})
     partial = bool(receipt.get("partial"))
@@ -20037,6 +20038,7 @@ def _worker_terminal_network_result(
         if isinstance(item, Mapping)
     ]
     return {
+        "verified_finding_ids": list((action_result or {}).get("verified_finding_ids") or []),
         "job_id": job_id,
         "status": status,
         "ok": status == "success",
@@ -21943,6 +21945,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 if stored.record.terminal:
                     result = _worker_terminal_network_result(
                         stored, job_id=job_id,
+                        action_result=_worker_json_object(action["result_summary"]),
                     )
                     return
                 if stored.record.status == "running":
@@ -22657,6 +22660,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                             settled_session.evidence_receipt_digest
                         ),
                     )
+                verified_finding_ids = await materialize_verified_hunt_findings(
+                    conn, hunt_id, action_id, uuid.UUID(target.target_id), target_url,
+                    capability_name, receipt_id, capability_input, observations,
+                    target_kind=target.target_kind, capability_receipt=capability_receipt,
+                    allowed_origins=target.allowed_origins,
+                )
                 persisted = await reservation_store.persist_terminal(
                     conn,
                     previous=latest,
@@ -22671,6 +22680,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     json.dumps(current_used),
                 )
                 action_result = {
+                    "verified_finding_ids": verified_finding_ids,
                     "status": status,
                     "ok": status == "success",
                     "error": error,
@@ -22710,6 +22720,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                         "HTTP action changed before settlement"
                     )
         result = {
+            "verified_finding_ids": verified_finding_ids,
             "job_id": job_id,
             "status": status,
             "ok": status == "success",

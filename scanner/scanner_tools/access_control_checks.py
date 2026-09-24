@@ -1981,8 +1981,12 @@ def _is_resource_placeholder_segment(segment: str) -> bool:
     return False
 
 
-def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any] | None:
-    """Return a concrete replay candidate by applying ``object_id`` to a discovered route."""
+def _replace_discovered_consumer_id(
+    url: str, object_id: str, *, object_id_key: str = "id",
+) -> dict[str, Any] | None:
+    """Replace the selected resource ID, not an unrelated enclosing parent ID."""
+    from .authz_replay_routing import select_replay_identifier
+
     if not object_id:
         return None
     try:
@@ -1991,40 +1995,32 @@ def _replace_discovered_consumer_id(url: str, object_id: str) -> dict[str, Any] 
         return None
     if parsed.fragment:
         return None
-    path = parsed.path or "/"
-    segments = path.split("/")
-    changed = False
-    object_id_location = "path"
-    new_segments: list[str] = []
-    for segment in segments:
-        if not segment:
-            new_segments.append(segment)
-            continue
-        decoded = urllib.parse.unquote(segment)
-        if not changed and (_is_resource_placeholder_segment(segment) or _safe_scalar_id(decoded)):
-            new_segments.append(urllib.parse.quote(str(object_id), safe=""))
-            changed = True
-        else:
-            new_segments.append(segment)
-
+    segments = (parsed.path or "/").split("/")
+    path_indices = [
+        index for index, segment in enumerate(segments)
+        if segment and (_is_resource_placeholder_segment(segment)
+                        or _safe_scalar_id(urllib.parse.unquote(segment)))
+    ]
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    new_pairs: list[tuple[str, str]] = []
-    query_changed = False
-    for key, value in query_pairs:
-        value_is_placeholder = _is_resource_placeholder_segment(value)
-        value_is_id = bool(_safe_scalar_id(value))
-        if not changed and not query_changed and _is_probable_id_param(key) and (value == "" or value_is_placeholder or value_is_id):
-            new_pairs.append((key, str(object_id)))
-            query_changed = True
-            object_id_location = "query"
-        else:
-            new_pairs.append((key, value))
-
-    if not changed and not query_changed:
+    query_indices = [
+        index for index, (key, value) in enumerate(query_pairs)
+        if _is_probable_id_param(key) and (
+            value == "" or _is_resource_placeholder_segment(value) or _safe_scalar_id(value)
+        )
+    ]
+    selected = select_replay_identifier(
+        segments, path_indices, query_pairs, query_indices, object_id_key=object_id_key,
+    )
+    if selected is None:
         return None
+    object_id_location, index = selected
+    if object_id_location == "path":
+        segments[index] = urllib.parse.quote(str(object_id), safe="")
+    else:
+        query_pairs[index] = (query_pairs[index][0], str(object_id))
 
-    new_path = "/".join(new_segments) or "/"
-    query = urlencode(new_pairs, doseq=True)
+    new_path = "/".join(segments) or "/"
+    query = urlencode(query_pairs, doseq=True)
     concrete_url = urlunsplit((parsed.scheme, parsed.netloc, new_path, query, ""))
     custom_endpoint = f"GET {new_path}?{query}" if query else f"GET {new_path}"
     return {
@@ -2080,7 +2076,9 @@ def _resource_replay_candidates(
     *,
     consumer_templates: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build read-safe candidate consumer URLs from a producer response reference."""
+    """Build read-safe candidates; spend the existing replay cap on related resources first."""
+    from .authz_replay_routing import prioritize_replay_candidates
+
     object_id = str(ref.get("object_id") or "").strip()
     object_key = str(ref.get("object_id_key") or "id")
     if not object_id:
@@ -2094,8 +2092,12 @@ def _resource_replay_candidates(
     candidates: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
-    for template_url in consumer_templates or []:
-        candidate = _replace_discovered_consumer_id(template_url, object_id)
+    # The upstream inventory is bounded at 80. Rank before truncating: the
+    # first five unrelated templates must not hide the correct consumer.
+    for template_url in (consumer_templates or [])[:80]:
+        candidate = _replace_discovered_consumer_id(
+            template_url, object_id, object_id_key=object_key,
+        )
         if not candidate:
             continue
         candidate_url = str(candidate.get("url") or "")
@@ -2103,8 +2105,6 @@ def _resource_replay_candidates(
             continue
         candidates.append(candidate)
         seen_urls.add(candidate_url)
-        if len(candidates) >= 5:
-            break
 
     path_url = host + _path_with_resource_id(base_path, object_id)
     if path_url not in seen_urls:
@@ -2141,7 +2141,10 @@ def _resource_replay_candidates(
             "object_id_location": "query",
             "custom_endpoint": f"GET {base_path}?{query}",
         })
-    return candidates[:6]
+    return prioritize_replay_candidates(
+        producer_url, candidates, object_id=object_id, object_id_key=object_key,
+        item_base_path=item_base_path,
+    )[:6]
 
 
 def _rank_authz_producer_url(url: str) -> int:
