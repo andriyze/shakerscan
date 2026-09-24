@@ -1,0 +1,102 @@
+name: Verify pinned MinIO mirror content
+on:
+  push:
+    branches: [diagnostics/pr217-minio-content-identity]
+    paths: ['.github/workflows/minio-content-identity.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify original index digests and every amd64/arm64 content blob
+        shell: bash
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import hashlib, json, urllib.error, urllib.parse, urllib.request
+          from pathlib import Path
+          from datetime import datetime, timezone
+          class HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  if urllib.parse.urlsplit(newurl).scheme != 'https':
+                      raise ValueError('non-HTTPS content redirect')
+                  redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+                  if redirected is not None:
+                      redirected.remove_header('Authorization')
+                  return redirected
+          opener = urllib.request.build_opener(HTTPSRedirect())
+          accept = ', '.join([
+              'application/vnd.oci.image.index.v1+json',
+              'application/vnd.docker.distribution.manifest.list.v2+json',
+              'application/vnd.oci.image.manifest.v1+json',
+              'application/vnd.docker.distribution.manifest.v2+json',
+          ])
+          identities = [
+              ('quay.io/minio/minio', 'teableio/minio', 'sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e'),
+              ('quay.io/minio/mc', 'teableio/minio-mc', 'sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3'),
+          ]
+          records = []
+          for original, repo, digest in identities:
+              params = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': f'repository:{repo}:pull'})
+              with opener.open('https://ghcr.io/token?' + params, timeout=60) as response:
+                  auth = json.load(response)
+              token = auth.get('token') or auth.get('access_token')
+              if not token:
+                  raise ValueError('public pull token unavailable')
+              headers = {'Accept': accept, 'Authorization': 'Bearer ' + token}
+              def content(kind, expected, maximum, retain=False):
+                  if not expected.startswith('sha256:') or len(expected) != 71:
+                      raise ValueError('invalid content digest')
+                  request = urllib.request.Request(f'https://ghcr.io/v2/{repo}/{kind}/{expected}', headers=headers)
+                  hashed, size, chunks = hashlib.sha256(), 0, []
+                  with opener.open(request, timeout=90) as response:
+                      while True:
+                          chunk = response.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          size += len(chunk)
+                          if size > maximum:
+                              raise ValueError('content exceeds bounded verification size')
+                          hashed.update(chunk)
+                          if retain:
+                              chunks.append(chunk)
+                  if 'sha256:' + hashed.hexdigest() != expected:
+                      raise ValueError('content digest mismatch')
+                  return b''.join(chunks), size
+              raw, index_size = content('manifests', digest, 4 * 1024 * 1024, True)
+              index = json.loads(raw)
+              platforms, checked = [], {}
+              for descriptor in index.get('manifests', []):
+                  platform = descriptor.get('platform', {})
+                  if platform.get('os') != 'linux' or platform.get('architecture') not in {'amd64', 'arm64'}:
+                      continue
+                  platform_digest = descriptor['digest']
+                  raw, size = content('manifests', platform_digest, 4 * 1024 * 1024, True)
+                  if size != descriptor['size']:
+                      raise ValueError('platform manifest size mismatch')
+                  manifest = json.loads(raw)
+                  blobs = []
+                  for item in [manifest['config'], *manifest['layers']]:
+                      blob_digest = item['digest']
+                      if blob_digest not in checked:
+                          _, blob_size = content('blobs', blob_digest, 512 * 1024 * 1024)
+                          checked[blob_digest] = blob_size
+                      if checked[blob_digest] != item['size']:
+                          raise ValueError('blob size mismatch')
+                      blobs.append({'digest': blob_digest, 'size': checked[blob_digest]})
+                  platforms.append({'os': 'linux', 'architecture': platform['architecture'], 'digest': platform_digest, 'blobs': blobs})
+              if {p['architecture'] for p in platforms} != {'amd64', 'arm64'}:
+                  raise ValueError('missing required platform')
+              record = {'original_reference': original + '@' + digest, 'retrieval_reference': 'ghcr.io/' + repo + '@' + digest, 'index_digest': digest, 'index_size': index_size, 'platforms': platforms, 'verified_bytes': sum(checked.values()), 'verified_at': datetime.now(timezone.utc).isoformat()}
+              records.append(record)
+              print('Verified original content identity:', record['original_reference'], 'platforms:', [p['architecture'] for p in platforms], 'bytes:', record['verified_bytes'])
+          Path('evidence/minio-content-identity.json').write_text(json.dumps({'schema_version': 1, 'images': records}, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minio-content-identity
+          path: evidence/minio-content-identity.json
+          if-no-files-found: error
+          retention-days: 14
