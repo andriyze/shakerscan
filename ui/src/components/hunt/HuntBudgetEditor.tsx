@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { HUNT_BUDGET_DIMENSIONS } from '@/lib/huntContract.generated'
-import { amendHuntBudget, getHuntV2, type HuntV2 } from '@/lib/huntV2'
+import { amendHuntBudget, getHuntV2, resumeHuntV2, type HuntV2 } from '@/lib/huntV2'
 import { Button, Card, Field, Select } from '@/components/ui'
 
 /** An explicit operator edit, never an automatic retry that expands the budget. */
@@ -10,7 +10,8 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
   const [dimension, setDimension] = useState('max_http_requests')
   const [total, setTotal] = useState('')
   const [resume, setResume] = useState(true)
-  const [busy, setBusy] = useState(false)
+  const [busyAction, setBusyAction] = useState<'extend' | 'refresh' | 'resume' | null>(null)
+  const busy = busyAction !== null
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const attempt = useRef<{ signature: string; key: string } | null>(null)
@@ -28,7 +29,7 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
     const signature = JSON.stringify([hunt.hunt_id, revision, dimension, parsed, resumeRequested])
     const key = attempt.current?.signature === signature ? attempt.current.key : crypto.randomUUID()
     attempt.current = { signature, key }
-    setBusy(true)
+    setBusyAction('extend')
     setError(null)
     setMessage(null)
     try {
@@ -44,11 +45,13 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
       setTotal('')
       setMessage(result.device_traffic_frozen
         ? 'Budget updated. The device traffic pause remains in effect.'
+        : result.status === 'budget_exhausted'
+          ? 'Budget updated. Resume this Hunt when you are ready.'
         : 'Budget updated. Your agent can continue this same Hunt; no action was started automatically.')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not extend Hunt budget')
     } finally {
-      setBusy(false)
+      setBusyAction(null)
     }
   }
 
@@ -75,14 +78,22 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
         </label>
       )}
       {error && <p role="alert" className="text-xs text-red-300">{error} Refresh the Hunt if another operator changed its budget.</p>}
-      {message && <p role="status" className="text-xs text-emerald-300">{message}</p>}
-      {error && <Button variant="secondary" disabled={busy} onClick={async () => {
-        setBusy(true)
+      {message && <p role="status" aria-label="Budget result" className="text-xs text-emerald-300">{message}</p>}
+      {error && <Button variant="secondary" loading={busyAction === 'refresh'} disabled={busy} onClick={async () => {
+        setBusyAction('refresh'); setMessage(null)
         try { onChanged(await getHuntV2(hunt.hunt_id)); setError(null); attempt.current = null }
         catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not refresh Hunt') }
-        finally { setBusy(false) }
+        finally { setBusyAction(null) }
       }}>Refresh budget</Button>}
-      <Button onClick={extend} loading={busy} disabled={!valid || busy}>Extend budget</Button>
+      {hunt.status === 'budget_exhausted' && (hunt.budget_revision ?? 0) > 0 && (
+        <Button variant="secondary" loading={busyAction === 'resume'} disabled={busy} onClick={async () => {
+          setBusyAction('resume'); setError(null); setMessage(null)
+          try { onChanged(await resumeHuntV2(hunt.hunt_id)); setMessage('Hunt resumed. Your agent can continue with the existing limits.') }
+          catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not resume Hunt') }
+          finally { setBusyAction(null) }
+        }}>Resume with current budget</Button>
+      )}
+      <Button onClick={extend} loading={busyAction === 'extend'} disabled={!valid || busy}>Extend budget</Button>
     </Card>
   )
 }

@@ -1055,6 +1055,16 @@
     "operation_id": "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post"
   },
   {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "method": "get",
+    "operation_id": "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "method": "post",
+    "operation_id": "amend_hunt_budget_hunts__hunt_id__budget_amendments_post"
+  },
+  {
     "path": "/hunts/{hunt_id}/cancel",
     "method": "post",
     "operation_id": "cancel_hunt_hunts__hunt_id__cancel_post"

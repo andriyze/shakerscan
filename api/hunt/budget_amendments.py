@@ -108,6 +108,16 @@ def amendable_dimensions(run: Mapping[str, Any]) -> list[str]:
     return sorted(BUDGET_FIELDS - forbidden)
 
 
+def require_resume_headroom(run: Mapping[str, Any], *, limits_override: Mapping[str, int] | None = None) -> None:
+    """Resume only once the reported exhausted dimension has room; do not change limits."""
+    budget = dict(limits_override) if limits_override is not None else _object(run["budget_json"])
+    used = _object(run["budget_used_json"])
+    dimension = str(run.get("stop_reason") or "").removeprefix("budget_exhausted:")
+    limits = {**HuntBudget(**budget).ledger_limits(), "candidates": budget["max_candidates"], "verifications": budget["max_verifications"]}
+    if dimension not in limits or int(used.get(dimension) or 0) >= limits[dimension]:
+        raise HTTPException(409, "Increase the exhausted dimension before resuming this Hunt")
+
+
 def amendment_public(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "amendment_id": str(row["id"]), "revision": row["revision"],
@@ -160,10 +170,7 @@ async def apply_budget_amendment(conn: Any, hunt_id: Any, request: HuntBudgetAme
     status = run["status"]
     stop_reason = run.get("stop_reason")
     if request.resume and status == "budget_exhausted":
-        dimension = str(stop_reason or "").removeprefix("budget_exhausted:")
-        limits = {**HuntBudget(**after).ledger_limits(), "candidates": after["max_candidates"], "verifications": after["max_verifications"]}
-        if dimension not in limits or int(used.get(dimension) or 0) >= limits[dimension]:
-            raise HTTPException(409, "Increase the exhausted dimension before resuming this Hunt")
+        require_resume_headroom(run, limits_override=after)
         status, stop_reason = "awaiting_planner", None
     if run["target_kind"] == "device":
         state = DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {})

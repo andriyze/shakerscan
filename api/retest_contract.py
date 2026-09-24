@@ -3472,6 +3472,8 @@ async def _run_schema_migrations_once(pool) -> None:
                     )
                 )
             """)
+            from hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
+            await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_skill_events (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -34,8 +34,10 @@ A missing executor is a capability gap, not an authorization problem.
   a full investigation, with bounded checks and checkpoints rather than new user prompts.
 - [ ] Build authorized state-changing collection and multi-step browser execution with real
   credential handling, accounting, cancellation, and evidence. Visibility alone is not implementation.
-- [ ] Add deliberate operator budget/resource amendments, including complete port-range work,
-  additional selected identities, and request collections. Preserve earlier action snapshots/history.
+- [x] Add operator-requested total-budget extensions above startup presets and resume unfinished
+  exhausted Hunts. Preserve live holds, usage, identity, permissions, initial snapshots and history.
+- [ ] Extend resource amendments to additional selected identities and request collections. Budget
+  amendments do not attach credentials/collections or enable additional capabilities.
 - [x] Reuse normalized Hunt service observations in shared durable knowledge through canonical
   settlement receipts, with idempotent action identity, provenance, locator checks and existing
   owner/receipt deletion and retention. No duplicate store or write-on-read backfill.
@@ -97,3 +99,56 @@ The integration check and regression tests cover dead links, retired execution c
 declaration/body agreement, all delivered body hashes, protocol selection/read/bind/pivot,
 priority-only web signals, installation and unchanged run authority. Independent vulnerability
 recall measurements, general workflow execution and operator amendments remain open.
+
+
+## Operator budget extensions
+
+The Hunt UI now offers **Extend this Hunt's budget** for unfinished active, awaiting-planner and
+budget-exhausted runs. An explicit operator edit sets a new **total**, not a delta. Startup profiles
+remain convenient defaults; this endpoint can increase their limits, including total TCP attempts
+for full-port work. Actual calls still use their existing per-action limits and batching.
+
+Read the current run's `budget_revision`, `budget`, `budget_used`, and
+`budget_amendable_dimensions`. Submit `POST /hunts/{id}/budget-amendments`, for example:
+
+```json
+{
+  "schema_version": "hunt-budget-amendment/v1",
+  "limits": {"max_tcp_ports": 65535},
+  "expected_revision": 0,
+  "idempotency_key": "operator-port-range-extension-1",
+  "operator_confirmed": true,
+  "resume": true,
+  "reason": "Operator requested all TCP ports on the same authorized asset"
+}
+```
+
+Use the revision actually returned by the server, and a fresh retry key for each distinct operator
+edit. Reuse the same body/key after a lost response; it cannot apply the increase twice. A concurrent
+edit returns a revision conflict rather than overwriting another operator's choice. The API accepts
+multiple dimensions in one transaction; the UI edits one dimension at a time.
+
+`resume: true` moves an unfinished budget-exhausted run to `awaiting_planner` only when its reported
+exhausted dimension has headroom. No action is started automatically. Without resume, exhaustion
+remains until deliberately addressed. After extending without resuming, use the existing
+`POST /hunts/{id}/resume` or **Resume with current budget**; it checks current headroom without
+another increase or resetting usage. Completed, failed, cancelled or finalized exhausted runs
+are not reopened. Exhausted unfinished runs remain cancellable, including their owned child jobs.
+
+The existing Hunt row lock serializes amendments with admission/settlement/cancellation. Usage and
+outstanding holds never reset; earlier action/reservation objects and the admission snapshot stay
+unchanged. The denormalized current policy budget mirrors the new limits, but its permissions and
+capability allowlist do not change. Increased device request/fragility ceilings preserve pacing,
+health/traffic freezes and all usage; device daily and child-scan limits remain independent. A zero
+ceiling can be increased only where the saved policy already permits it; this does not add a
+capability originally excluded from the run.
+
+`GET /hunts/{id}/budget-amendments?after_revision=0&limit=50` pages the durable history, which also
+appears in `/record` with explicit truncation. Events retain before/after limits, the usage snapshot,
+redacted reason and status transition. Retry-key hashes are internal. Deleting the owning Hunt or
+target cascades the event history; this audit table is not a second traffic ledger.
+
+This completes budget-only amendments, not adding principals/collections, clearing device health
+pauses, arbitrary protocol execution, or an autonomous child-result driver. Each remains separate
+unfinished work above. Budget extensions must reflect a real operator request, never an agent's
+silent response to an exhausted allowance.

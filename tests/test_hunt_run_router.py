@@ -640,6 +640,8 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
         (frozenset({"POST"}), "/hunts/{hunt_id}/finish", "finish_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),
         (frozenset({"POST"}), "/hunts/{hunt_id}/resume", "resume_hunt"),
+        (frozenset({"POST"}), "/hunts/{hunt_id}/budget-amendments", "amend_hunt_budget"),
+        (frozenset({"GET"}), "/hunts/{hunt_id}/budget-amendments", "get_hunt_budget_amendments"),
         (
             frozenset({"POST"}),
             "/hunts/{hunt_id}/authorization-investigations",

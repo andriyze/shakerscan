@@ -56,14 +56,17 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
         # The amendment must read the committed usage, not overwrite a stale snapshot.
         async with conn.transaction():
             await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"])
-            pending = asyncio.create_task(service.amend_budget(hunt_id, request()))
+            pending = asyncio.create_task(service.amend_budget(hunt_id, request(resume=False)))
             await asyncio.sleep(0.05)
             assert not pending.done(), "amendment must serialize on the existing Hunt row lock"
             held = {**run["budget_used_json"], "http_requests": 100}
             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2::jsonb WHERE id=$1", run["id"], json.dumps(held))
         result = await asyncio.wait_for(pending, timeout=5)
         assert result["budget_used"] == held and result["amendment"]["used_snapshot"] == held
-        assert result["status"] == "awaiting_planner" and result["budget"]["max_tcp_ports"] == 65_535
+        assert result["status"] == "budget_exhausted" and result["budget"]["max_tcp_ports"] == 65_535
+        resumed = await service.resume(hunt_id)
+        assert resumed["status"] == "active" and resumed["budget_revision"] == 1
+        assert resumed["budget_used"] == held
         # Settle a previously admitted hold after the extension using the existing ledger math.
         async with conn.transaction():
             latest = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"]))
@@ -76,7 +79,7 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
         await pool.close()
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
         restarted = HuntRunService(lambda: pool)
-        repeated = await restarted.amend_budget(hunt_id, request())
+        repeated = await restarted.amend_budget(hunt_id, request(resume=False))
         assert repeated["replayed"] and repeated["amendment"] == result["amendment"]
         assert repeated["budget_used"] == charged
         # Two operators use the same observed revision; only one may win.
@@ -114,7 +117,7 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
         assert cancelled["budget_used"] == charged
         assert await conn.fetchval("SELECT status FROM scans WHERE id=$1", child) == "cancelling"
         # Cancellation wins over a later replay and over any new extension.
-        assert (await restarted.amend_budget(hunt_id, request()))["status"] == "cancelled"
+        assert (await restarted.amend_budget(hunt_id, request(resume=False)))["status"] == "cancelled"
         with pytest.raises(HTTPException, match="unfinished"):
             await restarted.amend_budget(hunt_id, request(expected_revision=2, idempotency_key="after-cancel", limits={"max_tcp_ports": 80_000}))
         with pytest.raises(HTTPException) as missing:

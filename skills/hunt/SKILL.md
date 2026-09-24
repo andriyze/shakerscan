@@ -135,6 +135,18 @@ API, or device HTTP targets; encrypted values are injected only inside the runti
 require a separate typed, approval-gated verifier and are never enabled by the safe replay
 capability.
 
+## Operator-requested budget extension
+
+When the operator asks for more budget, use `POST /hunts/{hunt_id}/budget-amendments` with the
+current run's `expected_revision`, new **total** `limits`, a stable retry `idempotency_key`, and
+`operator_confirmed: true`. Never fabricate confirmation or silently increase an allowance.
+`resume: true` permits continuing an unfinished exhausted Hunt once the exhausted dimension has
+headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
+stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
+state after a conflict; retry a lost response with the same key/body, not an extra increase.
+Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema;
+`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
+
 ## Candidates and proof
 
 Create a candidate with `POST /hunts/{hunt_id}/candidates` only when the claim cites real evidence

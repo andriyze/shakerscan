@@ -1591,8 +1591,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 427 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 357 | `api/**/*.py` |
+| Public REST operations | 429 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 358 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1609,7 +1609,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 100 | `db/init.sql` + migrations |
+| Durable tables | 101 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1830,6 +1830,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve` | `approve_authorization_investigation` |
 | `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction` | `authorization_reproduction` |
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip` | `skip_authorization_investigation` |
+| `GET` | `/hunts/{hunt_id}/budget-amendments` | `get_hunt_budget_amendments` |
+| `POST` | `/hunts/{hunt_id}/budget-amendments` | `amend_hunt_budget` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
 | `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
@@ -2874,6 +2876,7 @@ Scan feature or a second orchestration engine.
 | `http_archive_stats` | `db/init.sql` |
 | `http_transactions` | `db/init.sql` |
 | `hunt_actions` | `db/init.sql` |
+| `hunt_budget_amendments` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |

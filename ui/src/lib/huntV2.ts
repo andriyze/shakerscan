@@ -55,6 +55,9 @@ export interface HuntV2 {
   policy: Record<string, unknown>
   policy_adjustments?: string[]
   budget: Record<string, number>
+  budget_revision?: number
+  budget_amendable_dimensions?: string[]
+  budget_amendments_url?: string
   budget_used: Record<string, number>
   context_pack?: Record<string, unknown>
   capabilities?: Array<{
@@ -297,6 +300,32 @@ export async function listHuntsV2(params: HuntListParams = {}): Promise<HuntList
 export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
   const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/cancel`, { method: 'POST' })
   if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to cancel Hunt (${response.status})`))
+  return response.json()
+}
+
+export async function resumeHuntV2(huntId: string): Promise<HuntV2> {
+  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/resume`, { method: 'POST' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to resume Hunt (${response.status})`))
+  return response.json()
+}
+
+export interface HuntBudgetAmendmentInput {
+  limits: Record<string, number>
+  expected_revision: number
+  idempotency_key: string
+  operator_confirmed: true
+  resume?: boolean
+  reason?: string
+}
+
+export async function amendHuntBudget(huntId: string, request: HuntBudgetAmendmentInput): Promise<{
+  budget_revision: number; status: HuntV2['status']; replayed: boolean; device_traffic_frozen: boolean
+}> {
+  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/budget-amendments`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schema_version: 'hunt-budget-amendment/v1', ...request }),
+  })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to extend Hunt budget (${response.status})`))
   return response.json()
 }
 

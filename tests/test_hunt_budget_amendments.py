@@ -82,6 +82,9 @@ class Connection:
             event = {**dict(zip(names, args, strict=True)), "created_at": NOW}
             self.events.append(deepcopy(event))
             return event
+        if sql.startswith("UPDATE hunt_runs SET status='active'"):
+            self.row.update(status="active", stop_reason=None)
+            return deepcopy(self.row)
         if sql.startswith("UPDATE hunt_runs SET budget_json"):
             assert "budget_used_json=" not in sql
             self.row.update(budget_json=json.loads(args[1]), budget_revision=args[2], context_pack=json.loads(args[3]), status=args[4], stop_reason=args[5], policy_json=json.loads(args[6]))
@@ -320,3 +323,26 @@ def test_multi_dimension_extension_keeps_disabled_permissions_and_original_snaps
     assert conn.row["context_pack"]["hunt_start_contract"] == before["context_pack"]["hunt_start_contract"]
     assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}
     assert result["budget_used"] == before["budget_used_json"]
+
+
+def test_extend_now_resume_later_uses_current_limits_without_another_amendment(monkeypatch):
+    conn = Connection()
+    service = HuntRunService(lambda: Pool(conn))
+    monkeypatch.setattr(run_router, "_service_provider", lambda: service)
+    app = FastAPI()
+    app.include_router(run_router.router)
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
+            path = f"/hunts/{conn.row['id']}"
+            assert (await client.post(path + "/resume")).status_code == 409
+            changed = await client.post(path + "/budget-amendments", json=request(resume=False).model_dump())
+            assert changed.status_code == 200 and changed.json()["status"] == "budget_exhausted"
+            resumed = await client.post(path + "/resume")
+            assert resumed.status_code == 200 and resumed.json()["status"] == "active"
+            assert resumed.json()["budget_revision"] == 1
+            assert len(conn.events) == 1
+            assert (await client.post(path + "/resume")).json()["status"] == "active"
+            assert conn.row["budget_used_json"]["tcp_ports_attempted"] == 10000
+            conn.row.update(status="cancelled", completed_at=NOW)
+            assert (await client.post(path + "/resume")).status_code == 409
+    asyncio.run(send())

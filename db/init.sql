@@ -974,6 +974,7 @@ CREATE TABLE hunt_runs (
     status TEXT NOT NULL DEFAULT 'active' CHECK (
         status IN ('created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted')
     ),
+    budget_revision INTEGER NOT NULL DEFAULT 0,
     budget_profile TEXT NOT NULL DEFAULT 'balanced' CHECK (budget_profile IN ('fast','balanced','thorough')),
     policy_json JSONB NOT NULL DEFAULT '{"allow_oob_interactions":false}'::jsonb,
     budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1008,6 +1009,24 @@ CREATE TABLE hunt_actions (
     completed_at TIMESTAMPTZ
 );
 CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
+
+-- Operator budget history does not reset the traffic ledger.
+CREATE TABLE hunt_budget_amendments (
+    id UUID PRIMARY KEY,
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    request_key_sha256 TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    limits_before JSONB NOT NULL,
+    limits_after JSONB NOT NULL,
+    used_snapshot JSONB NOT NULL,
+    reason TEXT NOT NULL,
+    status_before TEXT NOT NULL,
+    status_after TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (hunt_run_id, revision),
+    UNIQUE (hunt_run_id, request_key_sha256)
+);
 
 -- Methodology lifecycle is separate from the planner context so the complete catalog and
 -- historical event stream never consume the model's working context.
