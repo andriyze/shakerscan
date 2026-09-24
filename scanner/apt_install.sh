@@ -8,6 +8,23 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
+# The pinned Noble base uses plaintext official mirror URLs. A runner-side HTTP
+# cache can return indexes whose package URLs are no longer retrievable over HTTP,
+# even after an update. Use the same official repositories over verified HTTPS.
+# Keep suites, components and Signed-By unchanged; do not change third-party or
+# Debian sources, invent a mirror, pin a downgrade, or fall back to plaintext.
+upgrade_ubuntu_sources() {
+    for source in "$1/sources.list" "$1"/sources.list.d/*.list "$1"/sources.list.d/*.sources; do
+        [ -f "$source" ] && [ ! -L "$source" ] || continue
+        sed -i -E \
+            -e 's@http://archive\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://archive.ubuntu.com/ubuntu\1@g' \
+            -e 's@http://security\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://security.ubuntu.com/ubuntu\1@g' \
+            -e 's@http://ports\.ubuntu\.com/ubuntu-ports([/[:space:]]|$)@https://ports.ubuntu.com/ubuntu-ports\1@g' \
+            "$source"
+    done
+}
+upgrade_ubuntu_sources /etc/apt
+
 attempt=1
 while :; do
     # A base image or a failed update can retain an obsolete Packages index. Do not

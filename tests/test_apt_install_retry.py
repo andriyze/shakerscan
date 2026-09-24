@@ -1,6 +1,8 @@
 """APT mirror/index races retry the same package set, never omit dependencies."""
 import json
 import os
+import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -12,10 +14,27 @@ SCRIPT = ROOT / "scanner/apt_install.sh"
 PACKAGES = ["libexpat1", "libexpat1-dev", "nmap"]
 
 
-def run_install(tmp_path, *, updates=(0,), installs=(0,), packages=PACKAGES):
+def run_install(tmp_path, *, updates=(0,), installs=(0,), packages=PACKAGES, sources=None):
     """Only stub executables run: no host apt, sleep or filesystem deletion."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    # Redirect only the production call's filesystem root to fixtures. Execute the
+    # same transformation code with real sed, never edit host APT configuration.
+    etc = tmp_path / "apt"
+    (etc / "sources.list.d").mkdir(parents=True)
+    for relative, value in (sources or {}).items():
+        path = etc / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(value, Path):
+            path.symlink_to(value)
+        else:
+            path.write_text(value)
+    production = SCRIPT.read_text()
+    entry = "upgrade_ubuntu_sources /etc/apt\n"
+    assert production.count(entry) == 1
+    script = tmp_path / "apt_install.sh"
+    script.write_text(production.replace(entry, f"upgrade_ubuntu_sources {shlex.quote(str(etc))}\n"))
+    (bindir / "sed").symlink_to(shutil.which("sed"))
     trace = tmp_path / "trace.jsonl"
     state = tmp_path / "counts.json"
     for name in ("apt-get", "rm", "sleep"):
@@ -39,7 +58,7 @@ if name == "apt-get":
         path.chmod(0o755)
     env = {**os.environ, "PATH": str(bindir), "TRACE": str(trace), "COUNTS": str(state),
            "UPDATE": json.dumps(updates), "INSTALL": json.dumps(installs)}
-    result = subprocess.run(["/bin/sh", str(SCRIPT), *packages], env=env,
+    result = subprocess.run(["/bin/sh", str(script), *packages], env=env,
                             capture_output=True, text=True, timeout=10)
     calls = [json.loads(row) for row in trace.read_text().splitlines()] if trace.exists() else []
     return result, calls
@@ -104,7 +123,46 @@ def test_both_build_stages_use_helper_without_weakening_apt_verification():
     assert "COPY scanner/apt_install.sh /opt/build-inputs/apt_install.sh" in dockerfile
     assert "COPY --from=scanner-runtime /opt/build-inputs/apt_install.sh /opt/build-inputs/apt_install.sh" in api
     commands = "\n".join(row for row in SCRIPT.read_text().splitlines() if not row.lstrip().startswith("#"))
-    for bypass in ("--fix-missing", "--allow-unauthenticated", "AllowInsecureRepositories", "|| true"):
+    for bypass in ("--fix-missing", "--allow-unauthenticated", "AllowInsecureRepositories", "Verify-Peer=false", "Verify-Host=false", "|| true"):
         assert bypass not in commands
     for required in ("nmap", "hydra", "medusa", "nikto", "libpcap-dev", "libssl-dev", "bsdmainutils"):
         assert required in dockerfile
+
+
+@pytest.mark.parametrize("relative", ["sources.list", "sources.list.d/ubuntu.list", "sources.list.d/ubuntu.sources"])
+def test_official_ubuntu_sources_use_https_without_changing_repository_identity(tmp_path, relative):
+    before = (
+        "Types: deb\n"
+        "URIs: http://archive.ubuntu.com/ubuntu/ http://security.ubuntu.com/ubuntu\n"
+        "Suites: noble noble-updates noble-security\nComponents: main universe\n"
+        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+        "deb http://ports.ubuntu.com/ubuntu-ports/ noble main\n"
+    )
+    result, calls = run_install(tmp_path, sources={relative: before})
+    assert result.returncode == 0
+    after = (tmp_path / "apt" / relative).read_text()
+    assert after == before.replace("http://", "https://")
+    assert len(apt_calls(calls, "install")) == 1
+
+
+def test_other_sources_and_existing_tls_are_unchanged(tmp_path):
+    before = (
+        "deb http://deb.debian.org/debian bookworm main\n"
+        "deb https://archive.ubuntu.com/ubuntu noble main\n"
+        "deb http://mirror.example.test/ubuntu noble main\n"
+        "deb http://archive.ubuntu.com.example.test/ubuntu noble main\n"
+        "deb http://archive.ubuntu.com/ubuntu-custom noble main\n"
+    )
+    result, _ = run_install(tmp_path, sources={"sources.list": before})
+    assert result.returncode == 0
+    assert (tmp_path / "apt/sources.list").read_text() == before
+
+
+def test_source_symlink_target_is_not_modified(tmp_path):
+    outside = tmp_path / "local-repository.list"
+    before = "deb http://archive.ubuntu.com/ubuntu noble main\n"
+    outside.write_text(before)
+    result, _ = run_install(tmp_path, sources={"sources.list.d/local.list": outside})
+    assert result.returncode == 0
+    assert (tmp_path / "apt/sources.list.d/local.list").is_symlink()
+    assert outside.read_text() == before
