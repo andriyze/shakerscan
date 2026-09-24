@@ -47,10 +47,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends nmap
       - name: Reconstruct and verify the exact reviewed product tree
+        id: reconstruct
         run: |
           python /tmp/budget-batch/assemble.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p /tmp/budget-results
+          python scripts/generate_public_api_contract.py
+          PYTHONPATH=.:api:scanner SHAKERSCAN_UPDATE_API_CONTRACT=1 python -m pytest -q tests/test_api_characterization.py --junitxml=/tmp/budget-results/characterization.xml
+          python /tmp/budget-batch/verify_generated.py
+          git add -A
+          git write-tree > /tmp/budget-results/product-tree.txt
           git commit -m 'Local exact-tree budget validation snapshot; no ref publication'
       - name: Validate generators and architectural contracts
         run: |
@@ -59,6 +66,7 @@ jobs:
           python scripts/generate_install_manifest.py --check
           python scripts/generate_scan_contract.py --check
           python scripts/generate_hunt_contract.py --check
+          python scripts/generate_public_api_contract.py --check
           python scripts/check_installed_import_closure.py
           python scripts/check_documentation_policy.py
           python scripts/check_module_size.py
@@ -80,16 +88,20 @@ jobs:
       - name: Complete locked Python suite
         run: python scripts/run_complete_python_suite.py --artifacts-dir /tmp/budget-results
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        if: ${{ !cancelled() && steps.reconstruct.outcome == 'success' }}
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: UI tests and production build
+        id: ui_build
+        if: ${{ !cancelled() && steps.reconstruct.outcome == 'success' }}
         run: |
           npm ci --prefix ui
           npm --prefix ui test
           npm --prefix ui run build
       - name: Desktop and mobile budget continuation acceptance
+        if: ${{ !cancelled() && steps.ui_build.outcome == 'success' }}
         env:
           CI: 'true'
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:3100

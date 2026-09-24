@@ -9,7 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 OUT = Path('/tmp/budget-results')
-EXPECTED = '5dc4a8d266a0c28b3a8bfb7571c44ef221b1d4a4'
+EXPECTED = (OUT / 'product-tree.txt').read_text().strip()
 PARENT = '76653d344228eed9ce1cdfe59786a230ce119eb0'
 
 def git(*args):
@@ -18,7 +18,7 @@ def git(*args):
 assert git('write-tree').decode().strip() == EXPECTED
 subprocess.run(['git', 'diff', '--exit-code'], check=True)
 summary = {}
-for name in ('native-nse.xml', 'budget-postgres.xml', 'v2-full-python.xml'):
+for name in ('native-nse.xml', 'budget-postgres.xml', 'characterization.xml', 'v2-full-python.xml'):
     cases = list(ET.parse(OUT / name).getroot().iter('testcase'))
     assert cases, name
     assert not any(c.find('failure') is not None or c.find('error') is not None for c in cases), name
