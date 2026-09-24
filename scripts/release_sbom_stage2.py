@@ -132,6 +132,19 @@ def source_identity(root: Path, expected: str) -> None:
     require(not changed.strip(), "source checkout has modified tracked files")
 
 
+def supporting_service_platforms(service: dict) -> dict[str, str]:
+    """Identify the unavailable immutable dependency without changing or omitting it."""
+    repository, digest = coverage.canonical_image(service["image_reference"])
+    reference = repository + "@" + digest
+    print(f"Inspecting supporting image {reference}", flush=True)
+    try:
+        document = sbom.run_json(["docker", "buildx", "imagetools", "inspect", reference, "--raw"])
+        return coverage.service_platforms(document)
+    except sbom.SBOMError as exc:
+        # The reference is canonical and contains no credentials, mutable tag or query string.
+        raise sbom.SBOMError(f"Cannot inventory supporting image {reference}: {exc}") from None
+
+
 def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
     require(not (directory / sbom.BUNDLE).exists(), "cannot enhance a signed bundle")
     require(not output.exists(), "stage-two output already exists")
@@ -166,7 +179,7 @@ def enhance(directory: Path, root: Path, tools: Path, output: Path) -> None:
         validate_release_image_inventory(index, plan)
         subjects = [dict(a, scope="first-party-runtime") for a in index["artifacts"]]
         for service in services:
-            platforms = coverage.service_platforms(sbom.run_json(["docker", "buildx", "imagetools", "inspect", service["image_reference"], "--raw"]))
+            platforms = supporting_service_platforms(service)
             for platform, digest in platforms.items():
                 subjects.append(dict(service, scope="supporting-service-runtime", platform=platform, platform_digest=digest))
         for subject in subjects:

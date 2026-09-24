@@ -122,9 +122,20 @@ def run_json(args: list[str]) -> dict:
             value = json.loads(result.stdout)
             require(isinstance(value, dict), "tool returned no JSON object")
             return value
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             if attempt == 2:
-                raise SBOMError(f"command failed after three attempts: {' '.join(args[:4])}") from None
+                # Classify only; raw registry stderr may contain signed URLs or credentials.
+                detail = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "command error"
+                raw = getattr(exc, "stderr", None) or b""
+                text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                if isinstance(exc, subprocess.CalledProcessError):
+                    if re.search(r"(?i)\b(?:401|403|unauthorized|insufficient_scope)\b|pull access denied", text):
+                        detail = "registry authentication/access rejected"
+                    elif re.search(r"(?i)\b429\b|toomanyrequests|too many requests", text):
+                        detail = "registry rate limit"
+                    elif re.search(r"(?i)\b404\b|manifest unknown|manifest_unknown", text):
+                        detail = "registry manifest unavailable"
+                raise SBOMError(f"command failed after three attempts: {' '.join(args[:4])} ({detail})") from None
             time.sleep(2 ** attempt)
     raise AssertionError("unreachable")
 
