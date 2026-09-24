@@ -33,4 +33,13 @@ for generator in ('generate_capability_inventory', 'generate_hunt_contract', 'ge
 subprocess.run(['git', 'add', '-A'], check=True)
 actual = subprocess.check_output(['git', 'write-tree']).decode().strip()
 assert actual == EXPECTED, (actual, EXPECTED)
+followup = HERE / 'resume.patch'
+assert blob_sha(followup.read_bytes()) == 'fc968a49b728568f8e3d98171852f78051130e39'
+subprocess.run(['git', 'apply', '--index', str(followup)], check=True)
+for generator in ('generate_capability_inventory', 'generate_hunt_contract', 'generate_install_manifest'):
+    subprocess.run(['python', f'scripts/{generator}.py'], check=True)
+subprocess.run(['git', 'add', '-A'], check=True)
+actual = subprocess.check_output(['git', 'write-tree']).decode().strip()
+expected_final = '5dc4a8d266a0c28b3a8bfb7571c44ef221b1d4a4'
+assert actual == expected_final, (actual, expected_final)
 print('Reconstructed exact product tree:', actual)

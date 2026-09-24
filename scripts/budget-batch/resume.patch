@@ -1,0 +1,277 @@
+diff --git a/api/hunt/budget_amendments.py b/api/hunt/budget_amendments.py
+index b66a4ed..68be3ac 100644
+--- a/api/hunt/budget_amendments.py
++++ b/api/hunt/budget_amendments.py
+@@ -108,6 +108,16 @@ def amendable_dimensions(run: Mapping[str, Any]) -> list[str]:
+     return sorted(BUDGET_FIELDS - forbidden)
+ 
+ 
++def require_resume_headroom(run: Mapping[str, Any], *, limits_override: Mapping[str, int] | None = None) -> None:
++    """Resume only once the reported exhausted dimension has room; do not change limits."""
++    budget = dict(limits_override) if limits_override is not None else _object(run["budget_json"])
++    used = _object(run["budget_used_json"])
++    dimension = str(run.get("stop_reason") or "").removeprefix("budget_exhausted:")
++    limits = {**HuntBudget(**budget).ledger_limits(), "candidates": budget["max_candidates"], "verifications": budget["max_verifications"]}
++    if dimension not in limits or int(used.get(dimension) or 0) >= limits[dimension]:
++        raise HTTPException(409, "Increase the exhausted dimension before resuming this Hunt")
++
++
+ def amendment_public(row: Mapping[str, Any]) -> dict[str, Any]:
+     return {
+         "amendment_id": str(row["id"]), "revision": row["revision"],
+@@ -160,10 +170,7 @@ async def apply_budget_amendment(conn: Any, hunt_id: Any, request: HuntBudgetAme
+     status = run["status"]
+     stop_reason = run.get("stop_reason")
+     if request.resume and status == "budget_exhausted":
+-        dimension = str(stop_reason or "").removeprefix("budget_exhausted:")
+-        limits = {**HuntBudget(**after).ledger_limits(), "candidates": after["max_candidates"], "verifications": after["max_verifications"]}
+-        if dimension not in limits or int(used.get(dimension) or 0) >= limits[dimension]:
+-            raise HTTPException(409, "Increase the exhausted dimension before resuming this Hunt")
++        require_resume_headroom(run, limits_override=after)
+         status, stop_reason = "awaiting_planner", None
+     if run["target_kind"] == "device":
+         state = DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {})
+diff --git a/api/hunt/run_service.py b/api/hunt/run_service.py
+index 43ded63..2f70826 100644
+--- a/api/hunt/run_service.py
++++ b/api/hunt/run_service.py
+@@ -13,6 +13,7 @@ from fastapi import HTTPException
+ 
+ from .budget_amendments import (
+     HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment, read_amendments,
++    require_resume_headroom,
+ )
+ 
+ from .skills import (
+@@ -1257,22 +1258,23 @@ class HuntRunService:
+ 
+     async def resume(self, hunt_id: str) -> dict[str, Any]:
+         async with self._pool().acquire() as connection:
+-            row = await connection.fetchrow(
+-                """UPDATE hunt_runs SET status='active', stop_reason=NULL,
+-                          updated_at=NOW()
+-                   WHERE id=$1 AND status='awaiting_planner' RETURNING *""",
+-                _uuid_or_400(hunt_id, "hunt id"),
+-            )
+-            if not row:
+-                row = await hunt_run_or_404(connection, hunt_id)
++            async with connection.transaction():
++                row = await hunt_run_or_404(connection, hunt_id, for_update=True)
++                if row.get("completed_at") is not None or row["status"] not in {
++                    "active", "awaiting_planner", "budget_exhausted",
++                }:
++                    raise HTTPException(409, detail=f"Hunt is {row['status']} and cannot resume")
++                if row["status"] == "budget_exhausted":
++                    require_resume_headroom(dict(row))
+                 if row["status"] != "active":
+-                    raise HTTPException(
+-                        status_code=409,
+-                        detail=f"Hunt is {row['status']} and cannot resume",
++                    row = await connection.fetchrow(
++                        "UPDATE hunt_runs SET status='active',stop_reason=NULL,updated_at=NOW() "
++                        "WHERE id=$1 RETURNING *", _uuid_or_400(hunt_id, "hunt id"),
+                     )
+         return public_hunt_run(row)
+ 
+ 
++
+ __all__ = [
+     "HUNT_RUN_STATUSES",
+     "HuntRunService",
+diff --git a/docs/hunt-operator-workflows.md b/docs/hunt-operator-workflows.md
+index 405c04b..e7fcefe 100644
+--- a/docs/hunt-operator-workflows.md
++++ b/docs/hunt-operator-workflows.md
+@@ -130,7 +130,9 @@ multiple dimensions in one transaction; the UI edits one dimension at a time.
+ 
+ `resume: true` moves an unfinished budget-exhausted run to `awaiting_planner` only when its reported
+ exhausted dimension has headroom. No action is started automatically. Without resume, exhaustion
+-remains until deliberately addressed. Completed, failed, cancelled or finalized exhausted runs
++remains until deliberately addressed. After extending without resuming, use the existing
++`POST /hunts/{id}/resume` or **Resume with current budget**; it checks current headroom without
++another increase or resetting usage. Completed, failed, cancelled or finalized exhausted runs
+ are not reopened. Exhausted unfinished runs remain cancellable, including their owned child jobs.
+ 
+ The existing Hunt row lock serializes amendments with admission/settlement/cancellation. Usage and
+diff --git a/tests/test_hunt_budget_amendments.py b/tests/test_hunt_budget_amendments.py
+index 042be72..236ded7 100644
+--- a/tests/test_hunt_budget_amendments.py
++++ b/tests/test_hunt_budget_amendments.py
+@@ -82,6 +82,9 @@ class Connection:
+             event = {**dict(zip(names, args, strict=True)), "created_at": NOW}
+             self.events.append(deepcopy(event))
+             return event
++        if sql.startswith("UPDATE hunt_runs SET status='active'"):
++            self.row.update(status="active", stop_reason=None)
++            return deepcopy(self.row)
+         if sql.startswith("UPDATE hunt_runs SET budget_json"):
+             assert "budget_used_json=" not in sql
+             self.row.update(budget_json=json.loads(args[1]), budget_revision=args[2], context_pack=json.loads(args[3]), status=args[4], stop_reason=args[5], policy_json=json.loads(args[6]))
+@@ -320,3 +323,26 @@ def test_multi_dimension_extension_keeps_disabled_permissions_and_original_snaps
+     assert conn.row["context_pack"]["hunt_start_contract"] == before["context_pack"]["hunt_start_contract"]
+     assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}
+     assert result["budget_used"] == before["budget_used_json"]
++
++
++def test_extend_now_resume_later_uses_current_limits_without_another_amendment(monkeypatch):
++    conn = Connection()
++    service = HuntRunService(lambda: Pool(conn))
++    monkeypatch.setattr(run_router, "_service_provider", lambda: service)
++    app = FastAPI()
++    app.include_router(run_router.router)
++    async def send():
++        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
++            path = f"/hunts/{conn.row['id']}"
++            assert (await client.post(path + "/resume")).status_code == 409
++            changed = await client.post(path + "/budget-amendments", json=request(resume=False).model_dump())
++            assert changed.status_code == 200 and changed.json()["status"] == "budget_exhausted"
++            resumed = await client.post(path + "/resume")
++            assert resumed.status_code == 200 and resumed.json()["status"] == "active"
++            assert resumed.json()["budget_revision"] == 1
++            assert len(conn.events) == 1
++            assert (await client.post(path + "/resume")).json()["status"] == "active"
++            assert conn.row["budget_used_json"]["tcp_ports_attempted"] == 10000
++            conn.row.update(status="cancelled", completed_at=NOW)
++            assert (await client.post(path + "/resume")).status_code == 409
++    asyncio.run(send())
+diff --git a/tests/test_hunt_budget_amendments_postgres.py b/tests/test_hunt_budget_amendments_postgres.py
+index 5025914..e09a880 100644
+--- a/tests/test_hunt_budget_amendments_postgres.py
++++ b/tests/test_hunt_budget_amendments_postgres.py
+@@ -56,14 +56,17 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
+         # The amendment must read the committed usage, not overwrite a stale snapshot.
+         async with conn.transaction():
+             await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"])
+-            pending = asyncio.create_task(service.amend_budget(hunt_id, request()))
++            pending = asyncio.create_task(service.amend_budget(hunt_id, request(resume=False)))
+             await asyncio.sleep(0.05)
+             assert not pending.done(), "amendment must serialize on the existing Hunt row lock"
+             held = {**run["budget_used_json"], "http_requests": 100}
+             await conn.execute("UPDATE hunt_runs SET budget_used_json=$2::jsonb WHERE id=$1", run["id"], json.dumps(held))
+         result = await asyncio.wait_for(pending, timeout=5)
+         assert result["budget_used"] == held and result["amendment"]["used_snapshot"] == held
+-        assert result["status"] == "awaiting_planner" and result["budget"]["max_tcp_ports"] == 65_535
++        assert result["status"] == "budget_exhausted" and result["budget"]["max_tcp_ports"] == 65_535
++        resumed = await service.resume(hunt_id)
++        assert resumed["status"] == "active" and resumed["budget_revision"] == 1
++        assert resumed["budget_used"] == held
+         # Settle a previously admitted hold after the extension using the existing ledger math.
+         async with conn.transaction():
+             latest = dict(await conn.fetchrow("SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE", run["id"]))
+@@ -76,7 +79,7 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
+         await pool.close()
+         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
+         restarted = HuntRunService(lambda: pool)
+-        repeated = await restarted.amend_budget(hunt_id, request())
++        repeated = await restarted.amend_budget(hunt_id, request(resume=False))
+         assert repeated["replayed"] and repeated["amendment"] == result["amendment"]
+         assert repeated["budget_used"] == charged
+         # Two operators use the same observed revision; only one may win.
+@@ -114,7 +117,7 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
+         assert cancelled["budget_used"] == charged
+         assert await conn.fetchval("SELECT status FROM scans WHERE id=$1", child) == "cancelling"
+         # Cancellation wins over a later replay and over any new extension.
+-        assert (await restarted.amend_budget(hunt_id, request()))["status"] == "cancelled"
++        assert (await restarted.amend_budget(hunt_id, request(resume=False)))["status"] == "cancelled"
+         with pytest.raises(HTTPException, match="unfinished"):
+             await restarted.amend_budget(hunt_id, request(expected_revision=2, idempotency_key="after-cancel", limits={"max_tcp_ports": 80_000}))
+         with pytest.raises(HTTPException) as missing:
+diff --git a/ui/src/components/hunt/HuntBudgetEditor.tsx b/ui/src/components/hunt/HuntBudgetEditor.tsx
+index bfe0dd2..3717cb0 100644
+--- a/ui/src/components/hunt/HuntBudgetEditor.tsx
++++ b/ui/src/components/hunt/HuntBudgetEditor.tsx
+@@ -2,7 +2,7 @@
+ 
+ import { useRef, useState } from 'react'
+ import { HUNT_BUDGET_DIMENSIONS } from '@/lib/huntContract.generated'
+-import { amendHuntBudget, getHuntV2, type HuntV2 } from '@/lib/huntV2'
++import { amendHuntBudget, getHuntV2, resumeHuntV2, type HuntV2 } from '@/lib/huntV2'
+ import { Button, Card, Field, Select } from '@/components/ui'
+ 
+ /** An explicit operator edit, never an automatic retry that expands the budget. */
+@@ -44,6 +44,8 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+       setTotal('')
+       setMessage(result.device_traffic_frozen
+         ? 'Budget updated. The device traffic pause remains in effect.'
++        : result.status === 'budget_exhausted'
++          ? 'Budget updated. Resume this Hunt when you are ready.'
+         : 'Budget updated. Your agent can continue this same Hunt; no action was started automatically.')
+     } catch (cause) {
+       setError(cause instanceof Error ? cause.message : 'Could not extend Hunt budget')
+@@ -82,6 +84,14 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+         catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not refresh Hunt') }
+         finally { setBusy(false) }
+       }}>Refresh budget</Button>}
++      {hunt.status === 'budget_exhausted' && (hunt.budget_revision ?? 0) > 0 && (
++        <Button variant="secondary" disabled={busy} onClick={async () => {
++          setBusy(true); setError(null)
++          try { onChanged(await resumeHuntV2(hunt.hunt_id)); setMessage('Hunt resumed. Your agent can continue with the existing limits.') }
++          catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not resume Hunt') }
++          finally { setBusy(false) }
++        }}>Resume with current budget</Button>
++      )}
+       <Button onClick={extend} loading={busy} disabled={!valid || busy}>Extend budget</Button>
+     </Card>
+   )
+diff --git a/ui/src/lib/huntV2.ts b/ui/src/lib/huntV2.ts
+index 18fc6e8..523e473 100644
+--- a/ui/src/lib/huntV2.ts
++++ b/ui/src/lib/huntV2.ts
+@@ -303,6 +303,12 @@ export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
+   return response.json()
+ }
+ 
++export async function resumeHuntV2(huntId: string): Promise<HuntV2> {
++  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/resume`, { method: 'POST' })
++  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to resume Hunt (${response.status})`))
++  return response.json()
++}
++
+ export interface HuntBudgetAmendmentInput {
+   limits: Record<string, number>
+   expected_revision: number
+diff --git a/ui/tests/browser/hunt-budget-amendments.spec.ts b/ui/tests/browser/hunt-budget-amendments.spec.ts
+index 0f5792f..cfcfda6 100644
+--- a/ui/tests/browser/hunt-budget-amendments.spec.ts
++++ b/ui/tests/browser/hunt-budget-amendments.spec.ts
+@@ -23,6 +23,10 @@ async function fixture(page: Page, mode: 'success' | 'lost-response' | 'conflict
+     const request = route.request()
+     const path = new URL(request.url()).pathname
+     if (path === `/hunts/${id}`) return route.fulfill({ json: run })
++    if (path === `/hunts/${id}/resume`) {
++      run = { ...run, status: 'active', stop_reason: null }
++      return route.fulfill({ json: run })
++    }
+     if (path === `/hunts/${id}/budget-amendments`) {
+       writes.push(request.postDataJSON())
+       if (mode === 'conflict') {
+@@ -30,7 +34,8 @@ async function fixture(page: Page, mode: 'success' | 'lost-response' | 'conflict
+         return route.fulfill({ status: 409, json: { detail: { message: 'Hunt budget changed; refresh before extending' } } })
+       }
+       run = { ...run, budget_revision: 1, budget: { ...run.budget, max_tcp_ports: 65535 },
+-        status: 'awaiting_planner', stop_reason: null }
++        status: request.postDataJSON().resume ? 'awaiting_planner' : 'budget_exhausted',
++        stop_reason: request.postDataJSON().resume ? null : initial.stop_reason }
+       // The server committed, but the first response did not reach the operator.
+       if (mode === 'lost-response' && writes.length === 1) return route.abort('failed')
+       return route.fulfill({ json: { budget_revision: 1, status: run.status,
+@@ -87,3 +92,19 @@ test('conflicting revision is visible and never triggers an automatic budget inc
+   expect(state.writes).toHaveLength(1)
+   expect(state.errors).toEqual([])
+ })
++
++
++test('operator can extend first and resume later without increasing twice', async ({ page }) => {
++  const state = await fixture(page)
++  await state.panel.getByRole('checkbox').uncheck()
++  await state.panel.getByRole('button', { name: 'Extend budget', exact: true }).click()
++  await expect(state.panel.getByRole('status')).toContainText('Resume this Hunt when you are ready')
++  expect(state.current().status).toBe('budget_exhausted')
++  await state.panel.getByRole('button', { name: 'Resume with current budget', exact: true }).click()
++  await expect(state.panel.getByRole('status')).toContainText('Hunt resumed')
++  expect(state.current().status).toBe('active')
++  expect(state.writes).toHaveLength(1)
++  expect(state.current().budget_revision).toBe(1)
++  expect(state.current().budget_used).toEqual(initial.budget_used)
++  expect(state.errors).toEqual([])
++})

@@ -9,7 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 OUT = Path('/tmp/budget-results')
-EXPECTED = '2155f71fffd0dbfacc2eec6d155b54c6a0f5cb31'
+EXPECTED = '5dc4a8d266a0c28b3a8bfb7571c44ef221b1d4a4'
 PARENT = '76653d344228eed9ce1cdfe59786a230ce119eb0'
 
 def git(*args):
@@ -27,7 +27,7 @@ for name in ('native-nse.xml', 'budget-postgres.xml', 'v2-full-python.xml'):
         assert skipped == 0, name
     summary[name] = {'passed': len(cases)-skipped, 'skipped': skipped, 'failures': 0, 'errors': 0}
 ui = json.loads((OUT / 'browser-results.json').read_text())['stats']
-assert ui['expected'] >= 6 and not (ui['unexpected'] or ui['flaky'] or ui['skipped']), ui
+assert ui['expected'] >= 8 and not (ui['unexpected'] or ui['flaky'] or ui['skipped']), ui
 summary['budget-browser'] = ui
 entries = []
 for raw in git('diff', '--name-only', '-z', PARENT, 'HEAD').split(b'\0'):
