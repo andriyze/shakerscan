@@ -1,0 +1,30 @@
+name: Hunt proof development workspace
+on:
+  push:
+    branches: [diagnostics/hunt-proof-workspace]
+    paths: [.github/workflows/hunt-proof-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: d5c9955a11cb88322324e06efc61fd5e965df547
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/hunt-proof-workspace"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/hunt-proof-workspace/source.tar.gz" HEAD
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/hunt-proof-workspace/identity.txt"
+          cd "$RUNNER_TEMP/hunt-proof-workspace"
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hunt-proof-source-d5c9955
+          path: ${{ runner.temp }}/hunt-proof-workspace/
+          if-no-files-found: error
+          retention-days: 3
