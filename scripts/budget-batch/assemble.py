@@ -43,3 +43,10 @@ actual = subprocess.check_output(['git', 'write-tree']).decode().strip()
 expected_final = '5dc4a8d266a0c28b3a8bfb7571c44ef221b1d4a4'
 assert actual == expected_final, (actual, expected_final)
 print('Reconstructed exact product tree:', actual)
+
+ui_patch = HERE / 'ui-status.patch'
+assert blob_sha(ui_patch.read_bytes()) == 'a05fcac84ea2107950672a4eed34134177f8fd57'
+subprocess.run(['git', 'apply', '--index', str(ui_patch)], check=True)
+actual = subprocess.check_output(['git', 'write-tree']).decode().strip()
+assert actual == 'bece78b3522cd08d86c3f8ef779e555bbe4be728', actual
+print('Reconstructed UI correction:', actual)

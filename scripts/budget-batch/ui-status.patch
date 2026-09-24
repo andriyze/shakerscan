@@ -1,0 +1,98 @@
+diff --git a/ui/src/components/hunt/HuntBudgetEditor.tsx b/ui/src/components/hunt/HuntBudgetEditor.tsx
+index 3717cb0..76bd174 100644
+--- a/ui/src/components/hunt/HuntBudgetEditor.tsx
++++ b/ui/src/components/hunt/HuntBudgetEditor.tsx
+@@ -10,7 +10,8 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+   const [dimension, setDimension] = useState('max_http_requests')
+   const [total, setTotal] = useState('')
+   const [resume, setResume] = useState(true)
+-  const [busy, setBusy] = useState(false)
++  const [busyAction, setBusyAction] = useState<'extend' | 'refresh' | 'resume' | null>(null)
++  const busy = busyAction !== null
+   const [error, setError] = useState<string | null>(null)
+   const [message, setMessage] = useState<string | null>(null)
+   const attempt = useRef<{ signature: string; key: string } | null>(null)
+@@ -28,7 +29,7 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+     const signature = JSON.stringify([hunt.hunt_id, revision, dimension, parsed, resumeRequested])
+     const key = attempt.current?.signature === signature ? attempt.current.key : crypto.randomUUID()
+     attempt.current = { signature, key }
+-    setBusy(true)
++    setBusyAction('extend')
+     setError(null)
+     setMessage(null)
+     try {
+@@ -50,7 +51,7 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+     } catch (cause) {
+       setError(cause instanceof Error ? cause.message : 'Could not extend Hunt budget')
+     } finally {
+-      setBusy(false)
++      setBusyAction(null)
+     }
+   }
+ 
+@@ -77,22 +78,22 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
+         </label>
+       )}
+       {error && <p role="alert" className="text-xs text-red-300">{error} Refresh the Hunt if another operator changed its budget.</p>}
+-      {message && <p role="status" className="text-xs text-emerald-300">{message}</p>}
+-      {error && <Button variant="secondary" disabled={busy} onClick={async () => {
+-        setBusy(true)
++      {message && <p role="status" aria-label="Budget result" className="text-xs text-emerald-300">{message}</p>}
++      {error && <Button variant="secondary" loading={busyAction === 'refresh'} disabled={busy} onClick={async () => {
++        setBusyAction('refresh'); setMessage(null)
+         try { onChanged(await getHuntV2(hunt.hunt_id)); setError(null); attempt.current = null }
+         catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not refresh Hunt') }
+-        finally { setBusy(false) }
++        finally { setBusyAction(null) }
+       }}>Refresh budget</Button>}
+       {hunt.status === 'budget_exhausted' && (hunt.budget_revision ?? 0) > 0 && (
+-        <Button variant="secondary" disabled={busy} onClick={async () => {
+-          setBusy(true); setError(null)
++        <Button variant="secondary" loading={busyAction === 'resume'} disabled={busy} onClick={async () => {
++          setBusyAction('resume'); setError(null); setMessage(null)
+           try { onChanged(await resumeHuntV2(hunt.hunt_id)); setMessage('Hunt resumed. Your agent can continue with the existing limits.') }
+           catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not resume Hunt') }
+-          finally { setBusy(false) }
++          finally { setBusyAction(null) }
+         }}>Resume with current budget</Button>
+       )}
+-      <Button onClick={extend} loading={busy} disabled={!valid || busy}>Extend budget</Button>
++      <Button onClick={extend} loading={busyAction === 'extend'} disabled={!valid || busy}>Extend budget</Button>
+     </Card>
+   )
+ }
+diff --git a/ui/tests/browser/hunt-budget-amendments.spec.ts b/ui/tests/browser/hunt-budget-amendments.spec.ts
+index cfcfda6..9dc2490 100644
+--- a/ui/tests/browser/hunt-budget-amendments.spec.ts
++++ b/ui/tests/browser/hunt-budget-amendments.spec.ts
+@@ -60,7 +60,7 @@ async function fixture(page: Page, mode: 'success' | 'lost-response' | 'conflict
+ test('operator extends a total and resumes the same Hunt without resetting usage', async ({ page }) => {
+   const state = await fixture(page)
+   await state.panel.getByRole('button', { name: 'Extend budget', exact: true }).click()
+-  await expect(state.panel.getByRole('status')).toContainText('Budget updated')
++  await expect(state.panel.getByRole('status', { name: 'Budget result', exact: true })).toContainText('Budget updated')
+   expect(state.writes).toHaveLength(1)
+   expect(state.writes[0]).toMatchObject({ schema_version: 'hunt-budget-amendment/v1',
+     expected_revision: 0, limits: { max_tcp_ports: 65535 }, operator_confirmed: true, resume: true })
+@@ -76,7 +76,7 @@ test('a lost response retries with the same key rather than applying a second in
+   await expect(state.panel.getByRole('alert')).toBeVisible()
+   expect(state.writes).toHaveLength(1)
+   await state.panel.getByRole('button', { name: 'Extend budget', exact: true }).click()
+-  await expect(state.panel.getByRole('status')).toContainText('Budget updated')
++  await expect(state.panel.getByRole('status', { name: 'Budget result', exact: true })).toContainText('Budget updated')
+   expect(state.writes).toHaveLength(2)
+   expect(state.writes[1]).toEqual(state.writes[0])
+   expect(state.current().budget_revision).toBe(1)
+@@ -98,10 +98,10 @@ test('operator can extend first and resume later without increasing twice', asyn
+   const state = await fixture(page)
+   await state.panel.getByRole('checkbox').uncheck()
+   await state.panel.getByRole('button', { name: 'Extend budget', exact: true }).click()
+-  await expect(state.panel.getByRole('status')).toContainText('Resume this Hunt when you are ready')
++  await expect(state.panel.getByRole('status', { name: 'Budget result', exact: true })).toContainText('Resume this Hunt when you are ready')
+   expect(state.current().status).toBe('budget_exhausted')
+   await state.panel.getByRole('button', { name: 'Resume with current budget', exact: true }).click()
+-  await expect(state.panel.getByRole('status')).toContainText('Hunt resumed')
++  await expect(state.panel.getByRole('status', { name: 'Budget result', exact: true })).toContainText('Hunt resumed')
+   expect(state.current().status).toBe('active')
+   expect(state.writes).toHaveLength(1)
+   expect(state.current().budget_revision).toBe(1)
