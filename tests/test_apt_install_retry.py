@@ -166,3 +166,36 @@ def test_source_symlink_target_is_not_modified(tmp_path):
     assert result.returncode == 0
     assert (tmp_path / "apt/sources.list.d/local.list").is_symlink()
     assert outside.read_text() == before
+
+
+@pytest.mark.parametrize("image, expected", [
+    ("Dockerfile.api", ["ca-certificates", "curl", "jq"]),
+    ("Dockerfile.model-intake", [
+        "make", "gcc", "libcurl4-openssl-dev", "libssl-dev", "python3-dev",
+        "python3-venv", "python3-pip-whl", "python3-setuptools-whl",
+    ]),
+])
+@pytest.mark.parametrize("updates, status", [((100, 0), 0), ((100,), 100)])
+def test_overlay_installs_recover_from_index_mismatch_without_omitting_packages(
+    tmp_path, image, expected, updates, status,
+):
+    """Exercise the package argv actually wired into each independent image build.
+
+    Exit 100 covers the signed-index size/hash mismatch seen in Model Intake CI.
+    No install may run until update succeeds; a persistent mismatch must fail.
+    """
+    dockerfile = (ROOT / "scanner" / image).read_text().replace("\\\n", " ")
+    mount = "source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro"
+    assert dockerfile.count(mount) == 1
+    assert "apt-get update" not in dockerfile
+    command = next(line for line in dockerfile.splitlines()
+                   if "sh /tmp/apt_install.sh " in line)
+    packages = shlex.split(command.split("sh /tmp/apt_install.sh ", 1)[1].split(";", 1)[0])
+    assert packages == expected
+    result, calls = run_install(tmp_path, packages=packages, updates=updates)
+    assert result.returncode == status
+    assert len(apt_calls(calls, "update")) == (2 if status == 0 else 3)
+    installs = apt_calls(calls, "install")
+    assert len(installs) == (1 if status == 0 else 0)
+    if installs:
+        assert installs[0][-len(expected):] == expected

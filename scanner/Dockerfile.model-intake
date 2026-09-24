@@ -59,9 +59,11 @@ COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.
 COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
 COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
 COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
-RUN set -eu; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3-pip-whl python3-setuptools-whl; \
+# The overlay refreshes indexes independently of its scanner base. Use the same
+# bounded installer so a mirror publication race cannot leave stale indexes in use.
+RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
+    set -eu; \
+    sh /tmp/apt_install.sh make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3-pip-whl python3-setuptools-whl; \
     for tool in modelscan fickling semgrep safetensors pip-audit; do \
       python3 -m venv "/opt/model-intake-tools/${tool}"; \
       "/opt/model-intake-tools/${tool}/bin/pip" install \
