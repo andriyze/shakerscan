@@ -1,0 +1,232 @@
+diff --git a/docs/README.md b/docs/README.md
+index ab567ae..d6c963d 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -24,6 +24,7 @@ belong in Git history or immutable release notes rather than the active document
+ - [Hunt authorization behavior](hunt-authorization-behavior.md)
+ - [Hunt authorization workflow](hunt-authorization-workflow.md)
+ - [Hunt investigation evaluation](hunt-investigation-evaluation.md)
++- [Operator-complete Hunt implementation](hunt-operator-workflows.md)
+ - [Hunt review integrity](hunt-review-integrity.md)
+ - [Authenticated assurance](authenticated-assurance.md)
+ - [Browser login QA](browser-login-qa.md)
+diff --git a/docs/hunt-operator-workflows.md b/docs/hunt-operator-workflows.md
+new file mode 100644
+index 0000000..7e232e1
+--- /dev/null
++++ b/docs/hunt-operator-workflows.md
+@@ -0,0 +1,66 @@
++# Operator-complete Hunt workflows
++
++**Status:** active implementation plan, following merged PRs #214–#216. Checked items are implemented in this PR; unchecked items remain planned, not shipped capabilities.
++
++## Goal
++
++Carry an explicitly authorized investigation through to useful evidence without repeated consent
++prompts, avoidable restarts, or all-or-nothing methodology failures. Preserve cancellation, selected
++identities, target binding, measured budgets, and the distinction between evidence and proof.
++A missing executor is a capability gap, not an authorization problem.
++
++## Workstreams and acceptance
++
++- [x] Correct Hunt consent and public start examples. Reuse standing authorization; otherwise obtain
++  explicit target-specific consent once. Test public inputs through standing-authorization resolution.
++- [x] Retire leftover `CLAUDE.md` files during upgrades and workspace preparation, including
++  pre-manifest installs. Preserve local edits under non-loaded backup names and never follow links.
++- [x] Make MI-6 a real release gate. Verify that the release workflow executes the lifecycle and
++  rejects missing, skipped, failed, or waived trust-anchor assertions.
++- [x] Separate expected NSE optional-method omissions from execution errors. Preserve `coverage_gaps`,
++  actual request accounting, normal successful read checks, and genuine failures.
++- [x] Document and test NSE's anonymous same-frozen-asset redirect exception. It does not apply to
++  credentialed HTTP, expand the saved Hunt binding, or authorize a foreign asset.
++- [x] Make useful partial methodologies selectable with explicit missing-executor and permission
++  gaps. A missing technique must not discard the entire methodology or be called a clean test.
++- [ ] Let web/interface knowledge apply to appropriate device and network services without granting
++  their capabilities. Integrate device/protocol methodology discovery rather than adding an engine.
++- [x] Prioritize fresh caller signals, normalize retained service observations, and prevent older
++  context from crowding out an explicitly requested new direction.
++- [ ] Adapt the methodology bodies to real ShakerScan contracts. Preserve hypotheses, pivots,
++  evidence interpretation, and false-positive checks; remove nonexistent upstream adapter/schema
++  instructions and duplicated approval/budget machinery.
++- [ ] Distinguish submission-only requests from end-to-end Hunts. Follow queued child results during
++  a full investigation, with bounded checks and checkpoints rather than new user prompts.
++- [ ] Build authorized state-changing collection and multi-step browser execution with real
++  credential handling, accounting, cancellation, and evidence. Visibility alone is not implementation.
++- [ ] Add deliberate operator budget/resource amendments, including complete port-range work,
++  additional selected identities, and request collections. Preserve earlier action snapshots/history.
++- [ ] Persist normalized Hunt service observations into shared durable knowledge with idempotent
++  ingestion, provenance, asset-generation checks, and deletion/retention integration.
++- [ ] Improve the investigation frontier: unresolved leads, untested work, explicit coverage gaps,
++  freshness, and requested retests. Prior proof is not a ban on retesting or investigating a chain.
++- [ ] Make HTTPS-to-HTTP credential consequences visible and test actual synthetic transmission,
++  revocation, and foreign-host non-contact. Preserve intentional authorized same-asset testing.
++- [x] Repair the historical 0.8.0 readiness link without presenting old validation as current.
++- [ ] Run efficacy evaluations in addition to plumbing tests: useful selection, continuation after
++  partial failure, reproducible findings, patched controls, and operator-intervention count.
++
++## Validation rules
++
++Use the repository generators for manifests and inventories; never hand-author digests. Run affected
++behavioral tests before publishing a batch and report native/infrastructure tests separately when
++not run locally. Keep implementation status honest: a query signpost is not durable ingestion, a
++methodology is not an executor, and green unit tests are not a vulnerability-recall measurement.
++
++## First implementation batch
++
++Web methodology read/bind now also works for device/network interfaces; suggestions require an
++observed web signal or an explicit web objective. Native device/protocol methodology integration
++remains open. Submission-only versus full-investigation and requested-retest guidance is corrected;
++a durable amendment/execution driver and the independent efficacy runs are not implemented yet.
++
++Local validation: 271 affected tests passed across both repository import layouts, without skips.
++Generated contracts, inventory, install manifest, documentation policy, module size, installed import
++closure and canonical target transport passed. Native Nmap and full locked-dependency acceptance
++run separately in CI; local success is not a production or physical-device certification.
+diff --git a/docs/releases/0.8.0.md b/docs/releases/0.8.0.md
+index 6ef28d4..852fe32 100644
+--- a/docs/releases/0.8.0.md
++++ b/docs/releases/0.8.0.md
+@@ -132,4 +132,4 @@ evidence fails closed. AI Gate and Fleet WireGuard remain preview surfaces.
+ The release workflow publishes only from the exact `v0.8.0` commit reachable from `main` whose
+ generated documentation, locked builds, unit/contract suites, release gates, production dependency
+ audit, and UI build pass. Physical Model Intake, broker Fleet, installer, upgrade, browser, and
+-post-publish checks are tracked in the [release-readiness checklist](../release-readiness.md).
++post-publish checks are tracked in the [historical release-readiness checklist](https://github.com/andriyze/shakerscan/blob/c6bd3d7d97bfd76c891a3d546fb6c2bbad18f2a0/docs/release-readiness.md).
+diff --git a/install/MANIFEST.sha256 b/install/MANIFEST.sha256
+index b380cb9..d0ce088 100644
+--- a/install/MANIFEST.sha256
++++ b/install/MANIFEST.sha256
+@@ -18,7 +18,7 @@ bdae5c462201dd0901a2c4b0f542d8929f7e63be39f76659caa3ee0725aa34f1  .claude/comman
+ 0005c600942f875408cbceafb1d1d28a5e73178dcf1e6cc973eaabf6a3f71984  .claude/hooks/session-start.sh
+ 847e74bc6420fa4c93a6aff8bd1d165feddabcf87acb682327c62f387db53a95  .claude/settings.json
+ 6b49e2dcd64e4d230315fc64851288a2fbc4a4f103f0c5117c6d4f83f899c3c5  .dockerignore
+-ffdeef906ba599b0c15624de5a7e03683c631f8ece8ec96cebfdc3002761595c  AGENTS.md
++f8739c622ec4cfa846c2290d90b767b809509472b3adb1ed5ac4de79e567b863  AGENTS.md
+ feb03b7aa19f39f737f8548da242cd7f1a8cf6c15c0b0e45c95f4f635c7658fd  README.md
+ 8a81c718d7e78b74b27f8ec3313bbcec2a7acd1df926e6e72c71561996726595  VERSION
+ d7bfe4508ae0abbfb3928217945058180e33af571dd2b55fd14a0eb69a8691d5  api/agent_tools.py
+@@ -142,7 +142,7 @@ a5b0005a98416d4496fc96abe3ad88e8451f426055d219ab9c2fd385c2cb75cb  skills/device-
+ 7b890e6b54fe2b85f24a5feb034fd9401e98d0c9254948391498542121b24f09  skills/device-hunt/references/smart-tv-protocol-application.md
+ e5e8bc38897095b675a6fee7907472ec7233c02919b0378889227c86e9299f9e  skills/device-triage/SKILL.md
+ cd87e9cd53a76dad28a7680f87d6656f7b6b6af9c634f55dc40f4bb872dfba59  skills/device-triage/agents/openai.yaml
+-e6158b0577c365aaad225871dccb82defd40ced9c1d93e3dfc8cb1e8fa06364b  skills/hunt/SKILL.md
++4f86e173e8dbb12ea3a68742669f7f89533c371172304a22cd26c1c3a82e6a2e  skills/hunt/SKILL.md
+ d685c5252233c773eed8ddc67d60b87d1890eff47aa48ea936a0a27b53f4380a  skills/js-analyze/SKILL.md
+ 17629fd27266cf19aa9f9b662999aabf4b560c0aa1004b6e6012cf1321659682  skills/js-analyze/agents/openai.yaml
+ 74d544c971ae5738c76cf7456ae7ccde87e7caf8407bc5051107455b4f745060  skills/js-analyze/references/shakerscan.md
+@@ -185,7 +185,7 @@ b41b2b2cc3002d3189fbf0f6010219ff4dcb3fb7e89d58c439a6060cde2aec57  skills/web/21-
+ 029ee27cfb5381131ef2e2464de6c413d2a2410af7d700ae78e06ef273df5694  skills/web/29-web-llm-and-ai-feature-security-testing.md
+ e9242f129ba9c6d022ca257e84f13ac58d7797f27c84aa8a92f368f64334e72f  skills/web/30-scanner-orchestration-evidence-chaining-and-regression.md
+ 85a4709a1cf359949389b7ee7ea5e92b4fcc99479bccfb9e21f0606bfaa293cb  skills/web/31-edge-waf-and-origin-exposure-validation.md
+-d79f61a3d4a1704953b03ec1de3d875a0faf4cd509e63fab7a34b8cb371821d0  skills/web/README.md
++e0d914554d39ef2a2f24cd889ce403843241e6a683af2cb7995b981959d1afb4  skills/web/README.md
+ 06506964be7c4ae3ab6a73b4fbfce5231015fbe724c33f0e737b46f1183de805  skills/web/core/00-engagement-scope-policy.md
+ b9502850ccf60ad451b0ca41bafcd214a8925c204ef3deea5cfe5cab189676d1  skills/web/core/01-agent-trust-boundary.md
+ b6a86af36e1aff22831025a928e580ea5db938e4558df190ee69e8f77620ab57  skills/web/core/02-tool-execution-safety.md
+diff --git a/install/index.html b/install/index.html
+index ccafea5..9732223 100644
+--- a/install/index.html
++++ b/install/index.html
+@@ -172,8 +172,19 @@ prune_retired_files() {
+     # it with the new one, after which previous and staged are identical and nothing is ever pruned.
+     previous="$1"
+     staged="$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
+-    [ -f "$previous" ] || return 0
+     [ -f "$staged" ] || return 0
++    # Also migrate pre-manifest installs and agent-workspace leftovers. A stale
++    # CLAUDE.md can shadow the current AGENTS.md or retain an old instance note.
++    # Retire only this top-level instruction file, in the candidate tree; keep
++    # its bytes (or symlink) under a non-loaded name so local edits are not lost.
++    if ! grep -Fxq -- 'CLAUDE.md' "$staged"; then
++        legacy_guide="$INSTALL_STAGE/CLAUDE.md"
++        if [ -f "$legacy_guide" ] || [ -L "$legacy_guide" ]; then
++            retired_guide="$(mktemp "$INSTALL_STAGE/.shakerscan-retired-CLAUDE.XXXXXX")"
++            mv -f -- "$legacy_guide" "$retired_guide"
++        fi
++    fi
++    [ -f "$previous" ] || return 0
+     while IFS= read -r retired_relative; do
+         [ -n "$retired_relative" ] || continue
+         # Refuse anything that could escape the installation directory, whatever a previous
+diff --git a/install/index.sh b/install/index.sh
+index ccafea5..9732223 100644
+--- a/install/index.sh
++++ b/install/index.sh
+@@ -172,8 +172,19 @@ prune_retired_files() {
+     # it with the new one, after which previous and staged are identical and nothing is ever pruned.
+     previous="$1"
+     staged="$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
+-    [ -f "$previous" ] || return 0
+     [ -f "$staged" ] || return 0
++    # Also migrate pre-manifest installs and agent-workspace leftovers. A stale
++    # CLAUDE.md can shadow the current AGENTS.md or retain an old instance note.
++    # Retire only this top-level instruction file, in the candidate tree; keep
++    # its bytes (or symlink) under a non-loaded name so local edits are not lost.
++    if ! grep -Fxq -- 'CLAUDE.md' "$staged"; then
++        legacy_guide="$INSTALL_STAGE/CLAUDE.md"
++        if [ -f "$legacy_guide" ] || [ -L "$legacy_guide" ]; then
++            retired_guide="$(mktemp "$INSTALL_STAGE/.shakerscan-retired-CLAUDE.XXXXXX")"
++            mv -f -- "$legacy_guide" "$retired_guide"
++        fi
++    fi
++    [ -f "$previous" ] || return 0
+     while IFS= read -r retired_relative; do
+         [ -n "$retired_relative" ] || continue
+         # Refuse anything that could escape the installation directory, whatever a previous
+diff --git a/scripts/summarize_e2e_debt.py b/scripts/summarize_e2e_debt.py
+index 889d9ab..3d9c929 100644
+--- a/scripts/summarize_e2e_debt.py
++++ b/scripts/summarize_e2e_debt.py
+@@ -8,12 +8,13 @@ from typing import Any, Sequence
+ 
+ 
+ def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
+-              required_checks: Sequence[str] = ()) -> dict[str, Any]:
++              required_checks: Sequence[str] = (),
++              required_passes: Sequence[str] = ()) -> dict[str, Any]:
+     if not isinstance(card, dict) or not isinstance(card.get('areas'), list):
+         raise ValueError('Expected an E2E scorecard with an areas array')
+     counts = dict(passed=0, failed=0, skipped=0, unknown=0, accepted_failures=0, unexpected_failures=0, debt_xpasses=0)
+     exceptions, errors = [], []
+-    area_names, executed_checks = set(), set()
++    area_names, executed_checks, passed_checks = set(), set(), set()
+     for area in card['areas']:
+         if not isinstance(area, dict) or not isinstance(area.get('rows'), list):
+             raise ValueError('Each area must have a rows array')
+@@ -47,6 +48,8 @@ def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
+             if actual in {'passed', 'failed'}:
+                 area_executed += 1
+                 executed_checks.add((name, check))
++            if actual == 'passed' and not debt:
++                passed_checks.add((name, check))
+             if actual == 'failed':
+                 counts['accepted_failures' if debt else 'unexpected_failures'] += 1
+             if debt and actual == 'passed':
+@@ -68,6 +71,12 @@ def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
+             raise ValueError('Required checks use AREA:EXACT ASSERTION NAME')
+         if (area, check) not in executed_checks:
+             errors.append(f'Required assertion did not execute: {requirement}')
++    for requirement in required_passes:
++        area, separator, check = requirement.partition(':')
++        if not separator or not area or not check:
++            raise ValueError('Required passes use AREA:EXACT ASSERTION NAME')
++        if (area, check) not in passed_checks:
++            errors.append(f'Required assertion did not pass without a waiver: {requirement}')
+     executed = counts['passed'] + counts['failed']
+     observed_clean = executed > 0 and counts['failed'] == 0 and counts['unknown'] == 0
+     complete = executed > 0 and counts['unknown'] == 0 and not errors
+@@ -90,10 +99,13 @@ def main() -> int:
+     parser.add_argument('--strict', action='store_true', help='Reject actual failures including accepted debt')
+     parser.add_argument('--require-area', action='append', default=[])
+     parser.add_argument('--require-check', action='append', default=[], metavar='AREA:NAME')
++    parser.add_argument('--require-pass', action='append', default=[], metavar='AREA:NAME',
++                        help='Require a real pass; missing, skipped, failed or waived checks fail')
+     args = parser.parse_args()
+     try:
+         result = summarize(json.loads(args.scorecard.read_text()),
+-            required_areas=args.require_area, required_checks=args.require_check)
++            required_areas=args.require_area, required_checks=args.require_check,
++            required_passes=args.require_pass)
+     except (OSError, ValueError, TypeError) as exc:
+         parser.exit(2, f'Cannot summarize scorecard: {exc}\n')
+     print(json.dumps(result, indent=2))

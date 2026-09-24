@@ -1,0 +1,189 @@
+diff --git a/skills/hunt/SKILL.md b/skills/hunt/SKILL.md
+index c46f620..d4ba9fd 100644
+--- a/skills/hunt/SKILL.md
++++ b/skills/hunt/SKILL.md
+@@ -21,28 +21,32 @@ candidates, and proof. Do not start a second in-server reasoning loop.
+ 4. Reuse standing target authorization. When the target already has valid standing authorization,
+    let ShakerScan resolve the target-bound approval; do not ask the operator to repeat approval or
+    make them find/copy a receipt ID. Never invent authority or a receipt.
+-5. Start `POST /hunts`, then read the returned context pack and capability schemas. Starting with
++5. Without standing authorization, obtain explicit target-specific operator authorization before
++   requesting active authority. A clear authorization already given in this conversation counts;
++   record it once through the target authorization workflow rather than asking again.
++6. Start `POST /hunts`, then read the returned context pack and capability schemas. Starting with
+    no `skill_ids` is normal. Methodologies guide investigation; they do not grant or reduce
+    authority.
+ 
+-A compact set of contract-valid shapes is kept below so agents and CI can detect contract drift.
+-These are shapes, not recommended zero-budget templates; replace the example policy/budgets with the
+-operator-authorized values and server-advertised defaults for the real investigation.
++These public start examples are checked through standing-authorization resolution before the
++internal contract is validated. Active examples assume the operator has already authorized the
++registered target. Empty budgets use the server's profile defaults; policy automatically zeros
++unrequested permissions. Profile and collection IDs select resources, not new authority.
+ 
+ ```json
+-{"schema_version":"hunt-start/v2","target_id":"registered-target-id","target_kind":"web","goal":"Investigate the authorized web target.","budget_profile":"balanced","policy":{"active_testing":false,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":false},"budgets":{"max_active_actions":0,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
++{"schema_version":"hunt-start/v2","target_id":"registered-target-id","target_kind":"web","goal":"Investigate the authorized web target.","budget_profile":"balanced","policy":{"active_testing":false,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false},"budgets":{},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+ ```
+ 
+ ```json
+-{"schema_version":"hunt-start/v2","target_id":"registered-api-target-id","target_kind":"api","goal":"Compare authorization between two approved principals.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":12,"max_state_changing_requests":0,"max_hosts":0,"max_tcp_ports":0,"max_udp_ports":0,"max_oob_interactions":0},"credential_refs":{"primary_credential_profile_id":"primary-profile-id","secondary_credential_profile_id":"secondary-profile-id"},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
++{"schema_version":"hunt-start/v2","target_id":"registered-api-target-id","target_kind":"api","goal":"Compare authorization between two approved principals.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":false,"allow_oob_interactions":false},"budgets":{},"credential_refs":{"primary_credential_profile_id":"primary-profile-id","secondary_credential_profile_id":"secondary-profile-id"},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+ ```
+ 
+ ```json
+-{"schema_version":"hunt-start/v2","target_id":"registered-network-target-id","target_kind":"network","goal":"Investigate the authorized network target.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":4,"max_tcp_ports":100,"max_udp_ports":20,"max_oob_interactions":0},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
++{"schema_version":"hunt-start/v2","target_id":"registered-network-target-id","target_kind":"network","goal":"Investigate the authorized network target.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false},"budgets":{},"credential_refs":{},"capabilities":[],"request_collection_ids":[],"skill_ids":[]}
+ ```
+ 
+ ```json
+-{"schema_version":"hunt-start/v2","target_id":"registered-device-target-id","target_kind":"device","goal":"Investigate the authorized connected device.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false,"authorization_confirmed":true,"approval_receipt_id":"target-bound-approval-id"},"budgets":{"max_active_actions":8,"max_state_changing_requests":0,"max_hosts":1,"max_tcp_ports":100,"max_udp_ports":20,"max_device_fragility_points":40,"max_oob_interactions":0},"credential_refs":{"ssh_credential_profile_id":"ssh-profile-id"},"capabilities":[],"request_collection_ids":["saved-device-selection-id"],"skill_ids":[]}
++{"schema_version":"hunt-start/v2","target_id":"registered-device-target-id","target_kind":"device","goal":"Investigate the authorized connected device.","budget_profile":"balanced","policy":{"active_testing":true,"allow_state_changing_http":false,"network_discovery":true,"allow_oob_interactions":false},"budgets":{},"credential_refs":{"ssh_credential_profile_id":"ssh-profile-id"},"capabilities":[],"request_collection_ids":["saved-device-selection-id"],"skill_ids":[]}
+ ```
+ 
+ The exact `hunt-start/v2` fields come from `GET /hunts/contract`. A normal planner should not
+@@ -71,8 +75,9 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
+ - If one suggestion is relevant, load exactly that one with
+   `POST /hunts/{hunt_id}/skills/{skill_id}/read`, review its prerequisites, then bind it with
+   `/bind`. Never read the whole catalog. Binding reports `withheld_capabilities` per bound skill,
+-  including prerequisite requirements; it cannot add or remove capabilities, change scope, or
+-  resize the Hunt budget. Skip techniques needing withheld capabilities and continue compatible
++  including prerequisite requirements, and `missing_capabilities` for executor gaps. Useful partial
++  methodologies remain selectable. Binding cannot add/remove capabilities, change scope, or resize
++  the Hunt budget. Skip techniques needing unavailable capabilities and continue compatible
+   work. Report those untested techniques as coverage gaps, not findings or clean results. An empty
+   list is not execution proof and does not bypass the remaining runtime checks.
+ - Do not describe binding as narrowing, sandboxing, or fencing the Hunt. To reduce authority, start
+@@ -116,8 +121,11 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
+   Silence or `open|filtered` is inconclusive. Preserve pacing, fragility limits, circuit breakers,
+   exact-device origin pinning, and separate user confirmation through
+   `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm` for immutable SSH plans.
+-- If a capability queues a Scan or verifier, report its ID and stop. Do not poll unless the user
+-  explicitly asks later.
++- For a submission-only request, report the queued Scan/verifier ID and stop. For an explicitly
++  requested end-to-end Hunt, follow the child action with bounded status checks, collect its result,
++  and continue the investigation; do not ask for another command at each queue boundary. Respect
++  cancellation and the run deadline. If this planner session cannot remain active, save a checkpoint
++  and state what is still running instead of claiming the investigation is finished.
+ 
+ Request collections are redacted inventories. Postman scripts, HAR responses, and external
+ OpenAPI references never execute. Use only collection/request IDs returned by ShakerScan; do not
+@@ -157,7 +165,8 @@ actions. Cancel with `/cancel`; resume only when the server reports an awaiting-
+ 
+ Stop when the objective is answered, remaining hypotheses are falsified, authorization fails or
+ expires, the target changes or is deactivated, the user cancels, a circuit breaker freezes traffic,
+-or any budget is exhausted. Preserve partial observations and name material coverage gaps.
++or no useful authorized action fits the remaining budget. An exhausted optional dimension need not
++stop work that uses other remaining dimensions. Preserve observations and name material coverage gaps.
+ An action rejected with `budget_insufficient_for_action` has not exhausted the run: use its
+ reported shortages to select a smaller useful action. Do not retry an unchanged oversized action.
+ 
+diff --git a/skills/web/README.md b/skills/web/README.md
+index 7770dc0..657cd71 100644
+--- a/skills/web/README.md
++++ b/skills/web/README.md
+@@ -4,9 +4,10 @@ Testing methodology a Hunt can bind, served by `GET /hunt/skills` and delivered
+ the run's context pack.
+ 
+ A skill is methodology plus a declaration of the capabilities it needs. It is **not** an execution
+-path, an authority, or a safety fence. Binding retains supported methodology even when some
++path, an authority, or a safety fence. Binding retains supported and useful partial methodology even when some
+ required capabilities are absent from the Hunt's saved capability set. Each bound skill reports
+-`withheld_capabilities`, including prerequisite requirements. Skip techniques that need them,
++`withheld_capabilities` for absent run permissions and `missing_capabilities` for declared
++implementation gaps, including prerequisite requirements. Skip techniques that need them,
+ continue compatible work, and report untested techniques as coverage gaps, never findings or clean
+ results. Binding does not grant, remove, narrow, widen, or resize capabilities, policy, approval,
+ scope, or budget. Individual actions still pass through the runtime's execution checks.
+@@ -33,7 +34,7 @@ Skill 31 was authored here.
+ | Level | Meaning |
+ |---|---|
+ | `supported` | Every required capability exists and is planner-visible. Bindable. |
+-| `partial` | A required adapter has no ShakerScan capability. Listed, not bindable. |
++| `partial` | Some techniques lack a declared executor. Bindable for existing capabilities; gaps remain explicit. |
+ | `reference` | Describes authority the server holds, not a procedure a planner selects. |
+ 
+ The `partial` level exists so a gap is visible before a run starts rather than discovered when the
+@@ -44,6 +45,14 @@ cannot execute, each naming what it would need. Skill 14 supports bounded SQL ve
+ explicitly deferring OOB, LDAP, and unsupported query-language mutations. Skill 31's direct-origin
+ work requires separately admitted direct-origin authority; binding the skill never supplies it.
+ 
++## Service applicability
++
++Web/API methodology can be read and bound for a network or device target's web interface without
++changing the asset kind or granting web capabilities. Suggestions require an HTTP/application
++surface signal or an explicit web-oriented objective; an asset label alone does not invent one.
++A missing GraphQL, upload, or realtime executor is a technique gap, not a reason to hide all the
++methodology. Capability names in `missing_capabilities` are not callable API operations.
++
+ ## Two rules that do not bend
+ 
+ 1. **Only deterministic proof contracts mark a finding verified.** A skill produces candidates.
+diff --git a/tests/integration/test_hunt_nse_native.py b/tests/integration/test_hunt_nse_native.py
+index e1df35a..46c568a 100644
+--- a/tests/integration/test_hunt_nse_native.py
++++ b/tests/integration/test_hunt_nse_native.py
+@@ -141,8 +141,11 @@ def test_native_read_only_method_check_preserves_results_instead_of_refusing():
+     async def run():
+         async with http_fixture(lambda *_: (200, {}, b"")) as (port, wire):
+             result, _ = await execute(port, ("http-methods",), allow_write=False)
+-            assert result.status == "partial"
+-            assert "nse_optional_method_not_authorized" in result.errors
++            assert result.status == "success" and not result.partial
++            assert result.errors == ()
++            gaps = result.redacted_execution["coverage_gaps"]
++            assert gaps and all(gap["status"] == "not_requested" for gap in gaps)
++            assert all(gap["reason"] == "nse_optional_method_not_authorized" for gap in gaps)
+             assert all(m in {"GET", "HEAD", "OPTIONS"} for m,_,_ in wire)
+             assert result.actual_budget["http_requests"] == len(wire) > 0
+             assert result.actual_budget.get("state_changing_requests", 0) == 0
+diff --git a/tests/test_e2e_debt_summary.py b/tests/test_e2e_debt_summary.py
+index d1b6f56..1b81c69 100644
+--- a/tests/test_e2e_debt_summary.py
++++ b/tests/test_e2e_debt_summary.py
+@@ -84,3 +84,44 @@ def test_cli_accepts_explicit_debt_only_in_nonstrict_complete_validation(tmp_pat
+     result = subprocess.run(command,capture_output=True,text=True)
+     assert result.returncode == expected
+     assert json.loads(result.stdout)['counts']['accepted_failures'] == 1
++
++
++@pytest.mark.parametrize('row', [
++    None,
++    {'name': 'trust', 'passed': True, 'skipped': True},
++    {'name': 'trust', 'passed': False},
++    {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': False},
++    {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': True},
++    {'name': 'trust'},
++])
++def test_a_required_pass_cannot_be_missing_skipped_failed_unknown_or_waived(row):
++    rows = [{'name': 'ordinary', 'passed': True}]
++    if row is not None:
++        rows.append(row)
++    result = summarize({'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': rows}]},
++                       required_passes=['model_intake:trust'])
++    assert result['policy_validated'] is False
++    assert result['validation_complete'] is False
++    assert any('Required assertion did not pass' in error for error in result['validation_errors'])
++
++
++def test_required_trust_passes_coexist_with_explicit_debt_elsewhere():
++    card = {'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': [
++        {'name': 'trust', 'passed': True},
++        {'name': 'other', 'passed': True, 'xfail': True, 'xpass': False},
++    ]}]}
++    assert summarize(card, required_passes=['model_intake:trust'])['policy_validated'] is True
++
++
++def test_require_pass_cli_fails_on_a_waived_trust_check(tmp_path):
++    import json, subprocess, sys
++    from pathlib import Path
++    path = tmp_path / 'card.json'
++    path.write_text(json.dumps({'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': [
++        {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': False},
++    ]}]}))
++    command = [sys.executable, str(Path(__file__).resolve().parents[1] / 'scripts/summarize_e2e_debt.py'),
++               str(path), '--require-pass', 'model_intake:trust']
++    result = subprocess.run(command, capture_output=True, text=True)
++    assert result.returncode == 1
++    assert json.loads(result.stdout)['policy_validated'] is False
