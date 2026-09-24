@@ -1,0 +1,37 @@
+name: Frozen integration diagnostics
+on:
+  push:
+    branches: [feat/hunt-operator-workflows]
+    paths: ['.github/workflows/frozen-ci-diagnostics.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Preserve the failed stack build log for diagnosis
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/107723844843/logs" > diagnostics/stack-build.log
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          lines = Path('diagnostics/stack-build.log').read_text(errors='replace').splitlines()
+          selected = set()
+          for n, line in enumerate(lines):
+              if re.search(r'(?i)(error:|failed to solve|E: |404 |403 |401 |unable to|not found|NO_PUBKEY|EXPKEYSIG|exit code)', line):
+                  selected.update(range(max(0,n-2), min(len(lines),n+3)))
+          excerpt = '\n'.join(lines[n] for n in sorted(selected))
+          Path('diagnostics/build-errors.txt').write_text(excerpt + '\n')
+          print(excerpt[-24000:])
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: frozen-stack-diagnostics
+          path: diagnostics/
+          retention-days: 3
