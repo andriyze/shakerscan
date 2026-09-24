@@ -1,0 +1,31 @@
+name: Hunt proof source export
+
+on:
+  push:
+    branches: [feat/hunt-verified-discovery]
+    paths: [.github/workflows/hunt-proof-source-export.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Export tracked source for offline reproduction
+        run: |
+          mkdir -p /tmp/hunt-proof-source
+          git archive --format=tar HEAD | gzip -n > /tmp/hunt-proof-source/source.tar.gz
+          git rev-parse HEAD > /tmp/hunt-proof-source/commit.txt
+          git rev-parse HEAD^{tree} > /tmp/hunt-proof-source/tree.txt
+          sha256sum /tmp/hunt-proof-source/source.tar.gz > /tmp/hunt-proof-source/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hunt-proof-source-${{ github.sha }}
+          path: /tmp/hunt-proof-source/
+          if-no-files-found: error
+          retention-days: 1
