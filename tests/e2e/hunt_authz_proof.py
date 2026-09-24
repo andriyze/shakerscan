@@ -18,6 +18,11 @@ def run(harness, scorecard, *, authority, start_payload, fixture_base: str, nonc
                 "auth_kind": "authorization_header", "principal_slot": slot,
                 "principal_label": f"proof-{slot}", "secret": f"Bearer {token}",
                 "allowed_capabilities": ["auth.session.establish", "authz.verify"],
+                # authz.verify is an active credential consumer. Reuse the same
+                # target-bound credential-tier approval that authorizes this Hunt
+                # instead of weakening the profile contract for an E2E fixture.
+                "allow_active_capabilities": True,
+                "approval_receipt_id": approval_id,
                 "created_by": "hunt-e2e",
             })
             profile_id = str((created.get("profile") or {}).get("id") or "")
