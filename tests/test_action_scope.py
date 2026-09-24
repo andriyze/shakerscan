@@ -34,11 +34,18 @@ def test_blocks_userinfo_trailing_dot_and_unicode_hosts():
     assert "unicode_or_punycode_confusion" in blocked_by("https://xn--e1awd7f.com/", allowed_root_domains=["xn--e1awd7f.com"])
 
 
-def test_blocks_private_and_loopback_outside_lab():
-    assert "loopback_or_private_range" in blocked_by("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"])
+def test_admits_private_and_loopback_by_default_and_blocks_them_when_refused(monkeypatch):
+    """A self-hosted install scans its own network by default; a deployment that must not reach
+    private ranges sets the policy to refuse and is then blocked."""
+    monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", raising=False)
+    assert evaluate_scope("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"]).verdict != "blocked"
+    assert evaluate_scope("http://192.168.1.50/", allowed_hosts=["192.168.1.50"]).verdict != "blocked"
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    assert "loopback_or_private_range" in blocked_by(
+        "http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"])
     assert "loopback_or_private_range" in blocked_by("http://10.0.0.5/", allowed_hosts=["10.0.0.5"])
     lab = evaluate_scope("http://127.0.0.1:8080/", allowed_hosts=["127.0.0.1"], environment="lab")
-    assert lab.verdict == "allowed"
+    assert lab.verdict == "allowed", "a lab label still admits its own address"
     localhost_lab = evaluate_scope("http://localhost:8080/", allowed_hosts=["localhost"], environment="lab")
     assert localhost_lab.verdict == "allowed"
 
@@ -65,11 +72,15 @@ def test_deployment_policy_never_admits_link_local_multicast_or_unspecified(monk
         assert "loopback_or_private_range" in blocked_by(f"http://{host}/", allowed_hosts=[host]), host
 
 
-def test_private_networks_stay_refused_without_the_opt_in(monkeypatch):
+def test_private_networks_are_refused_when_the_deployment_says_so(monkeypatch):
+    """The opt-out, for a deployment whose network is not the customer's."""
     monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
     assert "loopback_or_private_range" in blocked_by("http://10.0.0.5/", allowed_hosts=["10.0.0.5"])
-    monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS")
     assert "loopback_or_private_range" in blocked_by("http://192.168.1.10/", allowed_hosts=["192.168.1.10"])
+    monkeypatch.delenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS")
+    # ...and without the opt-out, the operator's own network is in scope again.
+    assert evaluate_scope("http://10.0.0.5/", allowed_hosts=["10.0.0.5"]).verdict != "blocked"
+    assert evaluate_scope("http://192.168.1.10/", allowed_hosts=["192.168.1.10"]).verdict != "blocked"
 
 
 def test_blocks_broad_cidr_and_out_of_scope_hosts():

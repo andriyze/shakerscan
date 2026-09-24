@@ -221,6 +221,9 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     class Resolver:
         @asynccontextmanager
         async def resolve(self, *_args, **_kwargs):
+            assert _kwargs["expected_version"] == 2
+            assert _kwargs["expected_record_version"] == 4
+            assert _kwargs["expected_principal_slot"] == "primary"
             profile = types.SimpleNamespace(
                 profile_id=str(profile_id),
                 current_version=2,
@@ -247,6 +250,7 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
         "credential_profile_refs": [{
             "profile_id": str(profile_id),
             "profile_version": 2,
+            "credential_record_version": 4,
             "target_kind": "web",
             "principal_slot": "primary",
             "scan_lane": "primary",
@@ -277,6 +281,35 @@ def test_generic_scan_credentials_are_revalidated_and_decrypted_only_on_worker(m
     assert hydrated["resolved_credential_profiles"][0]["secret_values_visible"] is False
     assert "worker-only-secret" not in json.dumps(hydrated["credential_profile_refs"])
     assert "worker-only-secret" not in json.dumps(queued)
+
+
+@pytest.mark.parametrize("version,record_version", [(4, 5), (3, 6), (3, True)])
+def test_scan_hydration_refuses_changed_identity_before_decryption(monkeypatch, version, record_version):
+    from tests.test_credential_resolver import FakeStore, _metadata, TARGET_ID, PROFILE_ID
+    from runtime.credential_resolver import WorkerCredentialResolver, CredentialResolutionAuthority
+
+    decrypted = []
+    resolver = WorkerCredentialResolver(store=FakeStore(metadata=_metadata("bearer_token", target_kind="web")),
+        decryptor=lambda value: decrypted.append(value) or value)
+    monkeypatch.setattr(worker, "WorkerCredentialResolver", lambda: resolver)
+    monkeypatch.setattr(worker, "db_pool", _GenericCredentialPool(uuid.UUID(TARGET_ID)))
+
+    async def authority(_conn, **kwargs):
+        return CredentialResolutionAuthority(owner_kind="scan", owner_id=kwargs["owner_id"],
+            credential_access_allowed=True, approval_validated=True,
+            approval_receipt_id=kwargs["approval_receipt_id"], scope_receipt_id="scope-1")
+
+    monkeypatch.setattr(worker, "validate_worker_credential_authority", authority)
+    queued = {"credential_profile_refs": [{"profile_id": PROFILE_ID, "profile_version": version,
+        "credential_record_version": record_version, "target_kind": "web", "principal_slot": "primary",
+        "scan_lane": "primary", "auth_kind": "bearer_token", "allowed_capabilities": ["request.replay"],
+        "credential_resolution_capability": "request.replay", "source": "credential_profiles"}],
+        "credential_target_kind": "web", "credential_action_name": "scan.submit",
+        "approval_receipt_id": str(uuid.uuid4()), "scope_receipt_id": "scope-1",
+        "runtime_scope_guard": {"environment": "production", "allowed_root_domains": ["example.com"]}}
+    with pytest.raises(RuntimeError, match="changed before decryption"):
+        asyncio.run(worker._hydrate_generic_scan_credentials(queued, str(uuid.uuid4())))
+    assert decrypted == []
 
 
 def test_parallel_executor_projection_isolates_opaque_principal_refs():
@@ -2592,7 +2625,7 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
     target_id = uuid.UUID("31313131-3131-3131-3131-313131313131")
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     options["placement"] = {
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -2627,7 +2660,11 @@ def test_scan_plan_queues_placed_discovery_without_running_target_traffic_locall
         "node_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     }
     assert discovery_job.shard.sub_budget.max_state_changing_requests == 0
-    assert discovery_job.shard.sub_budget.max_browser_actions == 0
+    # The discovery stage drives a real Chromium, so it holds a browser
+    # reservation. While web.browser_crawl declared no browser cost the stage
+    # was granted zero, and every Scan reported browser actions 0 of the
+    # profile's ceiling while the crawl was running a browser.
+    assert discovery_job.shard.sub_budget.max_browser_actions > 0
     assert any(
         worker.parallel_scan.PARALLEL_DISCOVERY_ROLE in args
         for query, args in conn.executions if "INSERT INTO scans" in query
@@ -2657,6 +2694,7 @@ def test_active_scope_fanout_uses_preallocated_continuation_authority(monkeypatc
             target_id,
             policy={
                 "active_testing": True,
+                "preset": "passive",
                 "include_families": ["xss"],
             },
             strategy="scope",
@@ -3219,7 +3257,7 @@ def test_active_parallel_child_freezes_the_same_nuclei_template_pack():
 
     contract = resolve_scan_contract(
         budget_profile="balanced",
-        policy={"active_testing": True, "include_families": ["nuclei"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["nuclei"]},
         approval_receipt_id="approval-1",
     )
     target = TargetBinding(
@@ -3439,7 +3477,7 @@ def test_scan_plan_continuation_fans_out_from_durable_discovery_result(monkeypat
 
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     options["coverage_per_shard_cap"] = 2
     conn = DiscoveryPlanConn(
@@ -3522,7 +3560,7 @@ def test_scan_plan_fanout_harvests_canonical_discovery_observations(monkeypatch)
 
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
     )
     conn = CanonicalDiscoveryConn(
         parent_id, target_id, uuid.uuid4(), parent_plan,
@@ -4414,11 +4452,15 @@ def test_ffuf_worker_materializes_exact_owner_only_wordlist(tmp_path, monkeypatc
 def test_nuclei_request_accounting_uses_stderr_stats_without_exposing_them():
     stats = b'noise\n{"duration":"0:01:35","requests":"1369","templates":"1183"}\n'
     settlement = worker._agent_scanner_request_settlement("nuclei", "", stats)
+    # The stderr stats are read without being exposed, but nuclei's `requests` counter is
+    # progress through its request plan, not traffic sent -- measured at about eight times the
+    # wire -- so it is not exact and refunds nothing. The proxy's relayed request lines supply
+    # the wire lower bound instead (agent_tools.wire_evidence_settlement).
     assert settlement == {
-        "mode": "exact",
-        "actual": 1369,
-        "observed_minimum": 1369,
-        "source": "scanner_counter",
+        "mode": "unavailable",
+        "actual": None,
+        "observed_minimum": 0,
+        "source": "progress_counter_is_not_wire_evidence",
     }
     assert worker._agent_scanner_request_settlement("katana", "", stats)["mode"] == "unavailable"
 
@@ -4478,7 +4520,10 @@ def test_agent_scanner_tool_job_refuses_cross_host_without_spawning(monkeypatch)
     }
 
 
-def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch):
+def test_agent_scanner_tool_keeps_retained_output_and_says_partial_at_the_cap(monkeypatch):
+    """A thorough crawl of a small marketing site produced more JSONL than the
+    flat cap, and the runner ended it as `failed` with every retained record
+    discarded. What was read is trustworthy; only the rest is missing."""
     class _PinnedProxy:
         def __init__(self, **_kwargs):
             self.limit_exceeded = asyncio.Event()
@@ -4514,7 +4559,7 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
             self.returncode = 0
             self.stdout = asyncio.StreamReader()
             self.stderr = asyncio.StreamReader()
-            self.stdout.feed_data(b"X" * 4096)
+            self.stdout.feed_data(b'{"url":"https://example.test/p"}\n' * 400)
             self.stdout.feed_eof()
             self.stderr.feed_eof()
 
@@ -4526,6 +4571,7 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
     redis = _Redis()
     monkeypatch.setattr(worker, "get_redis", lambda: redis)
     monkeypatch.setattr(worker, "_AGENT_TOOL_OUTPUT_BYTES", 128)
+    monkeypatch.setattr(worker.agent_tools, "AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST", 128)
     monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
     asyncio.run(worker.process_agent_scanner_tool_job({
         "job_id": "agent-job-output-limit",
@@ -4541,9 +4587,19 @@ def test_agent_scanner_tool_streams_and_fails_closed_at_output_limit(monkeypatch
     }))
 
     result = json.loads(redis.values["agent_tool_result:agent-job-output-limit"])
-    assert result["status"] == "failed"
-    assert result["error"] == "output_limit_exceeded"
-    assert sum(len(line) for line in result["output_lines"]) <= 128
+    assert result["status"] == "success"
+    assert result["partial"] is True
+    assert result["error"] == "output_truncated"
+    # Some records were kept, and not all 400: the cap ended the read, not the run.
+    assert 0 < result["line_count"] < 400
+
+
+def test_agent_tool_output_cap_follows_the_request_reservation():
+    tools = worker.agent_tools
+    assert tools.agent_tool_output_bytes({"http_requests": 1}, floor=80_000) == 80_000
+    assert tools.agent_tool_output_bytes(None, floor=80_000) == 80_000
+    assert tools.agent_tool_output_bytes({"http_requests": 1500}, floor=80_000) == 1500 * tools.AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST
+    assert tools.agent_tool_output_bytes({"http_requests": 10**9}, floor=80_000) == tools.AGENT_TOOL_OUTPUT_BYTES_CEILING
 
 
 class _CandidateProofConn:
@@ -5389,7 +5445,7 @@ def test_scan_plan_dynamic_request_uses_self_contained_broker_shards(monkeypatch
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
         custom_endpoints=endpoints,
     )
     options.update({
@@ -5477,7 +5533,7 @@ def test_scan_plan_coverage_defaults_to_self_contained_allocation(monkeypatch):
     )
     parent_job, parent_plan, options, queue_payload = _canonical_parallel_fixture(
         parent_id, target_id,
-        policy={"active_testing": True, "include_families": ["xss"]},
+        policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
         custom_endpoints=endpoints,
     )
     options.update({
@@ -5729,6 +5785,7 @@ def test_scan_plan_coverage_family_dynamic_respects_explicit_bola_focus(monkeypa
         target_id,
         policy={
             "active_testing": True,
+            "preset": "passive",
             "allow_state_changing_http": True,
             "include_families": ["bola"],
         },

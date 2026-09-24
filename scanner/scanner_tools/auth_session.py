@@ -130,7 +130,8 @@ class AuthConfig:
     timeout: int = 30
     follow_redirects: bool = True
     max_redirects: int = 5
-    verify_ssl: bool = True
+    # Target certificate trust is assessed independently of authenticated testing.
+    verify_ssl: bool = False
 
     # Cookie handling
     preserve_cookies: bool = True  # Store cookies from responses

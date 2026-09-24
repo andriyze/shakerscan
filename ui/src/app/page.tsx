@@ -483,8 +483,8 @@ export default function Dashboard() {
         <ChangesStrip storageKey="dashboard" />
       ) : (
         <Card className="p-4 text-sm text-gray-400">
-          <span className="font-medium text-gray-200">What changed is hidden in scoped mode.</span>{' '}
-          Historical change events do not all carry a cohort binding yet. Choose All cohorts to inspect that unscoped stream.
+          <span className="font-medium text-gray-200">Recent changes are shown per cohort.</span>{' '}
+          Changes recorded before a target was assigned a cohort only appear under All cohorts.
         </Card>
       )}
 

@@ -172,7 +172,23 @@ test('a DAST run that only reached an auth challenge withholds the clean grade',
   assert.equal(presentation.status, 'not_examined')
   assert.equal(presentation.grade, null)
   assert.equal(presentation.score, null)
-  assert.match(presentation.note, /authentication challenge/)
+  assert.match(presentation.note, /No application response was observed/)
+})
+
+
+test('a web scan whose bound origin only redirects says so instead of blaming a login', () => {
+  const presentation = deviceScorePresentation({
+    run_kind: 'web_dast',
+    grade: 'A*',
+    score: 100,
+    result: {
+      result: { risk_score: 100, risk_grade: 'A', risk_assessment_state: 'not_examined', application_observed: false },
+      coverage: { status: 'partial', reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  })
+
+  assert.equal(presentation.status, 'not_examined')
+  assert.match(presentation.note, /only redirected to another origin/)
 })
 
 
@@ -205,4 +221,21 @@ test('latest device reachability is not confused with retained service history',
   }), 'this scan found no currently responding TCP service with complete visibility')
   assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: true }), 'at least one service responded')
   assert.equal(deviceReachabilityServiceSummary({ serviceAccessible: null }), 'service accessibility still being assessed')
+})
+
+
+test('explicit no-application evidence withholds even a stale row grade', () => {
+  for (const row of [
+    { grade: 'A*', score: 100, result: { result: { application_observed: false } } },
+    { grade: 'A*', score: 100, risk_assessment_state: 'not_examined' },
+  ]) {
+    const result = deviceScorePresentation(row)
+    assert.equal(result.status, 'not_examined')
+    assert.equal(result.grade, null)
+    assert.equal(result.score, null)
+  }
+})
+
+test('a missing score is not coerced into a measured zero', () => {
+  assert.equal(deviceScorePresentation({ grade: null, score: null }).score, null)
 })

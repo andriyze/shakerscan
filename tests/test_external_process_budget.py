@@ -63,16 +63,22 @@ def test_katana_supervisor_deadline_includes_bounded_shutdown_grace():
     crawl_seconds = int(
         plan.argv[plan.argv.index("-crawl-duration") + 1].removesuffix("s")
     )
-    assert crawl_seconds == 30
-    assert plan.timeout_ms == 35_000
+    # The crawl runs for the wall time it reserved, less the teardown window.
+    # A flat 30-second box left most of every reservation unspent: a thorough
+    # Scan authorizing 60,000 requests emitted 1,778 of them and a real site's
+    # crawl returned one route.
+    assert crawl_seconds == 70
+    # The supervisor still outlives the crawler, and the grace is reserved up
+    # front rather than taken from whatever the crawl did not use.
+    assert plan.timeout_ms == 75_000
+    assert 1 <= (plan.timeout_ms // 1_000) - crawl_seconds <= 5
     rate = plan.budget_proof["inputs"]["rate_per_second"]
     assert plan.hard_budget_dict == {
         "http_requests": rate * crawl_seconds + 1,
-        "tool_wall_seconds": 35,
+        "tool_wall_seconds": 75,
     }
-    # A 150-request reservation must fund a materially larger crawl than the
-    # one-request-per-second floor it used to be pinned to.
-    assert plan.hard_budget_dict["http_requests"] >= 75
+    # And the reservation is now substantially spent rather than abandoned.
+    assert plan.hard_budget_dict["http_requests"] >= 140
     assert plan.budget_proof["inputs"]["shutdown_grace_seconds"] == 5
 
 
@@ -338,3 +344,122 @@ def test_the_planner_and_the_adapter_share_one_set_of_floors():
     assert batch_attempt_capacity(
         "sqli.verify_batch", {"http_requests": 1_600, "tool_wall_seconds": 300},
     ) == 10
+
+
+def test_nuclei_batch_attempt_is_paced_to_what_it_reserved():
+    """nuclei was the only batched tool never re-paced to its reservation.
+
+    Its argv fixes `-rate-limit 10`, so a 45-second attempt holding 120 requests planned
+    roughly 450 -- about 3.75x its hold. Every attempt tripped the wire ceiling
+    ("external_process_contract:wire limiter reported traffic above the hard ceiling"),
+    was charged its whole reservation anyway, and surfaced as `adapter_failed`. On one deep
+    scan three shards spent ~1,560 requests and ~10 minutes that way and proved nothing.
+
+    katana, headless katana, ffuf and dalfox are all re-paced; nuclei is the one that was not.
+    """
+    reserved = {"http_requests": 120, "tool_wall_seconds": 45}
+    plan = _batch_plan("nuclei", reserved)
+    argv = list(plan.argv)
+    hard = dict(plan.hard_budget)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+
+    assert hard["http_requests"] <= reserved["http_requests"]
+    assert hard["tool_wall_seconds"] <= reserved["tool_wall_seconds"]
+    # The invariant that matters: the tool may run for its whole wall, so the rate has to
+    # fit the hold across the whole wall -- not across some fraction of it.
+    assert rate >= 1
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"], (
+        f"-rate-limit {rate} over {hard['tool_wall_seconds']}s plans "
+        f"{rate * hard['tool_wall_seconds']} requests against a {hard['http_requests']} hold"
+    )
+    # Bursting past the rate defeats the rate.
+    assert int(argv[argv.index("-concurrency") + 1]) <= rate
+    assert int(argv[argv.index("-bulk-size") + 1]) <= rate
+
+
+def test_a_nuclei_hold_smaller_than_its_wall_shortens_the_wall():
+    """nuclei cannot go below one request per second, so a hold thinner than the wall
+    must shorten the wall rather than let the rate outrun the hold."""
+    plan = _batch_plan("nuclei", {"http_requests": 30, "tool_wall_seconds": 45})
+    argv = list(plan.argv)
+    hard = dict(plan.hard_budget)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+    assert rate == 1
+    assert hard["tool_wall_seconds"] <= 30
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]
+
+
+def test_nuclei_pacing_never_raises_the_rate_above_the_existing_ceiling():
+    """Pacing derives the rate from the reservation, but the reservation must not become a
+    way to send more than the previously fixed 10/s: a 900-request, 45-second hold computed
+    20/s, doubling target load as a side effect of a throttling fix. The ceiling is policy;
+    raising it is a separate, tested decision."""
+    plan = _batch_plan("nuclei", {"http_requests": 900, "tool_wall_seconds": 45})
+    argv = list(plan.argv)
+    rate = int(argv[argv.index("-rate-limit") + 1])
+    assert rate == 10, f"rate {rate}/s exceeds the 10/s ceiling"
+    assert int(argv[argv.index("-concurrency") + 1]) <= 10
+    assert int(argv[argv.index("-bulk-size") + 1]) <= 10
+    # ...and the paced rate still fits the hold across the whole wall.
+    hard = dict(plan.hard_budget)
+    assert rate * hard["tool_wall_seconds"] <= hard["http_requests"]
+
+
+def test_a_reserved_browser_dimension_is_actually_charged_on_success():
+    """Reserving a dimension and settling it at zero is not accounting.
+
+    web.browser_crawl now holds a browser reservation, but normal successful
+    settlement populated only wall time, HTTP requests and mutations. Every
+    Scan therefore still reported browser actions 0 of the profile's ceiling
+    while a real Chromium was driving the crawl.
+    """
+    import asyncio
+
+    from capabilities.scanner import ScannerExecutionAdapter
+    from runtime.capability_registry import CAPABILITY_REGISTRY as REGISTRY
+
+    reserved = {"http_requests": 600, "tool_wall_seconds": 150, "browser_actions": 60}
+
+    async def runner(payload, *, heartbeat):
+        del payload
+        await heartbeat()
+        return {
+            "status": "success",
+            "typed_output": {"records": []},
+            "settlement": {"mode": "exact", "actual": 2},
+            "elapsed_seconds": 3,
+            # A complete enforcement receipt, so the run settles on the ordinary
+            # success path. An incomplete one settles as execution-uncertain,
+            # which charges the whole reservation for every dimension and would
+            # make this test pass whether or not the browser dimension is
+            # accounted for at all.
+            "process_enforcement": {
+                "schema_version": "external-process-enforcement/v1",
+                "tool_name": "katana_headless",
+                "process_plan_digest": "b" * 64,
+                "hard_budget": dict(reserved),
+                "accounting_mode": "conservative",
+                "proof_method": "fixed_conservative_profile",
+                "parser_version": REGISTRY.require("web.browser_crawl").output_schema,
+            },
+        }
+
+    adapter = ScannerExecutionAdapter(
+        specification=REGISTRY.require("web.browser_crawl"),
+        process_payload={"tool_name": "katana_headless"},
+        process_runner=runner,
+        requested_budget=reserved,
+        redacted_execution={"capability_name": "web.browser_crawl"},
+    )
+
+    async def _heartbeat() -> None:
+        return None
+
+    result = asyncio.run(adapter.execute(heartbeat=_heartbeat, cancelled=lambda: False))
+    assert result.status == "success", "the test must exercise ordinary settlement"
+    charged = dict(result.actual_budget)
+
+    assert charged.get("browser_actions") == 60, (
+        "a browser reservation must settle against the browser ceiling"
+    )
+    assert charged["browser_actions"] <= reserved["browser_actions"]

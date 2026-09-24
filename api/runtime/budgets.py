@@ -40,7 +40,9 @@ class Reservation:
     amounts: Mapping[str, int]
 
 
-def _normalize_amounts(values: Mapping[str, int], *, dimensions: frozenset[str]) -> dict[str, int]:
+def _normalize_amounts(
+    values: Mapping[str, int], *, dimensions: frozenset[str], keep_zero: bool = False,
+) -> dict[str, int]:
     normalized: dict[str, int] = {}
     for raw_kind, raw_amount in values.items():
         kind = str(raw_kind or "").strip()
@@ -54,7 +56,7 @@ def _normalize_amounts(values: Mapping[str, int], *, dimensions: frozenset[str])
             raise BudgetError(f"budget amount for {kind} must be an integer") from exc
         if amount < 0:
             raise BudgetError(f"budget amount for {kind} must be non-negative")
-        if amount:
+        if amount or keep_zero:
             normalized[kind] = amount
     return normalized
 
@@ -68,7 +70,7 @@ def reserve_budget_snapshot(
     Callers serialize the returned snapshot under their datastore lock before execution. This is
     the durable counterpart to :class:`BudgetLedger`, using the same dimensions and validation.
     """
-    normalized_limits = _normalize_amounts(limits, dimensions=dimensions)
+    normalized_limits = _normalize_amounts(limits, dimensions=dimensions, keep_zero=True)
     normalized_consumed = _normalize_amounts(consumed, dimensions=dimensions)
     normalized_charges = _normalize_amounts(charges, dimensions=dimensions)
     undeclared = (set(normalized_consumed) | set(normalized_charges)) - set(normalized_limits)
@@ -132,7 +134,7 @@ class BudgetLedger:
         self, limits: Mapping[str, int], *, dimensions: frozenset[str] = BUDGET_DIMENSIONS
     ) -> None:
         self._dimensions = dimensions
-        self._limits = _normalize_amounts(limits, dimensions=dimensions)
+        self._limits = _normalize_amounts(limits, dimensions=dimensions, keep_zero=True)
         self._reserved = {kind: 0 for kind in self._limits}
         self._consumed = {kind: 0 for kind in self._limits}
         self._reservations: dict[str, dict[str, int]] = {}

@@ -76,12 +76,25 @@ class CapabilitySpec:
     # which runtimes a capability may run under: xss.verify proves a hash-route
     # parameter in the pinned browser, which Dalfox cannot reach.
     alternate_adapters: tuple[tuple[str, str], ...] = ()
+    credential_transport: Literal["unverified", "not_used", "exact_origin"] = "unverified"
+    credential_interruption: Literal["unverified", "not_needed", "cooperative"] = "unverified"
 
     def __post_init__(self) -> None:
         if not self.name or "." not in self.name:
             raise ValueError("capability names must be non-empty dotted identifiers")
         if self.default_timeout_ms <= 0:
             raise ValueError("default_timeout_ms must be positive")
+        if self.credential_transport not in {"unverified", "not_used", "exact_origin"}:
+            raise ValueError("invalid credential transport contract")
+        if self.credential_interruption not in {"unverified", "not_needed", "cooperative"}:
+            raise ValueError("invalid credential interruption contract")
+        if (self.credential_transport == "not_used") != (self.credential_interruption == "not_needed"):
+            raise ValueError("credential-free capabilities must declare interruption not needed")
+        if self.credential_transport == "not_used" and (
+            self.placement_requirements.get("credentials_resolved_server_side") or
+            "as_principal" in self.input_schema.get("properties", {})
+        ):
+            raise ValueError("a credential consumer cannot declare credentials unused")
         if not self.target_kinds:
             raise ValueError("target_kinds must not be empty")
         if self.planner_visible and self.hunt_executor is None:
@@ -101,6 +114,14 @@ class CapabilitySpec:
     def adapter_identities(self) -> tuple[tuple[str, str], ...]:
         """Every (adapter_name, adapter_version) this capability may execute under."""
         return ((self.adapter, self.adapter_version), *self.alternate_adapters)
+
+    def identity_contract(self) -> dict[str, Any]:
+        """Verified transport facts, never permission or proof of accepted identity."""
+        return {"schema_version": "capability-identity/v1",
+            "credential_transport": self.credential_transport,
+            "credential_interruption": self.credential_interruption,
+            "proves_application_identity": False,
+            "proves_continuous_authentication": False}
 
     def scanner_template(self, builder: Any) -> dict[str, Any]:
         """Render the fixed scanner-process template from canonical metadata."""
@@ -150,6 +171,7 @@ class CapabilitySpec:
                 if key in placement_keys
             },
             "evidence_contract": list(self.evidence_contract),
+            "identity_contract": self.identity_contract(),
         }
 
 
@@ -334,8 +356,20 @@ def _validate_schema_value(
         raise CapabilityInputContractError(f"{path} is not an allowed value")
 
 
-_HTTP_TARGETS = frozenset({"web", "api"})
-_NETWORK_TARGETS = frozenset({"web", "api", "network"})
+# The kind is a label on one asset, not a different runtime. A ``network`` Hunt resolves
+# against the same targets table, URL and context pack as ``web`` and ``api``, and a device
+# that serves HTTP is the same host either way: the operator should be able to examine one
+# address as a target or as a connected device and get the same reach. Excluding those kinds
+# here left a network Hunt with three capabilities and a device Hunt with six, neither of
+# which could speak HTTP to what they found.
+_HTTP_TARGETS = frozenset({"web", "api", "network", "device"})
+_NETWORK_TARGETS = frozenset({"web", "api", "network", "device"})
+# The connection-based network capabilities slice their address list from the
+# reserved ``hosts_attempted`` grant, so a spec that omits that dimension can
+# never bind a single address and self-skips as not_applicable on every run.
+# Declare it beside the port grant: both are worst-case reservations, and this
+# ceiling covers the resolved address set of a real web/API target.
+_NETWORK_ADDRESS_GRANT = 8
 
 
 def _schema(
@@ -379,11 +413,30 @@ _SAME_ORIGIN_PATH_PROPERTY: Mapping[str, Any] = {
 }
 
 
+# A service origin on the same authorized target host. Scheme and port are
+# service coordinates on the already-authorized asset, not a new authorization
+# boundary, so any valid port is allowed under the Hunt's active target
+# authorization; a different host is never admitted by this field.
+_SERVICE_ORIGIN_PROPERTY: Mapping[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 2_048,
+    "description": (
+        "HTTP(S) service origin on the same authorized target host. Any valid "
+        "port is allowed under the Hunt's active target authorization; a "
+        "different host is never admitted."
+    ),
+}
+
+
 def _http_principal_schema(
     properties: Mapping[str, Any] | None = None, *, required: tuple[str, ...] = (),
 ) -> Mapping[str, Any]:
     """Declare the content-free identity binding shared by HTTP capabilities."""
     merged = dict(properties or {})
+    # Every HTTP-capable capability may be pointed at another service port on
+    # the same authorized host; a caller that declares its own origin keeps it.
+    merged.setdefault("origin", _SERVICE_ORIGIN_PROPERTY)
     merged.update(_HTTP_PRINCIPAL_BINDING_PROPERTIES)
     return _schema(merged, required=required)
 
@@ -408,6 +461,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "scan-report/v2",
             ("scan_report", "coverage_summary", "tool_receipts"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "scan.execute",
@@ -578,9 +632,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "web.spec_ingest",
-            "Fetch the target's own OpenAPI/Swagger description and declare its routes.",
+            "Fetch what the target declares about itself (OpenAPI, robots.txt, llms.txt) and declare its routes.",
             "internal", "read_only", _HTTP_TARGETS, "agent.spec_ingest", "1",
-            None, {"http_requests": 12, "tool_wall_seconds": 30},
+            # Nine conventional spec locations plus the two hint files, and headroom.
+            None, {"http_requests": 14, "tool_wall_seconds": 30},
             {"network_reachability": True, "runtime_target_binding": True},
             _http_principal_schema(),
             "spec-ingest/v1", ("discovered_route",),
@@ -979,7 +1034,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "service.fingerprint", "Bounded connection-based service/version fingerprint.",
             "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
-            "network_discovery", {"tcp_ports_attempted": 60, "tool_wall_seconds": 90},
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 60, "tool_wall_seconds": 90,
+            },
             {"network_reachability": True, "binary": "nmap"}, _schema({
                 "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 256},
                 "profile": {"type": "string", "enum": ["version_light", "version_default"]},
@@ -990,12 +1048,39 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_network",
         ),
         CapabilitySpec(
+            "service.nse_check",
+            "Run up to three reviewed, low-impact Nmap NSE service checks on up to four bound TCP ports; results are observations, not vulnerability proof.",
+            "network_tcp", "active", _NETWORK_TARGETS, "nmap", "1",
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 4 * _NETWORK_ADDRESS_GRANT,
+                "http_requests": 52 * _NETWORK_ADDRESS_GRANT,
+                "tool_wall_seconds": 90 * _NETWORK_ADDRESS_GRANT,
+            },
+            {"network_reachability": True, "binary": "nmap", "server_owned_nse_allowlist": True},
+            _schema({
+                "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535},
+                          "minItems": 1, "maxItems": 4},
+                "scripts": {"type": "array", "items": {"type": "string", "enum": [
+                    "ssl-enum-ciphers", "http-security-headers", "http-methods", "http-trace",
+                ]}, "minItems": 1, "maxItems": 3},
+            }, required=("ports", "scripts")),
+            "nmap-nse-observation/v1", ("nse_observation", "tool_receipt"),
+            "nmap", None, 120_000, ("--version",), ("/opt/tools/nmap",),
+            arsenal_status="gated", hunt_executor="worker_network",
+        ),
+        CapabilitySpec(
             "ports.discover", "Bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
-            "network_discovery", {"tcp_ports_attempted": 1_200, "tool_wall_seconds": 120},
+            "network_discovery", {
+                "hosts_attempted": _NETWORK_ADDRESS_GRANT,
+                "tcp_ports_attempted": 1_200, "tool_wall_seconds": 120,
+            },
             {"network_reachability": True, "binary": "naabu"}, _schema({
-                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000"]},
+                "profile": {"type": "string", "enum": ["known_services", "top_100", "top_1000", "device_common"]},
                 "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "minItems": 1, "maxItems": 1000},
+                "port_range": {"type": "string", "pattern": "^[0-9]{1,5}-[0-9]{1,5}$",
+                               "description": "Contiguous START-END range on the authorized host, bounded per call; chunk a wider span across calls."},
             }),
             "naabu-jsonl/v1", ("open_port_observation",),
             "naabu", "naabu", 120_000, ("-version",), ("/opt/tools/naabu",),
@@ -1019,6 +1104,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
+                           "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "path": {"type": "string"},
                 "query": {"type": "object"},
                 "headers": {"type": "object"},
@@ -1033,8 +1120,9 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 # name an address the operator confirmed at hunt start.
                 "via_address": {"type": "string", "maxLength": 45},
             }, required=("method", "path")),
-            "http-observation/v1", ("http_observation", "tool_receipt"),
+            "http-observation/v1", ("http_observation", "authentication_health", "tool_receipt"),
             hunt_executor="worker_http",
+            credential_transport="exact_origin", credential_interruption="cooperative",
         ),
         CapabilitySpec(
             "artifact.inspect",
@@ -1114,6 +1202,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_auth",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "as_principal": {
                     "type": "string",
                     "enum": ["primary", "secondary", "service"],
@@ -1195,6 +1284,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
+                "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1231,16 +1321,21 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "address_count": {
                     "type": "integer", "minimum": 1, "maximum": 64,
                 },
+                "origin": _SERVICE_ORIGIN_PROPERTY,
             }, required=(
                 "origins_ref", "origin_count", "addresses_ref", "address_count",
             )),
             "tls-observation/v2", ("tls_posture_observation",),
             hunt_executor="inline",
+            planner_input_schema=_schema({"origin": _SERVICE_ORIGIN_PROPERTY}),
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "dns.inspect", "Inspect bounded DNS and mail-policy records for the frozen host.",
             "internal", "passive", _HTTP_TARGETS, "scanner.dns", "1", None,
-            {"hosts_attempted": 5, "tool_wall_seconds": 15},
+            # One reservation per distinct query name: the host, the root, the
+            # three mail-policy names, and the conventional DKIM selectors.
+            {"hosts_attempted": 11, "tool_wall_seconds": 15},
             {
                 "network_reachability": True,
                 "runtime_target_binding": True,
@@ -1250,6 +1345,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "dns-posture-observation/v1",
             ("dns_posture_observation", "tool_receipt"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "infrastructure.inspect",
@@ -1267,6 +1363,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             "infrastructure-intelligence/v1",
             ("infrastructure_observation", "tool_receipt"),
             planner_visible=False,
+            credential_transport="not_used", credential_interruption="not_needed",
         ),
         CapabilitySpec(
             "browser.login_check",
@@ -1302,6 +1399,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "path": {"type": "string", "maxLength": 2000},
                 "session_ref": {"type": "string", "format": "uuid"},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "wait_until": {
                     "type": "string", "enum": ["domcontentloaded", "load"],
                 },
@@ -1334,6 +1432,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             },
             {**_schema({
                 "path": {"type": "string", "maxLength": 2000},
+                "origin": {"type": "string", "maxLength": 2048, "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "selector": {"type": "string", "minLength": 1, "maxLength": 500},
                 "session_ref": {"type": "string", "format": "uuid"},
                 "steps": {
@@ -1516,7 +1615,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.replay_safe", "Replay up to 25 safe-method requests from a bound collection.",
-            "http", "passive", frozenset({"web", "api", "device"}), "collections.replay", "1", None,
+            "http", "passive", frozenset({"web", "api", "network", "device"}), "collections.replay", "1", None,
             {"http_requests": 25, "tool_wall_seconds": 60}, {"network_reachability": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},
@@ -1530,7 +1629,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_active",
             "Replay an exact approved state-changing request selection from a bound collection.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "state_changing_http",
             {
                 "http_requests": 2_000,
@@ -1555,7 +1654,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "collections.replay_authentication",
             "Replay at most five exact POST authentication requests bound to disposable credentials.",
-            "http", "active", frozenset({"web", "api"}), "collections.replay", "1",
+            "http", "active", frozenset({"web", "api", "network", "device"}), "collections.replay", "1",
             "active_testing",
             {"http_requests": 5, "tool_wall_seconds": 60},
             {

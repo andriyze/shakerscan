@@ -313,7 +313,7 @@ def test_release_api_image_contains_hunt_methodology_catalog():
 
     assert "COPY skills/web /app/skills/web" in dockerfile
     assert (ROOT / "skills" / "web" / "README.md").is_file()
-    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 31
+    assert len(list((ROOT / "skills" / "web").glob("[0-9][0-9]-*.md"))) == 32
 
 
 def test_fresh_installer_downloads_every_hunt_methodology_asset():
@@ -325,7 +325,7 @@ def test_fresh_installer_downloads_every_hunt_methodology_asset():
         path.relative_to(ROOT / "skills" / "web").as_posix()
         for path in (ROOT / "skills" / "web").rglob("*.md")
     ]
-    assert len(assets) == 39
+    assert len(assets) == 40
     for installer in installers:
         assert 'mkdir -p "$INSTALL_STAGE/skills/web/core"' in installer
         for relative in assets:

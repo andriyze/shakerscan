@@ -165,6 +165,7 @@ def _normalized_route_path(path: str) -> str:
     return "/".join(normalized_segments) or "/"
 
 
+
 def normalize_endpoint(
     *, method: str, url: str, source: str, content_type: str | None = None,
     body_schema: Any = None,
@@ -187,6 +188,9 @@ def normalize_endpoint(
     except ValueError as exc:
         raise ValueError("endpoint URL contains an invalid port") from exc
     concrete = parsed.path or "/"
+    # This shared normalizer also receives concrete seeds and replayed requests.
+    # Template syntax can be literal input, not an unresolved source expression.
+    # Inferred crawler paths are filtered at their acquisition boundary instead.
     normalized = _normalized_route_path(concrete)
     query_keys = tuple(sorted({
         str(key).strip()[:200]

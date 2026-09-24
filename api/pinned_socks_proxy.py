@@ -3,12 +3,137 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import contextlib
 import ipaddress
 import struct
 from typing import Any, Iterable
 
 from runtime.target_bound_socket import FrozenTargetSocketFactory
+
+
+_REQUEST_LINE = re.compile(rb"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT) \S+ HTTP/1\.[01]$")
+_MAX_HEADER_BYTES = 64 * 1024
+
+
+class RequestCounter:
+    """Count HTTP/1 requests in the bytes one client connection sends toward the target.
+
+    Requests are counted only at message boundaries: a request line, then headers, then the body
+    the headers frame (Content-Length or chunked), then the next request line. A request-shaped
+    string inside a body or a header value is data, not a request -- nuclei's smuggling templates
+    send exactly such payloads, and the first counter, which matched anywhere in the stream,
+    turned one POST carrying 120 of them into 121 "requests", failed a 120-request hold on one real
+    message, and charged the full hold. A count that can exceed the real number of messages is
+    not a lower bound.
+
+    Anything that is not well-formed HTTP/1 -- a TLS handshake, another protocol, malformed
+    framing -- is unmeasurable: the counter keeps what it has already counted, which remains a
+    true lower bound, sets ``measurable`` to False and never adds to the count again.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.measurable = True
+        self._buffer = b""
+        self._state = "request_line"
+        self._body_remaining = 0
+
+    def _fail(self) -> int:
+        self.measurable = False
+        self._state = "opaque"
+        self._buffer = b""
+        return 0
+
+    def feed(self, chunk: bytes) -> int:
+        """Consume bytes; return how many complete requests began in this chunk."""
+        if self._state == "opaque":
+            return 0
+        self._buffer += chunk
+        counted = 0
+        while True:
+            if self._state == "request_line":
+                if not self._buffer:
+                    return counted
+                if b"\r\n" not in self._buffer:
+                    if len(self._buffer) > 8192 or not _REQUEST_LINE.match(self._buffer.split(b"\r")[0] + b"") and not self._plausible_prefix():
+                        self._fail()
+                    return counted
+                line, rest = self._buffer.split(b"\r\n", 1)
+                if not _REQUEST_LINE.match(line):
+                    self._fail()
+                    return counted
+                self.count += 1
+                counted += 1
+                self._buffer = rest
+                self._state = "headers"
+            if self._state == "headers":
+                idx = self._buffer.find(b"\r\n\r\n")
+                if idx < 0:
+                    if len(self._buffer) > _MAX_HEADER_BYTES:
+                        self._fail()
+                    return counted
+                header_block, self._buffer = self._buffer[:idx], self._buffer[idx + 4:]
+                length, chunked = 0, False
+                for raw in header_block.split(b"\r\n"):
+                    name, sep, value = raw.partition(b":")
+                    if not sep:
+                        continue
+                    key = name.strip().lower()
+                    if key == b"content-length":
+                        try:
+                            length = int(value.strip())
+                        except ValueError:
+                            self._fail()
+                            return counted
+                    elif key == b"transfer-encoding" and b"chunked" in value.lower():
+                        chunked = True
+                if chunked:
+                    self._state = "chunk_size"
+                elif length > 0:
+                    self._body_remaining = length
+                    self._state = "body"
+                else:
+                    self._state = "request_line"
+            if self._state == "body":
+                take = min(self._body_remaining, len(self._buffer))
+                self._buffer = self._buffer[take:]
+                self._body_remaining -= take
+                if self._body_remaining > 0:
+                    return counted
+                self._state = "request_line"
+            if self._state == "chunk_size":
+                if b"\r\n" not in self._buffer:
+                    return counted
+                size_line, rest = self._buffer.split(b"\r\n", 1)
+                try:
+                    size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+                except ValueError:
+                    self._fail()
+                    return counted
+                if size == 0:
+                    # trailer section ends with an empty line
+                    idx = rest.find(b"\r\n")
+                    if idx < 0:
+                        return counted
+                    self._buffer = rest[idx + 2:]
+                    self._state = "request_line"
+                    continue
+                self._body_remaining = size + 2  # data plus its CRLF
+                self._buffer = rest
+                self._state = "chunk_data"
+            if self._state == "chunk_data":
+                take = min(self._body_remaining, len(self._buffer))
+                self._buffer = self._buffer[take:]
+                self._body_remaining -= take
+                if self._body_remaining > 0:
+                    return counted
+                self._state = "chunk_size"
+
+    def _plausible_prefix(self) -> bool:
+        head = self._buffer[:8].upper()
+        return any(head.startswith(m[: len(head)] if len(head) < len(m) else m) for m in
+                   (b"GET ", b"POST ", b"PUT ", b"PATCH ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"TRACE ", b"CONNECT "))
 
 
 class PinnedSocksProxy:
@@ -46,6 +171,8 @@ class PinnedSocksProxy:
         self._connections: set[asyncio.Task[Any]] = set()
         self.connection_attempts = 0
         self.connections_opened = 0
+        self.http_requests_observed = 0
+        self.wire_requests_measurable = True
         self.connections_rejected = 0
         self.upstream_connection_attempts = 0
         self.address_attempts = {
@@ -180,10 +307,14 @@ class PinnedSocksProxy:
                 *,
                 toward_target: bool,
             ) -> None:
+                counter = RequestCounter()
                 try:
                     while chunk := await source.read(65536):
                         if toward_target:
                             self.bytes_to_target += len(chunk)
+                            self.http_requests_observed += counter.feed(chunk)
+                            if not counter.measurable:
+                                self.wire_requests_measurable = False
                         else:
                             self.bytes_from_target += len(chunk)
                         target.write(chunk)

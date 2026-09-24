@@ -172,8 +172,19 @@ prune_retired_files() {
     # it with the new one, after which previous and staged are identical and nothing is ever pruned.
     previous="$1"
     staged="$INSTALL_STAGE/$OWNED_MANIFEST_NAME"
-    [ -f "$previous" ] || return 0
     [ -f "$staged" ] || return 0
+    # Also migrate pre-manifest installs and agent-workspace leftovers. A stale
+    # CLAUDE.md can shadow the current AGENTS.md or retain an old instance note.
+    # Retire only this top-level instruction file, in the candidate tree; keep
+    # its bytes (or symlink) under a non-loaded name so local edits are not lost.
+    if ! grep -Fxq -- 'CLAUDE.md' "$staged"; then
+        legacy_guide="$INSTALL_STAGE/CLAUDE.md"
+        if [ -f "$legacy_guide" ] || [ -L "$legacy_guide" ]; then
+            retired_guide="$(mktemp "$INSTALL_STAGE/.shakerscan-retired-CLAUDE.XXXXXX")"
+            mv -f -- "$legacy_guide" "$retired_guide"
+        fi
+    fi
+    [ -f "$previous" ] || return 0
     while IFS= read -r retired_relative; do
         [ -n "$retired_relative" ] || continue
         # Refuse anything that could escape the installation directory, whatever a previous
@@ -185,6 +196,47 @@ prune_retired_files() {
             rm -f -- "$INSTALL_STAGE/$retired_relative"
         fi
     done < "$previous"
+}
+
+cleanup_activated_rollback() {
+    # Only the backup made by this activation, and only after the new tree exists.
+    # Never run privileged cleanup on an operator-supplied directory or symlink.
+    [ "$INSTALL_BACKUP" = "${INSTALL_DIR}.shakerscan-rollback.$$" ] || return 0
+    [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] || return 0
+    [ -d "$INSTALL_BACKUP" ] && [ ! -L "$INSTALL_BACKUP" ] || return 0
+    cleanup_image=""
+    # Capture a local immutable image before rm removes the old lock file. No pull,
+    # registry access, shell sourcing of .env, or Docker socket in the container.
+    if command -v docker >/dev/null 2>&1; then
+        for cleanup_lock in "$INSTALL_BACKUP/release-image-lock.env" "$INSTALL_DIR/release-image-lock.env"; do
+            [ -f "$cleanup_lock" ] && [ ! -L "$cleanup_lock" ] || continue
+            cleanup_candidate="$(sed -n 's/^API_IMAGE=//p' "$cleanup_lock")"
+            if printf '%s\n' "$cleanup_candidate" | grep -Eq '^[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}$' && \
+                [ "$(printf '%s\n' "$cleanup_candidate" | wc -l | tr -d ' ')" = 1 ] && \
+                docker image inspect "$cleanup_candidate" >/dev/null 2>&1; then
+                cleanup_image="$cleanup_candidate"
+                break
+            fi
+        done
+    fi
+    if rm -rf -- "$INSTALL_BACKUP" 2>/dev/null; then
+        return 0
+    fi
+    # Containers can leave root-owned result directories in the previous tree.
+    # Bind only that obsolete tree; do not chown/delete the activated installation.
+    case "$INSTALL_BACKUP" in *,*) cleanup_image="" ;; esac
+    if [ -n "$cleanup_image" ] && [ ! -L "$INSTALL_BACKUP" ] && \
+        docker run --rm --pull=never --network none --user 0:0 --read-only \
+            --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges \
+            --mount "type=bind,src=$INSTALL_BACKUP,dst=/rollback" \
+            --entrypoint /bin/sh "$cleanup_image" \
+            -c 'find /rollback -xdev -depth -mindepth 1 -delete' >/dev/null 2>&1 && \
+        rmdir -- "$INSTALL_BACKUP" 2>/dev/null; then
+        return 0
+    fi
+    # Activation succeeded. Keep an explicit recovery path rather than failing
+    # the upgrade or printing dozens of per-file Permission denied messages.
+    printf 'Warning: installation updated; old rollback files remain at %s (cleanup needs a local pinned API image and Docker permission).\n' "$INSTALL_BACKUP" >&2
 }
 
 commit_staged_downloads() {
@@ -216,7 +268,7 @@ commit_staged_downloads() {
     fi
     INSTALL_STAGE=""
     if [ -n "$INSTALL_BACKUP" ] && [ -d "$INSTALL_BACKUP" ]; then
-        rm -rf -- "$INSTALL_BACKUP"
+        cleanup_activated_rollback
     fi
     INSTALL_BACKUP=""
 }
@@ -294,6 +346,12 @@ install_command() {
     esac
     mkdir -p "$BIN_DIR"
     launcher="$BIN_DIR/shakerscan"
+    if [ -f "$launcher" ] && ! grep -q 'scanner.sh" "\$@"' "$launcher" 2>/dev/null; then
+        # A client build of the shakerscan command (pipx, uv, or Homebrew) already owns this
+        # path. It hands engine subcommands to this install (SHAKERSCAN_HOME, default
+        # ~/.shakerscan), so keep it rather than replace it with the launcher shim.
+        say "Kept the existing shakerscan client at $launcher; it runs engine commands from $INSTALL_DIR"
+    else
     cat > "$launcher" <<EOF
 #!/bin/sh
 : "\${SCANNER_IMAGE_TAG:=$release_image_tag}"
@@ -321,6 +379,7 @@ fi
 exec "$INSTALL_DIR/scanner.sh" "\$@"
 EOF
     chmod +x "$launcher"
+    fi
 
     case ":$PATH:" in
         *":$BIN_DIR:"*) ;;
@@ -545,11 +604,11 @@ printf '%s' "$locked_manifest" | grep -Eq '^[0-9a-f]{64}$' || \
     fail "release manifest does not match the digest published for v${release_version}"
 download "$REPO_RAW_BASE/README.md" "$INSTALL_DIR/README.md"
 download "$REPO_RAW_BASE/AGENTS.md" "$INSTALL_DIR/AGENTS.md"
-download "$REPO_RAW_BASE/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
 download "$REPO_RAW_BASE/.dockerignore" "$INSTALL_DIR/.dockerignore"
 download "$REPO_RAW_BASE/install/release-images.json" "$INSTALL_DIR/install/release-images.json"
 download "$REPO_RAW_BASE/install/release-images.sh" "$INSTALL_DIR/install/release-images.sh"
 download "$REPO_RAW_BASE/scripts/shakerscan_mcp.py" "$INSTALL_DIR/scripts/shakerscan_mcp.py"
+download "$REPO_RAW_BASE/scripts/api_cli.py" "$INSTALL_DIR/scripts/api_cli.py"
 download "$REPO_RAW_BASE/scripts/local_planner_adapter.py" "$INSTALL_DIR/scripts/local_planner_adapter.py"
 download "$REPO_RAW_BASE/scripts/planner_evals.py" "$INSTALL_DIR/scripts/planner_evals.py"
 download "$REPO_RAW_BASE/scripts/fleet_cli.py" "$INSTALL_DIR/scripts/fleet_cli.py"
@@ -572,11 +631,24 @@ download "$REPO_RAW_BASE/api/model_intake_runner_storage.py" "$INSTALL_DIR/api/m
 download "$REPO_RAW_BASE/api/model_intake_runner_service.py" "$INSTALL_DIR/api/model_intake_runner_service.py"
 download "$REPO_RAW_BASE/api/scan/__init__.py" "$INSTALL_DIR/api/scan/__init__.py"
 download "$REPO_RAW_BASE/api/scan/action_plan.py" "$INSTALL_DIR/api/scan/action_plan.py"
+download "$REPO_RAW_BASE/api/scan/capability_execution.py" "$INSTALL_DIR/api/scan/capability_execution.py"
+download "$REPO_RAW_BASE/api/scan/negative_control.py" "$INSTALL_DIR/api/scan/negative_control.py"
+download "$REPO_RAW_BASE/api/scan/health_plan.py" "$INSTALL_DIR/api/scan/health_plan.py"
+download "$REPO_RAW_BASE/api/scan/plan_errors.py" "$INSTALL_DIR/api/scan/plan_errors.py"
 download "$REPO_RAW_BASE/api/scan/capability_result.py" "$INSTALL_DIR/api/scan/capability_result.py"
 download "$REPO_RAW_BASE/api/scan/continuation.py" "$INSTALL_DIR/api/scan/continuation.py"
 download "$REPO_RAW_BASE/api/scan/execution.py" "$INSTALL_DIR/api/scan/execution.py"
 download "$REPO_RAW_BASE/api/scan/external_process.py" "$INSTALL_DIR/api/scan/external_process.py"
 download "$REPO_RAW_BASE/api/scan/finalizer.py" "$INSTALL_DIR/api/scan/finalizer.py"
+download "$REPO_RAW_BASE/api/scan/reachability.py" "$INSTALL_DIR/api/scan/reachability.py"
+download "$REPO_RAW_BASE/api/scan/assessment.py" "$INSTALL_DIR/api/scan/assessment.py"
+download "$REPO_RAW_BASE/api/scan/redirect_evidence.py" "$INSTALL_DIR/api/scan/redirect_evidence.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/__init__.py" "$INSTALL_DIR/api/authenticated_assurance/__init__.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/models.py" "$INSTALL_DIR/api/authenticated_assurance/models.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/evaluation.py" "$INSTALL_DIR/api/authenticated_assurance/evaluation.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/snapshots.py" "$INSTALL_DIR/api/authenticated_assurance/snapshots.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/snapshot_binding.py" "$INSTALL_DIR/api/authenticated_assurance/snapshot_binding.py"
+download "$REPO_RAW_BASE/api/authenticated_assurance/store.py" "$INSTALL_DIR/api/authenticated_assurance/store.py"
 download "$REPO_RAW_BASE/api/scan/scoring.py" "$INSTALL_DIR/api/scan/scoring.py"
 download "$REPO_RAW_BASE/api/scan/report_rebuild.py" "$INSTALL_DIR/api/scan/report_rebuild.py"
 download "$REPO_RAW_BASE/api/scan/surface_manifest.py" "$INSTALL_DIR/api/scan/surface_manifest.py"
@@ -588,6 +660,7 @@ download "$REPO_RAW_BASE/api/runtime/budgets.py" "$INSTALL_DIR/api/runtime/budge
 download "$REPO_RAW_BASE/api/runtime/capability_registry.py" "$INSTALL_DIR/api/runtime/capability_registry.py"
 download "$REPO_RAW_BASE/api/runtime/browser_login_contract.py" "$INSTALL_DIR/api/runtime/browser_login_contract.py"
 download "$REPO_RAW_BASE/api/runtime/credentials.py" "$INSTALL_DIR/api/runtime/credentials.py"
+download "$REPO_RAW_BASE/api/runtime/approval_policy.py" "$INSTALL_DIR/api/runtime/approval_policy.py"
 download "$REPO_RAW_BASE/api/runtime/models.py" "$INSTALL_DIR/api/runtime/models.py"
 download "$REPO_RAW_BASE/api/runtime/observation_manifests.py" "$INSTALL_DIR/api/runtime/observation_manifests.py"
 download "$REPO_RAW_BASE/api/runtime/receipts.py" "$INSTALL_DIR/api/runtime/receipts.py"
@@ -666,6 +739,7 @@ for skill_file in \
     29-web-llm-and-ai-feature-security-testing.md \
     30-scanner-orchestration-evidence-chaining-and-regression.md \
     31-edge-waf-and-origin-exposure-validation.md \
+    32-service-protocol-and-device-investigation.md \
     README.md; do
     download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
 done
@@ -711,6 +785,7 @@ download "$REPO_RAW_BASE/.claude/commands/ai-gate.md" "$INSTALL_DIR/.claude/comm
 download "$REPO_RAW_BASE/.claude/commands/ai-security-session.md" "$INSTALL_DIR/.claude/commands/ai-security-session.md"
 download "$REPO_RAW_BASE/.claude/commands/content-discovery.md" "$INSTALL_DIR/.claude/commands/content-discovery.md"
 download "$REPO_RAW_BASE/.claude/commands/deep-hunt.md" "$INSTALL_DIR/.claude/commands/deep-hunt.md"
+download "$REPO_RAW_BASE/.claude/commands/delete-target.md" "$INSTALL_DIR/.claude/commands/delete-target.md"
 download "$REPO_RAW_BASE/.claude/commands/findings.md" "$INSTALL_DIR/.claude/commands/findings.md"
 download "$REPO_RAW_BASE/.claude/commands/js-analyze.md" "$INSTALL_DIR/.claude/commands/js-analyze.md"
 download "$REPO_RAW_BASE/.claude/commands/research.md" "$INSTALL_DIR/.claude/commands/research.md"

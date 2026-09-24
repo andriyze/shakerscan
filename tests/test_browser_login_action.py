@@ -122,7 +122,7 @@ def test_registry_is_one_credential_gated_browser_action_without_raw_inputs():
     assert spec.budget_cost == BROWSER_LOGIN_BUDGET
     assert spec.placement_requirements["state_changing_http"] is True
     assert browser_capability_adapter(CAP) is BrowserLoginAdapter
-    assert spec.planner_contract()["input_schema"]["properties"].keys() == {"as_principal"}
+    assert spec.planner_contract()["input_schema"]["properties"].keys() == {"as_principal", "origin"}
     assert HUNT_ACTION_DISPATCHER.has_placement(CAP, "worker_browser")
 
 

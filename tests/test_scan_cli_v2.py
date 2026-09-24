@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import types
+
 import pytest
 
 from scripts import scan_cli
@@ -170,3 +172,35 @@ def test_scan_api_error_json_preserves_sanitized_status_and_detail(monkeypatch, 
         "http_status": 409,
         "schema_version": "scan-start-error/v1",
     }
+
+
+
+def test_scan_cli_sends_the_bearer_token_from_a_file_over_https_only(tmp_path, monkeypatch):
+    import scan_cli
+
+    token_file = tmp_path / "token"
+    token_file.write_text("sse_secret\n", encoding="utf-8")
+    monkeypatch.setenv("SHAKERSCAN_API_TOKEN_FILE", str(token_file))
+    seen = {}
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        seen["auth"] = request.get_header("Authorization")
+        return Response()
+
+    monkeypatch.setattr(scan_cli, "_opener", lambda: types.SimpleNamespace(open=fake_urlopen))
+    assert scan_cli._request_json("https://scanner.example.com/scan/contracts") == {"ok": True}
+    assert seen["auth"] == "Bearer sse_secret"
+    with pytest.raises(scan_cli.ScanCliError, match="https"):
+        scan_cli._request_json("http://127.0.0.1:8080/scan/contracts")

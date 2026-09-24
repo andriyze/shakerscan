@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from action_scope import _decode_json_value
+    import target_authorization as _target_authorization
     from ai_gate.targets.widget_playwright import logger
     from api_utils import _json_safe_row, _optional_uuid, _uuid_or_400, utc_now_iso
     from capabilities.http import execute_bound_http_request
@@ -47,6 +48,7 @@ try:
     from targets import router as _targets
 except ModuleNotFoundError:  # package import in host-side tests
     from ..action_scope import _decode_json_value
+    from .. import target_authorization as _target_authorization
     from ..ai_gate.targets.widget_playwright import logger
     from ..api_utils import _json_safe_row, _optional_uuid, _uuid_or_400, utc_now_iso
     from ..capabilities.http import execute_bound_http_request
@@ -578,9 +580,19 @@ def _agent_context_pack_sections(context: dict[str, Any]) -> list[dict[str, Any]
     return sections
 
 
-async def _resolve_agent_target_addresses(url: str) -> list[str]:
-    """Compatibility name for Hunt's frozen runtime target binding."""
-    return await _fleet_routes._resolve_runtime_target_addresses(url, subject="Hunt target")
+async def _resolve_agent_target_addresses(
+    url: str, *, environment: str | None = None,
+) -> list[str]:
+    """Compatibility name for Hunt's frozen runtime target binding.
+
+    The resolver admits each answer under the deployment policy for a given environment. A
+    caller that knows the target's environment must pass it: without it a Lab target that
+    authorized correctly was refused here under a refusing deployment, because the resolver fell
+    back to production and the Lab exception never applied.
+    """
+    return await _fleet_routes._resolve_runtime_target_addresses(
+        url, subject="Hunt target", environment=str(environment or "production"),
+    )
 
 
 async def _execute_agent_tool(
@@ -672,7 +684,21 @@ async def _agent_seed_state(
     # Freeze the DNS authorization set once, at hunt creation. Every direct request and
     # external scanner invocation connects to one of these exact addresses, so DNS changes
     # during a session cannot redirect an authorized public target into a private service.
-    state["authorized_target_addresses"] = await _resolve_agent_target_addresses(target_url)
+    # The same environment the target is authorized under, from what is stored for it.
+    target_environment = "production"
+    try:
+        async with _pool().acquire() as conn:
+            row = await conn.fetchrow("SELECT metadata_json FROM targets WHERE id=$1", target_uuid)
+        if row is not None:
+            target_environment = _target_authorization.effective_target_environment(
+                _decode_json_value(row["metadata_json"]) or {},
+            )
+    except Exception:
+        # Unknown stays production: the strict reading, never a looser one.
+        target_environment = "production"
+    state["authorized_target_addresses"] = await _resolve_agent_target_addresses(
+        target_url, environment=target_environment,
+    )
     if source_excerpt and isinstance(source_excerpt.get("stats"), dict):
         state["source_ingest"] = source_excerpt["stats"]
     return state

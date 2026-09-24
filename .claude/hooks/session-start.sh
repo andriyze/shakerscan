@@ -1,6 +1,7 @@
 #!/bin/bash
-# SessionStart hook for DAST Scanner
-# Checks if scanner is running and reports status
+# SessionStart hook for ShakerScan agent sessions: reports whether the scanner is reachable.
+# Works for a local engine (Docker on this machine) and for a connected remote instance
+# (`shakerscan agent` against ShakerScan Enterprise sets SHAKERSCAN_MANAGED_INSTANCE=1).
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 
@@ -21,6 +22,20 @@ else
         *:*) bind_host="[$bind_host]" ;;
     esac
     API_BASE="http://${bind_host}:${api_port:-8080}"
+fi
+
+# A connected remote instance: the credential lives in a file the API helper reads; no Docker here.
+if [ "${SHAKERSCAN_MANAGED_INSTANCE:-0}" = "1" ] && command -v shakerscan >/dev/null 2>&1; then
+    if shakerscan api GET /health >/dev/null 2>&1; then
+        WORKERS=$(shakerscan api GET /workers 2>/dev/null | grep -o '"count": *[0-9]*' | head -1 | tr -dc '0-9')
+        echo "SCANNER_STATUS=running"
+        echo "SCANNER_INSTANCE=$API_BASE"
+        echo "SCANNER_WORKERS=${WORKERS:-unknown}"
+    else
+        echo "SCANNER_STATUS=unreachable"
+        echo "SCANNER_INSTANCE=$API_BASE"
+    fi
+    exit 0
 fi
 
 # Check if Docker is available

@@ -42,6 +42,7 @@ class Conn(MemoryCredentialConn):
                        "allowed_capabilities": [CAP], "approval_receipt_id": APPROVAL_ID,
                        "scope_receipt_id": SCOPE_ID}
         self.context = json.loads(json.dumps(CONTEXT))
+        self.context["target"] = {"url": ORIGIN}
 
     async def fetchrow(self, query, *args):
         if "FROM scans WHERE" in query:

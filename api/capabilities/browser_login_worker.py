@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import uuid
 
 from .browser import browser_capability_adapter
+from .http import resolve_hunt_http_origin
 from .browser_login_action import BrowserLoginAdapter, BrowserLoginMaterial
 from .browser_login import BrowserLoginValues
 try:
@@ -37,23 +38,27 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy):
+def prepare_hunt_browser_action(name, *, target, base_url, args, context, policy: Mapping[str, Any]):
     adapter = browser_capability_adapter(name)
     if name != BROWSER_LOGIN_CAPABILITY:
+        target = resolve_hunt_http_origin(target, args.get("origin"), policy)
         return adapter.prepare(target=target, base_url=base_url, args=args)
     require_browser_login_policy(policy)
     # Use the persisted run's principal selection, never a planner-supplied ID.
-    if set(args) != {"as_principal"}:
-        raise ValueError("browser login accepts only a managed principal selection")
+    if "as_principal" not in args or set(args) - {"as_principal", "origin"}:
+        raise ValueError("browser login accepts a managed principal and optional service origin")
+    target = resolve_hunt_http_origin(target, args.get("origin"), policy)
     reference = select_hunt_principal_reference(
         context, args.get("as_principal"), capability=BROWSER_LOGIN_CAPABILITY,
     )
-    return adapter.prepare(target=target, base_url=base_url, args=args, profile_ref=reference)
+    return adapter.prepare(target=target, base_url=base_url, args=args, profile_ref=reference,
+                           allow_saved_service_origin=args.get("origin") is None)
 
 
 def browser_worker_policy(name: str, *, policy, target) -> ScanPolicy:
     result = ScanPolicy(
         active_testing=bool(policy.get("active_testing")),
+        network_discovery=bool(policy.get("network_discovery")),
         allow_state_changing_http=(name == BROWSER_LOGIN_CAPABILITY
                                   and policy.get("allow_state_changing_http") is True),
         scope_receipt_id=target.scope_receipt_id,
@@ -80,7 +85,8 @@ async def browser_login_material(pool, *, prepared, owner_kind, owner_id, policy
         # durable action lease. Heartbeat in the adapter maintains that lease.
         if owner_kind == "hunt":
             row = await conn.fetchrow(
-                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 AND target_id=$2",
+                "SELECT status, policy_json, context_pack FROM hunt_runs WHERE id=$1 "
+                "AND (target_id=$2 OR device_target_id=$2)",
                 owner_uuid, target_uuid,
             )
             if not row or row["status"] not in {"active", "awaiting_planner", "budget_exhausted"}:
@@ -102,9 +108,19 @@ async def browser_login_material(pool, *, prepared, owner_kind, owner_id, policy
                 raise ValueError("browser login owner is not executable")
         else:
             raise ValueError("browser login owner kind is invalid")
-        current_target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
+        if prepared.target.target_kind == "device":
+            current_target = await conn.fetchrow(
+                "SELECT primary_locator AS url, is_active FROM device_targets WHERE id=$1", target_uuid,
+            )
+        else:
+            current_target = await conn.fetchrow("SELECT url, is_active FROM targets WHERE id=$1", target_uuid)
+        expected_locator = prepared.target_url
+        if owner_kind == "hunt":
+            saved_target = _mapping(_mapping(row["context_pack"]).get("target"))
+            expected_locator = str(saved_target.get("url") or saved_target.get("locator") or "")
         if (not current_target or not current_target["is_active"]
-                or str(current_target["url"]).rstrip("/") != prepared.target_url.rstrip("/")):
+                or not expected_locator
+                or str(current_target["url"]).rstrip("/") != expected_locator.rstrip("/")):
             raise ValueError("browser login target changed")
         decision = await revalidate_scan_action_authority(
             conn, action={"capability_name": BROWSER_LOGIN_CAPABILITY},

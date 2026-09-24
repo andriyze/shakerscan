@@ -49,3 +49,25 @@ def test_target_active_only_marks_provenance():
     decision = api.build_deployment_decision(_scan([]), target_active_findings=[_crit("f9", "fp9")])
     match = [f for f in decision["blocking_findings"] if f.get("fingerprint") == "fp9"]
     assert match and match[0].get("from_target_active") is True
+
+
+def test_decision_carries_the_target_history_summary_over_all_severities():
+    scan = _scan([{"id": "f1", "fingerprint": "fp1", "title": "Seen", "severity": "low"}])
+    history = {"rows": [
+        {"severity": "medium", "scan_id": "old", "last_seen_scan_id": "old", "fingerprint": "fp-med", "status": "active"},
+        {"severity": "low", "scan_id": "old", "last_seen_scan_id": "old", "fingerprint": "fp1", "status": "active"},
+    ], "total": 2, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[], target_history=history)
+    assert decision["carried_over"] == {
+        "count": 1, "material": 1, "highest": "medium", "complete": True,
+        "total_active": 2, "unloaded_active": 0,
+    }
+    # The gate itself is unchanged: a medium does not block under the default profile.
+    assert decision["decision"] == "allow"
+
+
+def test_decision_marks_an_incomplete_history_instead_of_claiming_an_all_clear():
+    history = {"rows": [], "total": 12, "complete": False}
+    decision = api.build_deployment_decision(_scan([]), target_active_findings=[], target_history=history)
+    assert decision["carried_over"]["complete"] is False
+    assert decision["carried_over"]["unloaded_active"] == 12

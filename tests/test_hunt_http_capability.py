@@ -39,7 +39,7 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
     establish = CAPABILITY_REGISTRY.require(
         "auth.session.establish"
     ).planner_contract()["input_schema"]
-    assert set(establish["properties"]) == {"as_principal"}
+    assert set(establish["properties"]) == {"as_principal", "origin"}
     for forbidden in (
         "username", "password", "secret", "token", "cookie", "headers",
         "endpoint_url", "auth_kind", "credential_binding_digest",
@@ -54,7 +54,7 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
         "authz.verify"
     ).planner_contract()["input_schema"]
     assert set(authz["properties"]) == {
-        "primary_session_ref", "secondary_session_ref", "routes",
+        "primary_session_ref", "secondary_session_ref", "routes", "origin",
     }
     assert authz["required"] == [
         "primary_session_ref", "secondary_session_ref", "routes",

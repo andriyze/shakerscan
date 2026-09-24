@@ -62,12 +62,20 @@ def test_registry_filters_target_kind_and_active_permission():
         "templates.passive_scan", "templates.passive_batch",
         "collections.inspect", "collections.select", "collections.replay_safe",
     }
-    assert all_device == {
+    # A device that serves HTTP is the same host a web target is, so it carries the HTTP
+    # capabilities too: the operator should be able to examine one address either way and get
+    # the same reach. Its own capabilities stay, and no web kind gains them.
+    assert {
         "device.inspect", "device.capabilities.inspect", "device.http.probe",
         "device.scan", "device.service.verify", "collections.inspect", "collections.select",
         "collections.replay_safe", "device.ssh.propose", "device.ssh.execute_confirmed",
         "candidate.verify", "findings.create", "findings.update", "findings.delete",
-    }
+    } <= all_device
+    assert {"http.request", "web.crawl", "tls.inspect"} <= all_device
+    assert not {
+        spec.name for spec in CAPABILITY_REGISTRY.list(target_kind="web")
+        if spec.name.startswith("device.")
+    }, "a web target never gains device capabilities"
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 
@@ -110,7 +118,10 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
     }
     assert specification.planner_visible is True
     assert specification.hunt_executor == "worker_auth"
-    assert specification.planner_contract()["input_schema"] == {
+    schema = dict(specification.planner_contract()["input_schema"])
+    schema["properties"] = dict(schema["properties"])
+    assert schema["properties"].pop("origin")["type"] == "string"
+    assert schema == {
         "type": "object",
         "properties": {
             "as_principal": {
@@ -154,7 +165,7 @@ def test_authz_verification_is_read_only_proof_gated_and_worker_bound():
     assert specification.hunt_executor == "worker_http"
     assert set(
         specification.planner_contract()["input_schema"]["properties"]
-    ) == {"primary_session_ref", "secondary_session_ref", "routes"}
+    ) == {"primary_session_ref", "secondary_session_ref", "routes", "origin"}
 
 
 def test_ssh_proposal_registry_budget_is_control_plane_only():

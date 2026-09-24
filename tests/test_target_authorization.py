@@ -30,6 +30,11 @@ class _Conn:
             if args and str(args[0]) != str(TARGET_ID):
                 return None
             return {"id": TARGET_ID, "url": self.url, "metadata_json": json.dumps({"environment": "production"})}
+        if "FROM device_targets" in query:
+            # An id absent from the web inventory is looked for among connected devices, which
+            # can hold the same standing authorization. This fixture has no devices, so an
+            # unknown id still reaches "target not found".
+            return None
         if "INSERT INTO approval_receipts" in query:
             row = {
                 "id": uuid.uuid4(), "scope_receipt_id": args[0], "risk_tier": args[1],
@@ -49,7 +54,7 @@ class _Conn:
                 continue
             if approval.get("risk_tier") not in args[1]:
                 continue
-            if approval.get("action_name") not in (None, args[2]):
+            if approval.get("action_name") != args[2]:
                 continue
             expires = approval.get("expires_at")
             if expires is not None and expires <= datetime.now(timezone.utc):
@@ -161,3 +166,35 @@ def test_runtime_revalidation_accepts_a_standing_receipt_and_still_expires_bound
     assert _decision(expired) is ActionAuthorityDecision.REJECTED_EXPIRED
     dangerous = {**standing, "id": uuid.uuid4(), "risk_tier": "dangerous"}
     assert _decision(dangerous) is ActionAuthorityDecision.REJECTED_MISSING, "dangerous needs a bounded receipt"
+
+
+def test_a_receipt_without_the_standing_action_name_is_not_a_standing_authorization():
+    """One definition of standing, or a target deadlocks.
+
+    Receipts recorded before the standing-authorization contract carry no
+    action_name. The resolver counted them as standing, so the target reported
+    itself authorized -- while the submission gate, which compares the exact
+    action_name, refused every active scan of it, and revoke, which matches the
+    same name, could never clear it. Because authorization is recorded once per
+    target, re-authorizing returned the same unusable receipt: the target could
+    not be scanned and could not be fixed.
+    """
+    scope_id = "scope-legacy"
+    legacy = {
+        "id": uuid.uuid4(), "scope_receipt_id": scope_id, "risk_tier": "active",
+        "action_name": None, "approved_by": "benchmark", "expires_at": None,
+        "confirmations": ["confirm_authorized"], "status": "active",
+        "created_at": datetime.now(timezone.utc),
+    }
+    conn = _Conn(
+        url="https://app.example.com/",
+        approvals=[legacy],
+        scopes={scope_id: {"target_id": TARGET_ID, "allowed_hosts": ["app.example.com"],
+                           "normalized_scope": {"host": "app.example.com"}, "verdict": "allowed"}},
+    )
+
+    assert asyncio.run(ta.current_target_authorization(conn, TARGET_ID)) is None
+
+    # The runtime gate already agreed: a receipt with no action_name and no
+    # expiry is not standing, which is exactly why the two disagreeing deadlocked.
+    assert _decision(legacy) is not ActionAuthorityDecision.ALLOWED

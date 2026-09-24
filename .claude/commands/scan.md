@@ -7,15 +7,15 @@ ceilings; active testing is an explicit permission, not a scan type.
 
 ## Instructions
 
-Use `API_BASE=${SHAKERSCAN_API_BASE:-http://localhost:8080}` for API calls and
+Call the API with `shakerscan api METHOD PATH [JSON]` (it knows the instance address and credential; `SHAKERSCAN_API_BASE` overrides the address) and
 `UI_BASE=${SHAKERSCAN_UI_BASE:-http://localhost:3000}` for UI links. On a remote host, use the URLs
 printed by `./scanner.sh status`.
 
 1. Check scanner and worker health:
 
    ```bash
-   curl -s "$API_BASE/health"
-   curl -s "$API_BASE/workers"
+   shakerscan api GET /health
+   shakerscan api GET /workers
    ```
 
    If the scanner is not running, ask whether to start it with `./scanner.sh start`. Do not measure
@@ -24,9 +24,7 @@ printed by `./scanner.sh status`.
 2. Choose `fast`, `balanced`, or `thorough` ceilings. Passive `balanced` is the default:
 
    ```bash
-   curl -X POST "$API_BASE/scans" \
-     -H "Content-Type: application/json" \
-     -d '{
+   shakerscan api POST /scans '{
        "target": "$ARGUMENTS",
        "budget_profile": "balanced",
        "policy": {"active_testing": false}
@@ -38,9 +36,7 @@ printed by `./scanner.sh status`.
    require the matching target-bound approval receipt. Never put raw credentials in the request:
 
    ```bash
-   curl -X POST "$API_BASE/scans" \
-     -H "Content-Type: application/json" \
-     -d '{
+   shakerscan api POST /scans '{
        "target": "https://example.com",
        "budget_profile": "thorough",
        "policy": {

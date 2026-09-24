@@ -54,12 +54,14 @@ import { ExposureGraph as ExposureGraphCanvas, NODE_HEX } from '@/components/Exp
 import { TriageTable, PriorityBadge, riskDot, isProductionAIAsset, postureMatches, POSTURE_FILTERS, type PostureFilter, type TriageSort } from './TriageTable'
 import { ChangesStrip } from './ChangesStrip'
 import { AttackPaths } from './AttackPaths'
+import { ServicesView } from './ServicesView'
 import styles from './exposure.module.css'
 
-type Lens = 'triage' | 'map' | 'paths'
+type Lens = 'triage' | 'services' | 'map' | 'paths'
 
 const LENSES: Array<{ value: Lens; label: string; icon: typeof ListTree }> = [
   { value: 'triage', label: 'Triage', icon: ListTree },
+  { value: 'services', label: 'Services', icon: Route },
   { value: 'map', label: 'Map', icon: Radar },
   { value: 'paths', label: 'Attack paths', icon: GitBranch },
 ]
@@ -611,7 +613,7 @@ function ExposureView() {
   // reloads, and back/forward steps through filter changes.
   const { filters, setFilter, setFilters } = useUrlFilters()
   const domain = typeof filters.domain === 'string' ? filters.domain : ''
-  const lens: Lens = filters.lens === 'map' || filters.lens === 'paths' ? filters.lens : 'triage'
+  const lens: Lens = filters.lens === 'map' || filters.lens === 'paths' || filters.lens === 'services' ? filters.lens : 'triage'
   const triageKind: 'all' | ExposureAssetKind =
     filters.kind === 'web' || filters.kind === 'ai' || filters.kind === 'model' ? filters.kind : 'all'
   const triagePosture: PostureFilter =
@@ -654,6 +656,9 @@ function ExposureView() {
   }
   const graphKeyRef = useRef<string | null>(null)
   const pathsKeyRef = useRef<string | null>(null)
+
+  const [servicesRevision, setServicesRevision] = useState(0)
+  const [servicesBusy, setServicesBusy] = useState(false)
 
   // Attack paths lens
   const [paths, setPaths] = useState<ExposureAttackPath[]>([])
@@ -758,7 +763,7 @@ function ExposureView() {
   function changeScope(updates: Record<string, string | undefined>) {
     setSelectedNode(null)
     setSelectedAsset(null)
-    setFilters({ focus: undefined, highlight: undefined, endpoints: undefined, ...updates })
+    setFilters({ focus: undefined, highlight: undefined, endpoints: undefined, service_page: undefined, service_id: undefined, ...updates })
   }
 
   function handleFocus(node: ExposureNode) {
@@ -880,6 +885,7 @@ function ExposureView() {
 
   function refreshActiveLens() {
     if (lens === 'triage') loadAssets()
+    else if (lens === 'services') setServicesRevision((value) => value + 1)
     else if (lens === 'paths') loadPaths()
     else loadGraph()
   }
@@ -995,7 +1001,7 @@ function ExposureView() {
   const graphIsEmpty = !loading && (graphView?.nodes?.length ?? 0) === 0
   const renderedNodes = graphView?.nodes?.length ?? 0
   const totalNodes = summary?.node_count ?? renderedNodes
-  const lensBusy = lens === 'triage' ? assetsLoading : lens === 'paths' ? pathsLoading : loading || refetching
+  const lensBusy = lens === 'services' ? servicesBusy : lens === 'triage' ? assetsLoading : lens === 'paths' ? pathsLoading : loading || refetching
   const filterActive = triageKind !== 'all' || triagePosture !== 'all' || Boolean(triageQuery.trim())
   const displayedMetrics = useMemo<ExposureAssetMetrics | null>(() => {
     if (!assetMetrics || !filterActive) return assetMetrics
@@ -1040,6 +1046,7 @@ function ExposureView() {
           <h1 className={`${styles.displayTitle} mt-1.5 text-2xl font-bold text-white`}>Exposure</h1>
           <p className="mt-1 text-sm text-gray-400">
             {lens === 'triage' && 'Risk-ranked inventory of every asset — scan, triage, and drill in.'}
+            {lens === 'services' && 'Service evidence, candidate weaknesses, and service-specific investigation activities.'}
             {lens === 'map' && 'Connected view — click a node to explore its blast radius.'}
             {lens === 'paths' && 'Correlated exploit paths across your attack surface.'}
           </p>
@@ -1126,6 +1133,7 @@ function ExposureView() {
         ))}
       </div>
 
+      {lens !== 'services' && (<>
       <div className={`grid gap-4 md:grid-cols-2 xl:grid-cols-4 ${styles.rise} ${styles.d2}`}>
         <StatPanel label={filterActive ? 'Matching assets' : 'Assets'} value={displayedMetrics?.asset_count ?? '--'} icon={<Layers className="h-5 w-5" />} />
         <StatPanel
@@ -1152,6 +1160,8 @@ function ExposureView() {
           onPosture={(p) => applyTriage({ posture: p })}
         />
       </div>
+
+      </>)}
 
       {lens === 'triage' && (
         <div role="tabpanel" id="lens-panel-triage" aria-labelledby="lens-tab-triage" className={`${styles.rise} ${styles.d3} space-y-3`}>
@@ -1215,6 +1225,12 @@ function ExposureView() {
             query={triageQuery}
             onQueryChange={(q) => { applyTriage({ query: q }); setSearchQuery(q) }}
           />
+        </div>
+      )}
+
+      {lens === 'services' && (
+        <div role="tabpanel" id="lens-panel-services" aria-labelledby="lens-tab-services">
+          <ServicesView rootDomain={domain || undefined} revision={servicesRevision} onBusyChange={setServicesBusy} />
         </div>
       )}
 

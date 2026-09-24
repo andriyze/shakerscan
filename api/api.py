@@ -51,6 +51,8 @@ except ModuleNotFoundError:
     from scanner.release_identity import build_fingerprint as release_build_fingerprint
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
+from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
+from scan.carried_over import gate_findings_from_rows, load_target_history, summarize_carried_over
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -176,6 +178,10 @@ try:
 except ModuleNotFoundError:
     from scanner.scanner_tools.model_intake_evaluation import evaluate as _evaluate_model_intake_request
 
+try:
+    from model_intake import review_outcomes as _model_intake_review_outcomes
+except ModuleNotFoundError:
+    from api.model_intake import review_outcomes as _model_intake_review_outcomes
 try:
     from model_intake_admissions import REASSESSMENT_TRIGGERS, triggered_status as _model_admission_triggered_status
 except ModuleNotFoundError:
@@ -3614,6 +3620,37 @@ async def schedule_runner(pool: asyncpg.Pool):
             print(f"[scheduler] Error running schedules: {e}", flush=True)
 
 
+def _asm_dispatch_as_utc(value: datetime) -> datetime:
+    """The dispatcher clock is naive UTC; stored backoffs are aware. Compare in one frame."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _asm_dispatch_backoff_until(metadata_json) -> datetime | None:
+    """When the target's last dispatcher decision was a failed dispatch whose
+    ``next_eligible_at`` is still ahead, return that instant; otherwise ``None``."""
+    metadata = metadata_json
+    if isinstance(metadata, (str, bytes)):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    last = metadata.get("asm_last_decision")
+    if not isinstance(last, dict) or last.get("blocked_by") != "dispatch_failed":
+        return None
+    raw = last.get("next_eligible_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 async def run_asm_dispatch(pool: asyncpg.Pool):
     """One tick of the Continuous ASM dispatcher (docs §16 Phase 3/4): for each
     ASM-enabled target, pick at most ONE action (recon or exploit batch) within
@@ -3625,7 +3662,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         targets = await conn.fetch("""
             SELECT id, url, root_domain, scan_options, asm_config,
-                   asm_last_test_at, asm_last_recon_at
+                   asm_last_test_at, asm_last_recon_at, metadata_json
             FROM targets
             WHERE asm_enabled = true AND is_active = true
         """)
@@ -3636,6 +3673,12 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
         root_domain = t['root_domain']
         raw_config = _decode_asm_config(t['asm_config'])
         cfg = asm_inventory.merge_asm_config(raw_config)
+        backoff_until = _asm_dispatch_backoff_until(t['metadata_json'])
+        if backoff_until is not None and backoff_until > _asm_dispatch_as_utc(now):
+            # The previous dispatch of this target failed (typically a host that no
+            # longer resolves) and was recorded with a backoff; until it elapses the
+            # target is parked rather than retried -- and logged -- on every tick.
+            continue
         try:
             async with pool.acquire() as conn:
                 active = await conn.fetchval("""
@@ -3756,6 +3799,26 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                           f"({dispatch_batch_size} eps, {claimable} claimable) -> scan {enq['scan_id'][:8]}", flush=True)
         except Exception as e:
             print(f"[asm] dispatch error for {target_url}: {e}", flush=True)
+            # A failed dispatch is still an attempt. Record it where every other
+            # dispatcher decision is recorded, with a next_eligible_at backoff (the
+            # target's own min test interval), so an unreachable host is parked for a
+            # while instead of being retried on every single tick.
+            try:
+                eligible_at = _asm_dispatch_as_utc(now) + timedelta(minutes=cfg['min_interval_minutes'])
+                async with pool.acquire() as conn:
+                    await _persist_asm_decision(
+                        conn,
+                        target_id,
+                        {
+                            "action": "none",
+                            "reason": f"dispatch failed: {e}",
+                            "blocked_by": "dispatch_failed",
+                            "next_eligible_at": eligible_at.isoformat(),
+                        },
+                        source="dispatcher",
+                    )
+            except Exception as record_exc:
+                print(f"[asm] could not record dispatch failure for {target_url}: {record_exc}", flush=True)
 
 
 async def asm_dispatcher(pool: asyncpg.Pool):
@@ -3950,6 +4013,7 @@ try:
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
+        SameHostCorsMiddleware,
         UnsafeOriginGuardMiddleware,
         _origin_is_allowed,
         add_public_v2_idempotency_openapi,
@@ -3959,6 +4023,7 @@ except ModuleNotFoundError:
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
+        SameHostCorsMiddleware,
         UnsafeOriginGuardMiddleware,
         _origin_is_allowed,
         add_public_v2_idempotency_openapi,
@@ -3966,6 +4031,11 @@ except ModuleNotFoundError:
     )
 
 app.include_router(credential_router)
+try:
+    from authenticated_assurance.router import router as authenticated_assurance_router, configure_assurance_engine
+except ModuleNotFoundError:
+    from api.authenticated_assurance.router import router as authenticated_assurance_router, configure_assurance_engine
+app.include_router(authenticated_assurance_router)
 configure_scan_read_router(lambda: db_pool)
 app.include_router(scan_read_router)
 configure_request_collection_router(lambda: db_pool)
@@ -6679,6 +6749,8 @@ async def cancel_scan(scan_id: str):
                 pass
         elif scan['scan_role'] == 'shard' and scan['parent_scan_id']:
             parent_to_reconcile = str(scan['parent_scan_id'])
+        # A cancelled scan must not leave its campaign 'active' forever.
+        await asm_inventory.settle_campaign_after_scan(conn, scan['id'])
 
     # Signal worker to stop via Redis (set cancel flag)
     # Workers should check this flag periodically
@@ -7034,7 +7106,7 @@ try:
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
-    from worker_pools import worker_pool_summaries
+    from worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 except ModuleNotFoundError:  # package import in host-side tests
     from api.agent_routes.router import (
         configure_agent_router,
@@ -7089,7 +7161,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         get_agent_two_tier_findings,
         list_agent_hunt_runs,
     )
-    from api.worker_pools import worker_pool_summaries
+    from api.worker_pools import web_dast_heartbeat_summary, worker_pool_summaries
 configure_agent_router(
     lambda: db_pool,
     AGENT_TOOL_QUEUE_NAME=lambda: AGENT_TOOL_QUEUE_NAME,
@@ -7204,6 +7276,13 @@ app.add_middleware(
     allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""),
 )
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
+# Outermost, so the configured policy above answers first for everything it recognises. This only
+# covers the UI reached at the same host as the API itself, which the fixed allowlist could not
+# name: a LAN install answered on one private IP and the same engine opened by public IP, by
+# hostname or through a tunnel lost its CORS headers on reads and 403'd on every write.
+app.add_middleware(
+    SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"],
+)
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):
@@ -7965,6 +8044,7 @@ def build_deployment_decision(
     db_policy_profiles: dict[str, dict[str, Any]] | None = None,
     db_exceptions: list[dict[str, Any]] | None = None,
     target_active_findings: list[dict[str, Any]] | None = None,
+    target_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _decode_json_value(scan.get("result")) or {}
     run_kind = str(scan.get("run_kind") or "")
@@ -8098,6 +8178,9 @@ def build_deployment_decision(
         "exception_summary": exception_summary,
         "expired_or_invalid_exceptions": max(0, len(exceptions) - len(applied_exceptions)),
         "required_evidence_missing": missing,
+        # The target's unresolved findings this run did not observe, over all severities:
+        # the one definition the scan page renders, computed next to the gate that uses it.
+        "carried_over": summarize_carried_over(scan.get("id"), findings, target_history) if product == "dast" else None,
         "score": scan.get("score") or (result.get("result") or {}).get("score") if isinstance(result, dict) else scan.get("score"),
         "grade": scan.get("grade") or (result.get("result") or {}).get("grade") if isinstance(result, dict) else scan.get("grade"),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=int(policy_profile.get("expires_days") or 30))).isoformat(),
@@ -9275,12 +9358,6 @@ def _model_intake_auto_embedding_bundle(
     return bundle
 
 
-def _model_intake_auto_observed_embedding(job: dict[str, Any]) -> str | None:
-    result = _model_intake_json_object(job.get("result_json"))
-    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
-    observations = payload.get("observations") if isinstance(payload.get("observations"), dict) else {}
-    digest = str(observations.get("embedding_output_sha256") or "").lower()
-    return digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None
 
 
 async def _model_intake_auto_memory_mib(
@@ -9521,6 +9598,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
                 _model_intake_json_object(job.get("error_json")).get("message")
                 or "controlled conversion failed"
             ))
+        _model_intake_review_outcomes.require_runner_receipt(job, step="controlled conversion")
         rescan = response.get("conversion_rescan")
         next_subjects = (
             rescan.get("next_runtime_subjects") if isinstance(rescan, dict) else None
@@ -9578,7 +9656,8 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "calibration failed"))
-        digest = _model_intake_auto_observed_embedding(job)
+        _model_intake_review_outcomes.require_runner_receipt(job, step="calibration", accepted=_model_intake_review_outcomes.CALIBRATION_ACCEPTED)
+        digest = _model_intake_review_outcomes.observed_embedding_digest(job)
         if not digest:
             raise RuntimeError("calibration completed without a bounded embedding digest")
         await _update_model_intake_automatic_review(
@@ -9619,6 +9698,7 @@ async def _advance_model_intake_automatic_review(conn: Any, review: Any) -> None
             return
         if str(job.get("state")) != "completed":
             raise RuntimeError(str(_model_intake_json_object(job.get("error_json")).get("message") or "runtime verification failed"))
+        _model_intake_review_outcomes.require_runner_receipt(job, step="runtime verification")
         await _update_model_intake_automatic_review(
             conn, review, state="freeze_pending", current_step="freeze_technical_evidence",
             progress=92, event="runtime_verification_completed",
@@ -10150,7 +10230,7 @@ async def _generic_collection_refs(
 ]:
     """Freeze exact target-bound selection refs and derive safe endpoint seeds."""
     requested: list[tuple[uuid.UUID, Mapping[str, Any]]] = []
-    for raw in list(bindings)[:16]:
+    for raw in bindings:
         # Prefer the public V2 selection identity so a complete
         # collection_id/binding_id/selection_id tuple cannot silently degrade
         # into a discovery-only collection reference.
@@ -10165,10 +10245,10 @@ async def _generic_collection_refs(
     if len({value for value, _raw in requested}) != len(requested):
         raise HTTPException(status_code=422, detail="request collection references must be unique")
     normalized_kind = str(target_kind or ("device" if device_target_id else "web")).lower()
-    if normalized_kind not in {"web", "api", "device"}:
+    if normalized_kind not in {"web", "api", "network", "device"}:
         raise HTTPException(
             status_code=422,
-            detail="request collections require a web, API, or device target",
+            detail="request collections require a web, API, network, or device target",
         )
     bound_target_id = device_target_id if normalized_kind == "device" else target_id
     if not bound_target_id:
@@ -10221,10 +10301,13 @@ async def _generic_collection_refs(
                FROM request_collection_bindings b
                LEFT JOIN request_collection_environments e
                  ON e.id=b.environment_id AND e.is_active=true
-               WHERE b.collection_id=$1 AND b.target_kind=$2 AND b.target_id=$3
-                 AND b.is_active=true
-               ORDER BY b.updated_at DESC LIMIT 1""",
+               WHERE b.collection_id=$1 AND b.target_id=$3
+                 AND (b.target_kind=$2 OR
+                      (b.target_kind IN ('web','api','network') AND $2 IN ('web','api','network')))
+                 AND b.is_active=true AND ($4::uuid IS NULL OR b.id=$4)
+               ORDER BY (b.target_kind=$2) DESC, b.updated_at DESC LIMIT 1""",
             row["id"], normalized_kind, bound_target_id,
+            row.get("selection_binding_id") or _optional_uuid(raw.get("binding_id")),
         )
         if not binding:
             raise HTTPException(
@@ -10485,8 +10568,11 @@ async def _freeze_scan_target_binding(
         for item in guard.get("allowed_root_domains") or ()
         if str(item).strip()
     ] or [extract_root_domain(target_url) or canonical_host]
+    # Judge the answers under the same environment this binding will carry, so a lab target's
+    # own addresses are admitted and a production one's are not by accident.
+    binding_environment = str(guard.get("environment") or "unknown").strip().lower()
     allowed_addresses = await _resolve_runtime_target_addresses(
-        target_url, subject=subject,
+        target_url, subject=subject, environment=binding_environment,
     )
     guard.update({
         "target_id": str(target_id),
@@ -11589,7 +11675,7 @@ async def list_scans(
                    s.shard_index, s.shard_count
         """
         query = f"""
-            SELECT {scan_columns},
+            SELECT {scan_columns}, {SCAN_LIST_ASSESSMENT_COLUMNS},
                    COALESCE(t.name, ait.name) as target_name,
                    t.root_domain,
                    ait.target_type as ai_target_type
@@ -11676,7 +11762,7 @@ async def list_scans(
 
     scans = []
     for row in rows:
-        scan = dict(row)
+        scan = project_scan_assessment_row(dict(row))
         if scan.get("options") is not None:
             scan["options"] = (
                 _sanitize_scan_options(scan["options"])
@@ -11875,16 +11961,9 @@ async def get_scan_deployment_decision(scan_id: str):
               AND severity IN ('critical', 'high')
             LIMIT 200
         """, sibling_ids) if sibling_ids else []
+        target_history = await load_target_history(conn, sibling_ids)
 
-    target_active_findings = [{
-        "id": str(r["id"]),
-        "fingerprint": r["fingerprint"],
-        "title": r["title"],
-        "severity": r["severity"],
-        "tool": r["tool"],
-        "url": r["url"],
-        "source": "target_active",
-    } for r in taf_rows]
+    target_active_findings = gate_findings_from_rows(taf_rows)
 
     db_policy_profiles: dict[str, dict[str, Any]] = {}
     for r in profile_rows:
@@ -11921,6 +12000,7 @@ async def get_scan_deployment_decision(scan_id: str):
         db_policy_profiles=db_policy_profiles,
         db_exceptions=db_exceptions,
         target_active_findings=target_active_findings,
+        target_history=target_history,
     )
 
 
@@ -12216,7 +12296,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
         lines = []
     # When the displayed row is a parallel parent, its children own execution
     # and therefore own the raw log keys. Aggregate their bounded feeds so the
-    # parent page does not misleadingly show "No logs yet" while shards run.
+    # parent page does not misleadingly show "No logs yet" while children run.
+    # The discovery child runs first and alone, often for minutes on a thorough
+    # profile, so it must be part of the feed or the page stays blank exactly
+    # when the operator is watching most closely.
     # Model Intake activity is content-free and also stored in the durable scan
     # result. Use it when Redis live logs have expired or when an older worker
     # failed before it could emit live lines, so the UI does not become blank.
@@ -12241,9 +12324,10 @@ async def get_scan_logs(scan_id: str, limit: int = Query(200, ge=1, le=1000)):
                     if row and str(row.get("scan_role") or "") == "parent":
                         shard_rows = await conn.fetch(
                             """
-                            SELECT id, shard_index, status, current_phase
+                            SELECT id, shard_index, scan_role, status, current_phase
                             FROM scans
-                            WHERE parent_scan_id=$1 AND scan_role='shard'
+                            WHERE parent_scan_id=$1
+                              AND scan_role IN ('parallel_discovery', 'shard')
                             ORDER BY shard_index ASC NULLS LAST, created_at ASC
                             """,
                             scan_uuid,
@@ -12887,14 +12971,11 @@ def _hypothesis_situation_report(
     }
 
 
-RISK_TIER_ORDER = {
-    "read_only": 0,
-    "passive": 1,
-    "active": 2,
-    "intrusive": 3,
-    "credential": 4,
-    "dangerous": 5,
-}
+try:
+    from runtime.approval_policy import RISK_TIER_ORDER, approval_covers_risk
+except ModuleNotFoundError:
+    from api.runtime.approval_policy import RISK_TIER_ORDER, approval_covers_risk
+
 
 
 FORBIDDEN_AGENT_CONTEXT_KEYS = {
@@ -13060,7 +13141,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
             target_uuid,
         )
         device = await conn.fetchrow(
-            "SELECT id, name, primary_locator, device_class, is_active FROM device_targets WHERE id=$1",
+            "SELECT id, name, primary_locator, device_class, environment, is_active FROM device_targets WHERE id=$1",
             target_uuid,
         )
 
@@ -13094,9 +13175,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                     "url": target_url,
                     "origins": origins,
                     "root_domain": web["root_domain"],
-                    "environment": str(
-                        _hunt_json(web["metadata_json"], {}).get("environment")
-                        or "unknown"
+                    "environment": target_authorization.effective_target_environment(
+                        _hunt_json(web["metadata_json"], {})
                     ),
                 },
                 "principal_refs_available": bool(credential_rows),
@@ -13104,7 +13184,10 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 "secret_values_visible_to_planner": False,
                 "request_collections": collection_refs,
                 "authorized_target_addresses": await _resolve_agent_target_addresses(
-                    target_url
+                    target_url,
+                    environment=target_authorization.effective_target_environment(
+                        _hunt_json(web["metadata_json"], {})
+                    ),
                 ),
                 "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
                     conn, target_uuid),
@@ -13135,8 +13218,12 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                     else "safe_remote"
                 ),
                 fragility_limit=budget.max_device_fragility_points,
-                request_limit=min(40, budget.max_http_requests),
-                scan_limit=3,
+                # The per-run request cap follows the resolved budget profile
+                # rather than a fixed 40: device wear is bounded by the fragility
+                # budget and the per-device daily cap, so an authorized device
+                # Hunt is not forced to stop after 40 requests.
+                request_limit=budget.max_http_requests,
+                scan_limit=8,
             )
             context_pack = {
                 "schema_version": "hunt-context/v2",
@@ -13158,7 +13245,8 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                         else f"http://[{target_url}]"
                         if ":" in target_url
                         else f"http://{target_url}"
-                    )
+                    ),
+                    environment=str(device["environment"] or "production"),
                 ),
                 "prior_knowledge": await hunt_prior_knowledge.safe_prior_knowledge(
                     conn, target_uuid, device=True),
@@ -13248,6 +13336,10 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
         normalized_contract = contract.public_dict()
         normalized_contract["policy"]["approval_receipt_id"] = validated_approval_id
         normalized_contract["policy"]["scope_receipt_id"] = validated_scope_id
+        # Expose actual normalization. Unauthorized privileged work was rejected above.
+        normalized_contract["policy_adjustments"] = contract.resolution_adjustments(
+            approval_validated=approval_validated,
+        )
         context_pack["hunt_start_contract"] = normalized_contract
         if approval_context:
             context_pack["runtime_scope_guard"] = dict(
@@ -15103,7 +15195,7 @@ async def _validate_approval_receipt_for_action(
     if not approval.get("approved_by") or approval.get("denial_reason"):
         await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
     approved_risk = str(approval.get("risk_tier") or "active")
-    if RISK_TIER_ORDER.get(approved_risk, -1) < RISK_TIER_ORDER.get(str(risk_tier or "active"), 999):
+    if not approval_covers_risk(approval, str(risk_tier or "active")):
         await _deny(
             "approval_receipt_risk_too_low",
             "Approval receipt risk tier does not cover the requested action",
@@ -15209,6 +15301,7 @@ async def _validate_approval_receipt_for_action(
 
 
 configure_credential_api(approval_validator=_validate_approval_receipt_for_action)
+configure_assurance_engine(approve=_validate_approval_receipt_for_action, freeze=_freeze_scan_target_binding, enqueue=lambda payload: enqueue_job(get_redis(), AGENT_TOOL_QUEUE_NAME, payload), build=expected_build_fingerprint)
 
 
 
@@ -19461,26 +19554,8 @@ async def _reconcile_unconfirmed_queue_handoffs(conn) -> int:
         )
         if not changed:
             continue
-        campaign_id = row.get("campaign_id")
-        if campaign_id:
-            await conn.execute(
-                """
-                UPDATE scan_campaigns campaign
-                SET status='failed', completed_at=COALESCE(completed_at, NOW()), updated_at=NOW()
-                WHERE campaign.id=$1 AND campaign.status='active'
-                  AND EXISTS (
-                      SELECT 1 FROM scans owner
-                      WHERE owner.id=$2 AND owner.campaign_id=campaign.id
-                        AND owner.status='failed'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM scans other
-                      WHERE other.campaign_id=campaign.id AND other.id<>$2
-                  )
-                """,
-                campaign_id,
-                row["id"],
-            )
+        if row.get("campaign_id"):
+            await asm_inventory.settle_campaign_after_scan(conn, row["id"], status="failed")
         repaired += 1
     return repaired
 
@@ -20240,13 +20315,16 @@ def _compute_max_allowed_workers() -> int:
         platform_reserve_gb = float(os.environ.get("SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB") or 7)
     except (TypeError, ValueError):
         platform_reserve_gb = 7
-    if mem_gb <= 0 or per_worker_gb <= 0:
-        return 5
-    if mem_gb < 8:
-        return max(1, min(4, int(mem_gb) - 3))
-    if mem_gb < 16:
-        return 5
-    return max(5, min(200, int((mem_gb - max(0, platform_reserve_gb)) / per_worker_gb)))
+    return deployment_policy.max_allowed_workers_for_memory_gb(
+        mem_gb, per_worker_gb=per_worker_gb, platform_reserve_gb=platform_reserve_gb,
+    )
+
+
+def _reported_max_allowed_workers(running_count: int = 0) -> int:
+    """The capacity to report, never below the fleet that is actually running."""
+    return deployment_policy.reported_max_allowed_workers(
+        _compute_max_allowed_workers(), running_count,
+    )
 
 # Hard per-worker memory cap applied to scaler-created worker containers. Without
 # it, a runaway/large scan can exhaust the whole Docker VM and OOM-thrash every
@@ -20675,6 +20753,122 @@ async def _execution_capacity_snapshot(local_summary: Mapping[str, Any]) -> dict
         )
 
 
+def _web_dast_worker_readiness():
+    """Web DAST worker presence from Redis heartbeats, for the socket-less path (the Enterprise
+    gateway does not mount the Docker socket). Returns a fleet-summary-shaped dict, or None when
+    Redis itself cannot answer -- then the caller keeps the legacy 'inventory unknown' response.
+    Every worker refreshes shakerscan:worker_build every SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS
+    (default 30s), well inside the freshness window used here."""
+    try:
+        raw_reports = get_redis().hgetall("shakerscan:worker_build") or {}
+    except Exception:
+        return None
+    expected_fp = expected_build_fingerprint()
+    expected_version = current_scanner_version()
+    reports = []
+    workers_by_name = {}
+    for raw_host, raw_payload in raw_reports.items():
+        host = raw_host.decode("utf-8", "replace") if isinstance(raw_host, bytes) else str(raw_host)
+        payload = raw_payload.decode("utf-8", "replace") if isinstance(raw_payload, bytes) else raw_payload
+        try:
+            report = json.loads(payload) if isinstance(payload, str) else dict(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        try:
+            reported_at = datetime.fromisoformat(str(report.get("reported_at") or "").replace("Z", "+00:00"))
+            if reported_at.tzinfo is None:
+                reported_at = reported_at.replace(tzinfo=timezone.utc)
+            reported_epoch = reported_at.timestamp()
+        except (TypeError, ValueError):
+            continue
+        build_current = worker_build_current(
+            reported_fingerprint=report.get("build_fingerprint"),
+            reported_version=report.get("scanner_version"),
+            expected_fingerprint=expected_fp,
+            expected_version=expected_version,
+        )
+        reports.append({
+            "name": host,
+            "reported_epoch": reported_epoch,
+            "build_current": build_current,
+            "build_fingerprint": report.get("build_fingerprint"),
+        })
+        workers_by_name[host] = {
+            "name": host,
+            "status": "running",
+            "health": "heartbeat",
+            "build_fingerprint": report.get("build_fingerprint"),
+            "scanner_version": report.get("scanner_version"),
+            "build_current": build_current,
+            "reported_at": report.get("reported_at"),
+        }
+    summary = web_dast_heartbeat_summary(
+        reports,
+        now_epoch=time.time(),
+        max_age_seconds=_WORKER_BUILD_REPORT_MAX_AGE_SECONDS,
+        clock_skew_seconds=_WORKER_BUILD_REPORT_CLOCK_SKEW_SECONDS,
+    )
+    fresh_names = set(summary.pop("fresh_names", []))
+    summary["workers"] = [workers_by_name[name] for name in fresh_names if name in workers_by_name]
+    return summary
+
+
+def _socket_less_workers_response(scaling_reason):
+    """The /workers answer when the Docker socket is unavailable. Worker presence still comes
+    from heartbeats when Redis can answer, so a healthy Enterprise deployment reports a real
+    worker count instead of the dashboard's 'Unknown'; container scaling is what is unavailable,
+    not the inventory."""
+    summary = _web_dast_worker_readiness()
+    common = {
+        "max_allowed": _reported_max_allowed_workers(
+            len((summary or {}).get("workers") or ()) if summary else 0
+        ),
+        "max_active_scans": _compute_max_active_scans(),
+        "expected_build_fingerprint": expected_build_fingerprint(),
+        "expected_scanner_version": current_scanner_version(),
+        "fleet": fleet_feature_state(),
+        "scaling_available": False,
+        "scaling_reason": scaling_reason,
+    }
+    if summary is None:
+        # Redis unreachable as well: presence is genuinely unknown, keep the legacy shape.
+        return {
+            "count": -1,
+            "error": scaling_reason,
+            "workers": [],
+            "execution_capacity": compute_execution_capacity(
+                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
+            ),
+            "pools": worker_pool_summaries(
+                {},
+                agent_tool=_agent_tool_worker_readiness,
+                device=_device_worker_readiness,
+                model_intake=_model_intake_worker_readiness,
+            ),
+            **common,
+        }
+    return {
+        "count": summary["count"],
+        "current_count": summary["current_count"],
+        "stale_count": summary["stale_count"],
+        "pending_count": summary["pending_count"],
+        "fleet_uniform": summary["fleet_uniform"],
+        "distinct_fingerprints": summary["distinct_fingerprints"],
+        "stale_workers": summary["stale_workers"],
+        "workers": summary["workers"],
+        "execution_capacity": compute_execution_capacity(
+            summary, [], remote_inventory_available=False
+        ),
+        "pools": worker_pool_summaries(
+            summary,
+            agent_tool=_agent_tool_worker_readiness,
+            device=_device_worker_readiness,
+            model_intake=_model_intake_worker_readiness,
+        ),
+        **common,
+    }
+
+
 @app.get("/workers")
 async def get_workers():
     """Get current worker count and status via Docker socket API."""
@@ -20806,9 +21000,15 @@ async def get_workers():
 
         summary = compute_fleet_summary(worker_list)
         execution_capacity = await _execution_capacity_snapshot(summary)
-        max_allowed_workers = _compute_max_allowed_workers()
+        # Two different numbers. What is displayed accommodates the fleet that is actually
+        # running, so the dashboard cannot read "9 running, max 5". What governs execution is
+        # what the deployment configured: publishing the displayed figure let a GET of this
+        # endpoint raise real concurrency, and the worker list includes exited containers, so
+        # stopped workers inflated it past an explicit SHAKERSCAN_MAX_WORKERS.
+        configured_max_workers = _compute_max_allowed_workers()
+        max_allowed_workers = _reported_max_allowed_workers(len(worker_list))
         # Refresh the per-scan active-scan concurrency cap for workers.
-        max_active_scans = _publish_max_active_scans(max_allowed=max_allowed_workers)
+        max_active_scans = _publish_max_active_scans(max_allowed=configured_max_workers)
         # Refresh the real build label so workers stamp/report the deployed commit.
         _publish_scanner_version()
 
@@ -20829,42 +21029,10 @@ async def get_workers():
             ),
         }
     except FileNotFoundError:
-        return {
-            "count": -1,
-            "error": "Docker socket not available",
-            "workers": [],
-            "max_allowed": _compute_max_allowed_workers(),
-            "max_active_scans": _compute_max_active_scans(),
-            "execution_capacity": compute_execution_capacity(
-                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
-            ),
-            "fleet": fleet_feature_state(),
-            "pools": worker_pool_summaries(
-                {},
-                agent_tool=_agent_tool_worker_readiness,
-                device=_device_worker_readiness,
-                model_intake=_model_intake_worker_readiness,
-            ),
-        }
+        return _socket_less_workers_response("Docker socket not available")
     except Exception:
         logger.exception("Failed to query Docker worker fleet")
-        return {
-            "count": -1,
-            "error": "Failed to query Docker",
-            "workers": [],
-            "max_allowed": _compute_max_allowed_workers(),
-            "max_active_scans": _compute_max_active_scans(),
-            "execution_capacity": compute_execution_capacity(
-                {"count": 0, "current_count": 0}, [], remote_inventory_available=False
-            ),
-            "fleet": fleet_feature_state(),
-            "pools": worker_pool_summaries(
-                {},
-                agent_tool=_agent_tool_worker_readiness,
-                device=_device_worker_readiness,
-                model_intake=_model_intake_worker_readiness,
-            ),
-        }
+        return _socket_less_workers_response("Failed to query Docker")
 
 
 @app.post("/workers")

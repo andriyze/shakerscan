@@ -36,6 +36,16 @@ surfaces:
     new_writes_allowed: true
     routes: ["/hunts", "/hunts/*", "/hunt/skills", "/hunt/skills/*"]
 
+  - id: authenticated-assurance-preview
+    owner: scan
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/authenticated-scan-profiles", "/authenticated-scan-profiles/*"]
+    # Preview surface, off unless SHAKERSCAN_AUTHENTICATED_ASSURANCE=1. It is the canonical
+    # owner of reviewed authenticated-scan profile metadata and its read-only validation
+    # history; it never accepts secret material, which stays with the credential surface.
+
   - id: http-archive
     owner: scan
     disposition: KEEP_CANONICAL

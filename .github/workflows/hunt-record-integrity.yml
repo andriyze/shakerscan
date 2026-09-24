@@ -5,6 +5,8 @@ on:
     branches: [main, feat/2.3.0-dast-recall]
     paths:
       - 'api/hunt/**'
+      - 'api/exposure/**'
+      - 'tests/test_service_intelligence*'
       - 'api/investigation_candidates.py'
       - 'scripts/*hunt*'
       - 'tests/test_authorization*'
@@ -14,6 +16,8 @@ on:
   pull_request:
     paths:
       - 'api/hunt/**'
+      - 'api/exposure/**'
+      - 'tests/test_service_intelligence*'
       - 'api/investigation_candidates.py'
       - 'scripts/*hunt*'
       - 'tests/test_authorization*'
@@ -45,6 +49,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       HUNT_TEST_POSTGRES_DSN: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
+      SERVICE_INTELLIGENCE_TEST_DATABASE_URL: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -67,13 +72,25 @@ jobs:
             tests/test_hunt_graph_projection.py \
             tests/test_hunt_investigation_score.py \
             tests/test_hunt_review_metrics.py
+      - name: Shared Hunt service evidence in real PostgreSQL
+        env:
+          PYTHONPATH: .:api:scanner
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          python -m pytest -q --junitxml=artifacts/hunt-services.xml \
+            tests/test_hunt_service_sources.py \
+            tests/test_hunt_service_sources_postgres.py \
+            tests/test_hunt_budget_amendments_postgres.py \
+            tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
       - name: Retain the test result for this exact revision
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: hunt-record-integrity-${{ github.sha }}
-          path: artifacts/hunt-records.xml
+          path: |
+            artifacts/hunt-records.xml
+            artifacts/hunt-services.xml
           if-no-files-found: error
           retention-days: 14
   review-ui:

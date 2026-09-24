@@ -37,6 +37,30 @@ DEVICE_TARGET = TargetBinding(
 )
 
 
+def test_http_adapter_cancels_inflight_operation_and_settles_uncertain_use():
+    async def run():
+        stopped = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def operation():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        requested = {"http_requests": 1, "tool_wall_seconds": 5}
+        adapter = HttpRequestExecutionAdapter(specification=CAPABILITY_REGISTRY.require("http.request"),
+            operation=operation, requested_budget=requested, redacted_execution={})
+        result = await adapter.execute(heartbeat=lambda: asyncio.sleep(0), cancelled=entered.is_set)
+        assert stopped.is_set()
+        assert result.status == "cancelled" and not result.partial
+        assert result.actual_budget["http_requests"] == 1
+        assert result.redacted_execution["usage_uncertain"] is True
+
+    asyncio.run(run())
+
+
 def _execute(specification, adapter, requested):
     return asyncio.run(CapabilityExecutor().execute(
         CapabilityExecutionContext(
@@ -611,3 +635,73 @@ def test_candidate_verifier_block_conservatively_charges_the_full_hold():
     assert result.execution_started is True
     assert result.actual_budget == requested
     assert result.errors == ("verifier stopped after uncertain wire activity",)
+
+
+def test_ports_discover_supports_a_bounded_contiguous_range():
+    from capabilities.network import PortsDiscoverAdapter
+    from capabilities.network import CapabilityInputError
+    from runtime.models import ScanPolicy
+
+    net_target = TargetBinding(
+        target_id="net-1", target_kind="network", canonical_host="host.example.test",
+        allowed_origins=(), allowed_addresses=("192.0.2.30",), scope_receipt_id="scope-1",
+    )
+    policy = ScanPolicy(active_testing=True, network_discovery=True,
+                        approval_receipt_id="approval", scope_receipt_id="scope-1")
+    adapter = PortsDiscoverAdapter()
+
+    ranged = adapter.prepare(target=net_target, args={"port_range": "8000-8999"}, policy=policy)
+    assert ranged.estimated_budget["tcp_ports_attempted"] == 1_000
+    assert "8000-8999" in ranged.commands[0].argv
+    # Two different ranges must not collide on the idempotency digest.
+    other = adapter.prepare(target=net_target, args={"port_range": "9000-9999"}, policy=policy)
+    assert ranged.input_digest != other.input_digest
+
+    # One call never becomes a full-range sweep; a wider span is chunked.
+    for bad in ("1-65535", "1-1002"):
+        try:
+            adapter.prepare(target=net_target, args={"port_range": bad}, policy=policy)
+        except CapabilityInputError:
+            pass
+        else:
+            raise AssertionError(f"port_range {bad} should exceed the per-call ceiling")
+
+
+def test_active_collection_replay_reaches_device_and_network_targets():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    for name in ("collections.replay_active", "collections.replay_authentication"):
+        spec = CAPABILITY_REGISTRY.require(name)
+        assert {"web", "api", "network", "device"} <= set(spec.target_kinds)
+
+
+def test_http_capabilities_accept_a_same_host_service_origin_input():
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+    # Scanner and TLS capabilities now accept an `origin`, so an authorized Hunt
+    # can point them at another service port on the same host.
+    for name in ("web.probe", "templates.scan", "web.crawl", "web.browser_crawl",
+                 "web.content_discover", "xss.verify", "sqli.verify",
+                 "tls.inspect", "http.request"):
+        props = CAPABILITY_REGISTRY.require(name).input_schema["properties"]
+        assert "origin" in props, f"{name} input schema is missing origin"
+    # The planner projection must also admit origin where one exists.
+    for name in ("templates.scan", "xss.verify", "sqli.verify"):
+        projection = CAPABILITY_REGISTRY.require(name).planner_input_schema
+        assert "origin" in projection["properties"], f"{name} planner projection is missing origin"
+
+
+def test_scanner_execution_target_uses_the_selected_service_origin_base():
+    from worker import _worker_scanner_execution_target
+    # A path joins onto the selected origin (any port), and a path that escapes
+    # that origin is rejected against the selected origin, not the stored URL.
+    assert _worker_scanner_execution_target(
+        "https://host.example:8443", {"path": "/status"},
+    ) == "https://host.example:8443/status"
+    import agent_tools
+    try:
+        _worker_scanner_execution_target(
+            "https://host.example:8443", {"path": "https://host.example:9443/x"},
+        )
+    except agent_tools.AgentToolError:
+        pass
+    else:
+        raise AssertionError("a path escaping the selected origin must be rejected")

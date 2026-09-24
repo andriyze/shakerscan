@@ -29,6 +29,7 @@ def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
     suite = _yaml("python-suite.yml")
     triggers = suite.get("on", suite.get(True))
     assert "pull_request" in triggers
+    assert "merge_group" in triggers, "a required check must also run in the merge queue"
     assert triggers["push"]["branches"] == ["main"]
     text = _text("python-suite.yml")
     assert "scripts/run_complete_python_suite.py --artifacts-dir artifacts" in text
@@ -46,7 +47,7 @@ def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
         "scripts/check_scan_target_transport.py",
     ):
         assert static_gate in text, static_gate
-    assert "name: python-suite-${{ github.event.pull_request.head.sha || github.sha }}" in text
+    assert "name: python-suite-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}" in text
 
 
 def test_v2_contracts_workflow_is_manual_stack_acceptance_only():
@@ -175,11 +176,34 @@ def test_installed_stack_smoke_forwards_its_random_api_port_to_the_cli():
 
 def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
     e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
-    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
     lifecycle = e2e[e2e.index("# MI-6A/B/C:"):e2e.index("# MI-7:")]
     assert "sc.xfail" not in lifecycle
     assert 'sc.error("MI-6 durable trust-anchor lifecycle", e)' in lifecycle
-    assert "MI-6 durable trust-anchor lifecycle | Ship as release-gated" in readiness
+    expected = (
+        "MI-6 caller cannot supply its own trust anchor",
+        "MI-6A expired and wrong durable anchors do not verify",
+        "MI-6B operator-created durable anchor verifies exact signature",
+        "MI-6C deactivated durable anchor stops verification",
+    )
+    for workflow, job in (("e2e.yml", "e2e"), ("e2e-pr.yml", "smoke"),
+                          ("release-candidate.yml", "certify")):
+        steps = _steps(workflow, job)
+        gate = next(step for step in steps
+                    if "scripts/summarize_e2e_debt.py" in step.get("run", "")
+                    and "--require-pass" in step["run"])
+        assert not gate.get("continue-on-error"), workflow
+        assert not _yaml(workflow)["jobs"][job].get("continue-on-error"), workflow
+        assert gate.get("if") in (None, "always()",
+                                 "${{ always() && steps.changes.outputs.backend == 'true' }}")
+        assert "|| true" not in gate["run"] and "set +e" not in gate["run"]
+        for check in expected:
+            assert f"--require-pass 'model_intake:{check}'" in gate["run"]
+            assert check in e2e  # These are real assertions, not imaginary scorecard labels.
+        producers = [step for step in steps[:steps.index(gate)]
+                     if "tests/e2e/run_e2e.py --area all" in step.get("run", "")
+                     or ("make installed-stack-smoke" in step.get("run", "")
+                         and step.get("env", {}).get("INSTALLED_STACK_SMOKE_E2E") == "1")]
+        assert producers and all(not step.get("continue-on-error") for step in producers)
 
 
 def test_full_release_e2e_accepts_only_exact_main_candidates():

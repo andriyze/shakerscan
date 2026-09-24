@@ -113,6 +113,18 @@ def _result(**overrides):
 
 
 @pytest.mark.asyncio
+async def test_device_replay_settles_only_attempted_fragility():
+    plan = _plan()
+    outcome = await execute_replay_plan(
+        plan, target=_target(), owner_kind="hunt", owner_id="hunt-1",
+        worker_id="worker-1", limits={"http_requests": 10, "device_fragility_points": 10},
+        consumed={}, transport=FakeTransport([_result()]),
+        additional_budget={"device_fragility_points": 3}, clock=Clock(),
+    )
+    assert outcome.reservation.actual["device_fragility_points"] == 1
+
+
+@pytest.mark.asyncio
 async def test_exact_wire_request_executes_with_reservation_and_redacted_receipt():
     plan = _plan()
     transport = FakeTransport([_result()])

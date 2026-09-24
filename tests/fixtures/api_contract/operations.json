@@ -445,6 +445,46 @@
     "operation_id": "asm_check_families_asm_check_families_get"
   },
   {
+    "path": "/authenticated-scan-profiles",
+    "method": "get",
+    "operation_id": "list_profiles_authenticated_scan_profiles_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles",
+    "method": "post",
+    "operation_id": "write_profile_authenticated_scan_profiles_post"
+  },
+  {
+    "path": "/authenticated-scan-profiles/contract",
+    "method": "get",
+    "operation_id": "contract_authenticated_scan_profiles_contract_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}",
+    "method": "get",
+    "operation_id": "get_validation_authenticated_scan_profiles_validations__request_id__get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_validation_authenticated_scan_profiles_validations__request_id__cancel_post"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}",
+    "method": "get",
+    "operation_id": "get_profile_authenticated_scan_profiles__profile_id__get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/history",
+    "method": "get",
+    "operation_id": "get_profile_history_authenticated_scan_profiles__profile_id__history_get"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/validate",
+    "method": "post",
+    "operation_id": "validate_profile_authenticated_scan_profiles__profile_id__validate_post"
+  },
+  {
     "path": "/credential-profiles",
     "method": "get",
     "operation_id": "list_credential_profiles_credential_profiles_get"
@@ -718,6 +758,11 @@
     "path": "/exposure/nodes",
     "method": "get",
     "operation_id": "exposure_nodes_exposure_nodes_get"
+  },
+  {
+    "path": "/exposure/services",
+    "method": "get",
+    "operation_id": "exposure_services_exposure_services_get"
   },
   {
     "path": "/finding-exceptions",
@@ -1008,6 +1053,16 @@
     "path": "/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip",
     "method": "post",
     "operation_id": "skip_authorization_investigation_hunts__hunt_id__authorization_investigations__proposal_id__skip_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "method": "get",
+    "operation_id": "get_hunt_budget_amendments_hunts__hunt_id__budget_amendments_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "method": "post",
+    "operation_id": "amend_hunt_budget_hunts__hunt_id__budget_amendments_post"
   },
   {
     "path": "/hunts/{hunt_id}/cancel",
@@ -1441,6 +1496,11 @@
   },
   {
     "path": "/request-collections/{collection_id}",
+    "method": "delete",
+    "operation_id": "deactivate_request_collection_request_collections__collection_id__delete"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
     "method": "get",
     "operation_id": "get_request_collection_request_collections__collection_id__get"
   },
@@ -1613,6 +1673,11 @@
     "path": "/scans/{scan_id}/artifacts/{artifact_id}",
     "method": "get",
     "operation_id": "download_scan_artifact_scans__scan_id__artifacts__artifact_id__get"
+  },
+  {
+    "path": "/scans/{scan_id}/authentication-assurance",
+    "method": "get",
+    "operation_id": "get_scan_assurance_scans__scan_id__authentication_assurance_get"
   },
   {
     "path": "/scans/{scan_id}/cancel",

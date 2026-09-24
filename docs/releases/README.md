@@ -3,11 +3,27 @@
 Release notes are immutable historical records for the version named in each file. They may use the
 product vocabulary and support boundary of that release; do not rewrite old notes to resemble the
 current product. For current behavior use `../functionality-reference.md`, and for publication state
-use `../release-readiness.md` plus `RELEASES.md` at the repository root.
+use `../release-process.md` plus `RELEASES.md` at the repository root.
+
+## 2.5 line
+
+- [`2.5.3.md`](2.5.3.md) — candidate prepared 2026-09-23; not yet published.
+- [`2.5.2.md`](2.5.2.md) — published 2026-09-23 and promoted to the stable installer channel.
+- [`2.5.1.md`](2.5.1.md) — published 2026-09-23 and promoted to the stable installer channel.
+- [`2.5.0.md`](2.5.0.md) — published 2026-09-22 and promoted to the stable installer channel.
 
 ## 2.3 line
 
-- [`2.3.2.md`](2.3.2.md) — candidate prepared 2026-09-14; not yet published.
+- [`2.4.1.md`](2.4.1.md) — published 2026-09-21 and promoted to the stable installer channel.
+- [`2.4.0.md`](2.4.0.md) — published 2026-09-21 and promoted to the stable installer channel.
+- [`2.3.9.md`](2.3.9.md) — published 2026-09-20 and promoted to the stable installer channel.
+- [`2.3.8.md`](2.3.8.md) — published 2026-09-20 and promoted to the stable installer channel; its note overstates the active-testing default, corrected in 2.3.9.
+- [`2.3.7.md`](2.3.7.md) — published 2026-09-19 and promoted to the stable installer channel.
+- [`2.3.6.md`](2.3.6.md) — published 2026-09-18 and promoted to the stable installer channel.
+- [`2.3.5.md`](2.3.5.md) — published 2026-09-18; not promoted to the stable channel (superseded by 2.3.6).
+- [`2.3.4.md`](2.3.4.md) — published 2026-09-15 and promoted to the stable installer channel.
+- [`2.3.3.md`](2.3.3.md) — published 2026-09-15 and promoted to the stable installer channel.
+- [`2.3.2.md`](2.3.2.md) — published 2026-09-14 and promoted to the stable installer channel.
 - [`2.3.1.md`](2.3.1.md) — published 2026-09-11 and promoted to the stable installer channel.
 - [`2.3.0.md`](2.3.0.md) — published 2026-09-09.
 

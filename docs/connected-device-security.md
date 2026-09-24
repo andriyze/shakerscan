@@ -48,8 +48,11 @@ recorded safety profiles are:
 - `authenticated_active`: supplied-credential SSH and web checks with device-bound, encrypted
   credential profiles. It never guesses credentials. Fixed host review is read-only; model-authored
   remote SSH commands require a separate exact-plan user confirmation.
-- `lab_invasive`: reserved for a dedicated recovery-capable lab runner. It currently fails closed as
-  unavailable and cannot be enabled by choosing a deeper coverage profile.
+
+Older releases advertised a fourth `lab_invasive` profile that no worker ever implemented. It has
+been removed; a request that still names it is rejected and should use `authenticated_active`.
+Persistent-state, resource-intensive, and destructive action classes remain unavailable to every
+profile.
 
 Every device action receives a declared safety class. The device safety governor blocks actions not
 permitted by the selected profile and records baseline, post-inventory, and final health checkpoints.
@@ -256,8 +259,10 @@ header names, skipped reasons, and request-aware findings without persisting req
 
 HTTPS interfaces are assessed with a separate strict certificate handshake. Self-signed and otherwise
 untrusted device TLS does not hide the interface: non-secret checks continue and create a TLS finding.
-Web credentials and secret-bearing imported requests are withheld unless the operator separately
-permits their use over unverified TLS under `authenticated_active`; the AI cannot enable that override.
+Selected credentials and imported requests continue under the existing testing authorization;
+certificate trust adds no second confirmation or veto. The legacy `allow_untrusted_tls_credentials`
+field remains accepted but does not control execution. Credential and state-changing permissions
+remain enforced, and unverified TLS transmission is recorded as evidence, never labeled trusted.
 Response cookies, authentication challenges, URL query values, token-like path segments, and
 token-like request names are redacted before persistence.
 
@@ -399,3 +404,61 @@ and policy boundary.
 - Fixed authenticated host collection accepts only server-owned read-only bundles. Agent-authored
   remote SSH commands execute only after an earlier host key is pinned and a user separately confirms
   the exact digest-bound plan; local-host shell is never exposed.
+
+### Hunt service selection and managed authentication
+
+An authorized active Hunt may select HTTP or HTTPS on any valid port of its existing
+canonical host. This is a per-action service selection: target UUID, frozen IP addresses,
+scope, credential version, and revocation checks remain unchanged. A redirect or imported
+script cannot authorize a different destination.
+
+`auth.session.establish` accepts an optional `origin` for relative saved login endpoints;
+absolute operator-saved endpoints select their own same-host service. New Hunt sessions
+retain the admitted asset binding plus their login service, so an explicitly selected
+session works in subsequent same-asset requests and refresh returns to the original login
+port. Historical exact-bound sessions remain readable; Scan sessions retain exact binding.
+`browser.login_check` accepts an optional `origin`, or derives it from the immutable saved
+workflow. Credential decryption still occurs only in the worker. Device credentials are
+revalidated against the live device inventory, not the separate web-target table.
+
+Request-collection replay resolves only the selected, persisted collection origins against
+the same admitted asset, then narrows the replay transport to those origins. Collection
+ownership, selection digests, frozen addresses, budgets, and secret handling are unchanged.
+This does not authorize reuse between unrelated target UUIDs.
+
+Device authorization investigations use the same API/service/repository as web Hunts.
+Their graph records belong to `device_target_id`; an additive migration supports device
+HTTP sessions and graph ownership without manufacturing web targets. Native device adapters
+inherit the canonical Hunt request and scan limits rather than applying a second legacy
+40-request / three-scan ceiling.
+
+### Hunt NSE transport and coverage
+
+`service.nse_check` retains the installed Nmap analyses for `http-methods`,
+`http-security-headers`, `http-trace`, and `ssl-enum-ciphers`. The HTTP analyses
+use the worker's pinned transport, preserving Host and TLS SNI on the frozen
+address. Same-asset HTTP/HTTPS redirects, including alternate ports and untrusted
+certificates, reuse existing network authority; no per-hop approval is created.
+A redirect to another asset is recorded as incomplete coverage, and other selected
+checks continue. Evidence includes the actual response service and redacted URL.
+
+HTTP discovery uses metered HEAD requests instead of an implicit `-sV` version
+scan. Native TLS enumeration is forced on the explicitly selected port, including
+nonstandard ports; broader fingerprinting remains `service.fingerprint`.
+HTTP budgets count every request-header attempt, including connection-library
+retries, detector requests, and permitted optional method probes. Unused HTTP
+allowances are released. Native port/TLS device cost is still an estimate, not a
+claim of exact handshake or packet counting.
+
+The method analysis can probe POST and an unknown method as negative controls.
+Those probes use the existing `allow_state_changing_http` permission and budget.
+Without it, Hunt preserves the available read-method observations and explains
+which optional probes were omitted instead of refusing the entire capability.
+An incomplete script is not a clean security result; observations remain unverified
+until a separate deterministic proof contract validates a finding.
+
+NSE coverage outcomes do not stand in for a device health checkpoint. Repeated
+partial results (closed services, unavailable script output or optional omissions)
+do not trip the health circuit breaker, and a completed NSE action does not clear
+a pre-existing failure or operator pause. Traffic usage and pacing still settle;
+other capabilities retain their actual health-check behavior.

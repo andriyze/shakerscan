@@ -92,7 +92,9 @@ def test_dns_inspection_queries_only_binding_derived_names():
     assert result["ok"] is True
     assert result["status"] == "success"
     assert result["budget_consumed"] == {
-        "hosts_attempted": 5,
+        # One per distinct query name: the host, the root, the three mail-policy
+        # names and the six conventional DKIM selectors.
+        "hosts_attempted": 11,
         "tool_wall_seconds": 1,
     }
     observation = result["observation"]
@@ -116,13 +118,22 @@ def test_dns_inspection_queries_only_binding_derived_names():
     assert observation["records"]["root_ds"][0]["key_tag"] == 12345
     assert observation["record_metadata"]["root_ns"]["ttl"] == 300
     assert observation["records"]["dmarc"] == ["v=DMARC1; p=reject"]
-    assert len(resolver.calls) == 13
+    assert len(resolver.calls) == 19
     assert {name for name, _query_type, _kwargs in resolver.calls} == {
         "app.example.test",
         "example.test",
         "_dmarc.app.example.test",
         "_smtp._tls.app.example.test",
         "_mta-sts.app.example.test",
+        # DKIM keys are published under a selector the sender chooses, so the
+        # conventional ones are asked for by name. Every one stays derived from
+        # the binding: the host is the frozen host and nothing else.
+        "default._domainkey.app.example.test",
+        "google._domainkey.app.example.test",
+        "selector1._domainkey.app.example.test",
+        "selector2._domainkey.app.example.test",
+        "k1._domainkey.app.example.test",
+        "mail._domainkey.app.example.test",
     }
     assert all(call[2]["search"] is False for call in resolver.calls)
 
@@ -174,3 +185,341 @@ def test_dns_adapter_marks_host_budget_as_started():
         "tool_wall_seconds": 1,
     }
     assert result.observations == ({"kind": "dns_posture"},)
+
+
+def test_dns_inspection_bounds_its_fan_out_so_records_are_not_lost_to_contention():
+    """The plan must not flood one resolver and then report its own pressure.
+
+    Firing all thirteen lookups at once made the later ones report
+    LifetimeTimeout after the full five seconds, while the same queries answer
+    in under a tenth of a second on their own. A measured scan lost TXT, CAA,
+    DNSKEY, MX and CNAME that way, so the report silently dropped SPF, CAA
+    policy and DNSSEC while spending only a third of its wall.
+    """
+    import api.capabilities.dns as dns_module
+
+    class _ConcurrencyProbe(_Resolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inflight = 0
+            self.peak = 0
+
+        async def resolve(self, name, query_type, **kwargs):
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            try:
+                await asyncio.sleep(0)
+                return await super().resolve(name, query_type, **kwargs)
+            finally:
+                self.inflight -= 1
+
+    resolver = _ConcurrencyProbe()
+    posture = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=15, resolver=resolver,
+    ))
+
+    assert resolver.peak <= dns_module._MAX_CONCURRENT_QUERIES
+    # Bounding the fan-out must not drop any planned lookup.
+    assert len(resolver.calls) == 19
+    assert not posture.get("errors")
+
+
+def test_the_action_deadline_keeps_the_answers_that_already_arrived():
+    """A deadline must end the remaining work, not the work already done.
+
+    The plan was wrapped in one deadline whose expiry replaced the whole result
+    with an empty list. A nineteen-query plan run four at a time can cross that
+    deadline mid-wave, and the run then reported no records at all while its own
+    metadata still showed a dozen completed answers.
+    """
+    class _Slow(_Resolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = 0
+
+        async def resolve(self, name, query_type, **kwargs):
+            self.started += 1
+            await asyncio.sleep(0.3)
+            return await super().resolve(name, query_type, **kwargs)
+
+    resolver = _Slow()
+    result = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=1, resolver=resolver,
+    ))
+    observation = result["observation"]
+    answered = {label for label, values in observation["records"].items() if values}
+
+    # Every query that finished inside the deadline is reported, and its values
+    # agree with the metadata it recorded. Before this, metadata showed a dozen
+    # completed answers while every record set was empty.
+    assert answered, "a crossed deadline discarded records that had already arrived"
+    for label, meta in observation["record_metadata"].items():
+        assert len(observation["records"][label]) == meta["answer_count"], label
+    # The run is honest about the part that did not finish, and states the
+    # reason the receipt will carry: the queries timed out. Nothing was cut off,
+    # so the action must not be explained as a bounded-output truncation.
+    assert result["partial"] is True
+    assert any(item.startswith("dns_inspection:Timeout") for item in observation["errors"])
+    assert result["errors"][0] == "timed_out"
+
+
+def test_a_resolver_failure_is_not_reported_as_truncated_output():
+    class _Failing(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if query_type == "CAA":
+                raise RuntimeError("NoNameservers")
+            return await super().resolve(name, query_type, **kwargs)
+
+    result = asyncio.run(inspect_dns_posture(_target(), timeout_seconds=5, resolver=_Failing()))
+    assert result["partial"] is True
+    assert result["errors"][0] == "adapter_failed"
+    assert any(item.endswith(":RuntimeError") for item in result["errors"][1:])
+
+
+class _ForwarderDroppingRareTypes(_Resolver):
+    """Docker Desktop's embedded DNS: A/MX/TXT answer at once, CAA/DNSKEY/DS time out."""
+
+    async def resolve(self, name, query_type, **kwargs):
+        if query_type in {"CAA", "DNSKEY", "DS"}:
+            raise type("LifetimeTimeout", (Exception,), {})("resolution lifetime expired")
+        return await super().resolve(name, query_type, **kwargs)
+
+
+def _public_target() -> TargetBinding:
+    return TargetBinding(
+        target_id="target-2", target_kind="web", canonical_host="www.example.org",
+        allowed_origins=("https://www.example.org",), allowed_addresses=("93.184.216.34",),
+        allowed_root_domains=("example.org",), scope_receipt_id="scope-2",
+    )
+
+
+def _doh_answers(name, query_type):
+    import dns.rdatatype
+
+    class _RRset(list):
+        def __init__(self, values, rdtype):
+            super().__init__(values)
+            self.rdtype = rdtype
+            self.ttl = 120
+
+    wanted = dns.rdatatype.from_text(query_type)
+    values = {
+        "CAA": [SimpleNamespace(flags=0, tag=b"issue", value=b"letsencrypt.org")],
+        "DNSKEY": [SimpleNamespace(flags=257, protocol=3, algorithm=13)],
+        "DS": [],
+    }.get(query_type, [])
+    return SimpleNamespace(answer=[_RRset(values, wanted)] if values else [])
+
+
+def test_a_query_the_forwarder_drops_is_recovered_over_https_for_a_public_name():
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append((name, query_type))
+        return _doh_answers(name, query_type)
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    observation = result["observation"]
+    assert result["status"] == "success" and not observation["errors"]
+    assert {qt for _name, qt in calls} == {"CAA", "DNSKEY", "DS"}
+    assert observation["records"]["host_caa"] and observation["records"]["host_dnskey"]
+    assert observation["records"]["root_ds"] == []
+    assert observation["record_metadata"]["host_caa"]["resolver"] == "doh"
+    assert set(observation["doh_fallback_queries"]) == {"host_caa", "host_dnskey", "root_ds"}
+
+
+def test_an_internal_name_never_leaves_the_network_as_a_doh_query():
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append((name, query_type))
+        return _doh_answers(name, query_type)
+
+    # app.example.test resolves to a TEST-NET address and carries a private suffix.
+    result = asyncio.run(inspect_dns_posture(
+        _target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert calls == []
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+
+
+def test_doh_permission_requires_a_public_name_and_public_addresses():
+    from api.capabilities.dns import doh_permitted
+
+    assert doh_permitted(_public_target()) is True
+    assert doh_permitted(_target()) is False
+    private_address = TargetBinding(
+        target_id="t3", target_kind="web", canonical_host="intranet.example.org",
+        allowed_origins=("https://intranet.example.org",), allowed_addresses=("10.0.0.5",),
+        allowed_root_domains=("example.org",), scope_receipt_id="scope-3",
+    )
+    assert doh_permitted(private_address) is False
+    bare = TargetBinding(
+        target_id="t4", target_kind="web", canonical_host="crapi-web",
+        allowed_origins=("http://crapi-web",), allowed_addresses=("172.18.0.14",),
+        allowed_root_domains=("crapi-web",), scope_receipt_id="scope-4",
+    )
+    assert doh_permitted(bare) is False
+
+
+def test_a_doh_failure_keeps_the_primary_timeout_as_the_error():
+    async def doh(name, query_type):
+        raise RuntimeError("upstream 502")
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+    assert any(item.startswith("host_caa:doh:RuntimeError") for item in result["errors"])
+    assert any(item == "host_caa:LifetimeTimeout" for item in result["errors"])
+
+
+def _doh_transport(builder):
+    """An httpx transport that answers every resolver URL with the wire message builder makes."""
+    import base64
+    import dns.message
+    import httpx
+
+    calls = []
+
+    def handler(request):
+        encoded = request.url.params["dns"]
+        padded = encoded + "=" * (-len(encoded) % 4)
+        query = dns.message.from_wire(base64.urlsafe_b64decode(padded))
+        calls.append(str(request.url.host))
+        message = builder(query)
+        return httpx.Response(200, content=message.to_wire(), headers={"content-type": "application/dns-message"})
+
+    return httpx.MockTransport(handler), calls
+
+
+def _run_doh(builder, name="www.example.org", qtype="CAA"):
+    from api.capabilities.dns import _doh_query
+
+    transport, calls = _doh_transport(builder)
+    try:
+        return asyncio.run(_doh_query(name, qtype, transport=transport)), calls
+    except Exception as exc:  # noqa: BLE001 - the test inspects the failure
+        return exc, calls
+
+
+def test_doh_rejects_servfail_refused_and_truncation_and_tries_the_next_resolver():
+    import dns.flags
+    import dns.message
+    import dns.rcode
+    from api.capabilities.dns import DohAnswerInvalid
+
+    for shape in ("servfail", "refused", "truncated"):
+        def build(query, shape=shape):
+            reply = dns.message.make_response(query)
+            if shape == "servfail":
+                reply.set_rcode(dns.rcode.SERVFAIL)
+            elif shape == "refused":
+                reply.set_rcode(dns.rcode.REFUSED)
+            else:
+                reply.flags |= dns.flags.TC
+            return reply
+
+        outcome, calls = _run_doh(build)
+        assert isinstance(outcome, DohAnswerInvalid), shape
+        assert len(calls) == 2, f"{shape}: every configured resolver must be tried"
+
+
+def test_doh_rejects_an_answer_for_another_owner():
+    import dns.message
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.rrset
+    from api.capabilities.dns import DohAnswerInvalid
+
+    def build(query):
+        reply = dns.message.make_response(query)
+        reply.answer.append(dns.rrset.from_text(
+            "unrelated.invalid.", 300, dns.rdataclass.IN, dns.rdatatype.CAA, '0 issue "letsencrypt.org"',
+        ))
+        return reply
+
+    outcome, _calls = _run_doh(build)
+    assert isinstance(outcome, DohAnswerInvalid) and "answer_owner_mismatch" in str(outcome)
+
+
+def test_doh_rejects_a_reply_to_a_different_question():
+    import dns.message
+    from api.capabilities.dns import DohAnswerInvalid
+
+    def build(query):
+        return dns.message.make_response(dns.message.make_query("other.example.org", "CAA"))
+
+    outcome, _calls = _run_doh(build)
+    assert isinstance(outcome, DohAnswerInvalid) and "question_mismatch" in str(outcome)
+
+
+def test_doh_accepts_a_matching_answer_and_a_real_negative_answer():
+    import dns.message
+    import dns.rcode
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.rrset
+
+    def positive(query):
+        reply = dns.message.make_response(query)
+        reply.answer.append(dns.rrset.from_text(
+            "www.example.org.", 120, dns.rdataclass.IN, dns.rdatatype.CAA, '0 issue "letsencrypt.org"',
+        ))
+        return reply
+
+    message, calls = _run_doh(positive)
+    assert len(message.answer) == 1 and calls == ["cloudflare-dns.com"]
+
+    def nxdomain(query):
+        reply = dns.message.make_response(query)
+        reply.set_rcode(dns.rcode.NXDOMAIN)
+        return reply
+
+    message, _calls = _run_doh(nxdomain)
+    assert message.answer == []
+
+
+def test_an_invalid_doh_answer_keeps_the_timeout_as_the_stated_reason():
+    from api.capabilities.dns import DohAnswerInvalid
+
+    async def doh(name, query_type):
+        raise DohAnswerInvalid("rcode:SERVFAIL")
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_ForwarderDroppingRareTypes(), doh_query=doh,
+    ))
+    assert result["partial"] is True
+    assert result["errors"][0] == "timed_out"
+    assert any(item == "host_caa:doh:DohAnswerInvalid:rcode:SERVFAIL" for item in result["errors"])
+    assert result["observation"]["records"]["host_caa"] == []
+    assert result["observation"]["doh_fallback_queries"] == []
+
+
+def test_a_stub_resolver_servfail_is_recovered_over_https_like_a_timeout():
+    """systemd-resolved on Ubuntu 24.04 answered DS and DNSKEY with SERVFAIL (NoNameservers);
+    the fallback only covered timeouts, so a fresh Linux install reported DNS posture partial
+    on every scan and never asked a resolver that could answer."""
+    class _Servfail(_Resolver):
+        async def resolve(self, name, query_type, **kwargs):
+            if query_type in {"DS", "DNSKEY"}:
+                raise type("NoNameservers", (Exception,), {})("All nameservers failed to answer the query")
+            return await super().resolve(name, query_type, **kwargs)
+
+    calls = []
+
+    async def doh(name, query_type):
+        calls.append(query_type)
+        return _doh_answers(name, query_type)
+
+    result = asyncio.run(inspect_dns_posture(
+        _public_target(), timeout_seconds=5, resolver=_Servfail(), doh_query=doh,
+    ))
+    assert result["status"] == "success" and not result["observation"]["errors"]
+    assert sorted(calls) == ["DNSKEY", "DS"]
+    assert result["observation"]["records"]["host_dnskey"]
+    assert set(result["observation"]["doh_fallback_queries"]) == {"root_ds", "host_dnskey"}

@@ -16,7 +16,8 @@ def test_safety_profiles_keep_coverage_independent_and_fail_closed():
     assert catalog["authenticated_active"]["credentials_allowed"] is True
     assert "explicit_user_confirmed_shell" in catalog["authenticated_active"]["allowed_action_classes"]
     assert "explicit_user_confirmed_shell" not in catalog["safe_remote"]["allowed_action_classes"]
-    assert catalog["lab_invasive"]["available"] is False
+    assert set(catalog) == {"observe_only", "safe_remote", "authenticated_active"}
+    assert all(item["available"] is True for item in catalog.values())
     assert catalog["observe_only"]["allowed_action_classes"] == ("readonly",)
 
     observe = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["observe_only"])
@@ -43,18 +44,41 @@ def test_safety_request_rejects_misleading_or_unavailable_modes():
     }).name == "safe_remote"
 
 
-def test_health_degradation_halts_future_actions_after_a_healthy_checkpoint():
+def test_lost_resolution_halts_future_actions_after_a_healthy_checkpoint():
     governor = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["safe_remote"])
-    governor.record_health({"stage": "post_inventory", "status": "healthy"})
-    governor.record_health({"stage": "final", "status": "degraded"})
+    governor.record_health({"stage": "post_inventory", "status": "healthy", "resolution_succeeded": True})
+    governor.record_health({"stage": "final", "status": "degraded", "resolution_succeeded": False})
     assert governor.halted is True
     assert governor.receipt()["halt_reason"] == "device health degraded at final"
     with pytest.raises(PermissionError, match="device health degraded"):
         governor.authorize("another_probe", "readonly")
 
 
-def test_health_degradation_halts_after_indeterminate_baseline_when_ports_were_tested():
+def test_lost_resolution_halts_after_indeterminate_baseline_when_ports_were_tested():
     governor = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["safe_remote"])
     governor.record_health({"stage": "baseline", "status": "indeterminate", "attempted_tcp_ports": []})
-    governor.record_health({"stage": "post_inventory", "status": "degraded", "attempted_tcp_ports": [443]})
+    governor.record_health({"stage": "post_inventory", "status": "degraded", "resolution_succeeded": False, "attempted_tcp_ports": [443]})
     assert governor.halted is True
+
+
+def test_a_closed_port_does_not_halt_a_reachable_device():
+    # A closed/unresponsive TCP port is normal and is never proof a service is
+    # absent, so an authorized Hunt must keep running while the device still
+    # resolves. Only loss of resolution (the device itself becoming
+    # unreachable) halts.
+    governor = device_safety.DeviceSafetyGovernor(device_safety.SAFETY_PROFILES["safe_remote"])
+    governor.record_health({"stage": "post_inventory", "status": "healthy", "resolution_succeeded": True})
+    governor.record_health({
+        "stage": "probe", "status": "degraded", "resolution_succeeded": True,
+        "attempted_tcp_ports": [8443], "responsive_tcp_ports": [],
+    })
+    assert governor.halted is False
+    assert governor.authorize("next_probe", "readonly")["allowed"] is True
+
+
+def test_removed_lab_profile_is_refused_plainly_and_grants_nothing():
+    for value in ("lab_invasive", "lab-invasive"):
+        with pytest.raises(ValueError, match="was removed.*use authenticated_active"):
+            device_safety.validate_safety_request({"safety_profile": value, "confirm_lab_invasive": True})
+    for profile in device_safety.SAFETY_PROFILES.values():
+        assert not {"persistent_state", "resource_intensive", "destructive"} & set(profile.allowed_action_classes)

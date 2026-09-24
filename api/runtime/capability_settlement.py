@@ -64,7 +64,8 @@ def terminalize_capability_reservation(
     owner = (
         {"scan_id": running.owner_id}
         if running.owner_kind == "scan"
-        else {"hunt_id": running.owner_id}
+        else {"hunt_id": running.owner_id} if running.owner_kind == "hunt"
+        else {"validation_id": running.owner_id}
     )
     terminal_at = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
     receipt = CapabilityReceipt(

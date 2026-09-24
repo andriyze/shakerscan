@@ -39,6 +39,12 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 9. Preserve trustworthy partial output on timeout. Cancellation is distinct and stops execution.
 10. Reuse core concepts instead of adding parallel registries, ledgers, scope paths, candidate
     models, proof paths, or orchestration engines.
+11. Treat durable target knowledge as shared product state. Scan, Hunt, device assessment, service
+    intelligence, and imported request collections should enrich the same target understanding
+    instead of forcing each workflow to rediscover it.
+12. Optimize for investigation efficacy and operator flow. A capability is valuable when it helps
+    reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
+    or refusal paths that do not improve those outcomes.
 
 ## Environment and startup
 
@@ -48,7 +54,7 @@ workers. Check the launcher before assuming those URLs:
 
 ```bash
 ./scanner.sh status
-curl -sS http://localhost:8080/health
+shakerscan api GET /health
 ```
 
 If stopped, use `./scanner.sh start`. Use `./scanner.sh start --remote` for a VPS reached over
@@ -62,8 +68,19 @@ shakerscan agent codex       # or claude, or opencode
 # equivalent: cd ~/.shakerscan && codex
 ```
 
-If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. Never invent removed wrapper
-commands; inspect `shakerscan --help` or `./scanner.sh help`.
+**Connected remote instance.** `shakerscan agent …` can also run against a remote, authenticating
+ShakerScan instance (ShakerScan Enterprise) after `shakerscan connect`; it then sets
+`SHAKERSCAN_MANAGED_INSTANCE=1`. There is no local engine in that session: `./scanner.sh start`,
+`stop`, `scale` and Docker do not apply. Everything in this guide that talks to the API still works
+through `shakerscan api`, `shakerscan scan`, `shakerscan hunt` and the MCP tools, under the
+connected person's identity and role; a route the instance keeps closed answers with a refusal
+that names what is missing, so report it and choose another path rather than retrying.
+
+If the launcher is not yet on `PATH`, use `~/.local/bin/shakerscan`. The pipx/Homebrew client is
+also named `shakerscan` and supports public checks plus configured-instance API, Hunt, MCP, and
+connection workflows. The full local engine launcher additionally owns Docker lifecycle commands.
+Do not infer capabilities from an old client/launcher split; inspect `shakerscan --help`, the live
+server contracts, or `./scanner.sh help` before declaring an operation unavailable.
 
 ## Default agent behavior
 
@@ -79,11 +96,13 @@ commands; inspect `shakerscan --help` or `./scanner.sh help`.
 - Use current server contracts instead of client-side copies of families or ceilings.
 - Preserve unrelated worktree changes and use non-destructive repository operations.
 
-### Submission terminal condition
+### Submission-only requests and end-to-end investigations
 
-After submitting any Scan, device scan, AI Gate run, Model Intake scan, discovery run, or queued ASM
-action, report its ID and browser-facing UI link, then stop. Do **not** poll or wait unless the user
-explicitly asks to monitor or check later. Jobs may take minutes or hours.
+For a submission-only Scan, device, AI Gate, Model Intake, discovery, or ASM request, report the ID
+and UI link, then stop. An explicit end-to-end Hunt is different: use bounded status checks for its
+queued child actions, collect evidence, and continue toward the objective without requesting a new
+command at every queue boundary. Respect cancellation and deadlines; checkpoint incomplete work if
+the planner session cannot continue. Never claim that queued work has completed.
 
 For batches, report `queued_count`, `failed_count`, and per-target errors. Never claim the requested
 count was queued; `status: partial` means only some submissions succeeded.
@@ -92,8 +111,8 @@ count was queued; `status: partial` means only some submissions succeeded.
 
 - Active testing requires persisted policy permission and a target-bound approval receipt. The
   receipt is normally the target's standing authorization, recorded once and resolved
-  automatically at submission; credential use keeps an explicit credential-tier receipt and the
-  dangerous tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
+  automatically at submission and covers explicitly selected target credentials. The dangerous
+  tier keeps bounded per-action approvals. A UI checkbox or planner statement cannot
   replace server checks.
 - State-changing HTTP, direct-origin access, OOB callbacks, network discovery, and device-fragility
   spend are independent permissions and budget dimensions.
@@ -128,12 +147,14 @@ Known endpoints seed discovery without expanding scope. Preserve body-spec synta
 collections are immutable selections supplied by opaque ID.
 
 ```bash
-curl -sS -X POST "$API_BASE/scans" -H 'Content-Type: application/json' \
-  -d '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
+shakerscan api POST /scans '{"target":"https://example.com","budget_profile":"balanced","policy":{"active_testing":false}}'
 ```
 
 For active work, first establish explicit authorization (authorize the target once, or provide a
-bounded approval receipt) and the policy. Never silently upgrade a passive request.
+bounded approval receipt) and the policy. Never silently upgrade a passive request. A request with
+`active_testing: true` and no `preset` resolves to `standard_active` (recon, passive templates, XSS,
+SQLi); pass `"preset": "passive"` to allow active testing without running an active family. Read
+`resolved_families` on the result, not the permission.
 
 ### Build freshness and repeatability
 
@@ -217,9 +238,45 @@ does not investigate in the background unless an external planner actively drive
 Start from `GET /hunts/contract`. Invoke only capabilities returned in the run manifest through
 `POST /hunts/{id}/capabilities/{name}`. Never supply argv or use a shell escape.
 
+One authorization, then obey. A target's standing authorization is the operator's confirmation;
+do not re-ask for it per Hunt. Ask for `active_testing`, `allow_state_changing_http`,
+`network_discovery`, `allow_oob_interactions`, `allow_identity_headers` or `allow_direct_origin`
+directly: a sub-authority enables `active_testing` on its own, and a budget dimension whose
+authority is off resolves to 0 rather than refusing the request. Read `policy_adjustments` on the
+start response: it names every authority the server implied and every dimension it zeroed.
+Unauthorized privileged work is rejected, never secretly converted to a passive success.
+
+Certificate defects are assessment evidence, not authorization vetoes. Target requests, login,
+browser-login QA and imported replay support HTTP and untrusted HTTPS on nonstandard ports.
+Do not ask the operator again or demand a repaired certificate after testing with selected
+credentials has been authorized. Keep control-plane TLS verification separate and unchanged.
+Web, API and network are views of the same target row and reuse its credentials and collections;
+different target UUIDs and device identities remain distinct.
+
+### Authorized service reuse
+
+An approved active Hunt with selected credentials may use those identities on HTTP or HTTPS
+services at other ports of the same frozen asset, including services with invalid certificates.
+Reuse the existing standing authorization; do not add a per-port, per-scheme, or per-call prompt.
+The login service is provenance and the refresh destination, not a permanent replay-port lock.
+At execution, revalidate the saved Hunt authority and asset binding before cross-service session
+decryption. A changed or revoked authorization is different from an unobserved service port.
+
+Use the scheme, host, port, path and principal actually captured when building evidence and
+comparing accounts. Equivalent default-port spellings are one service, but different services
+must not be mistaken for the same access-control baseline. A failed identity comparison is
+inconclusive, not a reason to abandon other authorized Hunt work. Service reuse does not grant
+another asset's authority, waive traffic budgets, or turn a successful request into proof.
+
+`service.nse_check` has a deliberate anonymous-discovery exception: its HTTP analyses may follow
+same-frozen-asset redirects across ports/schemes under the existing active/network authorization.
+Every hop is pinned and metered; this bridge never loads credentials or changes the Hunt's selected
+origins. The exception does not apply to credentialed HTTP/session replay or to another asset.
+
 ### Progressive methodologies
 
-The 31 web methodologies live under `skills/web/`; `skills/web/README.md` is the compact catalogue.
+Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
+the library. Native protocol messages remain unavailable unless a live executor supports them.
 Do not preload them all or spend the context window on an index dump.
 
 1. Start with no methodology.
@@ -229,9 +286,14 @@ Do not preload them all or spend the context window on an index dump.
 5. Bind only when used and record usage/completion/deferral.
 
 These are descriptive context controls. They never grant, remove, narrow, widen, or resize scope,
-capabilities, policy, approval, or budget. Binding validates that all required capabilities already
-survived policy filtering; missing requirements reject it. Do not claim a passive methodology
-fences an otherwise broader run.
+capabilities, policy, approval, or budget. Binding keeps supported and useful partial methodologies available even
+when this Hunt cannot execute every technique. Each bound skill reports `withheld_capabilities`
+for required capabilities outside the saved Hunt capability set and `missing_capabilities` for
+declared executor gaps, including prerequisites. Skip those techniques, continue compatible work,
+and report the omissions as
+coverage gaps, never findings or clean results. An empty list is not proof that a technique ran;
+credentials, scope, approvals, budgets, and runtime checks still apply to each action. Do not claim
+a passive methodology fences an otherwise broader run.
 
 ### Context, accounting, and completion
 
@@ -241,8 +303,13 @@ existing evidence. Artifact/JavaScript inspection uses bounded capabilities, not
 Count attempted, admitted/executed, successful, rejected, and indeterminate actions separately. A
 missing/malformed result is not success. Report settled actual usage separately from ceilings.
 
-Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Cancellation
-is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
+Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Before
+finalizing, an operator may explicitly extend the same unfinished Hunt through
+`/hunts/{id}/budget-amendments`: read the current revision, set new total limits, and reuse the same
+idempotency key on retries. Never increase limits automatically. `resume` allows the planner to
+continue only when the reported exhausted dimension has headroom; it does not execute traffic,
+clear device pauses, change permissions, or reset usage. The admission snapshot remains historical.
+Cancellation is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
 decision record and debrief, never hidden chain-of-thought. Requests-only export stays separate.
 
 ## Product boundaries
@@ -257,8 +324,13 @@ devices do not belong in web target metrics.
 
 Devices use separate inventory/workers. Confirm ownership/authorization. All-TCP examination is
 possible, so silence is inconclusive and receives no score. Imported Postman/HAR/OpenAPI never
-executes scripts, external references, or arbitrary destinations; requests stay pinned to observed
-origins. Untrusted HTTPS may be observed, but secrets require explicit risk authorization.
+executes scripts, external references, or arbitrary destinations. In an authorized active Hunt,
+select an HTTP(S) service on the same canonical host at any valid port using `origin`; the target
+ID and frozen addresses never change. The operator-selected collection or credential workflow
+may name that same-host service directly. Selected credentials work over HTTP and untrusted
+HTTPS; certificate defects are evidence, not an extra authorization prompt. Session refresh
+uses the saved login service, not the inventory record's default port. Do not bypass managed
+credentials or redirect credentials to another asset.
 
 SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
 uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
@@ -366,12 +438,12 @@ Set `API_BASE` and `UI_BASE` from `./scanner.sh status`. Use OpenAPI for bodies 
 ./scanner.sh restart
 ./scanner.sh scan https://example.com --budget-profile balanced
 
-curl -sS "$API_BASE/openapi.json"
-curl -sS "$API_BASE/scan/contracts"
-curl -sS "$API_BASE/hunts/contract"
-curl -sS "$API_BASE/workers"
-curl -sS "$API_BASE/scans?limit=10"
-curl -sS "$API_BASE/findings?status=active&limit=50"
+shakerscan api GET /openapi.json
+shakerscan api GET /scan/contracts
+shakerscan api GET /hunts/contract
+shakerscan api GET /workers
+shakerscan api GET "/scans?limit=10"
+shakerscan api GET "/findings?status=active&limit=50"
 ```
 
 The normal scan list hides shards, internal ASM rows, and Model Intake evidence scans. Include them

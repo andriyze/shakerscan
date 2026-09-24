@@ -219,6 +219,50 @@ The canonical graph uses `web.probe`, `web.crawl`, `web.content_discover`, `subd
 family controls additional crawl/content breadth, and network/subdomain actions require their
 separate policy permission. Output is normalized into one content-addressed endpoint manifest.
 
+**Declared surface** (`web.spec_ingest`): besides the conventional OpenAPI/Swagger locations, the
+same action fetches `robots.txt` and `llms.txt` from the origin root. `Disallow`/`Allow` rules and
+Markdown links become `discovered_route` observations, origin-bound (another host's link is never
+declared), with a wildcard rule contributing only the literal prefix it is anchored on and
+`Disallow: /` contributing nothing. A path written in prose keeps its query string, since observed
+parameters are what candidate generation is built from. A 200 that is really the application's
+single-page shell is refused as `hint_document_is_markup` rather than mined. A declared path is a
+claim, never a confirmed route: it enters the endpoint manifest and is probed like any other.
+
+**Measured absence** (`web.content_discover`): a few high-entropy paths that cannot exist are probed
+inside the same exact request reservation as the wordlist, and their responses are the negative
+control. A hit whose response is an origin-only rewrite identical to at least two independent control
+paths (same status, request path/query/fragment carried through unchanged — a fact the producer records
+before redaction, because redaction is not injective) is dropped and counted as
+`indistinguishable_from_absent:N`. Anything the observations cannot distinguish from a real route is
+retained as uncertain and reported as `unverified_redirect_observations:N`; a run that carried no
+control claims nothing.
+
+**Family presets and the active default.** `policy.preset` selects the family set: `passive`
+(recon, reviewed passive templates), `standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`). A submission that allows active testing and
+names no preset resolves to `standard_active`; one that does not allow it resolves to `passive`.
+Permission and work are reported separately: the scan page's Testing tile names the active
+families that ran, or warns that active testing was allowed but no active family was selected.
+
+**DNS posture over a limited forwarder.** `dns.inspect` asks the system resolver first. When a
+query times out and the bound host is a public name on public addresses, the same query is retried
+over DNS-over-HTTPS (`SHAKERSCAN_DNS_DOH_RESOLVERS`, comma-separated `https://` URLs, default
+Cloudflare then Google; empty disables it). Set it in the project `.env`: both Compose files pass it
+to the api, worker and agent-tool-worker services, and the broker worker file passes it to its
+worker, with `${VAR-default}` so an explicit blank stays blank. Internal names and private addresses
+never leave the network as a resolver query. An HTTP 200 is not a DNS answer: a reply is accepted
+only when its rcode is NOERROR or NXDOMAIN, it is not truncated, its question is the one asked, and
+every answer record belongs to the asked name or a CNAME target the answer introduces; anything else
+is refused, the next resolver is tried, and a run with no valid answer keeps the primary timeout as
+its stated reason. Recovered answers are marked `resolver: doh` in the record metadata and listed
+under `doh_fallback_queries`.
+
+**Discovery reservations scale with the profile.** Each producer keeps the share of the ceiling it
+always took, but the cap that share may reach now rises with the granted budget instead of staying at
+the constant sized for the smallest profile; the tools derive their rate from the reservation, so a
+larger grant buys a longer look, not a louder one. `dns.inspect` bounds its fan-out and asks the six
+conventional DKIM selectors alongside SPF/DMARC/CAA/DNSKEY/MTA-STS/TLS-RPT; absence from those names is
+not proof that the domain does not sign mail.
+
 The compatibility `scanner_tools/` directory supplies migrated adapter implementations and richer
 observations behind those registered capabilities. Its module inventory does not imply that every
 module is enabled in every V2 plan. Available discovery/recon implementations include:
@@ -617,8 +661,8 @@ capability-labeled sensor extension rather than an implied Docker-worker capabil
 [`connected-device-security.md`](connected-device-security.md).
 
 Device coverage depth and action safety are independent. `observe_only`, `safe_remote`, and
-`authenticated_active` are available; `lab_invasive` remains declared but fails closed until its
-dedicated runner is ready. Device reports carry `device-safety/v1` receipts plus a
+`authenticated_active` are the executable profiles. The never-implemented `lab_invasive` profile was
+removed; a request naming it is rejected with a pointer to `authenticated_active`. Device reports carry `device-safety/v1` receipts plus a
 stable `device-evidence/v1` node/edge/observation graph. A device-target `POST /hunts` run lets the
 current coding agent inspect device state, inspect redacted user-bound request collections, compare scans, recall prior hypotheses, query effective policy, use
 size-capped SHA-256-pinned offline advisory candidates and protocol playbooks, queue bounded deterministic scans, and query
@@ -675,7 +719,7 @@ be backed by deterministic, cryptographic, parser-backed, protocol-backed, or re
 Findings carry proof quality explicitly (see [AI proof and evidence states](#ai-proof-and-evidence-states)
 below); AI is never the sole authority for verified status or severity promotion. Operator workflows
 are in [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md), and future hardening belongs only in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+the maintained architecture and evaluation documents.
 
 ### AI capability status quick read
 
@@ -713,8 +757,7 @@ Today a finding exposes a three-state proof level — `verified` (deterministic 
 deterministic proof blocks any AI downgrade. The **target** is one taxonomy unified across DAST and AI
 (`deterministic_verified`, `cryptographically_verified`, `claimed_present`, `ai_judged_likely`,
 `inconclusive`, `blocked`, `false_positive`) so that *claimed* metadata and *AI-judged* results can
-never render as *verified*. Future proof-state hardening is tracked in
-[`proposed-next-steps.md`](proposed-next-steps.md).
+never render as *verified*. Future proof-state changes belong in the proof contracts and focused architecture/decision records.
 
 ### 11.1 AI Gate
 
@@ -872,7 +915,7 @@ Evidence-backed findings can be saved via `POST /session/{id}/findings` (the com
 `ai_session`; the user-facing source label is **Interactive**). This is the engine behind the
 `/ai-security-session` compatibility skill. These findings remain unverified until deterministic
 proof establishes impact; see
-[`docs/INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md).
+the live `/session*` OpenAPI contract.
 
 ### 11.4 AI-assisted analysis of DAST findings
 
@@ -925,7 +968,19 @@ report reserved traffic, exact settled traffic when the scanner exposes it, and 
 traffic otherwise. Scanner subprocesses run on the worker plane, which independently rebuilds fixed
 argv and revalidates the target host; the API never spawns them. The external coding agent owns its
 model context: ShakerScan cannot meter an external coding agent's tokens, and makes no token-budget
-claim for that planner. It meters every executable capability. A final debrief persists evidence-backed claims only as durable,
+claim for that planner. It meters every executable capability.
+
+`service.nse_check` exposes Nmap's scripting engine inside Hunt only for the reviewed
+`ssl-enum-ciphers`, `http-security-headers`, `http-methods`, and `http-trace` scripts. It requires
+network-discovery authority and a standing active authorization, accepts at most four bound TCP
+ports and three script IDs per call, and never accepts script arguments, categories, paths, or raw
+Nmap flags. HTTP script traffic is charged at a conservative fixed allowance because NSE does not
+report a reliable request count. Results contain bounded signals and a digest of the script output,
+without raw target content; they are observations and cannot verify a finding. Broader CVE scripts
+need separate review of their request and device-fragility behavior before being added to the
+server-owned allowlist.
+
+A final debrief persists evidence-backed claims only as durable,
 non-authoritative investigation candidates outside the findings table. Candidate lifecycle is linked
 to the server verification record and typed evidence. A finding is materialized only after a
 supported family reaches **Verified** through server-run deterministic proof. Legacy unverified
@@ -994,6 +1049,19 @@ Scanner findings driven by a hunt are included in `deep_hunt` and excluded from 
 does not present two competing sources. `model_intake` and the AI sources also filter separately
 from `dast` (R8).
 Findings support filtering, sorting, bulk status triage from the list selection dock (`POST /findings/bulk`), previewed cleanup, manual creation, and per-finding retest.
+
+**Findings freshness is separate from status.** Status answers whether someone triaged a finding;
+`first_seen_at` / `last_seen_at` answer when a scan actually observed it, and a scan that does not
+observe a finding never advances `last_seen_at`. The Findings page opens on **Current** (observed
+within the last 14 days), says how many older findings that leaves out, and offers **Not seen
+recently** and **All**; the card shows when the finding was last and first seen, whether it
+`returned` after being resolved (`resurfaced_count`), and the latest retest verdict. "Not seen
+recently" is deliberately not "fixed": absence from a later scan may only mean that scan never
+reached the route. Web findings are never auto-resolved on non-observation — only connected-device
+findings are, and only after a run that proved complete coverage — and a `false_positive` retest
+verdict does not change status unless `auto_fp_on_retest` is enabled, so a human stays in the loop.
+The API exposes the same partition through `seen_within_days` and its complement
+`not_seen_within_days`, so paging and totals are computed server-side.
 
 **Evidence objects**: finding evidence is indexed by hash, storage URI, retention class, scan/finding
 links, and redaction profile. Large evidence can live in local content-addressed storage or an opt-in
@@ -1084,7 +1152,7 @@ Base URL `http://localhost:8080`. Most structured POST/PATCH operations accept J
 control and discovery operations use query parameters or no body. FastAPI also serves the live schema
 at `/openapi.json`. The curated groups below explain product areas; §17 is the exhaustive generated
 method/path catalog. (See `api/api.py` for handlers. The agent-facing
-how-to with request bodies is in [`CLAUDE.md`](../CLAUDE.md) / [`AGENTS.md`](../AGENTS.md).)
+how-to with request bodies is in [`AGENTS.md`](../AGENTS.md).)
 
 **Health & settings**: `GET /` · `GET /health` · `GET|PUT /settings/ai` · `POST /settings/ai/test` ·
 `GET|PUT /settings/scan-execution` · `GET|PUT /settings/automation`
@@ -1223,7 +1291,7 @@ See [`docs/mcp.md`](mcp.md).
 `GET /scans/{id}/deployment-decision` · `GET /scans/{id}/ai-redteam-report` ·
 `GET|DELETE /scans/{id}/http-transactions`
 
-**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}`
+**Findings**: `GET /findings` · `GET /findings/{id}` · `PATCH /findings/{id}` · `DELETE /findings/{id}` (list filters include `severity`, `status`, `source_type`, `target_id`, `scan_id`, `root_domain`, `search`, `seen_within_days`, `not_seen_within_days`, `first_seen_within_days`, `resolved_within_days`, `verification_verdict`, `verified_only`)
 · `POST /findings/bulk` · `POST /findings/cleanup` · `POST /findings/manual` ·
 `POST /findings/{id}/retest` · `POST /findings/retest` · `GET /retests/{id}` ·
 `GET /retests/finding/{id}`
@@ -1523,25 +1591,25 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 416 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 348 | `api/**/*.py` |
+| Public REST operations | 429 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 358 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
-| Canonical scanner wrapper commands | 31 | `scanner.sh` |
+| Canonical scanner wrapper commands | 32 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 382 | Python sources + Compose manifests |
+| Runtime environment keys | 386 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 121 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
-| Canonical slash commands | 13 | `.claude/commands/` |
+| Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
 | Specialized subagents | 3 | `.claude/agents/` |
-| Durable tables | 100 | `db/init.sql` + migrations |
+| Durable tables | 101 | `db/init.sql` + migrations |
 
 ### Public REST Operations
 
@@ -1636,6 +1704,14 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/arsenal/tools` | `arsenal_tools` |
 | `GET` | `/artifacts/storage/health` | `get_artifact_storage_health` |
 | `GET` | `/asm/check-families` | `asm_check_families` |
+| `GET` | `/authenticated-scan-profiles` | `list_profiles` |
+| `POST` | `/authenticated-scan-profiles` | `write_profile` |
+| `GET` | `/authenticated-scan-profiles/contract` | `contract` |
+| `GET` | `/authenticated-scan-profiles/validations/{request_id}` | `get_validation` |
+| `POST` | `/authenticated-scan-profiles/validations/{request_id}/cancel` | `cancel_validation` |
+| `GET` | `/authenticated-scan-profiles/{profile_id}` | `get_profile` |
+| `GET` | `/authenticated-scan-profiles/{profile_id}/history` | `get_profile_history` |
+| `POST` | `/authenticated-scan-profiles/{profile_id}/validate` | `validate_profile` |
 | `GET` | `/credential-profiles` | `list_credential_profiles` |
 | `POST` | `/credential-profiles` | `create_credential_profile` |
 | `GET` | `/credential-profiles/capabilities` | `credential_capability_catalog` |
@@ -1691,6 +1767,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/exposure/changes` | `exposure_changes` |
 | `GET` | `/exposure/graph` | `exposure_graph` |
 | `GET` | `/exposure/nodes` | `exposure_nodes` |
+| `GET` | `/exposure/services` | `exposure_services` |
 | `GET` | `/finding-exceptions` | `list_finding_exceptions` |
 | `POST` | `/finding-exceptions` | `create_finding_exception` |
 | `POST` | `/finding-exceptions/lifecycle/sweep` | `finding_exception_lifecycle_sweep` |
@@ -1753,6 +1830,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/approve` | `approve_authorization_investigation` |
 | `GET` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction` | `authorization_reproduction` |
 | `POST` | `/hunts/{hunt_id}/authorization-investigations/{proposal_id}/skip` | `skip_authorization_investigation` |
+| `GET` | `/hunts/{hunt_id}/budget-amendments` | `get_hunt_budget_amendments` |
+| `POST` | `/hunts/{hunt_id}/budget-amendments` | `amend_hunt_budget` |
 | `POST` | `/hunts/{hunt_id}/cancel` | `cancel_hunt` |
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
 | `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
@@ -1844,6 +1923,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
 | `POST` | `/request-collections` | `create_request_collection` |
+| `DELETE` | `/request-collections/{collection_id}` | `deactivate_request_collection` |
 | `GET` | `/request-collections/{collection_id}` | `get_request_collection` |
 | `POST` | `/request-collections/{collection_id}/bindings` | `upsert_request_collection_binding` |
 | `POST` | `/request-collections/{collection_id}/environments` | `upsert_request_collection_environment` |
@@ -1879,6 +1959,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/scans/{scan_id}/ai-redteam-report` | `get_ai_redteam_report` |
 | `GET` | `/scans/{scan_id}/artifacts` | `list_scan_artifacts` |
 | `GET` | `/scans/{scan_id}/artifacts/{artifact_id}` | `download_scan_artifact` |
+| `GET` | `/scans/{scan_id}/authentication-assurance` | `get_scan_assurance` |
 | `POST` | `/scans/{scan_id}/cancel` | `cancel_scan` |
 | `GET` | `/scans/{scan_id}/capabilities` | `get_scan_capabilities` |
 | `GET` | `/scans/{scan_id}/coverage` | `get_scan_coverage` |
@@ -2261,7 +2342,7 @@ opaque profile, and collection-reference fields.
 
 | Surface | Names |
 |---|---|
-| Canonical `scanner.sh` commands | `agent`, `ai`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
+| Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `backup`, `build`, `collections`, `credentials`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop` |
 | Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
@@ -2355,8 +2436,8 @@ Only key names and declaring sources are documented; secret values are never rea
 | `DATABASE_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/model_intake_signer_service.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py`, `scripts/model_intake_workflow_smoke.py`, `scripts/upgrade_schema_smoke.py` |
 | `DEFAULT_ASM_ENABLED` | `api/api.py` |
 | `DEFAULT_RESEARCH_PLANNER_MODE` | `api/api.py` |
-| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
-| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_PATH` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
+| `DEVICE_INTEL_DB_SHA256` | `api/device_agent.py`, `api/devices/router.py`, `api/exposure/service_intel.py`, `api/worker.py` |
 | `DEVICE_ONLY_WORKER` | `api/worker.py` |
 | `DEVICE_POSTURE_ENABLED` | `api/devices/router.py`, `api/worker_handlers/device.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `DEVICE_QUEUE_NAME` | `api/api.py`, `api/devices/router.py`, `api/operations/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2463,7 +2544,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_RUNNER_QUEUE_LIMIT` | `api/model_intake_runner_service.py` |
 | `MODEL_INTAKE_RUNNER_STAGE_DIR` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_RUNNER_URL` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `MODEL_INTAKE_SANDBOX_GID` | `docker-compose.release.yml`, `docker-compose.yml`, `scanner/scanner_tools/model_intake_acquisition.py` |
 | `MODEL_INTAKE_SANDBOX_IMAGE` | `docker-compose.yml` |
 | `MODEL_INTAKE_SANDBOX_NETWORK_MODE` | `scanner/scanner_tools/model_intake_sandbox.py` |
 | `MODEL_INTAKE_SANDBOX_NO_NEW_PRIVILEGES` | `scanner/scanner_tools/model_intake_sandbox.py` |
@@ -2558,10 +2639,13 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_API_TOKEN` | `scripts/scan_cli.py`, `scripts/v2_cli.py` |
+| `SHAKERSCAN_API_TOKEN_FILE` | `scripts/scan_cli.py` |
 | `SHAKERSCAN_API_UID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
-| `SHAKERSCAN_BIND_HOST` | `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_AUTHENTICATED_ASSURANCE` | `api/authenticated_assurance/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
 | `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/fleet_routes/router.py` |
 | `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/fleet_routes/router.py` |
@@ -2584,6 +2668,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DISABLE_DISCOVERY_RECOVERY` | `scanner/manifests.py` |
+| `SHAKERSCAN_DNS_DOH_RESOLVERS` | `api/capabilities/dns.py`, `docker-compose.broker-worker.yml`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DOCKER_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_ENABLE_ADAPTIVE_THROTTLE` | `scanner/scanner.py` |
 | `SHAKERSCAN_ENDPOINT_MANIFEST_FILE` | `scanner/manifests.py` |
@@ -2608,7 +2693,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
-| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py` |
+| `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
@@ -2635,7 +2720,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_TRIVY_REFRESH_ON_START` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRIVY_REFRESH_TIMEOUT_SECONDS` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT` | `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_UI_PORT` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_UI_PORT` | `api/api.py`, `api/public_api_contract.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_WORKER_BUILD_REPORT_INTERVAL_SECONDS` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_FAIL_CLOSED` | `api/worker.py` |
 | `SHAKERSCAN_WORKER_IMAGE_DIGEST` | `scanner/scanner_tools/model_intake_scanners.py` |
@@ -2717,6 +2802,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/ai-security-session` | Interactive Testing | Drive an authorized Interactive Testing browser workflow with the compatibility-named `ai-security-session` skill. | `.claude/commands/ai-security-session.md` |
 | `/content-discovery` | Content Discovery | Build a high-signal route and file discovery plan for a target using ShakerScan evidence, JS outputs, and framework clues. | `.claude/commands/content-discovery.md` |
 | `/deep-hunt` | Hunt compatibility command | Run an authorized, AI-driven Hunt against the supplied target. | `.claude/commands/deep-hunt.md` |
+| `/delete-target` | Archive or Delete a Target | Archive a target (hide it, pause its schedules, keep its history) or permanently delete it with | `.claude/commands/delete-target.md` |
 | `/findings` | List Security Findings | Show security findings from scans. | `.claude/commands/findings.md` |
 | `/js-analyze` | JS Analyze | Run JavaScript and frontend attack-surface analysis for a target, completed scan, or supplied JS bundle set. | `.claude/commands/js-analyze.md` |
 | `/research` | Hunt compatibility command | Use the `research-agent` skill. | `.claude/commands/research.md` |
@@ -2790,6 +2876,7 @@ Scan feature or a second orchestration engine.
 | `http_archive_stats` | `db/init.sql` |
 | `http_transactions` | `db/init.sql` |
 | `hunt_actions` | `db/init.sql` |
+| `hunt_budget_amendments` | `db/init.sql` |
 | `hunt_cancellable_jobs` | `api/retest_contract.py` |
 | `hunt_runs` | `db/init.sql` |
 | `hunt_skill_events` | `db/init.sql` |
@@ -2854,16 +2941,16 @@ Scan feature or a second orchestration engine.
 
 | Topic | Document |
 |-------|----------|
-| Agent-facing API how-to (request bodies, examples) | [`CLAUDE.md`](../CLAUDE.md) · [`AGENTS.md`](../AGENTS.md) |
+| Agent-facing API how-to (request bodies, examples) | [`AGENTS.md`](../AGENTS.md) |
 | Getting started, install, product tour | [`README.md`](../README.md) |
 | AI-native V2 architecture and trust boundary | [`ai-native-architecture-rfc.md`](ai-native-architecture-rfc.md) |
 | Scan execution/action/revision schemas | [`execution.py`](../api/scan/execution.py) · [`action_plan.py`](../api/scan/action_plan.py) · [`continuation.py`](../api/scan/continuation.py) |
 | Historical pre-V2 mode policy | [`archive/smart-scan-policy.md`](https://github.com/andriyze/shakerscan/blob/ae5a4e231ff2f8f24eeb0abaded1df121cdcf7db/docs/archive/smart-scan-policy.md) |
 | OWASP coverage and intentional gaps | [`owasp-coverage-matrix.md`](owasp-coverage-matrix.md) |
-| Future product roadmap | [`proposed-next-steps.md`](proposed-next-steps.md) |
-| Release readiness and publishing checklist | [`release-readiness.md`](release-readiness.md) |
+| Product direction | [`product-model.md`](product-model.md) · architecture documents in this directory |
+| Release and publishing process | [`release-process.md`](release-process.md) |
 | AI test workflows + Honey contract | [`AI_TEST_WORKFLOWS.md`](AI_TEST_WORKFLOWS.md) |
-| Interactive session compatibility API | [`INTERACTIVE_SESSIONS_GUIDE.md`](INTERACTIVE_SESSIONS_GUIDE.md) |
+| Interactive session compatibility API | Live `/session*` OpenAPI contract |
 | DAST execution and Continuous ASM architecture | [`dast-asm-architecture.md`](dast-asm-architecture.md) |
 | Connected-device architecture, policies, and safety boundary | [`connected-device-security.md`](connected-device-security.md) |
 | Multi-node fleet architecture (RFC) | [`multi-node-architecture.md`](multi-node-architecture.md) |

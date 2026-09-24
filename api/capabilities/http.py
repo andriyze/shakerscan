@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import json
 import sys
+import ssl
 import time
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
@@ -126,6 +127,8 @@ def _origin(value: Any) -> str | None:
         return None
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     netloc = parsed.hostname.lower()
+    if ":" in netloc:
+        netloc = f"[{netloc}]"
     if port is not None and port != default_port:
         netloc = f"{netloc}:{port}"
     return f"{parsed.scheme.lower()}://{netloc}"
@@ -144,6 +147,41 @@ def _origin_key(value: Any) -> tuple[str, str, int] | None:
         parsed.hostname.lower().rstrip("."),
         port or (443 if parsed.scheme.lower() == "https" else 80),
     )
+
+
+def resolve_hunt_http_origin(target: TargetBinding, origin: Any, policy: Mapping[str, Any]) -> TargetBinding:
+    """Select another service on the same frozen host under existing network authority.
+
+    No new host/address is admitted, and a response redirect cannot expand scope this way.
+    Admission and the worker both validate this before credential resolution or traffic.
+    """
+    if origin is None:
+        return target
+    text = str(origin).strip()
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("HTTP service origin is invalid") from exc
+    if (any(c.isspace() or ord(c) < 32 for c in text) or "\\" in text
+            or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or port == 0
+            or parsed.hostname.lower().rstrip(".") != target.canonical_host):
+        raise ValueError("HTTP service origin must be on the Hunt's exact target host")
+    candidate = _origin(text)
+    if _origin_key(candidate) in {_origin_key(value) for value in target.allowed_origins}:
+        return target
+    # A different port or scheme on the SAME already-authorized host is another
+    # service on the target the operator authorized, not a new destination: the
+    # host is pinned above and cannot change here, and a response redirect still
+    # cannot widen scope this way. Reaching it needs active testing (which the
+    # target's standing authorization grants); network discovery is sufficient
+    # but no longer required, so an authorized Hunt is not refused a service that
+    # simply listens on another port.
+    if policy.get("active_testing") is not True:
+        raise ValueError("another service port on this host requires the Hunt's active-testing authority")
+    return replace(target, allowed_origins=(*target.allowed_origins, candidate))
 
 
 def _emit_transaction(
@@ -277,6 +315,24 @@ def _bound_redirect_url(
     ))
 
 
+def request_error_class(exc: BaseException) -> str:
+    """Name a failed request by its cause, not just the exception the client wrapped it in.
+
+    httpx reports a certificate the client will not trust as a plain ``ConnectError``. Left
+    like that, a self-signed target failed the whole HTTP baseline as an unclassified adapter
+    error, while every tool that skips verification carried on. The class is a constant
+    token with no target data in it.
+    """
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            break
+        if isinstance(seen, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(seen):
+            return f"tls_certificate_untrusted:{type(exc).__name__}"
+        seen = seen.__cause__ or seen.__context__
+    return f"request_error:{type(exc).__name__}"
+
+
 async def execute_bound_http_request(
     base_url: str,
     args: Mapping[str, Any],
@@ -381,6 +437,7 @@ async def execute_bound_http_request(
     request_view = {
         "method": method,
         "origin": request_origin,
+        "tls_verification": "not_enforced" if request_origin.startswith("https://") else "not_applicable",
         "path": path,
         "query_keys": sorted(query or {}),
         "as_principal": str(principal_slot or "anonymous")[:80],
@@ -408,6 +465,7 @@ async def execute_bound_http_request(
     hops_followed = 0
     connection_attempts = 0
     connected_addresses: list[str] = []
+    last_connect_error: Exception | None = None
     response = None
     body = b""
     final_url = url
@@ -417,6 +475,8 @@ async def execute_bound_http_request(
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             trust_env=False,
+            # Targets may deliberately have defective certificates. Assess TLS separately.
+            verify=False,
         ) as client:
             current_url = url
             current_method = method
@@ -453,18 +513,21 @@ async def execute_bound_http_request(
                     connection_attempts += 1
                     try:
                         response = await client.send(request, stream=True)
-                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                         # Retry only failures that happen before a connection.
                         # A post-connect failure may follow target traffic and
                         # must never duplicate a state-changing request.
+                        last_connect_error = exc
                         continue
                     pinned_address = candidate_address
                     connected_addresses.append(candidate_address)
                     break
                 if response is None:
+                    # Keep the real cause on the chain: a certificate the client will not
+                    # trust is a different finding from a port nobody answers on.
                     raise httpx.ConnectError(
                         "all frozen target addresses failed before connect"
-                    )
+                    ) from last_connect_error
                 request_view["pinned_address"] = pinned_address
                 try:
                     (
@@ -544,6 +607,18 @@ async def execute_bound_http_request(
                         "stopped": "cross_origin",
                     })
                     break
+                if _origin_key(next_url) != _origin_key(current_url) and (
+                    trusted_headers or cookies or (allow_identity_headers and headers)
+                    or getattr(client, "cookies", None)
+                ):
+                    # Target scope may include several services on one host. It
+                    # never authorizes disclosing this request's identity to a
+                    # different scheme or port, including cookies just received.
+                    redirect_chain.append({
+                        "status": response.status_code, "location": location[:500],
+                        "followed": False, "stopped": "credential_destination",
+                    })
+                    break
                 redirect_chain.append({
                     "status": response.status_code,
                     "location": location[:500],
@@ -558,6 +633,7 @@ async def execute_bound_http_request(
                 current_url = next_url
                 hops_followed += 1
     except (httpx.InvalidURL, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        error_class = request_error_class(exc)
         # A call that never got a response is still a call the scanner made, and it is
         # often the interesting one -- a refused connection to a confirmed origin is how a
         # control proves it works. Archiving only completed responses would leave the
@@ -576,14 +652,14 @@ async def execute_bound_http_request(
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "started_at": request_started_at,
                     "principal_slot": str(principal_slot or "anonymous"),
-                    "error": f"request_error:{type(exc).__name__}",
+                    "error": error_class,
                     "fidelity": "attempted_no_response",
                 })
             except Exception:  # pragma: no cover - recording must never mask the error
                 pass
         return {
             "ok": False,
-            "error": f"request_error:{type(exc).__name__}",
+            "error": error_class,
             "request": request_view,
         }
     if response is None:

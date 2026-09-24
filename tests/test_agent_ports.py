@@ -422,7 +422,6 @@ def test_run_tool_rejects_flag_injection():
 @pytest.mark.parametrize(
     ("tool_name", "header_flag"),
     [
-        ("httpx", "-H"),
         ("nuclei", "-H"),
         ("katana", "-H"),
         ("ffuf", "-H"),
@@ -467,6 +466,24 @@ def test_sqlmap_worker_private_credentials_use_one_bounded_header_argument():
         "Authorization: Bearer worker-private\n"
         "Cookie: session=worker-private"
     )
+
+
+def test_httpx_credentials_require_a_private_descriptor_and_never_enter_argv():
+    headers = {"Authorization": "Bearer worker-private", "Cookie": "session=cookie-private"}
+    with pytest.raises(at.AgentToolError, match="sealed worker configuration"):
+        at.build_scanner_argv("httpx", "https://app.example.test/", {}, trusted_headers=headers)
+    for descriptor in (None, True, 0, 2, "/tmp/config"):
+        with pytest.raises(at.AgentToolError, match="sealed worker configuration"):
+            at.build_enforced_scanner_plan("httpx", "https://app.example.test/", {},
+                reserved_budget={"http_requests": 1, "tool_wall_seconds": 10}, trusted_headers=headers,
+                runtime_paths={"httpx_config_fd": descriptor})
+    plan = at.build_enforced_scanner_plan("httpx", "https://app.example.test/", {},
+        reserved_budget={"http_requests": 1, "tool_wall_seconds": 10}, trusted_headers=headers,
+        runtime_paths={"httpx_config_fd": 7})
+    assert "worker-private" not in str(plan.argv) and "cookie-private" not in str(plan.argv)
+    assert plan.argv[-2:] == ("-config", "/proc/self/fd/7")
+    assert json.loads(at.httpx_credential_config_bytes(headers)) == {"header": [
+        "Authorization: Bearer worker-private", "Cookie: session=cookie-private"]}
 
 
 @pytest.mark.parametrize(
@@ -767,8 +784,9 @@ def test_hunt_dns_authorization_is_frozen_in_session_state():
     seed = definition_source("_agent_seed_state")
     http_request = definition_source("_agent_tool_http_request")
     assert (
-        'state["authorized_target_addresses"] = await '
-        '_resolve_agent_target_addresses(target_url)'
+        'state["authorized_target_addresses"] = await _resolve_agent_target_addresses(\n'
+        '        target_url, environment=target_environment,\n'
+        '    )'
     ) in seed
     assert "await _resolve_agent_target_addresses" not in http_request
     assert (
@@ -778,8 +796,13 @@ def test_hunt_dns_authorization_is_frozen_in_session_state():
 
 
 def test_scanner_request_settlement_distinguishes_exact_from_observed():
+    # nuclei's own counters are progress, not wire evidence (see
+    # test_nuclei_progress_counter_is_not_wire_evidence); a generic tool's explicit counter is exact.
     assert at.scanner_request_settlement(
         "nuclei", json.dumps({"stats": {"total-requests": 17}})
+    )["mode"] == "unavailable"
+    assert at.scanner_request_settlement(
+        "generic-tool", json.dumps({"stats": {"total-requests": 17}})
     ) == {
         "mode": "exact", "actual": 17, "observed_minimum": 17,
         "source": "scanner_counter",
@@ -880,10 +903,9 @@ def test_nuclei_focused_default_and_progress_counter_contract():
             json.dumps({"duration": "0:00:10", "requests": 149}),
         ]),
     )
-    assert settlement == {
-        "mode": "exact", "actual": 149, "observed_minimum": 149,
-        "source": "scanner_counter",
-    }
+    # The progress counter is parsed (both int and v3.11 string forms) but is not wire evidence.
+    assert settlement["mode"] == "unavailable" and settlement["actual"] is None
+    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
     string_counter = at.scanner_request_settlement(
         "nuclei",
         json.dumps({"duration": "0:00:10", "requests": "149", "templates": "1183"}),
@@ -1372,3 +1394,97 @@ def test_tool_output_records_stay_bounded():
     )
     parsed = at.parse_scanner_output("katana", flood)
     assert parsed["record_count"] <= at.MAX_TOOL_RECORDS
+
+
+def test_nuclei_progress_counter_is_not_wire_evidence():
+    """Measured on the deployed 2.3.6 candidate through the real pinned proxy at a counting
+    target: one 120-request/45-second attempt at `-rate-limit 2` sent 33 HTTP requests over 5
+    connections while nuclei's stats reported `requests: 277` (`total: 2729`, `percent: 10`).
+    The counter is progress through the request plan, about eight times the wire. Taken as
+    exact it made every batch attempt fail the hard-ceiling contract regardless of pacing --
+    thirteen of thirteen on the rerun -- and charged each its full hold.
+    """
+    settlement = at.scanner_request_settlement(
+        "nuclei",
+        json.dumps({"duration": "0:00:40", "errors": "2", "hosts": "1", "matched": "0",
+                    "percent": "10", "requests": "277", "rps": "6", "templates": "1183",
+                    "total": "2729"}),
+    )
+    assert settlement["mode"] != "exact"
+    assert settlement["actual"] is None
+    # The progress counter must not masquerade as a lower bound either; nothing about the
+    # wire is known from it.
+    assert settlement["observed_minimum"] == 0
+    assert settlement["source"] == "progress_counter_is_not_wire_evidence"
+
+
+def _feed(counter, *chunks):
+    return sum(counter.feed(c) for c in chunks)
+
+
+def _post(body: bytes, extra: bytes = b"") -> bytes:
+    return b"POST /submit HTTP/1.1\r\nHost: t\r\n" + extra + b"Content-Length: %d\r\n\r\n" % len(body) + body
+
+
+def test_request_lookalikes_inside_a_body_or_header_are_not_requests():
+    """Audit counterexample (2026-09-18): the first counter matched a request-shaped string
+    anywhere in the stream, so one POST whose body carried 120 such strings counted as 121
+    requests, the settlement called that a lower bound, and the hard-ceiling contract failed a
+    120-request hold on one real message -- the original failure class for a new reason. nuclei's
+    smuggling templates send exactly such payloads. A counter that can exceed the real message
+    count is not a lower bound; requests are counted at HTTP/1 message boundaries only."""
+    from pinned_socks_proxy import RequestCounter
+    assert _feed(RequestCounter(), _post(b"GET /embedded-not-a-request HTTP/1.1\r\n")) == 1
+    assert _feed(RequestCounter(), _post(b"".join(b"GET /embedded-%d HTTP/1.1\r\n" % i for i in range(120)))) == 1
+    assert _feed(RequestCounter(), b"GET /x HTTP/1.1\r\nHost: t\r\nX-Debug: GET /inner HTTP/1.1\r\n\r\n") == 1
+
+
+def test_keep_alive_requests_are_counted_across_bodies_and_chunk_boundaries():
+    """Under keep-alive the next request follows the previous body with no newline between them,
+    and chunks split anywhere; each real message counts exactly once."""
+    from pinned_socks_proxy import RequestCounter
+    stream = (b"GET /a HTTP/1.1\r\nHost: t\r\n\r\n"
+              + _post(b"ok")
+              + b"GET /c HTTP/1.1\r\nHost: t\r\n\r\n")
+    for cut in (1, 7, 29, 40, len(stream) - 3):
+        c = RequestCounter()
+        assert _feed(c, stream[:cut], stream[cut:]) == 3, cut
+    # chunked transfer encoding: the body is framed by chunk sizes, then a zero chunk
+    chunked = (b"POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+               b"5\r\nGET /\r\n" b"c\r\n HTTP/1.1\r\nx\r\n" b"0\r\n\r\n"
+               b"GET /after HTTP/1.1\r\n\r\n")
+    assert _feed(RequestCounter(), chunked) == 2
+
+
+def test_opaque_or_malformed_traffic_stops_counting_instead_of_guessing():
+    """TLS and anything that is not well-formed HTTP/1 are unmeasurable: the counter keeps what it
+    has already counted (still a true lower bound) and never adds to it."""
+    from pinned_socks_proxy import RequestCounter
+    c = RequestCounter()
+    assert c.feed(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03") == 0 and c.measurable is False
+    c = RequestCounter()
+    assert c.feed(b"GET /a HTTP/1.1\r\nHost: t\r\n\r\n") == 1
+    assert c.feed(b"NOT AN HTTP MESSAGE\r\n\r\nGET /b HTTP/1.1\r\n\r\n") == 0 and c.measurable is False
+
+
+
+def test_worker_prefers_proxy_wire_evidence_over_an_unavailable_settlement():
+    """What the pinned proxy relayed is wire evidence; a tool's progress counter is not. When the
+    scanner settlement is not exact, the proxy's request-line count becomes the lower bound the
+    hard-ceiling contract checks -- so 33 real requests pass a 120 hold and 312 fail it, instead
+    of every attempt failing on a counter that was eight times the wire."""
+    w = at
+
+    class Proxy:
+        http_requests_observed = 33
+    unavailable = {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": "progress_counter_is_not_wire_evidence"}
+    settled = w.wire_evidence_settlement(unavailable, Proxy())
+    assert settled == {"mode": "observed_lower_bound", "actual": None, "observed_minimum": 33, "source": "proxy_request_lines"}
+    # An exact settlement from a tool's own complete wire log is kept as is.
+    exact = {"mode": "exact", "actual": 17, "observed_minimum": 17, "source": "tool_wire_log"}
+    assert w.wire_evidence_settlement(exact, Proxy()) == exact
+    # Without a proxy, or with nothing relayed, the settlement is unchanged.
+    assert w.wire_evidence_settlement(unavailable, None) == unavailable
+    class Quiet:
+        http_requests_observed = 0
+    assert w.wire_evidence_settlement(unavailable, Quiet()) == unavailable

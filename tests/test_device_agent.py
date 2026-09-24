@@ -280,7 +280,11 @@ def test_device_http_request_server_side_budgets_are_enforced_in_the_executor():
     assert "reserve_device_http_attempt" in api_source
     assert "_device_request_pinned_http(" in api_source
     assert "_device_confirmed_web_origins" in api_source
-    assert "origin_port does not match a confirmed-open web origin" in api_source
+    # A port the operator names is reached directly: a device locator cannot carry a port, so
+    # demanding a discovery scan first made a known service unreachable and unsayable. The
+    # origin is still built from the bound device's own locator, never from planner input.
+    assert "_device_operator_named_web_origin" in api_source
+    assert "port directly with origin_port" in api_source
     state = device_agent.seed_state(objective="probe web", safety_profile="safe_remote", max_turns=4)
     assert state["device_http_requests_used"] == 0
 

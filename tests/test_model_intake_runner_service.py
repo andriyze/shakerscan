@@ -109,3 +109,37 @@ def test_runner_queue_adds_mandatory_bounded_smoke_inputs(tmp_path, monkeypatch)
     assert "" in stored
     assert any("東京" in item for item in stored)
     assert any(len(item) > 4000 for item in stored)
+
+
+def test_job_outcome_line_names_the_receipt_verdict_and_the_failing_phase():
+    completed_fail = {
+        "state": "completed",
+        "result": {"payload": {"status": "FAIL", "observations": {"errors": [
+            {"phase": "deserialize_convert", "type": "RuntimeError",
+             "message": "Some tensors share memory; safetensors refuses tied tensors"},
+        ]}}},
+    }
+    line = runner_service._job_outcome_line(completed_fail)
+    assert line.startswith("receipt status=FAIL; phase deserialize_convert RuntimeError: Some tensors share memory")
+
+    assert runner_service._job_outcome_line({"state": "completed", "result": {"payload": {"status": "PASS"}}}) == "receipt status=PASS"
+    failed = {"state": "failed", "error": {"code": "RuntimeError", "message": "insufficient_runner_storage: x"}}
+    assert runner_service._job_outcome_line(failed) == "error RuntimeError: insufficient_runner_storage: x"
+
+
+def test_journal_logging_installs_one_root_handler_at_info(monkeypatch):
+    import logging
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    root.handlers.clear()
+    root.setLevel(logging.NOTSET)
+    try:
+        runner_service._ensure_journal_logging()
+        assert len(root.handlers) == 1
+        assert root.level == logging.INFO
+        runner_service._ensure_journal_logging()
+        assert len(root.handlers) == 1
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)

@@ -50,13 +50,38 @@ class CliError(RuntimeError):
         return result
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never replay an authenticated request against another origin.
+
+    The https:// guard above only covers the URL the operator supplied. Following a
+    redirect with urllib's default handler re-sends the Authorization header to
+    whatever Location names -- another host, or plain HTTP. Refuse instead, and let
+    the caller surface the 3xx.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 class ApiClient:
-    def __init__(self, base_url: str, *, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 60.0, api_token: str | None = None) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.timeout = timeout
         parsed = urllib.parse.urlsplit(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise CliError("the configured ShakerScan API URL is invalid")
+        # A bearer token (an Enterprise gateway service token) authenticates a remote API; it is
+        # only ever sent over HTTPS and never printed.
+        if api_token and parsed.scheme != "https":
+            raise CliError("SHAKERSCAN_API_TOKEN requires an https:// API URL")
+        self.api_token = api_token or None
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer " + self.api_token} if self.api_token else {}
 
     def request(
         self,
@@ -67,7 +92,7 @@ class ApiClient:
         idempotency_key: str | None = None,
     ) -> Any:
         body = None
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **self._auth_headers()}
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if len(body) > MAX_REQUEST_BYTES:
@@ -79,9 +104,16 @@ class ApiClient:
             f"{self.base_url}{path}", data=body, headers=headers, method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _opener().open(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_JSON_BYTES + 1)
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise CliError(
+                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                    "request is never followed to another location",
+                    error_type="api_error",
+                    http_status=exc.code,
+                ) from exc
             raw = exc.read(MAX_JSON_BYTES + 1)
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"
@@ -125,14 +157,22 @@ class ApiClient:
 
     def download(self, path: str, *, max_bytes: int = MAX_REQUEST_BYTES) -> tuple[bytes, str]:
         request = urllib.request.Request(
-            f"{self.base_url}{path}", headers={"Accept": "application/json, application/zip"},
+            f"{self.base_url}{path}",
+            headers={"Accept": "application/json, application/zip", **self._auth_headers()},
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _opener().open(request, timeout=self.timeout) as response:
                 raw = response.read(max_bytes + 1)
                 content_type = str(response.headers.get("Content-Type") or "")
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise CliError(
+                    f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                    "request is never followed to another location",
+                    error_type="api_error",
+                    http_status=exc.code,
+                ) from exc
             raw = exc.read(MAX_JSON_BYTES + 1)
             message, detail = _safe_api_error(
                 raw, fallback=f"API returned HTTP {exc.code}"
@@ -1028,7 +1068,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        client = ApiClient(args.api_url)
+        token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip() or None
+        if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
+            raise CliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
+        client = ApiClient(args.api_url, api_token=token)
         if args.product == "hunt":
             result = _run_hunt(args, client)
         elif args.product == "credentials":

@@ -35,6 +35,7 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
+from .worker_accounting import worker_replay_settlement_matches
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -44,10 +45,13 @@ from .cancellation import (
 )
 from .settlement import blocked_actual_charges as _hunt_blocked_actual
 from .device_policy import DeviceHuntPolicyState
+from .device_traffic import reserve_device_traffic, require_device_admission, settle_device_traffic
+from .service_binding import collection_uses_service_origin
+from .target_binding import web_hunt_target
 from .capability_reservations import hunt_capability_action_digest, hunt_capability_lease_seconds, terminalize_hunt_capability
 from .capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from .action_service import HUNT_ACTION_SERVICE, HuntActionInputError, HuntActionNotFound
-from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory
+from .action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, HuntActionResult, RegisteredHuntAdapterFactory, worker_result_errors
 try:
     from action_scope import _decode_json_value
     from ai_gate.targets.widget_playwright import logger
@@ -56,10 +60,14 @@ try:
     from capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from capabilities.network import CapabilityInputError, network_capability_adapter
     from capabilities.tls import inspect_tls_origin
+    from capabilities.http import resolve_hunt_http_origin
     from http_experiment import MAX_REDIRECT_HOPS
     from runtime.budget_reservations import DurableBudgetReservation
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
-    from runtime.credential_refs import CredentialReferenceError, select_hunt_principal_reference
+    from runtime.credential_refs import (
+        CredentialReferenceError, select_hunt_principal_reference,
+        select_hunt_session_principal_reference,
+    )
     from runtime.models import ScanPolicy, TargetBinding
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
     from runtime.reservation_store import PostgresBudgetReservationStore
@@ -74,10 +82,14 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.inline import ControlPlaneExecutionAdapter, DeviceExecutionAdapter, TlsInspectionExecutionAdapter
     from ..capabilities.network import CapabilityInputError, network_capability_adapter
     from ..capabilities.tls import inspect_tls_origin
+    from ..capabilities.http import resolve_hunt_http_origin
     from ..http_experiment import MAX_REDIRECT_HOPS
     from ..runtime.budget_reservations import DurableBudgetReservation
     from ..runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
-    from ..runtime.credential_refs import CredentialReferenceError, select_hunt_principal_reference
+    from ..runtime.credential_refs import (
+        CredentialReferenceError, select_hunt_principal_reference,
+        select_hunt_session_principal_reference,
+    )
     from ..runtime.models import ScanPolicy, TargetBinding
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
     from ..runtime.reservation_store import PostgresBudgetReservationStore
@@ -217,7 +229,7 @@ class HuntQueryRequest(BaseModel):
         # Opt-in grouped frontier: the same inventory collapsed into route templates, so the
         # first page is not dominated by repeated samples of one handler. "endpoints" is
         # unchanged for callers that want raw samples.
-        "endpoint_groups",
+        "endpoint_groups", "service_intelligence",
     ] = "summary"
     filter: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=100, ge=1, le=500)
@@ -1283,6 +1295,20 @@ def _hunt_nonexecuting_actual(
     return actual
 
 
+def _worker_replay_actual(
+    requested: Mapping[str, int], result: Mapping[str, Any],
+) -> dict[str, int]:
+    """Report only replay charges the worker says it settled in its ledger."""
+    measured = result.get("budget_consumed")
+    if not isinstance(measured, Mapping):
+        return {}
+    return {
+        dimension: min(int(limit), max(0, int(measured[dimension])))
+        for dimension, limit in requested.items()
+        if dimension in measured
+    }
+
+
 async def _execute_hunt_capability_lifecycle(
     hunt_id: str,
     name: str,
@@ -1469,6 +1495,13 @@ async def _execute_hunt_capability_lifecycle(
                 }
                 else "anonymous"
             )
+            if name == "auth.session.establish":
+                try:
+                    select_hunt_session_principal_reference(
+                        context, principal_slot,
+                    )
+                except CredentialReferenceError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             if name == "collections.replay_safe":
                 principal = _hunt_managed_principal_reference(
                     _hunt_json(run["context_pack"], {}), principal_slot,
@@ -1476,7 +1509,15 @@ async def _execute_hunt_capability_lifecycle(
                 principal_slot = (
                     str(principal["principal_slot"]) if principal is not None else "anonymous"
                 )
-            if str(run["target_kind"]) == "device" and not name.startswith("collections."):
+            # Route by the capability's own placement, not by the target kind. A device Hunt
+            # now carries the web capabilities too, and sending every one of them down the
+            # device adapter meant `http.request` on a device answered "Native device Hunt
+            # adapter state is unavailable" instead of reaching the service.
+            if (
+                str(run["target_kind"]) == "device"
+                and not name.startswith("collections.")
+                and str(spec.hunt_executor or "").startswith("device")
+            ):
                 device_adapter_name = str(spec.adapter).split(".")[-1]
                 validated_device_input = dict(request.input)
             uses_session = bool(
@@ -1508,12 +1549,36 @@ async def _execute_hunt_capability_lifecycle(
             uses_direct_origin = bool(
                 str(request.input.get("via_address") or "").strip()
             )
+            # Selecting another service port on the same authorized host is an
+            # active act and is re-metered/re-approved per call, for every
+            # HTTP-capable capability that accepts an origin (http.request and
+            # the scanner capabilities), not only http.request.
+            uses_service_origin = False
+            if request.input.get("origin") is not None and (
+                name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
+                or is_scanner or is_browser
+            ):
+                original, _ = web_hunt_target(run, context, policy)
+                try:
+                    selected = resolve_hunt_http_origin(original, request.input["origin"], policy)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                uses_service_origin = selected.allowed_origins != original.allowed_origins
+            elif name == "collections.replay_safe":
+                # Replay takes no planner origin; it follows the operator's collection
+                # binding, which may name another port on the same host. Anonymous replay
+                # to such a port is the same active act as http.request with an origin.
+                original, _ = web_hunt_target(run, context, policy)
+                uses_service_origin = collection_uses_service_origin(
+                    original, context, request.input.get("collection_id"),
+                )
             requires_call_approval = (
                 spec.requires_active_approval
                 or principal_slot != "anonymous"
                 or uses_session
                 or forges_identity
                 or uses_direct_origin
+                or uses_service_origin
             )
             if requires_call_approval:
                 authority_context = _hunt_json(run["context_pack"], {})
@@ -1524,7 +1589,7 @@ async def _execute_hunt_capability_lifecycle(
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier=(
                         "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity or uses_direct_origin
+                        else "active" if forges_identity or uses_direct_origin or uses_service_origin
                         else str(spec.risk_tier)
                     ), always_require_receipt=True,
                     require_target_binding=True,
@@ -1558,21 +1623,11 @@ async def _execute_hunt_capability_lifecycle(
             if is_network:
                 authority_context = _hunt_json(run["context_pack"], {})
                 target_context = authority_context.get("target") if isinstance(authority_context.get("target"), Mapping) else {}
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(target_context.get("root_domain") or parsed_target.hostname or "").lower().rstrip(".")
                 try:
-                    network_target = TargetBinding(
-                        target_id=str(run["target_id"]), target_kind=str(run["target_kind"]),
-                        canonical_host=parsed_target.hostname,
-                        allowed_origins=tuple(target_context.get("origins") or ()),
-                        allowed_addresses=tuple(authority_context.get("authorized_target_addresses") or ()),
-                        allowed_root_domains=(root_domain,) if root_domain else (),
-                        environment=str(target_context.get("environment") or "unknown"),
-                        scope_receipt_id=validated_scope_receipt_id,
-                    )
+                    network_target, target_url = web_hunt_target(run, authority_context, policy)
                     network_policy = ScanPolicy(
                         active_testing=bool(policy.get("active_testing")),
+                        allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
                         network_discovery=bool(policy.get("network_discovery")),
                         subdomain_discovery=name == "subdomains.discover",
                         scope_receipt_id=validated_scope_receipt_id,
@@ -1594,26 +1649,8 @@ async def _execute_hunt_capability_lifecycle(
                     if isinstance(authority_context.get("target"), Mapping)
                     else {}
                 )
-                target_url = str(target_context.get("url") or "")
-                parsed_target = urllib.parse.urlsplit(target_url)
-                root_domain = str(
-                    target_context.get("root_domain")
-                    or parsed_target.hostname
-                    or ""
-                ).lower().rstrip(".")
                 try:
-                    browser_target = TargetBinding(
-                        target_id=str(run["target_id"]),
-                        target_kind=str(run["target_kind"]),
-                        canonical_host=parsed_target.hostname,
-                        allowed_origins=tuple(target_context.get("origins") or ()),
-                        allowed_addresses=tuple(
-                            authority_context.get("authorized_target_addresses") or ()
-                        ),
-                        allowed_root_domains=(root_domain,) if root_domain else (),
-                        environment=str(target_context.get("environment") or "unknown"),
-                        scope_receipt_id=validated_scope_receipt_id,
-                    )
+                    browser_target, target_url = web_hunt_target(run, authority_context, policy)
                     prepared_browser = prepare_hunt_browser_action(name,
                         target=browser_target,
                         base_url=target_url,
@@ -1708,36 +1745,17 @@ async def _execute_hunt_capability_lifecycle(
                             None,
                         )
                         charges[transport_dimension] = 1
-                    if fragility_cost:
-                        legacy_daily = int(await conn.fetchval(
-                            """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
-                               WHERE device_target_id=$1 AND outcome <> 'blocked'
-                                 AND created_at >= date_trunc('day', NOW())""",
-                            run["device_target_id"],
-                        ) or 0)
-                        hunt_daily = int(await conn.fetchval(
-                            """SELECT COALESCE(SUM(COALESCE((budget_used_json->>'device_fragility_points')::int,0)),0)
-                               FROM hunt_runs WHERE device_target_id=$1
-                                 AND created_at >= date_trunc('day', NOW())""",
-                            run["device_target_id"],
-                        ) or 0)
-                        if legacy_daily + hunt_daily + fragility_cost > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
-                            raise HTTPException(status_code=409, detail="Daily fragility budget for this device is exhausted")
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
-            if is_device_adapter:
-                authority_context = _hunt_json(run["context_pack"], {})
+            reserve_device_traffic(run, spec, charges)
+            if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
                 try:
-                    device_policy_state = DeviceHuntPolicyState.from_mapping(
-                        authority_context.get("device_policy_state") or {}
-                    )
-                    device_policy_state.require_admission(
-                        request_attempts=1 if is_device_http else 0,
-                        scan_attempts=1 if is_device_queue else 0,
-                        fragility_cost=int(
-                            charges.get("device_fragility_points") or 0
-                        ),
+                    await require_device_admission(
+                        conn, run, fragility=int(charges.get("device_fragility_points") or 0),
+                        requests=(0 if is_device_queue or is_device_control or is_device_ssh_proposal
+                                  else int(charges.get("device_fragility_points") or 1)),
+                        scans=1 if is_device_queue else 0,
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1984,32 +2002,7 @@ async def _execute_hunt_capability_lifecycle(
     context = _hunt_json(run["context_pack"], {})
 
     def inline_web_target_binding() -> TargetBinding:
-        target_context = (
-            dict(context.get("target") or {})
-            if isinstance(context.get("target"), Mapping)
-            else {}
-        )
-        target_url = str(target_context.get("url") or "")
-        parsed_target = urllib.parse.urlsplit(target_url)
-        root_domain = str(
-            target_context.get("root_domain")
-            or parsed_target.hostname
-            or ""
-        ).lower().rstrip(".")
-        return TargetBinding(
-            target_id=str(run["target_id"]),
-            target_kind=str(run["target_kind"]),
-            canonical_host=parsed_target.hostname,
-            allowed_origins=tuple(target_context.get("origins") or ()),
-            allowed_addresses=tuple(
-                str(item)
-                for item in context.get("authorized_target_addresses") or ()
-                if str(item)
-            ),
-            allowed_root_domains=(root_domain,) if root_domain else (),
-            environment=str(target_context.get("environment") or "unknown"),
-            scope_receipt_id=validated_scope_receipt_id,
-        )
+        return web_hunt_target(run, context, policy)[0]
 
     def inline_device_target_binding() -> TargetBinding:
         target_context = (
@@ -2244,8 +2237,9 @@ async def _execute_hunt_capability_lifecycle(
                 action_id=action_id,
                 action_digest=durable_action_digest,
             )
-        elif str(run["target_kind"]) == "device":
-            assert device_adapter_name is not None and validated_device_input is not None
+        elif device_adapter_name is not None and validated_device_input is not None:
+            # Chosen above by the capability's placement, so a web capability in a device Hunt
+            # takes the ordinary path below rather than asserting its way into this one.
             device_state = device_adapter_state
             if not isinstance(device_state, dict):
                 raise HTTPException(
@@ -2382,7 +2376,22 @@ async def _execute_hunt_capability_lifecycle(
                 action_digest=durable_action_digest,
             )
         elif name == "tls.inspect":
-            tls_target = inline_web_target_binding()
+            # A device Hunt records a bare locator, not a "url": resolve the
+            # origin the same way the HTTP binding does so this does not raise
+            # KeyError, and bind as the actual target kind (device/network are
+            # allowed by the adapter, not only web/api).
+            tls_target, tls_origin = web_hunt_target(run, context, policy)
+            # An explicit HTTPS service origin on the same authorized host lets
+            # tls.inspect examine a service on any port (e.g. https://host:8443)
+            # instead of only the target's stored origin.
+            if request.input.get("origin") is not None:
+                try:
+                    tls_target = resolve_hunt_http_origin(
+                        tls_target, request.input["origin"], policy,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                tls_origin = str(request.input["origin"])
             tls_budget = (
                 durable_reservation.record.requested
                 if durable_reservation is not None
@@ -2391,7 +2400,7 @@ async def _execute_hunt_capability_lifecycle(
             tls_adapter = TlsInspectionExecutionAdapter(
                 specification=spec,
                 operation=lambda: inspect_tls_origin(
-                    str(context["target"]["url"]),
+                    tls_origin,
                     target=tls_target,
                     timeout_seconds=int(
                         tls_budget.get("tool_wall_seconds") or 1
@@ -2541,6 +2550,10 @@ async def _execute_hunt_capability_lifecycle(
             for dimension, amount in measured.items():
                 if dimension in charges:
                     actual_charges[dimension] = min(int(charges[dimension]), max(0, int(amount)))
+            if worker_managed_budget:
+                actual_charges = _worker_replay_actual(
+                    charges, receipt_payload if isinstance(receipt_payload, Mapping) else {},
+                )
             if capability_execution is not None:
                 actual_charges = dict(capability_execution.actual_budget)
             elapsed_wall = max(0, math.ceil(time.perf_counter() - execution_started))
@@ -2564,7 +2577,7 @@ async def _execute_hunt_capability_lifecycle(
                 ):
                     if dimension in charges:
                         actual_charges[dimension] = int(charges[dimension])
-            if status == "blocked":
+            if status == "blocked" and not worker_managed_budget:
                 actual_charges = _hunt_blocked_actual(
                     charges,
                     actual_charges,
@@ -2611,7 +2624,7 @@ async def _execute_hunt_capability_lifecycle(
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), 1 + followed,
                 )
-            elif name == "collections.replay_safe" and isinstance(receipt_payload, dict):
+            elif name == "collections.replay_safe" and not worker_managed_budget and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
@@ -2763,6 +2776,8 @@ async def _execute_hunt_capability_lifecycle(
                     current_ledger = {
                         key: int(current_used.get(key) or 0) for key in limits
                     }
+                    if not is_device_adapter:
+                        await settle_device_traffic(conn, locked, charges, actual_charges, status=status)
                     prospective_ledger = reconcile_budget_snapshot(
                         current_ledger,
                         latest_reservation.record.requested,
@@ -2932,6 +2947,33 @@ async def _execute_hunt_capability_lifecycle(
                         raise RuntimeError(
                             "Hunt capability action changed before settlement"
                         )
+            elif (
+                worker_managed_budget
+                and isinstance(receipt_payload, Mapping)
+                and receipt_payload.get("durable_budget_settled") is True
+                and receipt_payload.get("receipt_id")
+            ):
+                if durable_action_digest is None:
+                    raise RuntimeError("Replay action digest disappeared after dispatch")
+                async with conn.transaction():
+                    stored = await durable_store.load(
+                        conn, str(receipt_payload.get("reservation_id") or ""),
+                        for_update=True,
+                    )
+                    action = await conn.fetchrow(
+                        """SELECT status, receipt_id, result_summary FROM hunt_actions
+                           WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
+                        action_id, run["id"],
+                    )
+                    if not worker_replay_settlement_matches(
+                        receipt_payload, stored, dict(action) if action else None,
+                        action_digest=durable_action_digest,
+                    ):
+                        raise RuntimeError(
+                            "Replay capability settlement is not internally consistent"
+                        )
+                # The worker has already persisted the exact action outcome and
+                # receipt atomically with its reservation. Do not replace them.
             elif worker_durable_budget:
                 if (
                     isinstance(receipt_payload, dict)
@@ -3091,11 +3133,7 @@ async def _execute_hunt_capability_lifecycle(
                 )
                 if isinstance(item, Mapping)
             ),
-            errors=(
-                (str(result.get("error")),)
-                if isinstance(result, Mapping) and result.get("error")
-                else ()
-            ),
+            errors=worker_result_errors(result) if isinstance(result, Mapping) else (),
             actual_budget=(
                 dict(result.get("budget_consumed") or {})
                 if isinstance(result, Mapping)

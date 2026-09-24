@@ -734,7 +734,6 @@ def test_path_injection_never_invents_get_for_other_methods(method):
 
 
 def test_legacy_non_get_path_candidate_is_rejected_at_execution():
-    from dataclasses import replace
     surface = _surface(query_keys=())
     endpoint = build_endpoint_manifest(scan_id=SCAN_ID, target_binding_digest=TARGET_DIGEST,
                                        surface_manifest=surface, source_action_ids=("discover.spec",))
@@ -749,3 +748,124 @@ def test_legacy_non_get_path_candidate_is_rejected_at_execution():
         execution_request_for_manifest_candidate(endpoint, legacy, 0)
     with pytest.raises(ScanWorkManifestError, match="identity"):
         execution_url_for_manifest_candidate(endpoint, legacy, 0)
+
+
+def test_a_target_supplied_name_is_opaque_and_an_internal_token_is_not():
+    """Names the target chooses are data; identifiers this module mints are not.
+
+    A form field called _csrf, user[email] or __utm_source is a name the
+    application chose, and execution serializes it with urlencode, so no
+    character in it can create a second field. Rejecting it on identifier
+    rules failed a whole scan over one such name. Internal tokens -- route ids,
+    lanes, source tools, reference ids -- are minted here and stay strict, so a
+    construction fault cannot hide behind the tolerance meant for targets.
+    """
+    from api.scan.work_manifests import _parameter_name, _token
+
+    for name in ("_csrf", "_rsc", "user[email]", "$filter", "__utm_source"):
+        assert _parameter_name(name, name="body_field_names") == name
+    # The identifier rule is unchanged for what this module mints itself.
+    with pytest.raises(ScanWorkManifestError):
+        _token("_not_an_identifier", name="source_tool")
+
+
+def test_body_field_names_survive_endpoint_assembly_like_query_names():
+    manifest = build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v1",
+            "status": "complete",
+            "endpoints": [{
+                "method": "POST", "scheme": "https", "host": "app.example.test",
+                "port": 443, "concrete_path": "/login", "normalized_path": "/login",
+                "query_keys": ["_rsc"], "body_field_names": ["_csrf", "user[email]"],
+                "content_type": "application/x-www-form-urlencoded",
+                "content_fingerprint": None, "sensitive_path_redacted": False,
+                "source": "web.browser_crawl",
+            }],
+        },
+        source_action_ids=("discover.browser_crawl",),
+    )
+
+    (entry,) = manifest.entries
+    assert entry["query_parameter_names"] == ("_rsc",)
+    assert entry["body_field_names"] == ("_csrf", "user[email]")
+
+
+def _surface_endpoint(path, query_names, *, normalized=None):
+    return {
+        "method": "GET", "scheme": "https", "host": "app.example.test",
+        "port": 443, "concrete_path": path, "normalized_path": normalized or path,
+        "query_keys": query_names, "body_field_names": [],
+        "content_type": None, "content_fingerprint": None,
+        "sensitive_path_redacted": False, "source": "web.crawl",
+    }
+
+
+def _built(endpoints, **kwargs):
+    return build_endpoint_manifest(
+        scan_id=SCAN_ID,
+        target_binding_digest=TARGET_DIGEST,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v1",
+            "status": "complete",
+            "endpoints": endpoints,
+        },
+        source_action_ids=("discover.web_crawl",),
+        **kwargs,
+    )
+
+
+def test_one_unrepresentable_endpoint_does_not_end_the_whole_scan():
+    """A real target's awkward output must degrade, not fail the run.
+
+    A thorough Scan of a production site failed outright after discovery had
+    already succeeded: one query parameter name the manifest could not express
+    raised during fan-out, the queue exhausted its retries, and the run was
+    marked failed. Every other endpoint discovery found went with it.
+    """
+    manifest = _built([
+        _surface_endpoint("/good", ["mode"]),
+        _surface_endpoint("/bad", ["bad name"]),
+        _surface_endpoint("/also-good", ["_rsc"]),
+    ])
+
+    assert sorted(e["canonical_path"] for e in manifest.entries) == ["/also-good", "/good"]
+    assert manifest.status == "partial"
+    assert "unrepresentable_endpoints:1" in (manifest.reason_code or "")
+
+
+def test_that_tolerance_never_extends_to_a_sensitive_path():
+    """Skipping an awkward entry must not also skip a security rejection.
+
+    An earlier attempt caught the base error class, so forgiving an
+    unrepresentable endpoint silently forgave the sensitive-path and
+    secret-value rejections too. Those keep failing the build outright.
+    """
+    with pytest.raises(ScanWorkManifestError, match="sensitive path"):
+        _built([
+            _surface_endpoint("/fine", ["mode"]),
+            _surface_endpoint(
+                "/reset", ["mode"],
+                normalized="/reset/secret_abcdefghijklmnopqrstuvwxyz",
+            ),
+        ])
+
+
+def test_the_skippable_error_is_a_strict_subset_of_manifest_errors():
+    """The distinction is in the type, not in matching on message text."""
+    from api.scan.work_manifests import (
+        ScanWorkManifestUnrepresentableError,
+        _reject_sensitive_keys,
+        _parameter_name,
+    )
+
+    assert issubclass(ScanWorkManifestUnrepresentableError, ScanWorkManifestError)
+    # A shape failure driven by target data is skippable...
+    with pytest.raises(ScanWorkManifestUnrepresentableError):
+        _parameter_name("bad name", name="query_parameter_names entry")
+    # ...while a secret rejection is not.
+    with pytest.raises(ScanWorkManifestError) as caught:
+        _reject_sensitive_keys({"authorization": "Bearer never-persist"})
+    assert not isinstance(caught.value, ScanWorkManifestUnrepresentableError)

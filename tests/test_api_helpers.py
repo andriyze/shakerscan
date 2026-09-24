@@ -304,6 +304,9 @@ if "fastapi" not in sys.modules:
     fastapi_mod.Header = _fake_query
     fastapi_mod.HTTPException = _FakeHTTPException
     fastapi_mod.Query = _fake_query
+    # Routers declare dependencies in signatures at import time; the stub only
+    # needs to hand the dependency back so the module loads.
+    fastapi_mod.Depends = _fake_query
     fastapi_mod.Request = _FakeRequest
     sys.modules["fastapi"] = fastapi_mod
 
@@ -3403,6 +3406,20 @@ def test_device_routes_confirm_handoff_before_reporting_queued():
         ) < route.index('status": "queued"')
 
 
+def test_device_requests_no_longer_offer_the_removed_lab_profile():
+    from pydantic import ValidationError
+
+    for model in (devices_router_module.DeviceScanRequest, devices_router_module.DeviceServiceVerifyRequest):
+        extra = {} if model is devices_router_module.DeviceScanRequest else {
+            "transport": "tcp", "port": 8443, "expected_state": "open", "reason": "check",
+        }
+        with pytest.raises(ValidationError):
+            model(safety_profile="lab_invasive", confirm_lab_invasive=True, **extra)
+        # Older clients still send the retired flag; it is accepted and has no effect.
+        assert model(safety_profile="authenticated_active", confirm_lab_invasive=True, **extra).safety_profile == "authenticated_active"
+    assert "lab_invasive" not in {item["name"] for item in devices_router_module.safety_profile_catalog()}
+
+
 class _FakeConn:
     def __init__(self, schedules):
         self.schedules = schedules
@@ -3848,9 +3865,11 @@ def test_reconcile_stale_unconfirmed_handoff_fails_scan_and_owned_campaign():
         "options->>'queue_handoff_confirmed'='false'" in query
         for query, _args in conn.executions
     )
+    # The campaign is settled through the shared helper: keyed by the failed scan, and only
+    # when no scan of that campaign is still unfinished (a cancelled scan uses the same path).
     campaign_update = next(item for item in conn.executions if "UPDATE scan_campaigns" in item[0])
-    assert campaign_update[1] == (campaign_id, scan_id)
-    assert "other.campaign_id=campaign.id AND other.id<>$2" in campaign_update[0]
+    assert campaign_update[1] == (scan_id, "failed")
+    assert "other.status IN ('pending', 'queued', 'running', 'cancelling')" in campaign_update[0]
 
 
 def _due_schedule():
@@ -20508,6 +20527,18 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     existing_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):
+            # Target creation and its authorization run in one transaction, so a refused
+            # authorization leaves no target behind.
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
         async def fetchrow(self, query, *args):
             assert "RETURNING id, url, name, discovery_source, metadata_json" in query
             return {
@@ -20765,6 +20796,49 @@ def test_finding_record_rejects_ambiguous_fingerprint_before_retest():
 
     assert excinfo.value.status_code == 409
     assert "use the finding UUID" in excinfo.value.detail
+
+
+def test_parent_scan_logs_carry_the_discovery_child_while_no_shard_exists(monkeypatch):
+    """A thorough parent shows "Waiting for the worker's first activity update"
+    for the whole discovery phase when the aggregation only reads shards: the
+    discovery child is the only one running for minutes, and it was skipped."""
+    parent = uuid.UUID("00000000-0000-4000-8000-000000000501")
+    discovery = uuid.UUID("00000000-0000-4000-8000-000000000502")
+
+    class _Redis:
+        def lrange(self, key, start, end):
+            if key == f"scan:{discovery}:logs":
+                return ["[scan] Started Discover Web Content \u00b7 35%"]
+            return []
+
+    class _Conn:
+        async def fetchrow(self, query, scan_id):
+            assert scan_id == parent
+            return {"run_kind": "web_dast", "scan_role": "parent", "status": "running",
+                    "progress": 2, "current_phase": "parallel_discovery", "result": None}
+
+        async def fetch(self, query, scan_id):
+            assert scan_id == parent
+            assert "parallel_discovery" in query
+            return [{"id": discovery, "shard_index": -1, "scan_role": "parallel_discovery",
+                     "status": "running", "current_phase": "discover.web_content"}]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+    monkeypatch.setattr(api_module, "get_redis", lambda: _Redis())
+    payload = asyncio.run(api_module.get_scan_logs(str(parent), limit=200))
+    assert payload["count"] == 1
+    assert payload["lines"] == ["[Discovery] [scan] Started Discover Web Content \u00b7 35%"]
 
 
 def test_all_public_limit_parameters_have_explicit_lower_bounds():

@@ -14,6 +14,14 @@ from .authorization_evidence import AuthorizationWorkflowError, canonical_action
 from .authorization_receipt import receipt_backed_action
 
 
+def asset_id(run: Mapping[str, Any]) -> Any:
+    return run.get("device_target_id") or run.get("target_id")
+
+
+def asset_column(run: Mapping[str, Any]) -> str:
+    return "device_target_id" if run.get("target_kind") == "device" else "target_id"
+
+
 PROPOSAL_TYPE = "authorization_proposal"
 ATTEMPT_TYPE = "authorization_attempt"
 DECISION_TYPE = "authorization_decision"
@@ -30,14 +38,14 @@ def uid(value: Any) -> uuid.UUID:
 class PostgresAuthorizationRepository:
     async def run(self, conn: Any, hunt_id: Any) -> dict[str, Any]:
         row = await conn.fetchrow(
-            "SELECT id, target_id, device_target_id, target_kind, status, context_pack "
+            "SELECT id, target_id, device_target_id, target_kind, status, context_pack, policy_json "
             "FROM hunt_runs WHERE id=$1", uid(hunt_id),
         )
         if not row:
             raise AuthorizationWorkflowError("Hunt not found", 404)
         result = dict(row)
-        if result.get("target_kind") not in {"web", "api"} or result.get("device_target_id"):
-            raise AuthorizationWorkflowError("Authorization investigations require a web/API Hunt", 422)
+        if result.get("target_kind") not in {"web", "api", "network", "device"} or not asset_id(result):
+            raise AuthorizationWorkflowError("Authorization investigation requires an HTTP-capable Hunt asset", 422)
         return result
 
     async def capture(self, conn: Any, run: Mapping[str, Any], capture_id: Any) -> dict[str, Any]:
@@ -61,7 +69,7 @@ class PostgresAuthorizationRepository:
             "FROM auth_sessions WHERE id=$1 AND owner_kind='hunt' AND owner_id=$2 "
             "AND target_id=$3 AND target_kind=$4 AND principal_slot=$5 "
             "AND status='active' AND expires_at > NOW()",
-            uid(session_ref), uid(run["id"]), uid(run["target_id"]), run["target_kind"], slot,
+            uid(session_ref), uid(run["id"]), uid(asset_id(run)), run["target_kind"], slot,
         )
         if not row:
             raise AuthorizationWorkflowError("The selected authentication session is unavailable, expired or bound elsewhere")
@@ -70,17 +78,17 @@ class PostgresAuthorizationRepository:
     async def insert_node(self, conn: Any, run: Mapping[str, Any], node_id: Any, kind: str,
                           key: str, attributes: Mapping[str, Any]) -> None:
         await conn.execute(
-            "INSERT INTO application_graph_nodes (id,target_id,node_type,node_key,label,attributes) "
+            f"INSERT INTO application_graph_nodes (id,{asset_column(run)},node_type,node_key,label,attributes) "
             "VALUES ($1,$2,$3,$4,'Authorization investigation',$5::jsonb) "
-            "ON CONFLICT (target_id,node_type,node_key) DO NOTHING",
-            uid(node_id), uid(run["target_id"]), kind, key, json.dumps(dict(attributes)),
+            f"ON CONFLICT ({asset_column(run)},node_type,node_key) DO NOTHING",
+            uid(node_id), uid(asset_id(run)), kind, key, json.dumps(dict(attributes)),
         )
 
     async def proposal(self, conn: Any, run: Mapping[str, Any], proposal_id: Any, *, lock: bool = False) -> dict[str, Any]:
         row = await conn.fetchrow(
-            "SELECT attributes FROM application_graph_nodes WHERE id=$1 AND target_id=$2 "
+            f"SELECT attributes FROM application_graph_nodes WHERE id=$1 AND {asset_column(run)}=$2 "
             "AND node_type=$3" + (" FOR UPDATE" if lock else ""),
-            uid(proposal_id), uid(run["target_id"]), PROPOSAL_TYPE,
+            uid(proposal_id), uid(asset_id(run)), PROPOSAL_TYPE,
         )
         item = mapping(dict(row).get("attributes")) if row else {}
         if not item or item.get("hunt_id") != str(run["id"]):
@@ -97,9 +105,9 @@ class PostgresAuthorizationRepository:
     async def attempts(self, conn: Any, run: Mapping[str, Any], proposal_id: Any) -> list[dict[str, Any]]:
         prefix = f"authz:{uid(proposal_id)}:attempt:"
         rows = await conn.fetch(
-            "SELECT attributes FROM application_graph_nodes WHERE target_id=$1 "
+            f"SELECT attributes FROM application_graph_nodes WHERE {asset_column(run)}=$1 "
             "AND node_type=$2 AND node_key LIKE $3 ORDER BY node_key LIMIT 21",
-            uid(run["target_id"]), ATTEMPT_TYPE, prefix + "%",
+            uid(asset_id(run)), ATTEMPT_TYPE, prefix + "%",
         )
         result = [mapping(dict(row).get("attributes")) for row in rows]
         if len(result) > MAX_ATTEMPTS or any(r.get("hunt_id") != str(run["id"]) for r in result):
@@ -132,7 +140,7 @@ class PostgresAuthorizationRepository:
                 "AND action_id=$3 AND capability_name='authz.verify'",
                 str(summary.get("budget_reservation_id") or ""), str(run["id"]), str(uid(action_id)),
             )
-            action = receipt_backed_action(action, reservation, target_id=run["target_id"])
+            action = receipt_backed_action(action, reservation, target_id=asset_id(run))
         return action
 
     async def transactions(self, conn: Any, run: Mapping[str, Any], action_id: Any) -> list[dict[str, Any]]:
@@ -146,7 +154,7 @@ class PostgresAuthorizationRepository:
 
     async def skipped(self, conn: Any, run: Mapping[str, Any], proposal_id: Any) -> bool:
         row = await conn.fetchrow(
-            "SELECT id FROM application_graph_nodes WHERE target_id=$1 AND node_type=$2 AND node_key=$3",
-            uid(run["target_id"]), DECISION_TYPE, f"authz:{uid(proposal_id)}:skip",
+            f"SELECT id FROM application_graph_nodes WHERE {asset_column(run)}=$1 AND node_type=$2 AND node_key=$3",
+            uid(asset_id(run)), DECISION_TYPE, f"authz:{uid(proposal_id)}:skip",
         )
         return row is not None

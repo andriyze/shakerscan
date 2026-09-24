@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .credential_store import CredentialProfileMetadata
+from .models import target_kinds_share_asset
 from .credentials import HTTP_CREDENTIAL_KINDS, SSH_CREDENTIAL_KINDS
 
 
@@ -19,6 +20,11 @@ GENERIC_CREDENTIAL_REF_KEYS = frozenset({
     "cookie_credential_id",
     "oauth_credential_profile_id",
 })
+INTERACTIVE_HTTP_CREDENTIAL_KINDS = frozenset({
+    "form_login", "json_login", "oauth_client_credentials", "oauth_password",
+})
+
+
 class CredentialReferenceError(ValueError):
     """A submitted opaque reference is missing, expired, misbound, or ambiguous."""
 
@@ -72,6 +78,30 @@ def select_hunt_principal_reference(
     }
 
 
+def select_hunt_session_principal_reference(
+    context: Mapping[str, Any], value: Any,
+) -> dict[str, Any]:
+    """Reject unusable session profiles before reserving a worker action."""
+    selected = select_hunt_principal_reference(
+        context, value, capability="auth.session.establish",
+    )
+    if selected is None:
+        raise CredentialReferenceError(
+            "session establishment requires a managed principal"
+        )
+    matches = [
+        item for item in context.get("credential_refs") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("profile_id") or "") == selected["profile_id"]
+        and str(item.get("principal_slot") or "") == selected["principal_slot"]
+    ]
+    if len(matches) != 1 or matches[0].get("auth_kind") not in INTERACTIVE_HTTP_CREDENTIAL_KINDS:
+        raise CredentialReferenceError(
+            "session establishment requires an interactive HTTP profile"
+        )
+    return selected
+
+
 def _role_compatible(role: str, profile: CredentialProfileMetadata) -> bool:
     if role == "ssh_credential_profile_id":
         return profile.auth_kind in SSH_CREDENTIAL_KINDS and profile.principal_slot == "ssh"
@@ -122,7 +152,7 @@ def validate_generic_credential_references(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= normalized_now):
             raise CredentialReferenceError(f"{role} is inactive or expired")
-        if profile.target_kind != target_kind:
+        if not target_kinds_share_asset(profile.target_kind, target_kind):
             raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
         if not _role_compatible(role, profile):
             raise CredentialReferenceError(

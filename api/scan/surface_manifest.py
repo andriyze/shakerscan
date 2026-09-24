@@ -7,6 +7,9 @@ import re
 from typing import Any, Iterable, Mapping
 import urllib.parse
 
+from .negative_control import indistinguishable_from_absent, is_negative_control_url
+from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
+
 try:
     from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package imports in host-side tests
@@ -18,8 +21,81 @@ except ModuleNotFoundError:  # package imports through scanner
     from scanner.manifests import EndpointManifest, EndpointRecord, normalize_endpoint
 
 
+
+def wildcard_redirect_urls(
+    observations: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return suspected origin-wide rewrites, not proof that these paths do not exist.
+
+    Content discovery counts a 3xx as a hit. A host that permanently redirects
+    every path to its canonical origin therefore "discovers" the entire wordlist:
+    measured against a static site whose apex 301s to its www origin, the scan
+    recorded 108 endpoints -- ``/graphql``, ``/api-docs``, ``/coupon`` -- none of
+    which existed, and every one of them was persisted into the ASM inventory as
+    real attack surface.
+
+    Count distinct paths within the exact source/destination origin pair. Query
+    variants do not add paths. Without a negative control even five real moved
+    routes are not proof of a wildcard: callers must retain them as uncertain.
+    """
+    groups: dict[tuple[int, str, str], dict[str, set[str]]] = {}
+    for item in observations:
+        if not isinstance(item, Mapping) or item.get("kind") != "content_discovery":
+            continue
+        if is_negative_control_url(item.get("url")):
+            continue  # the calibration probe is the measurement, not a suspected hit
+        status = item.get("status")
+        url = str(item.get("url") or "")
+        location = str(item.get("redirect_location") or "")
+        if type(status) is not int or status not in REDIRECT_STATUSES:
+            continue
+        source_origin = http_origin(url)
+        destination = redirect_destination(url, location)
+        destination_origin = http_origin(destination)
+        if not source_origin or not destination_origin or source_origin == destination_origin:
+            continue
+        # Whether the rewrite kept the requested path, query and fragment is
+        # decided by the producer on the raw pair. It cannot be re-derived from
+        # these URLs: they arrive redacted, and redaction collapses every query
+        # value to one marker and strips the fragment outright, so a
+        # route-specific redirect would look like a blanket rewrite here.
+        if item.get("redirect_preserves_request_target") is not True:
+            continue
+        try:
+            path = urllib.parse.urlsplit(url).path or "/"
+        except ValueError:
+            continue
+        key = (status, source_origin, destination_origin)
+        groups.setdefault(key, {}).setdefault(path, set()).add(url)
+    return frozenset(
+        url
+        for paths in groups.values()
+        if len(paths) >= _WILDCARD_REDIRECT_MIN_PATHS
+        for urls in paths.values()
+        for url in urls
+    )
+
+
 _HTTP_METHOD = re.compile(r"^[A-Z]{3,12}$")
 _DEGRADED_STATUSES = frozenset({"partial", "failed", "blocked"})
+# Several distinct paths can suggest a server-wide rewrite, but cannot prove
+# absent content without a negative-control request (which we do not invent).
+_WILDCARD_REDIRECT_MIN_PATHS = 5
+
+_CLIENT_TEMPLATE_EXPRESSION = re.compile(r"\$\{|\{\{|<%")
+
+
+def _unexpanded_crawler_path(url: str) -> bool:
+    """Filter source-inferred paths, never query values or concrete seeded traffic."""
+    path = urllib.parse.urlsplit(url).path
+    for _ in range(3):
+        if _CLIENT_TEMPLATE_EXPRESSION.search(path):
+            return True
+        decoded = urllib.parse.unquote(path)
+        if decoded == path:
+            return False
+        path = decoded
+    return bool(_CLIENT_TEMPLATE_EXPRESSION.search(path))
 
 
 def _record_origin(record: EndpointRecord) -> str:
@@ -206,6 +282,7 @@ def build_scan_surface_manifest(
         *,
         summary: Mapping[str, Any] | None = None,
         root_scoped: bool = False,
+        extra_reasons: Iterable[str] = (),
     ) -> None:
         nonlocal cancelled
         manifest.start_producer(name)
@@ -217,6 +294,8 @@ def build_scan_surface_manifest(
             raw_content_type = raw[2] if len(raw) > 2 else None
             raw_body_schema = raw[3] if len(raw) > 3 else None
             try:
+                if name in {"web.crawl", "web.browser_crawl"} and _unexpanded_crawler_path(str(raw_url or "")):
+                    raise ValueError("unexpanded inferred crawler path")
                 record = normalize_endpoint(
                     method=str(raw_method or "GET"),
                     url=str(raw_url or ""),
@@ -246,13 +325,15 @@ def build_scan_surface_manifest(
                 endpoint_identities.add(record.identity)
         status, summary_reason, producer_cancelled = _summary_status(summary)
         cancelled = cancelled or producer_cancelled
+        discarded = [str(item) for item in extra_reasons if str(item or "").strip()]
         reasons = [item for item in (
             summary_reason,
             f"invalid_observations:{invalid}" if invalid else None,
             f"out_of_scope_observations:{out_of_scope}" if out_of_scope else None,
             f"endpoint_limit_reached:{truncated}" if truncated else None,
+            *discarded,
         ) if item]
-        if status == "complete" and (invalid or out_of_scope or truncated):
+        if status == "complete" and (invalid or out_of_scope or truncated or discarded):
             status = "partial"
         manifest.finish_producer(
             name,
@@ -315,14 +396,28 @@ def build_scan_surface_manifest(
         ),
         summary=browser,
     )
+    content_observations = list(content.get("observations") or ())
+    # Measured first: a path whose response is identical to a path that cannot
+    # exist is not discovered content, and the control probe is the proof. Only
+    # where a run carried no control does the suspected-rewrite count stand on
+    # its own, and there the observations are retained as uncertain.
+    absent = indistinguishable_from_absent(content_observations)
+    blanket_redirects = wildcard_redirect_urls(content_observations) - absent
     collect(
         "web.content_discover",
         (
             ("GET", item.get("url"))
-            for item in content.get("observations") or ()
+            for item in content_observations
             if isinstance(item, Mapping) and item.get("kind") == "content_discovery"
+            and not is_negative_control_url(item.get("url"))
+            and str(item.get("url") or "") not in absent
         ),
         summary=content,
+        extra_reasons=(
+            *((f"indistinguishable_from_absent:{len(absent)}",) if absent else ()),
+            *((f"unverified_redirect_observations:{len(blanket_redirects)}",)
+              if blanket_redirects else ()),
+        ),
     )
     collect(
         "web.spec_ingest",

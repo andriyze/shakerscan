@@ -159,6 +159,15 @@ async def query_knowledge_page(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     kind = "receipts" if kind == "tool_receipts" else kind
+    if kind == "service_intelligence":
+        try:
+            from exposure.service_knowledge import query_service_knowledge
+        except ModuleNotFoundError:
+            from ..exposure.service_knowledge import query_service_knowledge
+        try:
+            return await query_service_knowledge(conn, target_id=target_id, device=device, filters=filters, limit=limit, cursor=cursor)
+        except ValueError as exc:
+            raise KnowledgeQueryError(str(exc)) from exc
     if kind == "endpoint_groups":
         values = _filter_values(QUERIES["endpoints"], filters or {})
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_ROWS:

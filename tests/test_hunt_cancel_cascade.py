@@ -54,7 +54,8 @@ def test_cancelling_an_already_terminal_hunt_does_not_cascade():
     # The UPDATE ... RETURNING only matches a live hunt; a second cancel must not re-cancel scans
     # that some other path has since legitimately restarted or completed.
     source = _cancel_source()
-    live_guard = source.index("status IN ('created','active','awaiting_planner')")
+    live_guard = source.index("status IN ('created','active','awaiting_planner','budget_exhausted')")
+    assert "AND completed_at IS NULL" in source
     early_return = source.index("return public_hunt_run(row)")
     cascade = source.index("options->'hunt_dispatch'")
     assert live_guard < early_return < cascade

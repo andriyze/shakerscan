@@ -9,13 +9,60 @@ from collections import Counter
 from typing import Any, Mapping, Sequence
 
 from . import scoring
+from .assessment import withhold_unexamined_grade
 from .action_plan import ScanActionPlan
-from .capability_result import CapabilityResultReference, CapabilityResultStatus
+from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
+from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
 from .continuation import (
     ScanContinuationError,
     ScanPlanRevision,
     root_scan_plan_revision,
 )
+def _assurance_unavailable_summary(
+    options: Mapping[str, Any], *, interrupted_action_count: int = 0,
+    health_observations: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Stand in for the assurance preview when it cannot be imported.
+
+    `report-rebuild` runs from an installed tree that carries no third-party packages, and the
+    preview's models need pydantic, so importing it must never be required to rebuild a report.
+    This claims nothing: no profile is projected, no health sample is counted, nothing is
+    proven, and the absence is stated in `limitations` rather than left to be inferred from a
+    clean-looking block.
+    """
+    references = options.get("credential_profile_refs") if isinstance(options, Mapping) else None
+    interrupted = max(0, int(interrupted_action_count or 0))
+    return {
+        "schema_version": "authentication-assurance/v1",
+        "authentication_requested": bool(references) or bool(interrupted),
+        "state": "unknown",
+        "reason_code": "authentication_gap" if interrupted else "not_validated",
+        "profiles": [],
+        "coverage": "unverified",
+        "health_sample_count": 0,
+        "valid_health_sample_count": 0,
+        "uncertain_health_sample_count": 0,
+        "health_timeline": [],
+        "interrupted_action_count": interrupted,
+        "continuous_authentication_proven": False,
+        "finding_evidence_preserved": True,
+        "limitations": [
+            "authentication assurance was not available in this runtime;"
+            " no identity state is established by this report"
+        ],
+        "secret_values_visible": False,
+    }
+
+
+try:
+    from authenticated_assurance.evaluation import scan_authentication_summary
+except ImportError:
+    try:
+        from api.authenticated_assurance.evaluation import scan_authentication_summary
+    except ImportError:
+        # Both spellings resolve to the same module; reaching here means a dependency of the
+        # preview is absent, not that the path was wrong.
+        scan_authentication_summary = _assurance_unavailable_summary
 
 
 SCAN_REPORT_SCHEMA = "canonical-scan-report/v2"
@@ -56,6 +103,7 @@ _INFORMATIONAL_CAPABILITIES = frozenset({"infrastructure.inspect"})
 _PROOF_UNAVAILABLE_REASONS = frozenset({
     "insufficient_plan_budget",
     "placement_unavailable",
+    "dependency_incomplete",
 })
 _PROOF_CAPABILITIES = frozenset({
     "xss.browser_prove_batch",
@@ -1132,14 +1180,29 @@ def _posture_sections(
                     continue
                 posture_observed = isinstance(status, int) and 200 <= status < 400
                 origin = request.get("origin") or response.get("final_url")
+                canonical_origin = _off_origin_redirect(response, origin=origin)
                 is_https = urllib.parse.urlsplit(str(origin or "")).scheme.lower() == "https"
                 expected_headers = tuple(
                     name for name in _EXPECTED_SECURITY_HEADERS
                     if name != "strict-transport-security" or is_https
                 )
+                location = response.get("location")
                 http_section = {
                     "status": status,
+                    # Origin only: enough for the conclusion to say which host to
+                    # scan instead, never a path or query the redirect carried.
+                    "redirect_origin": (
+                        http_origin(redirect_destination(str(origin or ""), str(location or "")))
+                        if isinstance(status, int) and status in REDIRECT_STATUSES and location
+                        else None
+                    ),
                     "posture_observed": posture_observed,
+                    # Where the application actually lives when the bound origin
+                    # only forwards to it. Reported so a scan of an apex that
+                    # redirects to its www origin names the origin that serves
+                    # the application instead of silently examining nothing.
+                    **({"application_origin_redirect": canonical_origin}
+                       if canonical_origin else {}),
                     "security_headers": {
                         key: headers[header]
                         for key, header in _UI_SECURITY_HEADERS
@@ -1165,6 +1228,14 @@ def _posture_sections(
                     key: row.get(key) for key in (
                         "protocol", "cipher", "cipher_bits", "weak_cipher",
                         "alpn_protocol", "origin", "port", "status",
+                        # Which versions the server actually accepts, and the
+                        # cipher it negotiated for each. The capability probes
+                        # every protocol and records the result; keeping only the
+                        # one handshake it happened to report first threw that
+                        # away, so a report could not say whether a deprecated
+                        # version was still enabled.
+                        "supported_protocols", "protocol_attempts",
+                        "legacy_protocol_negotiated",
                     ) if row.get(key) is not None
                 }
                 certificate = _certificate_section(row)
@@ -1280,6 +1351,45 @@ def _posture_sections(
             discovery["server_versions"] = server_versions
         sections["discovery"] = discovery
     return sections
+
+
+
+def _off_origin_redirect(
+    response: Mapping[str, Any], *, origin: Any,
+) -> str | None:
+    """Return a different HTTP origin, including scheme and effective-port changes."""
+    status = response.get("status")
+    location = response.get("location")
+    if type(status) is not int or status not in REDIRECT_STATUSES:
+        return None
+    moved = http_origin(redirect_destination(origin, location))
+    return moved if moved and moved != http_origin(origin) else None
+
+
+def _observed_success_response(
+    observations: Mapping[str, Sequence[Mapping[str, Any]]],
+    *, origins: frozenset[str],
+) -> bool:
+    """Whether any capability retrieved a 2xx application response."""
+    for rows in observations.values():
+        for row in rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind == "http_observation":
+                inner = row.get("response")
+                status = inner.get("status") if isinstance(inner, Mapping) else None
+                request = row.get("request")
+                url = request.get("origin") if isinstance(request, Mapping) else None
+                url = url or (inner.get("final_url") if isinstance(inner, Mapping) else None)
+            elif kind in {"http_fingerprint", "content_discovery"}:
+                status = row.get("status")
+                url = row.get("url")
+            else:
+                continue
+            if type(status) is int and 200 <= status < 300 and http_origin(url) in origins:
+                return True
+    return False
 
 
 def _evaluate_csp(policy: Any) -> dict[str, Any]:
@@ -1445,6 +1555,13 @@ def finalize_scan_report(
             int(raw_slice.get("count") or 0)
             if isinstance(raw_slice, Mapping) else 0
         )
+        # A slice is sized from the profile's floor before the manifest is cut,
+        # so a shard whose manifest turned out empty still carries a slice of
+        # one. The manifest is what exists to attempt: planned work cannot
+        # exceed it, or an empty family reads as one candidate never tried.
+        declared_entries = action.capability_args.get("manifest_entries")
+        if isinstance(declared_entries, int) and not isinstance(declared_entries, bool) and declared_entries >= 0:
+            planned = min(planned, declared_entries)
         attempts = {
             str(item.get("attempt_id") or "")
             for item in observations.get(action.action_id, ())
@@ -1463,7 +1580,7 @@ def finalize_scan_report(
             "family": family, "selected": True, "required": False,
             "batch_actions": 0, "planned_candidates": 0, "attempted_candidates": 0,
             "verified_findings": 0, "suspected_findings": 0,
-            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [],
+            "budget_reserved": {}, "budget_consumed": {}, "_statuses": [], "_reasons": [],
             # Per-capability manifest size vs what the plan actually scheduled. A capability whose
             # manifest holds more entries than its slices cover has work that was never attempted,
             # and comparing attempts with slices alone reports that as complete coverage.
@@ -1488,6 +1605,7 @@ def finalize_scan_report(
             row["planned_candidates"] += max(0, planned - inapplicable)
             row["attempted_candidates"] += len(attempts)
             row["_statuses"].append(result.status.value)
+            row["_reasons"].append(result.reason_code.value if result.reason_code is not None else "")
             declared = action.capability_args.get("manifest_entries")
             if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
                 # Every slice of one capability declares the same manifest size.
@@ -1517,6 +1635,7 @@ def finalize_scan_report(
     selected_family_gaps: list[str] = []
     for family, row in family_coverage.items():
         statuses = row.pop("_statuses")
+        batch_reasons = row.pop("_reasons")
         proof = row["proof_escalation"]
         proof_statuses = proof.pop("_statuses")
         proof_reasons = proof.pop("_reasons")
@@ -1568,6 +1687,16 @@ def finalize_scan_report(
         zero_attempts = (
             row["planned_candidates"] > 0 and row["attempted_candidates"] == 0
         )
+        # Every verifier settled skipped/not_applicable over an empty candidate set.
+        # The family ran against a surface that offered it nothing; that is a
+        # complete examination with no work, not one that failed to finish.
+        no_candidates = (
+            row["batch_actions"] > 0
+            and row["planned_candidates"] == 0
+            and row["unscheduled_candidates"] == 0
+            and all(status == "skipped" for status in statuses)
+            and all(reason == "not_applicable" for reason in batch_reasons)
+        )
         if row["batch_actions"] == 0:
             # Only escalation was planned for this family, so nothing established
             # its execution coverage. Reporting it complete would overstate work
@@ -1576,7 +1705,7 @@ def finalize_scan_report(
             row["reason"] = "no_verifier_action"
             if row["required"]:
                 selected_family_gaps.append(family)
-        elif action_incomplete or zero_attempts:
+        elif (action_incomplete or zero_attempts) and not no_candidates:
             row["coverage_status"] = "partial"
             row["reason"] = "zero_attempts" if zero_attempts else "action_incomplete"
             if row["required"]:
@@ -1597,7 +1726,7 @@ def finalize_scan_report(
                 selected_family_gaps.append(family)
         else:
             row["coverage_status"] = "complete"
-            row["reason"] = None
+            row["reason"] = "no_candidates" if no_candidates else None
     selected_family_gaps.sort()
 
     coverage_actions = [
@@ -1608,7 +1737,16 @@ def finalize_scan_report(
         (action, action_results[action.action_id])
         for action in coverage_actions if action.required
     ]
-    statuses = {result.status for _action, result in required_rows}
+    # Skipped as not applicable is a settled "nothing to do", not degraded
+    # coverage and not a reason the run fell short.
+    settled_rows = [
+        (action, result) for action, result in required_rows
+        if not (
+            result.status is CapabilityResultStatus.SKIPPED
+            and result.reason_code is CapabilityResultReason.NOT_APPLICABLE
+        )
+    ]
+    statuses = {result.status for _action, result in settled_rows}
     cancelled = CapabilityResultStatus.CANCELLED in statuses
     failed = bool(statuses & {
         CapabilityResultStatus.FAILED,
@@ -1621,7 +1759,7 @@ def finalize_scan_report(
     )
     reasons = sorted({
         result.reason_code.value
-        for _action, result in required_rows if result.reason_code is not None
+        for _action, result in settled_rows if result.reason_code is not None
     })
     work_manifests = [dict(item) for item in work_manifest_references]
     candidate_count = sum(
@@ -1657,9 +1795,12 @@ def finalize_scan_report(
         if item.get("severity") in {"critical", "high"}
         and item.get("verified") is not True
     )
+    # A required verifier that settled skipped/not_applicable had nothing to do
+    # on this surface. That is not unfinished required work: counting it made
+    # every target without a parameterised route read grade-unreliable.
     required_incomplete = [
         (action, result)
-        for action, result in required_rows
+        for action, result in settled_rows
         if result.status is not CapabilityResultStatus.SUCCESS
     ]
     posture_sections = _posture_sections(observations)
@@ -1670,11 +1811,31 @@ def finalize_scan_report(
     explicit_http_status = http_posture.get("status")
     application_proof_observed = any(
         item.get("verified") is True
-        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect"}
+        and str(item.get("tool") or "") not in {"tls.inspect", "dns.inspect", "http_baseline"}
+        and not (
+            isinstance(item.get("evidence"), Mapping)
+            and item["evidence"].get("template_id") == "http-missing-security-headers"
+        )
         for item in findings
     )
+    # Header posture on a redirect is real, but is not proof of the application
+    # behind it. Neither a same-host port change nor a relative redirect proves
+    # a follow-up request occurred. An unrelated origin's 2xx cannot fill this gap.
+    application_origins = frozenset(origin for value in (
+        target_url, http_posture.get("application_origin_redirect"),
+    ) if (origin := http_origin(value)) is not None)
+    redirect_without_application = (
+        type(explicit_http_status) is int and explicit_http_status in REDIRECT_STATUSES
+        and not application_proof_observed
+        and not _observed_success_response(observations, origins=application_origins)
+    )
+    application_forwarded_off_origin = (
+        bool(http_posture.get("application_origin_redirect")) and redirect_without_application
+    )
     risk_assessment_state = (
-        "observed"
+        "not_examined"
+        if redirect_without_application
+        else "observed"
         if http_posture.get("posture_observed") is True or application_proof_observed
         else "not_examined"
         if isinstance(explicit_http_status, int)
@@ -1691,12 +1852,15 @@ def finalize_scan_report(
       | ({"placement_unavailable"} if placement_gaps else set())
       | ({"selected_family_incomplete"} if selected_family_gaps else set())
       | ({"unproven_critical_high"} if unproven_critical_high else set())
-      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set()))
+      | ({"application_not_observed"} if risk_assessment_state == "not_examined" else set())
+      | ({"bound_origin_redirects_off_origin"} if application_forwarded_off_origin else set()))
     grade_reliable = not reliability_reasons
     coverage_reasons = sorted(
         set(reasons)
         | ({"active_verifier_zero_attempts"} if zero_attempt_actions else set())
         | ({"placement_unavailable"} if placement_gaps else set())
+        | ({"bound_origin_redirects_off_origin"}
+           if application_forwarded_off_origin else set())
     )
     coverage_action_rows = [
         row for row in action_rows
@@ -1864,6 +2028,11 @@ def finalize_scan_report(
     })
     report = {
         "schema_version": SCAN_REPORT_SCHEMA,
+        "authentication_assurance": scan_authentication_summary({
+            "managed_credential_profiles": principal_contexts,
+        }, interrupted_action_count=sum(result.reason_code is CapabilityResultReason.AUTHENTICATION_UNCERTAIN or any(
+            item.get("kind") == "identity_authority_interruption" for item in observations.get(action_id, ()))
+            for action_id, result in action_results.items())),
         "target": str(target_url),
         "runtime_destinations": runtime_destinations,
         "findings": findings,
@@ -1909,6 +2078,9 @@ def finalize_scan_report(
             "grade_reliability_reasons": reliability_reasons,
         },
     }
+    from .reachability import apply_reachability_outcome
+    apply_reachability_outcome(report, action_results=action_results, observations=observations)
+    withhold_unexamined_grade(report)
     report["report_digest"] = hashlib.sha256(json.dumps(
         report,
         sort_keys=True,

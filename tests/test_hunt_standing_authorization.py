@@ -33,7 +33,7 @@ def test_every_privileged_flag_triggers_resolution():
         assert payload["policy"]["approval_receipt_id"], flag
 
 
-def test_passive_explicit_credentialed_and_unknown_targets_are_left_alone():
+def test_passive_explicit_and_unknown_targets_stay_unchanged_but_credentials_reuse_authority():
     passive = asyncio.run(apply_standing_authorization(_payload(), _resolver))
     assert "approval_receipt_id" not in passive["policy"]
     explicit = asyncio.run(apply_standing_authorization(
@@ -44,7 +44,8 @@ def test_passive_explicit_credentialed_and_unknown_targets_are_left_alone():
     credentialed = asyncio.run(apply_standing_authorization(
         {**_payload(active_testing=True), "credential_refs": {"primary": "cred-1"}}, _resolver,
     ))
-    assert "approval_receipt_id" not in credentialed["policy"], "credential use stays explicit"
+    assert credentialed["policy"]["approval_receipt_id"] == STANDING["approval_receipt_id"]
+    assert credentialed["policy"]["authorization_confirmed"] is True
     unknown = asyncio.run(apply_standing_authorization(
         {**_payload(active_testing=True), "target_id": "target-9"}, _resolver,
     ))

@@ -84,3 +84,44 @@ def test_cli_accepts_explicit_debt_only_in_nonstrict_complete_validation(tmp_pat
     result = subprocess.run(command,capture_output=True,text=True)
     assert result.returncode == expected
     assert json.loads(result.stdout)['counts']['accepted_failures'] == 1
+
+
+@pytest.mark.parametrize('row', [
+    None,
+    {'name': 'trust', 'passed': True, 'skipped': True},
+    {'name': 'trust', 'passed': False},
+    {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': False},
+    {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': True},
+    {'name': 'trust'},
+])
+def test_a_required_pass_cannot_be_missing_skipped_failed_unknown_or_waived(row):
+    rows = [{'name': 'ordinary', 'passed': True}]
+    if row is not None:
+        rows.append(row)
+    result = summarize({'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': rows}]},
+                       required_passes=['model_intake:trust'])
+    assert result['policy_validated'] is False
+    assert result['validation_complete'] is False
+    assert any('Required assertion did not pass' in error for error in result['validation_errors'])
+
+
+def test_required_trust_passes_coexist_with_explicit_debt_elsewhere():
+    card = {'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': [
+        {'name': 'trust', 'passed': True},
+        {'name': 'other', 'passed': True, 'xfail': True, 'xpass': False},
+    ]}]}
+    assert summarize(card, required_passes=['model_intake:trust'])['policy_validated'] is True
+
+
+def test_require_pass_cli_fails_on_a_waived_trust_check(tmp_path):
+    import json, subprocess, sys
+    from pathlib import Path
+    path = tmp_path / 'card.json'
+    path.write_text(json.dumps({'gate': 'pass', 'areas': [{'area': 'model_intake', 'rows': [
+        {'name': 'trust', 'passed': True, 'xfail': True, 'xpass': False},
+    ]}]}))
+    command = [sys.executable, str(Path(__file__).resolve().parents[1] / 'scripts/summarize_e2e_debt.py'),
+               str(path), '--require-pass', 'model_intake:trust']
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)['policy_validated'] is False

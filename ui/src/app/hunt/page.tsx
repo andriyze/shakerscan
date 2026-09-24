@@ -40,7 +40,9 @@ import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/c
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
+import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
 import { usableWebTargets } from '@/lib/targetChoices'
 
 type TargetChoice = {
@@ -48,6 +50,7 @@ type TargetChoice = {
   sourceKind: 'web' | 'device'
   label: string
   detail: string
+  authorized?: boolean
 }
 
 const CREDENTIAL_SLOT_LABELS: Record<CredentialPrincipalSlot, string> = {
@@ -287,6 +290,7 @@ function HuntContent() {
       sourceKind: 'web' as const,
       label: target.name || target.url,
       detail: target.url,
+      authorized: target.authorized_for_active_testing === true,
     })),
     ...devices.filter((device) => device.is_active).map((device) => ({
       id: device.id,
@@ -379,45 +383,35 @@ function HuntContent() {
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
+  // Revalidated server-side at submission and before worker decryption.
+  const standingAuthorized = selectedChoice?.authorized === true
+    || (targetKind !== 'device' && managedTargetAuthorizationIsAutomatic())
+  const effectiveAuthorization = authorizationConfirmed || standingAuthorized
+  const receiptRequired = privileged && !standingAuthorized
   const configuredDuration = positiveInteger(maxDurationSeconds)
   const approvalTtlMinutes = Math.ceil((configuredDuration ?? HUNT_BUDGET_PROFILES[budget].max_duration_seconds) / 60) + 15
   const startBlockedReason = !targetId
     ? 'Choose a target to continue.'
     : !objective.trim()
       ? 'Describe what the Hunt should investigate.'
-      : privileged && !authorizationConfirmed
+      : privileged && !effectiveAuthorization
         ? 'Confirm that you are authorized to use the selected capabilities.'
-        : privileged && !approvalReceipt.trim()
+        : receiptRequired && !approvalReceipt.trim()
           ? 'Create or paste a target-bound approval receipt.'
           : null
-  const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network'
-    ? ['ssh']
-    : targetKind === 'device'
-      ? ['primary', 'secondary', 'service', 'ssh']
-      : ['primary', 'secondary', 'service']
-
-  useEffect(() => {
-    if (targetKind === 'network') setRequestCollectionIds([])
-  }, [targetKind])
+  const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network' || targetKind === 'device'
+    ? ['primary', 'secondary', 'service', 'ssh']
+    : ['primary', 'secondary', 'service']
 
   async function start() {
     if (!targetId || !selectedChoice) return
     setStarting(true)
     setError(null)
     try {
-      if (networkDiscovery && !activeTesting) {
-        throw new Error('Network discovery requires active testing.')
-      }
-      if (allowStateChanging && !activeTesting) {
-        throw new Error('State-changing HTTP requires active testing.')
-      }
-      if (allowOobInteractions && !activeTesting) {
-        throw new Error('Out-of-band interactions require active testing.')
-      }
-      if (privileged && !authorizationConfirmed) {
+      if (privileged && !effectiveAuthorization) {
         throw new Error('Confirm that you own or are authorized to test this target.')
       }
-      if (privileged && !approvalReceipt.trim()) {
+      if (receiptRequired && !approvalReceipt.trim()) {
         throw new Error('Privileged Hunt capabilities require a target-bound approval receipt.')
       }
 
@@ -470,7 +464,7 @@ function HuntContent() {
           allowStateChangingHttp: allowStateChanging,
           networkDiscovery,
           allowOobInteractions,
-          authorizationConfirmed,
+          authorizationConfirmed: effectiveAuthorization,
           approvalReceiptId: approvalReceipt.trim() || undefined,
           scopeReceiptId: scopeReceipt.trim() || undefined,
         },
@@ -650,40 +644,38 @@ function HuntContent() {
                   />
                   <span>Allow bounded active testing</span>
                 </label>
-                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                <label className="flex items-start gap-3 text-sm text-gray-300">
                   <input
                     className="mt-1"
                     type="checkbox"
-                    disabled={!activeTesting}
                     checked={networkDiscovery}
-                    onChange={(event) => setNetworkDiscovery(event.target.checked)}
+                    onChange={(event) => { setNetworkDiscovery(event.target.checked); if (event.target.checked) setActiveTesting(true) }}
                   />
                   <span>Allow TCP service discovery and fingerprinting</span>
                 </label>
-                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                <label className="flex items-start gap-3 text-sm text-gray-300">
                   <input
                     className="mt-1"
                     type="checkbox"
-                    disabled={!activeTesting}
                     checked={allowStateChanging}
                     onChange={(event) => {
                       setAllowStateChanging(event.target.checked)
+                      if (event.target.checked) setActiveTesting(true)
                       if (!event.target.checked) setRequestCollectionIds([])
                     }}
                   />
                   <span>Allow explicitly selected state-changing HTTP requests</span>
                 </label>
-                <label className={`flex items-start gap-3 text-sm ${activeTesting ? 'text-gray-300' : 'text-gray-600'}`}>
+                <label className="flex items-start gap-3 text-sm text-gray-300">
                   <input
                     className="mt-1"
                     type="checkbox"
-                    disabled={!activeTesting}
                     checked={allowOobInteractions}
-                    onChange={(event) => setAllowOobInteractions(event.target.checked)}
+                    onChange={(event) => { setAllowOobInteractions(event.target.checked); if (event.target.checked) setActiveTesting(true) }}
                   />
                   <span>Allow bounded out-of-band callbacks when a registered verifier requires them</span>
                 </label>
-                {privileged && (
+                {privileged && !standingAuthorized && (
                   <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
                     <input
                       className="mt-1"
@@ -706,17 +698,17 @@ function HuntContent() {
                   />
                 </label>
               </div>
-              {(privileged || approvalReceipt) && (
+              {(receiptRequired || approvalReceipt) && (
                 <ApprovalReceiptField
                   targetId={selectedChoice?.id}
                   targetUrl={selectedChoice?.detail || ''}
-                  authorizationConfirmed={authorizationConfirmed}
+                  authorizationConfirmed={effectiveAuthorization}
                   receiptId={approvalReceipt}
                   onReceiptIdChange={setApprovalReceipt}
                   onScopeReceiptIdChange={setScopeReceipt}
                   ttlMinutes={approvalTtlMinutes}
                   riskTier={selectedCredentialCount > 0 ? 'credential' : 'active'}
-                  required={privileged}
+                  required={receiptRequired}
                 />
               )}
 
@@ -761,14 +753,14 @@ function HuntContent() {
                 )}
                 {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
                 <p className="text-xs text-gray-500">
-                  Credential use requires a target-bound approval receipt. No SSH command runs until you separately confirm the exact immutable plan.
+                  Existing target authorization also covers selected credentials. HTTP and untrusted HTTPS are supported. No SSH command runs until you separately confirm the exact immutable plan.
                 </p>
               </div>
 
-              {targetKind !== 'network' && (
+              {(
                 <RequestCollectionPicker
                   targetId={selectedChoice?.id}
-                  targetKind={targetKind}
+                  targetKind={targetKind === 'network' ? 'web' : targetKind}
                   selectedIds={requestCollectionIds}
                   onChange={setRequestCollectionIds}
                   allowConfirmedActive={activeTesting && allowStateChanging}
@@ -827,7 +819,7 @@ function HuntContent() {
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Budget</span>
-                  <span className="text-white">{hunt.budget_profile}</span>
+                  <span className="text-white">{hunt.budget_profile}{(hunt.budget_revision ?? 0) > 0 ? ' (amended)' : ''}</span>
                 </div>
                 <div className="rounded bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Capability calls</span>
@@ -853,6 +845,12 @@ function HuntContent() {
                 <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
                   {HUNT_SESSION_NON_AUTONOMOUS_NOTICE}
                 </p>
+              )}
+              {Boolean(hunt.policy_adjustments?.length) && (
+                <div className="rounded-lg border border-amber-800 p-3 text-xs text-amber-100" role="status">
+                  <p className="font-medium">Resolved Hunt configuration</p>
+                  {hunt.policy_adjustments?.map((message) => <p key={message} className="mt-1">{message}</p>)}
+                </div>
               )}
               {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
               <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact />
@@ -889,13 +887,15 @@ function HuntContent() {
                 <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
                 The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
               </div>
-              {['active', 'awaiting_planner'].includes(hunt.status) && (
+              {['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at && (
                 <Button variant="danger" onClick={cancel}>Cancel session</Button>
               )}
               <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
                 Back to launcher and history
               </Link>
             </Card>
+
+            <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
 
             <Card className="space-y-4 p-5">
               <div>

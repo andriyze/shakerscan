@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS credential_profiles (
     name TEXT NOT NULL,
     auth_kind TEXT NOT NULL CHECK (auth_kind IN (
         'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-        'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
+        'form_login','oauth_client_credentials','oauth_password','json_login','custom_headers','query_parameter',
         'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
     )),
     principal_label TEXT,
@@ -122,13 +122,14 @@ BEGIN
         SELECT 1 FROM pg_constraint
         WHERE conname='credential_profiles_auth_kind_check'
           AND conrelid='credential_profiles'::regclass
-          AND pg_get_constraintdef(oid) NOT LIKE '%query_parameter%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%query_parameter%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%json_login%')
     ) THEN
         ALTER TABLE credential_profiles DROP CONSTRAINT credential_profiles_auth_kind_check;
         ALTER TABLE credential_profiles ADD CONSTRAINT credential_profiles_auth_kind_check
             CHECK (auth_kind IN (
                 'authorization_header','bearer_token','api_key_header','cookie','basic_auth',
-                'form_login','oauth_client_credentials','oauth_password','custom_headers','query_parameter',
+                'form_login','oauth_client_credentials','oauth_password','json_login','custom_headers','query_parameter',
                 'ssh_password','ssh_private_key','ssh_private_key_with_passphrase'
             ));
     END IF;
@@ -238,8 +239,6 @@ def _validate_kind_placement(*, auth_kind: str, target_kind: str, principal_slot
             raise CredentialStoreError("SSH credentials require a network or device target")
         if principal_slot != "ssh":
             raise CredentialStoreError("SSH credentials require principal_slot=ssh")
-    elif target_kind == "network":
-        raise CredentialStoreError("HTTP credentials cannot bind to a network target")
     elif principal_slot == "ssh":
         raise CredentialStoreError("HTTP credentials cannot use principal_slot=ssh")
 
@@ -508,7 +507,7 @@ class PostgresCredentialProfileStore:
                LEFT JOIN credential_profile_bindings b
                  ON b.profile_id=p.id AND b.binding_kind='target'
                 AND b.binding_id=p.target_id::text
-               WHERE p.target_kind=$1 AND p.target_id=$2
+               WHERE (p.target_kind=$1 OR (p.target_kind IN ('web','api','network') AND $1 IN ('web','api','network'))) AND p.target_id=$2
                  AND ($3::boolean OR p.is_active=true)
                ORDER BY p.is_active DESC, lower(p.name), p.id""",
             _target_kind(target_kind),
@@ -702,7 +701,7 @@ class PostgresCredentialProfileStore:
                JOIN credential_profile_bindings b
                  ON b.profile_id=p.id AND b.binding_kind='target'
                 AND b.binding_id=p.target_id::text AND b.is_active=true
-               WHERE p.id=$1 AND p.target_kind=$2 AND p.target_id=$3
+               WHERE p.id=$1 AND (p.target_kind=$2 OR (p.target_kind IN ('web','api','network') AND $2 IN ('web','api','network'))) AND p.target_id=$3
                  AND p.is_active=true
                  AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
             _profile_id(profile_id),

@@ -36,6 +36,9 @@ RETEST_QUEUE_SCHEMA_VERSION = 1
 ASM_ENDPOINT_FINGERPRINT_MIGRATION = "asm_endpoint_fingerprint_v2"
 CAMPAIGN_SCAN_FINDING_LINKS_MIGRATION = "campaign_scan_finding_links_v1"
 TARGET_HOST_IDENTITY_MIGRATION = "target_host_identity_v1"
+# Ports became part of a web target's identity; keys only split under the new rule, so a
+# recompute through the trigger cannot collide with the unique index.
+TARGET_PORT_IDENTITY_MIGRATION = "target_port_identity_v1"
 LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"
 EVIDENCE_SCAN_IDENTITY_MIGRATION = "evidence_scan_identity_v2"
 
@@ -869,8 +872,12 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
             raw TEXT;
             authority TEXT;
             host_part TEXT;
+            port_part TEXT;
+            scheme_part TEXT;
         BEGIN
-            raw := regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', '');
+            raw := lower(btrim(COALESCE(NEW.url, '')));
+            scheme_part := substring(raw FROM '^(https?)://');
+            raw := regexp_replace(raw, '^https?://', '');
             IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
                 NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
             ELSE
@@ -878,10 +885,21 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
                 authority := regexp_replace(authority, '^.*@', '');
                 IF authority ~ '^\[[^]]+\]' THEN
                     host_part := substring(authority FROM '^\[([^]]+)\]');
+                    port_part := substring(authority FROM '^\[[^]]+\]:([0-9]+)$');
                 ELSE
                     host_part := regexp_replace(authority, ':[0-9]+$', '');
+                    port_part := substring(authority FROM ':([0-9]+)$');
                 END IF;
-                NEW.canonical_key := 'web:' || rtrim(host_part, '.');
+                -- A port that is not the scheme's default is part of the asset: a service on
+                -- https://host:8443 is not the application behind https://host.
+                IF port_part IS NULL
+                   OR (scheme_part = 'https' AND port_part = '443')
+                   OR (scheme_part = 'http' AND port_part = '80')
+                   OR (scheme_part IS NULL AND port_part IN ('80', '443')) THEN
+                    port_part := NULL;
+                END IF;
+                NEW.canonical_key := 'web:' || rtrim(host_part, '.')
+                    || COALESCE(':' || port_part, '');
             END IF;
             RETURN NEW;
         END;
@@ -902,6 +920,7 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
         "SELECT indisunique FROM pg_index WHERE indexrelid=to_regclass('idx_targets_canonical_key')"
     )
     if migration_applied and existing_index_is_unique is True:
+        await _ensure_target_port_identity(conn)
         return
 
     # The former unique origin index would reject the first host-key rewrite when two
@@ -936,6 +955,30 @@ async def _ensure_target_canonical_key_invariant(conn) -> None:
         "idx_targets_canonical_key created",
         flush=True,
     )
+    await _ensure_target_port_identity(conn)
+
+
+async def _ensure_target_port_identity(conn) -> None:
+    """Recompute every key once under the port-aware rule.
+
+    A target created for https://host:8443 used to dedupe into the https://host row, so
+    the service on the closed default port was the one every scan and Hunt reached. The
+    rule now keeps a non-default port in the key. Existing rows never merge under it (a
+    key can only become more specific), so the recompute runs with the unique index in
+    place and is recorded like the host-identity migration.
+    """
+    applied = bool(await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name=$1)",
+        TARGET_PORT_IDENTITY_MIGRATION,
+    ))
+    if applied:
+        return
+    await conn.execute("UPDATE targets SET url=url WHERE url IS NOT NULL")
+    await conn.execute(
+        "INSERT INTO app_schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        TARGET_PORT_IDENTITY_MIGRATION,
+    )
+    print("[schema] target keys recomputed with port identity", flush=True)
 
 
 async def _reconcile_active_finding_counts(conn) -> None:
@@ -1110,6 +1153,16 @@ async def _run_schema_migrations_once(pool) -> None:
             # under the same startup lock so neither API nor workers can observe profiles
             # without their immutable version and binding tables.
             await PostgresCredentialProfileStore().ensure_schema(conn)
+            try:
+                from authenticated_assurance.store import AssuranceStore
+            except ModuleNotFoundError:
+                from api.authenticated_assurance.store import AssuranceStore
+            await AssuranceStore().ensure_schema(conn)
+            try:
+                from authenticated_assurance.jobs import SCHEMA_SQL as validation_jobs_schema
+            except ModuleNotFoundError:
+                from api.authenticated_assurance.jobs import SCHEMA_SQL as validation_jobs_schema
+            await conn.execute(validation_jobs_schema)
 
             # Interactive Hunt identities are durable opaque references whose
             # cookies/tokens remain encrypted until a leased worker uses them.
@@ -3419,6 +3472,8 @@ async def _run_schema_migrations_once(pool) -> None:
                     )
                 )
             """)
+            from hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
+            await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS hunt_skill_events (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4312,6 +4367,12 @@ async def _run_schema_migrations_once(pool) -> None:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_nodes_target ON application_graph_nodes(target_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_app_graph_edges_target ON application_graph_edges(target_id)")
+            from runtime.hunt_service_schema import HUNT_SERVICE_SCHEMA_SQL
+            if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM app_schema_migrations WHERE name='v2_hunt_service_assets_v1')"
+            ):
+                await conn.execute(HUNT_SERVICE_SCHEMA_SQL)
+
 
             # Phase-1 owned-fleet identity and enrollment foundation. These
             # tables intentionally contain only hashes of join/node secrets.

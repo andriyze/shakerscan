@@ -80,3 +80,9 @@ artifacts/v2-*.xml
 !tests/fixtures/**/*.har
 !tests/fixtures/**/*.pcap
 !tests/fixtures/**/*.pcapng
+
+# The shakerscan client (client/): build outputs, and the runtime modules vendored at build time.
+client/dist/
+client/build/
+client/src/shakerscan/_mcp.py
+client/src/shakerscan/_v2_cli.py

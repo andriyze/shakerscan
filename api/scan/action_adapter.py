@@ -43,6 +43,7 @@ try:
         bfla_finding,
         boundary_established,
     )
+    from capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
@@ -104,6 +105,7 @@ except (ImportError, ModuleNotFoundError):
         bfla_finding,
         boundary_established,
     )
+    from ..capabilities.hint_files import ingest_hint_documents, HINT_DISCOVERY_PATHS
     from ..capabilities.spec_ingest import ingest_spec_bodies, SPEC_DISCOVERY_PATHS
     from ..capabilities.exposure_probe import (
         SENSITIVE_SEED_PATHS,
@@ -461,6 +463,7 @@ class DatabaseNeutralScanActionDispatcher:
         private_inputs: BrokerPrivateScanInputs | None = None,
         private_replay_plan_loader: PrivateReplayPlanLoader | None = None,
         browser_login_adapter_factory: Callable[..., Any] | None = None,
+        authentication_health_adapter_factory: Callable[..., Any] | None = None,
     ) -> None:
         if not isinstance(plan, ScanActionPlan) or target.digest != plan.target_binding_digest:
             raise ScanActionAdapterError("action dispatcher authority is inconsistent")
@@ -501,9 +504,12 @@ class DatabaseNeutralScanActionDispatcher:
         self.plan_revision = revision
         self.backend = backend
         self.process_runner = process_runner
-        self.cancelled = cancelled
+        from .action_interruption import action_interrupted
+        self.cancelled = lambda: cancelled() or action_interrupted()
         self._private_replay_plan_loader = private_replay_plan_loader
         self._browser_login_adapter_factory = browser_login_adapter_factory
+        self._authentication_health_adapter_factory = authentication_health_adapter_factory
+        self._authentication_health_records: dict[str, Any] = {}
         self._private_replay_plans = dict(
             private_inputs.replay_plans if private_inputs is not None else {}
         )
@@ -606,6 +612,12 @@ class DatabaseNeutralScanActionDispatcher:
             },
         )
 
+    def _empty_slice_reason(self, manifest: ScanWorkManifest) -> str:
+        """Do not launder an incomplete producer into clean not-applicable coverage."""
+        if str(getattr(manifest, "status", "complete")) != "complete":
+            return "dependency_incomplete"
+        return "not_applicable"
+
     async def _observations(self, action_id: str) -> tuple[Mapping[str, Any], ...]:
         return await self.backend.load_observations(action_id)
 
@@ -613,6 +625,8 @@ class DatabaseNeutralScanActionDispatcher:
         self, action: ScanAction, _result: Any,
     ) -> bool:
         """Rehydrate sealed prerequisites without repeating completed traffic."""
+        if "authentication_profile_ref" in action.capability_args:
+            return False  # A prior process's health sample cannot authorize resumed traffic.
         if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
             lane = (
                 "primary" if action.action_id.endswith("primary") else "secondary"
@@ -798,7 +812,24 @@ class DatabaseNeutralScanActionDispatcher:
             redacted_execution=prepared.redacted_execution,
         )
 
+    def authentication_health_status(self, action: ScanAction) -> str | None:
+        from authenticated_assurance.scan_health import scan_health_status
+        return scan_health_status(self._authentication_health_records, self.options, action)
+
     async def _http(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        if "authentication_profile_ref" in action.capability_args:
+            if self._authentication_health_adapter_factory is None:
+                return self._skip(action, "authentication_uncertain")
+            try:
+                adapter = self._authentication_health_adapter_factory(action=action, dispatcher=self)
+            except (ValueError, TypeError):
+                return self._skip(action, "authentication_uncertain")
+            receipt = await self._execute_adapter(action, adapter, heartbeat)
+            for observation in receipt.observations:
+                if observation.get("kind") == "authentication_health":
+                    record = dict(observation["record"])
+                    self._authentication_health_records[str(record["profile_id"])] = record
+            return receipt
         parsed = urllib.parse.urlsplit(self.target_url)
         scheme = "http" if action.action_id == "baseline.http_redirect" else parsed.scheme
         origin = urllib.parse.urlunsplit((scheme, parsed.netloc, "", "", ""))
@@ -1233,7 +1264,7 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError("request batch slice is invalid")
         rows = tuple(manifest.entries[start:min(len(manifest.entries), start + count)])
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -1439,7 +1470,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
         for dependency in action.dependencies:
             for item in await self._observations(dependency):
@@ -1627,7 +1658,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         candidate_signals: set[str] = set()
         for dependency in action.dependencies:
             for item in await self._observations(dependency):
@@ -1823,13 +1854,19 @@ class DatabaseNeutralScanActionDispatcher:
         )
 
     async def _spec_ingest(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
-        """Fetch the target's own OpenAPI/Swagger description and declare its routes.
+        """Fetch what the target declares about itself and turn it into routes.
 
-        A crawl only observes the endpoints an application happens to call; the spec declares the
-        whole surface, including body-bearing routes a black-box crawl never exercises. Each
-        conventional spec location is fetched once over the pinned transport, under the primary
-        principal so an authenticated spec is reachable, and parsed into value-free
-        ``discovered_route`` observations that flow into the same endpoint manifest as the crawl.
+        A crawl only observes the endpoints an application happens to call. Its own
+        description declares the rest: an OpenAPI document gives the body-bearing
+        routes a black-box crawl never exercises, and robots.txt and llms.txt give
+        the paths an operator wrote down by hand -- including the ones deliberately
+        kept out of the link graph, which is exactly the surface a crawl cannot see.
+
+        Each conventional location is fetched once over the pinned transport, under
+        the primary principal so an authenticated document is reachable, and parsed
+        into value-free ``discovered_route`` observations that flow into the same
+        endpoint manifest as the crawl. A declared path is a claim, never a
+        confirmed route; it is probed like any other candidate.
         """
         origin = self._exposure_origin()
         if origin is None:
@@ -1848,7 +1885,8 @@ class DatabaseNeutralScanActionDispatcher:
         documents: list[tuple[str, bytes, str | None]] = []
         errors: list[str] = []
         attempted = 0
-        for path in SPEC_DISCOVERY_PATHS:
+        hint_documents: list[tuple[str, bytes, str | None]] = []
+        for path in (*SPEC_DISCOVERY_PATHS, *HINT_DISCOVERY_PATHS):
             if self.cancelled() or attempted >= http_ceiling:
                 break
             spec_url = f"{base_origin}{path}"
@@ -1875,9 +1913,23 @@ class DatabaseNeutralScanActionDispatcher:
                     result.response_headers.get("content-type")
                     or result.response_headers.get("Content-Type") or ""
                 ) or None
-                documents.append((spec_url, result.response_body, content_type))
+                target = (
+                    hint_documents if path in HINT_DISCOVERY_PATHS else documents
+                )
+                target.append((spec_url, result.response_body, content_type))
         ingestion_issues: list[str] = []
         routes = ingest_spec_bodies(documents, origin=base_origin, issues=ingestion_issues)
+        # The hint files are an optional extra source. Whatever they do, the
+        # specification results this action already parsed must survive them.
+        try:
+            routes = list(routes) + ingest_hint_documents(
+                hint_documents, origin=base_origin, issues=ingestion_issues,
+            )
+        except Exception as hint_error:  # noqa: BLE001 - target-supplied content
+            routes = list(routes)
+            ingestion_issues.append(
+                f"hint_ingestion_failed:{type(hint_error).__name__}"
+            )
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
@@ -1901,6 +1953,7 @@ class DatabaseNeutralScanActionDispatcher:
                 "action_id": action.action_id,
                 "specs_probed": attempted,
                 "specs_parsed": len(documents),
+                "hint_documents_parsed": len(hint_documents),
                 "routes_declared": len(routes),
                 "ingestion_limitations": ingestion_issues,
                 "authenticated": bool(header_items),
@@ -2130,7 +2183,7 @@ class DatabaseNeutralScanActionDispatcher:
             manifest.entries[start:min(len(manifest.entries), start + count)], start=start,
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -2648,7 +2701,7 @@ class DatabaseNeutralScanActionDispatcher:
             enumerate(manifest.entries[start:stop], start=start)
         ))
         if not rows:
-            return self._skip(action, "not_applicable")
+            return self._skip(action, self._empty_slice_reason(manifest))
         template_options: dict[str, Any] = {}
         if tool == "nuclei":
             template_manifest = await self._work_manifest(

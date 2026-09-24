@@ -1496,6 +1496,126 @@ def test_database_neutral_network_action_limits_commands_to_reserved_hosts(monke
     assert len(captured["ports"]) == 4
 
 
+@pytest.mark.parametrize(
+    "capability_name, action_id",
+    [("ports.discover", "discover.ports"), ("service.fingerprint", "discover.services")],
+)
+def test_network_capabilities_reserve_the_addresses_they_slice(capability_name, action_id):
+    """The registry grant must fund the dimension the adapter binds addresses from.
+
+    ``_network`` slices ``target.allowed_addresses`` by the reserved
+    ``hosts_attempted`` grant. A spec that funds only ports reserves zero hosts,
+    so the slice is empty and the action self-skips as ``not_applicable`` on
+    every target -- which is what shipped: across the whole action history
+    ``ports.discover`` had never once executed, and ``discover.services``
+    was always blocked behind it as ``dependency_failed``.
+    """
+    spec = CAPABILITY_REGISTRY.require(capability_name)
+    del action_id
+    assert int(dict(spec.budget_cost).get("hosts_attempted") or 0) >= 1
+
+
+def test_network_action_binds_addresses_under_the_registry_budget(monkeypatch):
+    """Plan the action from the registry cost, exactly as the allocator does."""
+    target = TargetBinding(
+        target_id=TARGET.target_id,
+        target_kind=TARGET.target_kind,
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=TARGET.allowed_origins,
+        allowed_addresses=("192.0.2.10", "192.0.2.11", "192.0.2.12"),
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    spec = CAPABILITY_REGISTRY.require("ports.discover")
+    action = ScanAction(
+        action_id="discover.ports",
+        stage="discover_network",
+        ordinal=0,
+        capability_name=spec.name,
+        capability_args={},
+        target_binding_digest=target.digest,
+        input_binding_digest="e" * 64,
+        # The allocator hands the adapter the registry cost, never a hand-written
+        # budget; pinning a literal here is what hid the missing host grant.
+        requested_budget=dict(spec.budget_cost),
+        placement={
+            "schema_version": "scan-action-placement/v1",
+            "eligible_backends": ["local", "broker"],
+            "requirements": dict(spec.placement_requirements),
+            "adapter_name": spec.adapter,
+            "adapter_version": spec.adapter_version,
+        },
+        dependencies=(),
+        required=True,
+        supporting=True,
+        output_schema=spec.output_schema,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()),
+        execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest,
+        actions=(action,),
+    )
+    captured = {}
+
+    class Factory:
+        capability_name = spec.name
+        adapter_name = spec.adapter
+        adapter_version = spec.adapter_version
+        parser_version = spec.output_schema
+
+        def prepare(self, *, target, args, policy):
+            del policy
+            captured["addresses"] = target.allowed_addresses
+            captured["ports"] = tuple(args["ports"])
+            return PreparedExecution(
+                capability_name=spec.name,
+                adapter_name=spec.adapter,
+                adapter_version=spec.adapter_version,
+                commands=(),
+                estimated_budget={
+                    "hosts_attempted": len(target.allowed_addresses),
+                    "tcp_ports_attempted": len(args["ports"]),
+                    "tool_wall_seconds": 5,
+                },
+                input_digest="f" * 64,
+                redacted_execution={},
+                parser_version=spec.output_schema,
+            )
+
+    class ExecutionAdapter:
+        manages_cancellation = False
+
+        def __init__(self, *, prepared, parser, **_kwargs):
+            del parser
+            self.capability_name = prepared.capability_name
+            self.adapter_name = prepared.adapter_name
+            self.adapter_version = prepared.adapter_version
+
+        async def execute(self, **_kwargs):
+            return CapabilityAdapterResult(
+                status="success",
+                actual_budget={
+                    "hosts_attempted": len(captured["addresses"]),
+                    "tcp_ports_attempted": len(captured["ports"]),
+                    "tool_wall_seconds": 1,
+                },
+                execution_started=True,
+                parser_version=spec.output_schema,
+            )
+
+    monkeypatch.setattr(action_adapter_module, "network_capability_adapter", lambda _name: Factory())
+    monkeypatch.setattr(action_adapter_module, "NetworkExecutionAdapter", ExecutionAdapter)
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    # A skip would come back as a receipt that never entered execution.
+    assert receipt.status == "success"
+    # Every bound address is examined, and each one gets a real port list.
+    assert captured["addresses"] == target.allowed_addresses
+    assert len(captured["ports"]) >= 1
+
+
+
 def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeypatch):
     target = TargetBinding(
         target_id=TARGET.target_id,
@@ -2196,3 +2316,87 @@ def test_a_path_segment_candidate_is_inapplicable_to_dalfox_not_unattempted(monk
     assert [item["kind"] for item in result.observations] == ["candidate_inapplicable"]
     assert result.observations[0]["reason"] == "path_segment_candidate"
     assert result.observations[0]["candidate_id"] == candidates.entries[0]["candidate_id"]
+
+
+def _search_endpoint_manifest(scan_id):
+    return build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [{
+                "method": "GET", "scheme": "https",
+                "host": "app.example.test", "port": 443,
+                "normalized_path": "/search", "concrete_path": "/search",
+                "query_keys": ["q", "page", "sort"], "source": "seed",
+            }],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+
+
+def _prove_xss_receipt(endpoint_manifest, candidates, *, start):
+    action = _action(
+        "prove.xss", "xss.browser_prove_batch", 0,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": start, "count": 9},
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=endpoint_manifest.scan_id,
+        execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest,
+        actions=(action,),
+    )
+    dispatcher = _dispatcher(
+        plan,
+        Backend(manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        }),
+        policy=ScanPolicy(active_testing=True),
+    )
+    return asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+
+def test_proof_slice_beyond_a_partial_manifest_is_incomplete_dependency_work():
+    """A truncated (partial) producer never published the candidates this slice was
+    scheduled for. Reporting that as not_applicable would let the finalizer count the
+    escalation as cleanly complete; it is unavailable dependency work instead."""
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=1,
+    )
+    assert candidates.status == "partial" and len(candidates.entries) == 1
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=1)
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("dependency_incomplete",)
+
+
+def test_proof_slice_beyond_a_complete_manifest_stays_not_applicable():
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = _search_endpoint_manifest(scan_id)
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=50,
+    )
+    assert candidates.status == "complete"
+
+    receipt = _prove_xss_receipt(endpoint_manifest, candidates, start=len(candidates.entries))
+
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+
+
+def test_every_capability_result_reason_has_an_operator_label():
+    import importlib
+    root = DatabaseNeutralScanActionDispatcher.__module__.rsplit(".", 1)[0]
+    reasons = importlib.import_module(root + ".capability_result").CapabilityResultReason
+    labels = importlib.import_module(root + ".explanation")._REASON_LABELS
+    assert sorted(item.value for item in reasons if item.value not in labels) == []

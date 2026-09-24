@@ -1,6 +1,7 @@
 'use client'
 
 import Link from '@/components/WorkspaceLink'
+import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Router, ShieldCheck } from 'lucide-react'
 import {
@@ -42,6 +43,7 @@ export default function DevicesPage() {
   const [enabled, setEnabled] = useState(true)
   const [workerReady, setWorkerReady] = useState(false)
   const [readinessReason, setReadinessReason] = useState<string | null>(null)
+  const [readinessRemedy, setReadinessRemedy] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [scanTarget, setScanTarget] = useState<DeviceTarget | null>(null)
@@ -65,6 +67,7 @@ export default function DevicesPage() {
       setEnabled(readiness.enabled)
       setWorkerReady(readiness.status === 'ready')
       setReadinessReason(readiness.reason || null)
+      setReadinessRemedy(readiness.remedy || null)
       setFailed(false)
     } catch {
       if (sequence === loadSequence.current) setFailed(true)
@@ -135,7 +138,7 @@ export default function DevicesPage() {
       />
 
       {!enabled && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Connected-device scanning is disabled by the operator.</Card>}
-      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.</Card>}
+      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.{readinessRemedy && <span className="mt-2 block text-amber-100">{readinessRemedy}</span>}</Card>}
 
       <div className="mb-4 max-w-md"><Input value={search} onChange={(event) => { setPage(0); setSearch(event.target.value) }} placeholder="Search name, address, or manufacturer" aria-label="Search connected devices" /></div>
 
@@ -155,7 +158,7 @@ export default function DevicesPage() {
               <div className="rounded bg-gray-950 p-2"><div className="text-lg font-semibold text-white">{device.active_findings_count || 0}</div><div className="text-gray-500">findings</div></div>
               <div className="rounded bg-gray-950 p-2"><div className="truncate text-sm font-semibold text-white">{device.device_class}</div><div className="text-gray-500">class</div></div>
             </div>
-            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500"><span>{device.policy_name || 'Default policy'}</span><RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => { if (devices.length === 1 && page > 0) setPage(page - 1); else void load() }} /><Button size="sm" disabled={!workerReady} onClick={() => { setScanTarget(device); setScanForm({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', confirm_authorized: false }) }}>Scan</Button></div>
           </Card>
         })}</div>}
       {!loading && !failed && total > PAGE_SIZE && <div className="mt-5 flex items-center justify-between text-sm text-gray-400"><span>Showing {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} of {total}</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button size="sm" variant="secondary" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((value) => value + 1)}>Next</Button></div></div>}
@@ -175,7 +178,7 @@ export default function DevicesPage() {
           <Field label="Coverage"><Select value={scanForm.profile} onChange={(event) => setScanForm({ ...scanForm, profile: event.target.value })}><option value="inventory">Inventory — top 100 TCP ports + curated UDP, lightest</option><option value="posture">Posture — all 65,535 TCP ports + curated UDP, slower</option><option value="thorough">Thorough — all 65,535 TCP ports + deeper fingerprints, heaviest</option></Select></Field>
           {scanForm.profile !== 'inventory' && <p className="rounded border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">This profile checks every TCP port and can take hours on slow or filtered devices. Start with Inventory unless complete port coverage is required.</p>}
           <Field label="Known TCP ports (optional)" hint="Previously observed and policy-defined ports are included automatically."><Input value={scanForm.port_hints} onChange={(event) => setScanForm({ ...scanForm, port_hints: event.target.value })} placeholder="7345, 9443" /></Field>
-          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scanForm.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScanForm({ ...scanForm, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scanForm.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — credentials can be selected on the device page</option><option value="lab_invasive" disabled>Lab invasive — dedicated runner required</option></Select></Field>
+          <Field label="Safety level" hint="Safety is independent from port coverage."><Select value={scanForm.safety_profile} onChange={(event) => { const safety_profile = event.target.value; setScanForm({ ...scanForm, safety_profile, include_web_dast: safety_profile === 'observe_only' ? false : scanForm.include_web_dast }) }}><option value="observe_only">Observe only — discovery and fingerprints</option><option value="safe_remote">Safe remote — bounded non-destructive checks</option><option value="authenticated_active">Authenticated active — credentials can be selected on the device page</option></Select></Field>
           <label className="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300"><input type="checkbox" checked={scanForm.include_web_dast} disabled={scanForm.safety_profile === 'observe_only'} onChange={(event) => setScanForm({ ...scanForm, include_web_dast: event.target.checked })} className="mt-1" /><span><strong className="block text-white">Check discovered web interfaces</strong>{scanForm.safety_profile === 'observe_only' ? 'Observe-only discovers origins without launching Web/API children.' : 'Run bounded device-owned Web/API checks on HTTP(S) found on any port. Select imported request collections from the device details page.'}</span></label>
           {scanForm.include_web_dast && <Field label="Web coverage"><Select value={scanForm.web_scan_type} onChange={(event) => setScanForm({ ...scanForm, web_scan_type: event.target.value })}><option value="quick">Quick</option><option value="standard">Standard</option><option value="deep">Deep web review</option></Select></Field>}
           <label className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100"><input type="checkbox" checked={scanForm.confirm_authorized} onChange={(event) => setScanForm({ ...scanForm, confirm_authorized: event.target.checked })} className="mt-1" /><span>I confirm I am authorized to scan this device and its listening services.</span></label>

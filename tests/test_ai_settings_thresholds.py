@@ -56,3 +56,30 @@ def test_partial_threshold_patch_is_validated_against_persisted_state():
 
     assert exc.value.status_code == 422
     assert "effective verification_min_severity" in exc.value.detail
+
+
+def test_research_ai_provider_loader_imports_importlib_and_returns_the_provider():
+    """Regression: `_load_research_ai_provider` uses `importlib`, which this module does not
+    import at module scope. Before the fix it raised NameError, the bare except swallowed it, and
+    the loader always returned None, so the configured-AI research planner reported "Shared AI
+    provider client is unavailable" in every deployment. The loader must import `importlib`
+    itself and return the real `scanner_tools.ai_classifier.call_ai_provider`.
+    """
+    import importlib as _importlib
+
+    import settings_routes.router as router_module
+
+    provider = router_module._load_research_ai_provider()
+    assert callable(provider), "the research AI provider loader returned nothing"
+    ai_classifier = _importlib.import_module("scanner_tools.ai_classifier")
+    assert provider is ai_classifier.call_ai_provider
+
+    # The loader must not depend on a caller or the module having pre-imported `importlib`:
+    # remove any module-level binding and confirm it still resolves the provider on its own.
+    had = "importlib" in router_module.__dict__
+    saved = router_module.__dict__.pop("importlib", None)
+    try:
+        assert callable(router_module._load_research_ai_provider())
+    finally:
+        if had:
+            router_module.__dict__["importlib"] = saved

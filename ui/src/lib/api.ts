@@ -1177,6 +1177,8 @@ export interface LocalAgentsResponse {
 }
 
 export interface Scan {
+  risk_assessment_state?: string | null
+  application_observed?: boolean | null
   id: string
   target_id?: string | null
   target_url: string
@@ -1495,10 +1497,10 @@ export interface DeviceCapabilityItem {
   id: string
   title: string
   group: string
-  implementation: 'available' | 'partial' | 'planned' | 'sensor_required' | 'lab_only'
+  implementation: 'available' | 'partial' | 'planned' | 'sensor_required'
   executor?: string | null
-  minimum_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
-  state: 'ready' | 'completed' | 'blocked' | 'planned' | 'sensor_required' | 'lab_only' | 'not_applicable'
+  minimum_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
+  state: 'ready' | 'completed' | 'blocked' | 'planned' | 'sensor_required' | 'not_applicable'
   blockers: string[]
   applicable: boolean
   notes?: string
@@ -2453,6 +2455,7 @@ export interface WorkerPoolSummary {
   pending: number
   status: 'ready' | 'not_ready' | 'disabled'
   reason?: string | null
+  remedy?: string | null
 }
 
 export interface WorkerStats {
@@ -4108,6 +4111,17 @@ export async function updateTargetMetadata(
   return res.json()
 }
 
+/** Bring an archived target back into the inventory; its history was never removed. */
+export async function restoreTarget(targetId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(targetId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_active: true }),
+  })
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to restore target'))
+  return res.json()
+}
+
 export async function getExposureChanges(params?: {
   root_domain?: string
   since?: string
@@ -5181,19 +5195,20 @@ export async function getDeviceReadiness(): Promise<{
   enabled: boolean
   status: string
   reason?: string | null
+  /** The one command that resolves `reason`, so a not-ready page is not a dead end. */
+  remedy?: string | null
   worker_count: number
   capable_worker_count: number
   profiles: string[]
   coverage_profiles: string[]
   safety_profiles: Array<{
-    name: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+    name: 'observe_only' | 'safe_remote' | 'authenticated_active'
     label: string
     allowed_action_classes: string[]
     max_concurrency: number
     max_requests_per_second: number
     health_monitor_required: boolean
     credentials_allowed: boolean
-    explicit_lab_confirmation_required: boolean
     available: boolean
     unavailable_reason?: string | null
   }>
@@ -5301,9 +5316,8 @@ export async function createDevice(payload: {
 
 export async function scanDevice(deviceId: string, payload: {
   profile: 'inventory' | 'posture' | 'thorough'
-  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active' | 'lab_invasive'
+  safety_profile: 'observe_only' | 'safe_remote' | 'authenticated_active'
   confirm_authorized: boolean
-  confirm_lab_invasive?: boolean
   include_web_dast: boolean
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number
@@ -5706,7 +5720,10 @@ export async function createTarget(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, name, cohort, ...(authorizedBy ? { authorized_by: authorizedBy } : {}) })
   })
-  if (!res.ok) throw new Error('Failed to create target')
+  // Carry the server's reason. A fixed string here meant the page, which shows err.message,
+  // still only ever said "Failed to create target" -- the scope refusal, the duplicate and the
+  // invalid URL all looked identical to the operator.
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to create target'))
   return res.json()
 }
 
@@ -5781,6 +5798,7 @@ export async function getFindings(params?: {
   device_target_id?: string
   search?: string
   seen_within_days?: number
+  not_seen_within_days?: number
   first_seen_within_days?: number
   resolved_within_days?: number
   verification_verdict?: 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error'
@@ -5815,6 +5833,7 @@ export async function getFindings(params?: {
   if (params?.device_target_id) searchParams.set('device_target_id', params.device_target_id)
   if (params?.search) searchParams.set('search', params.search)
   if (params?.seen_within_days) searchParams.set('seen_within_days', params.seen_within_days.toString())
+  if (params?.not_seen_within_days) searchParams.set('not_seen_within_days', params.not_seen_within_days.toString())
   if (params?.first_seen_within_days) searchParams.set('first_seen_within_days', params.first_seen_within_days.toString())
   if (params?.resolved_within_days) searchParams.set('resolved_within_days', params.resolved_within_days.toString())
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
@@ -5982,6 +6001,15 @@ export interface DeploymentDecision {
     signature_trusted_root?: boolean | null
     signature_verification_status?: string | null
   }>
+  /** The target's unresolved findings this scan did not observe, computed next to the gate. */
+  carried_over?: {
+    count?: number
+    material?: number
+    highest?: string | null
+    complete?: boolean
+    total_active?: number
+    unloaded_active?: number
+  } | null
   expires_at?: string
   [key: string]: unknown
 }
@@ -7567,12 +7595,14 @@ export async function createTargetPolicyApprovalReceipt({
   ttlMinutes = 120,
   riskTier = 'active',
   environment = 'production',
+  actionName,
 }: {
   targetId?: string
   targetUrl: string
   ttlMinutes?: number
   riskTier?: 'active' | 'credential'
   environment?: 'production' | 'lab'
+  actionName?: string
 }): Promise<{ approvalReceiptId: string; scopeReceiptId: string; expiresAt: string }> {
   const normalizedTargetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
     ? targetUrl.trim()
@@ -7593,6 +7623,7 @@ export async function createTargetPolicyApprovalReceipt({
   const approval = await createApprovalReceipt({
     scope_receipt_id: scope.scope_receipt.receipt_id,
     risk_tier: riskTier,
+    ...(actionName ? { action_name: actionName } : {}),
     confirmations,
     approved_by: 'interactive-ui',
     // Keep interactive approvals bounded to the requested workflow duration and the server's

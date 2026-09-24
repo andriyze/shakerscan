@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -118,7 +118,13 @@ function scanLogBadgeTone(kind: string): string {
   }
 }
 
-function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; buildVersion?: string | null; buildFingerprint?: string | null }) {
+// Active rows loaded for the carried-over summary. Past this, history is reported partial.
+const HISTORY_ROW_CAP = 5000
+
+function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], historyState = 'ready' }: {
+  scan: any; buildVersion?: string | null; buildFingerprint?: string | null
+  decision?: DeploymentDecision | null; targetFindings?: any[]; historyState?: 'loading' | 'error' | 'ready' | 'partial'
+}) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
     .map((severity) => [severity, severityCounts[severity]] as const)
@@ -151,8 +157,23 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
   const scopeSummary = [
     resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
-    resultPresentation.authenticated ? 'authenticated' : 'anonymous',
+    resultPresentation.authenticationRequested ? 'identity unverified' : 'anonymous',
   ].filter(Boolean).join(' · ')
+  // The deployment decision carries the server's carried-over summary, computed next to the
+  // gate over the target's complete active set. The client computation is the fallback for
+  // an API that does not send one yet.
+  const carried = carriedOverFromDecision(decision) ?? carriedOverSummary(scan, targetFindings, historyState)
+  const release = releaseLine(decision, scan?.id, resultPresentation.confirmedCount)
+  const releaseClass = release?.tone === 'block'
+    ? 'bg-red-900/50 text-red-200'
+    : release?.tone === 'allow'
+      ? 'bg-green-900/50 text-green-200'
+      : 'bg-amber-900/50 text-amber-200'
+  const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
+    + resultPresentation.coverageGapReasons.length
+    + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
+  const assuranceGaps = (assurance?.gaps || [])
+    .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
 
   return (
     <Card className="mb-6 overflow-hidden p-0">
@@ -164,9 +185,29 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               {resultPresentation.headline}
             </h2>
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
+            {release && (
+              <p className="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-200" data-testid="release-line">
+                <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
+                <span>{release.text}</span>
+              </p>
+            )}
             <p className={`mt-3 text-sm font-medium ${resultPresentation.confidenceTone === 'qualified' ? 'text-amber-200' : assuranceClass(assurance?.band)}`}>
               {resultPresentation.confidence}
             </p>
+            {resultPresentation.nextSteps.length > 0 && (
+              <div className="mt-4 flex flex-wrap items-center gap-2" data-testid="next-steps">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Next</span>
+                {resultPresentation.nextSteps.map((step: { key: string; label: string; href: string }) => (
+                  <Link
+                    key={step.key}
+                    href={step.href}
+                    className="rounded border border-blue-400/40 bg-blue-500/10 px-3 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/20"
+                  >
+                    {step.label} →
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
           <div className="text-right text-xs text-gray-500">
             {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
@@ -176,73 +217,59 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
         </div>
       </section>
 
-      <div className="grid gap-px bg-gray-800 md:grid-cols-3">
-        <div className="bg-gray-950/80 p-5">
+      <div className="grid gap-px bg-gray-800 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="bg-gray-950/80 p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Observed risk from this run</p>
           {scorePresentation.status === 'not_examined' ? (
-            <p className="mt-3 text-lg font-semibold text-amber-200">Not examined</p>
+            <p className="mt-2 text-lg font-semibold text-amber-200">Not examined</p>
           ) : scorePresentation.status === 'unavailable' ? (
-            <p className="mt-3 text-sm font-medium text-amber-200">Risk score unavailable</p>
+            <p className="mt-2 text-sm font-medium text-amber-200">Risk score unavailable</p>
           ) : (
-            <div className="mt-2 flex items-baseline gap-3">
-              {hasGrade && (
-                <span className={`text-4xl font-bold ${observedRiskColor}`}>
-                  {scorePresentation.grade}
-                </span>
-              )}
-              {hasScore && <span className="text-lg text-gray-300">{scorePresentation.score}/100</span>}
+            <div className="mt-1 flex items-baseline gap-2">
+              {hasGrade && <span className={`text-3xl font-bold ${observedRiskColor}`}>{scorePresentation.grade}</span>}
+              {hasScore && <span className="text-sm text-gray-300">{scorePresentation.score}/100</span>}
             </div>
           )}
-          <p className="mt-2 text-xs leading-5 text-gray-500">
+          <p className="mt-1 text-xs leading-5 text-gray-500" title={resultPresentation.scorePolicy ? `Scored by ${resultPresentation.scorePolicy}` : undefined}>
             {resultPresentation.notExamined
-              ? 'No application response was observed, so this run cannot publish a clean risk grade.'
+              ? 'No application response; no clean grade.'
               : resultPresentation.postureIncluded
-              ? 'Finding evidence and deterministic application posture observed by this run.'
-              : 'Finding evidence observed by this run; this historical scoring policy may exclude posture deductions.'}
+              ? 'Findings and posture observed by this run.'
+              : 'Findings observed by this run; this historical scoring policy may exclude posture deductions.'}
             {' '}This is not an overall safety or release score.
+            {scoreProjection?.reason === 'historical_policy_preserved' && ' Historical output is preserved; it was not silently rescored.'}
           </p>
-          {resultPresentation.scorePolicy && (
-            <p className="mt-2 text-xs text-gray-600">
-              Scored by <span className="font-mono text-gray-500">{resultPresentation.scorePolicy}</span>.
-              {scoreProjection?.reason === 'historical_policy_preserved' && ' Historical output is preserved; it was not silently rescored.'}
-            </p>
-          )}
-          {scorePresentation.note && (
-            <p className="mt-2 text-xs text-amber-200/80">{scorePresentation.note}</p>
-          )}
+          {scorePresentation.note && <p className="mt-1 text-xs text-amber-200/80">{scorePresentation.note}</p>}
         </div>
 
-        <div className="bg-gray-950/80 p-5">
+        <div className="bg-gray-950/80 p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Examination strength</p>
           {assurance ? (
             <>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className={`text-4xl font-bold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className={`text-3xl font-bold ${assuranceClass(assurance.band)}`}>{assurance.score}</span>
                 <span className="text-sm text-gray-300">/100 · {assurance.label}</span>
               </div>
-              <p className="mt-2 text-xs leading-5 text-gray-500">
-                How much planned work, candidate testing, identity coverage, and verification actually ran.
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                {resultPresentation.coverageIncomplete
+                  ? resultPresentation.incompleteFamilies.length > 0
+                    ? `Scores the work that ran; ${resultPresentation.incompleteFamilies.length} selected check ${resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} did not finish.`
+                    : 'Scores the work that ran; the run did not finish everything it planned.'
+                  : 'How much planned work, candidate testing, identity coverage and verification ran.'}
               </p>
-              {resultPresentation.coverageIncomplete && (
-                <p className="mt-2 text-xs text-amber-200/90">
-                  Scores the work that ran; {resultPresentation.incompleteFamilies.length > 0
-                    ? `${resultPresentation.incompleteFamilies.length} selected check ${resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} did not finish.`
-                    : 'the run did not finish everything it planned.'}
-                </p>
-              )}
             </>
           ) : (
-            <p className="mt-3 text-sm text-gray-500">Coverage score unavailable</p>
+            <p className="mt-2 text-sm text-gray-500">Coverage score unavailable</p>
           )}
         </div>
 
-        <div className="bg-gray-950/80 p-5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Evidence observed</p>
-          <div className="mt-3 flex flex-wrap gap-2">
+        <div className="bg-gray-950/80 p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">This run found</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
             {severityEntries.length > 0 ? severityEntries.map(([severity, count]) => (
               <Link
                 key={severity}
-                href={`/findings?scan_id=${scan.id}&severity=${severity}`}
+                href={`/findings?scan_id=${scan.id}&severity=${severity}&freshness=all`}
                 title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} from this scan`}
                 className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
@@ -252,43 +279,79 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
               <span className="text-sm text-gray-400">No findings reported</span>
             )}
           </div>
-          <p className="mt-3 text-xs leading-5 text-gray-500">
+          <p className="mt-2 text-xs leading-5 text-gray-500">
             {resultPresentation.confirmedCount > 0
               ? `${resultPresentation.confirmedCount} material finding${resultPresentation.confirmedCount === 1 ? ' carries' : 's carry'} deterministic proof.`
               : resultPresentation.candidateCount > 0
                 ? `${resultPresentation.candidateCount} material candidate${resultPresentation.candidateCount === 1 ? '' : 's'} still need verification.`
-                : 'No confirmed medium, high, or critical finding was produced by this run.'}
+                : 'No confirmed medium, high, or critical finding in this run.'}
           </p>
+        </div>
+
+        <div className="bg-gray-950/80 p-4" data-testid="carried-over">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Carried over</p>
+          {carried.state === 'loading' ? (
+            <p className="mt-2 text-sm text-gray-500">Loading target history…</p>
+          ) : carried.state === 'error' ? (
+            <p className="mt-2 text-sm text-amber-300">Target history unavailable; earlier findings were not checked.</p>
+          ) : carried.count > 0 || !carried.complete ? (
+            <>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <Link
+                  href={`/findings?target_id=${scan.target_id}&status=active&freshness=all`}
+                  className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest as SeverityLevel] : 'bg-gray-800 text-gray-300'}`}
+                >
+                  {carried.complete ? '' : 'at least '}{carried.count} unresolved{carried.highest ? ` · up to ${carried.highest}` : ''}
+                </Link>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-gray-500">
+                {carried.complete
+                  ? 'Found by earlier scans and still open; this run did not observe them. They count toward the release decision.'
+                  : 'Target history is incomplete: not every active finding could be loaded, so this is a lower bound and not an all-clear.'}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="mt-2 text-sm text-gray-400">Nothing unresolved from earlier scans</p>
+              <p className="mt-2 text-xs leading-5 text-gray-500">Every open finding on this target was observed in this run.</p>
+            </>
+          )}
         </div>
       </div>
 
-      <div className="space-y-3 border-t border-gray-800 p-5">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <CoverageMetric label="Budget" value={resultPresentation.budgetProfile} />
-          <CoverageMetric label="Testing" value={resultPresentation.activeTesting ? 'Active allowed' : 'Passive only'} />
-          <CoverageMetric label="Identity coverage" value={resultPresentation.authenticated ? 'Authenticated' : 'Anonymous only'} />
-          <CoverageMetric label="HTTP requests used" value={resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()} />
-        </div>
-        {resultPresentation.resolvedFamilies.length > 0 && (
-          <p className="text-xs text-gray-500">
-            Check families run: {resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}
+      <div className="space-y-3 border-t border-gray-800 p-4">
+        <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-400">
+          <div><dt className="inline text-gray-500">Budget </dt><dd className="inline text-gray-200">{resultPresentation.budgetProfile}</dd></div>
+          <div><dt className="inline text-gray-500">Testing </dt><dd className="inline text-gray-200">{resultPresentation.testingSummary}</dd></div>
+          <div><dt className="inline text-gray-500">Identity assurance </dt><dd className="inline text-gray-200">{resultPresentation.authenticationAssurance}</dd></div>
+          <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
+          {resultPresentation.resolvedFamilies.length > 0 && (
+            <div><dt className="inline text-gray-500">Check families run </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
+          )}
+        </dl>
+        {resultPresentation.testingWarning && (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
+            {resultPresentation.testingWarning}
           </p>
         )}
-        {resultPresentation.missingHeaders.length > 0 && (
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3">
-            <p className="text-sm font-medium text-amber-200">Baseline posture needs attention</p>
-            <p className="mt-1 text-xs leading-5 text-amber-100/75">
-              Missing headers: {resultPresentation.missingHeaders.join(', ')}.
-              {resultPresentation.postureIncluded
-                ? ` These deterministic weaknesses reduced the observed-risk score${resultPresentation.posturePenalty !== null ? ` by ${resultPresentation.posturePenalty} points` : ''}.`
-                : ' This historical score predates posture-aware scoring, so these weaknesses are visible but were not deducted from its number.'}
-            </p>
-          </div>
-        )}
-        {resultPresentation.coverageIncomplete && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3" data-testid="coverage-gaps">
-            <p className="text-sm font-medium text-amber-200">Requested coverage did not complete</p>
-            <ul className="mt-2 space-y-1 text-xs leading-5 text-amber-100/80">
+        {(resultPresentation.coverageIncomplete || resultPresentation.missingHeaders.length > 0) && (
+          <details
+            className="rounded-lg border border-amber-500/30 bg-amber-500/10"
+            data-testid="coverage-gaps"
+            open={resultPresentation.confidenceTone !== 'supporting'}
+          >
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-amber-200">
+              What limits this result{limitCount > 0 ? ` (${limitCount})` : ''}
+            </summary>
+            <ul className="space-y-1 px-3 pb-3 text-xs leading-5 text-amber-100/80">
+              {resultPresentation.missingHeaders.length > 0 && (
+                <li>
+                  • <span className="font-medium text-amber-100">Baseline posture needs attention</span>: missing {resultPresentation.missingHeaders.join(', ')}.
+                  {resultPresentation.postureIncluded
+                    ? ` These deterministic weaknesses reduced the observed-risk score${resultPresentation.posturePenalty !== null ? ` by ${resultPresentation.posturePenalty} points` : ''}.`
+                    : ' This historical score predates posture-aware scoring, so these weaknesses are visible but were not deducted from its number.'}
+                </li>
+              )}
               {resultPresentation.coverageGapReasons.map((reason: string) => (
                 <li key={reason}>• {reason}.</li>
               ))}
@@ -298,19 +361,14 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint }: { scan: any; 
                   <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
                 </li>
               )}
-              {(() => {
-                const gaps = (assurance?.gaps || [])
-                  .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
-                return gaps.length > 0
-                  ? <li>• What was not established: {gaps.join('; ')}.</li>
-                  : null
-              })()}
+              {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}
+              {resultPresentation.coverageIncomplete && (
+                <li className="text-amber-100/60">
+                  Findings above are real; absence of a finding in an unfinished family is not evidence of safety. Coverage details are in the execution section below.
+                </li>
+              )}
             </ul>
-            <p className="mt-2 text-xs text-amber-100/60">
-              Findings above are real; absence of a finding in an unfinished family is not evidence of safety.
-              Coverage details are in the execution section below.
-            </p>
-          </div>
+          </details>
         )}
       </div>
 
@@ -666,7 +724,7 @@ function ScanFindingContextCard({
             This run's observations are kept separate from findings that were not observed in this run.
           </p>
         </div>
-        <Link href={`/findings?target_id=${scan.target_id}`} className="text-xs text-blue-300 hover:text-blue-200">
+        <Link href={`/findings?target_id=${scan.target_id}&freshness=all`} className="text-xs text-blue-300 hover:text-blue-200">
           Open all target findings
         </Link>
       </div>
@@ -1265,6 +1323,10 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   }
 
   const rollup = scan.shard_rollup || {}
+  // Contribution totals are summed from shards that have settled, so they only
+  // mean what they say once every shard is terminal.
+  const rollupSettled = Number(rollup.terminal || 0) >= Number(rollup.total || 0)
+    && Number(rollup.total || 0) > 0
   const plannedRequestBudget = Number(scan.options?.parallel_planned_request_budget || 0)
   const backboneRequestBudget = Number(scan.options?.parallel_backbone_request_budget || 0)
   return (
@@ -1300,7 +1362,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           Actual traffic remains subject to per-target rate limits and completion budgets.
         </div>
       )}
-      <ShardContributionRollup rollup={rollup} />
+      <ShardContributionRollup rollup={rollup} settled={rollupSettled} />
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {scan.shards.map((shard: any) => (
           <ShardCard shard={shard} key={shard.id} />
@@ -1310,7 +1372,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   )
 }
 
-function ShardContributionRollup({ rollup }: { rollup: any }) {
+function ShardContributionRollup({ rollup, settled }: { rollup: any; settled: boolean }) {
   const contribution = rollup?.contribution
   if (!contribution || typeof contribution !== 'object') return null
 
@@ -1333,7 +1395,7 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
           {attemptTelemetryAvailable
             ? `${attempted || selected || 0} attempted${assigned ? ` · ${assigned} assigned` : ''}`
             : assigned
-              ? `Attempt telemetry unavailable · ${assigned} assigned`
+              ? `${assigned} assigned · ${settled ? 'shards did not report how many were attempted' : 'attempts reported when each shard finishes'}`
               : 'No endpoint work assigned'}
         </div>
         {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
@@ -1341,8 +1403,13 @@ function ShardContributionRollup({ rollup }: { rollup: any }) {
       <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Runtime / active cap</div>
         <div className="mt-1 text-gray-200">
-          {duration ? formatDuration(duration) : '0s'}
-          {activeBudget ? ` / ${formatDuration(activeBudget)}` : ''}
+          {/* Shard runtime is summed from settled shards, so during a run it is
+              legitimately 0 -- printing "0s" while the scan has been going for
+              minutes reads as a stuck scan rather than an unsettled total. */}
+          {duration > 0
+            ? formatDuration(duration)
+            : settled ? '0s' : 'settles as shards finish'}
+          {activeBudget > 0 ? ` / ${formatDuration(activeBudget)}` : ''}
         </div>
         {typeof contribution.active_budget_utilization === 'number' && (
           <div className="mt-1 text-gray-500">{formatPct(contribution.active_budget_utilization)} of cap</div>
@@ -1380,7 +1447,7 @@ function ShardCard({ shard }: { shard: any }) {
   const endpointSummary = assigned || attempted
     ? hasAttemptTelemetry
       ? `${attempted || selected || 0}${assigned ? ` / ${assigned}` : ''}`
-      : `${assigned} assigned · attempts unavailable`
+      : `${assigned} assigned · attempts not reported`
     : selected || worklistTotal
       ? `${selected}${worklistTotal ? ` / ${worklistTotal}` : ''}`
       : null
@@ -1430,7 +1497,7 @@ function ShardCard({ shard }: { shard: any }) {
             <div className="truncate text-gray-200">{String(contribution.auth_state).replace(/_/g, ' ')}</div>
           </div>
         )}
-        {(endpointBudget || activeSeconds) && (
+        {(endpointBudget > 0 || activeSeconds > 0) && (
           <div className="rounded bg-gray-950/60 px-2 py-1">
             <div className="text-gray-500">Active budget</div>
             <div className="text-gray-200">
@@ -1558,7 +1625,9 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
                 href={`/scan/new?target=${encodeURIComponent(targetUrl)}`}
                 className="mt-3 inline-flex rounded-lg bg-amber-500/15 px-3 py-1.5 text-sm font-medium text-amber-100 hover:bg-amber-500/25"
               >
-                Review target and retry
+                {/heartbeat|queue delivery|worker job|worker ownership|reclaimed|lease/i.test(String(rawFailureMessage || ''))
+                  ? 'Retry scan'
+                  : 'Review target and retry'}
               </Link>
             )}
           </div>
@@ -1769,6 +1838,7 @@ function ScanDetailContent() {
   const [deploymentDecisionLoading, setDeploymentDecisionLoading] = useState(false)
   const [targetFindings, setTargetFindings] = useState<Finding[]>([])
   const [targetFindingsTotal, setTargetFindingsTotal] = useState(0)
+  const [targetFindingsPartial, setTargetFindingsPartial] = useState(false)
   const [targetFindingsLoading, setTargetFindingsLoading] = useState(false)
   const [targetFindingsError, setTargetFindingsError] = useState<string | null>(null)
   const [targetPosture, setTargetPosture] = useState<TargetPosture | null>(null)
@@ -1830,14 +1900,29 @@ function ScanDetailContent() {
         if (data?.target_id && ['completed', 'failed'].includes(String(data?.status))) {
           setTargetFindingsLoading(true)
           try {
-            const findingData = await getFindings({
-              target_id: data.target_id,
-              limit: 100,
-              sort_by: 'severity',
-              sort_order: 'desc',
-            })
-            setTargetFindings(findingData.findings || [])
-            setTargetFindingsTotal(findingData.total || 0)
+            // The carried-over summary is only true over the complete set of active rows.
+            // Page through all of them; a cap that cannot be reached is reported as a
+            // partial history, never as an all-clear.
+            const pageSize = 200
+            const rows: Finding[] = []
+            let total = 0
+            for (let offset = 0; offset < HISTORY_ROW_CAP; offset += pageSize) {
+              const page = await getFindings({
+                target_id: data.target_id,
+                status: 'active',
+                limit: pageSize,
+                offset,
+                sort_by: 'severity',
+                sort_order: 'desc',
+              })
+              const batch = page.findings || []
+              rows.push(...batch)
+              total = Math.max(Number(page.total || 0), rows.length)
+              if (batch.length < pageSize || rows.length >= total) break
+            }
+            setTargetFindings(rows)
+            setTargetFindingsTotal(total)
+            setTargetFindingsPartial(rows.length < total)
             setTargetFindingsError(null)
           } catch {
             setTargetFindingsError('Could not load earlier findings for this target.')
@@ -2248,7 +2333,16 @@ function ScanDetailContent() {
     <div>
       <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
       <ShardContextBanner scan={scan} />
-      {scan.status === 'completed' && <ScanVerdictCard scan={scan} buildVersion={buildVersion} buildFingerprint={buildFingerprint} />}
+      {scan.status === 'completed' && (
+        <ScanVerdictCard
+          scan={scan}
+          buildVersion={buildVersion}
+          buildFingerprint={buildFingerprint}
+          decision={deploymentDecision}
+          targetFindings={targetFindings}
+          historyState={targetFindingsLoading ? 'loading' : targetFindingsError ? 'error' : targetFindingsPartial ? 'partial' : 'ready'}
+        />
+      )}
       {scan.status === 'completed' && scan.target_id && (
         <TargetPostureCard posture={targetPosture} currentScanId={String(scan.id)} targetId={String(scan.target_id)} loading={targetPostureLoading} error={targetPostureError} />
       )}

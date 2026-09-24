@@ -392,19 +392,37 @@ def _commit_quarantine_file(temp_path: Path, root: Path, digest: str, size: int)
     return final_path
 
 
+def sandbox_read_gid() -> int | None:
+    """The group that may read quarantine: the configured sandbox group, else the image's.
+
+    The launcher runs the sandbox and the API as the host account on a non-root
+    Linux install and records it as MODEL_INTAKE_SANDBOX_GID. Granting the
+    image's built-in scanner group (10001) instead left every quarantined
+    artifact unreadable to both, so the dynamic sandbox crashed and the
+    Firecracker review stopped at prepare_isolated_runtime with EACCES on a
+    clean Ubuntu install. Docker Desktop's bind-mount mapping hid this on macOS.
+    """
+    configured = str(os.environ.get("MODEL_INTAKE_SANDBOX_GID") or "").strip()
+    if configured.isdigit() and int(configured) > 0:
+        return int(configured)
+    try:
+        return pwd.getpwnam("scanner").pw_gid
+    except KeyError:
+        return None
+
+
 def _grant_sandbox_read(path: Path, root: Path) -> None:
-    """Grant only the image's unprivileged scanner group read/traverse access."""
+    """Grant only the sandbox group read/traverse access."""
     if os.geteuid() != 0:
         return
-    try:
-        account = pwd.getpwnam("scanner")
-    except KeyError:
+    gid = sandbox_read_gid()
+    if gid is None:
         return
     for directory in (root, root / "sha256", path.parent):
         if directory.exists():
-            os.chown(directory, 0, account.pw_gid)
+            os.chown(directory, 0, gid)
             os.chmod(directory, 0o750)
-    os.chown(path, 0, account.pw_gid)
+    os.chown(path, 0, gid)
     os.chmod(path, 0o640)
 
 

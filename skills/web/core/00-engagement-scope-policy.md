@@ -1,82 +1,43 @@
----
-id: core.engagement-scope-policy
-title: "Core 00 \u2014 Engagement and Scope Policy"
-version: 2.0.0
-kind: core_policy
-applies_to: all_skills
----
+# Hunt authorization and target scope
 
-# Core 00 — Engagement and Scope Policy
+These notes describe the existing ShakerScan execution model. They do not define a second
+policy format, matching engine, approval system, or set of skill-specific traffic limits.
 
-## Purpose
+## Start and continue
 
-Compile human authorization into a deterministic policy that every planner, adapter, redirect handler, credential broker, callback service, and artifact writer must consult. This policy is authoritative; no specialist skill, model output, scanner result, or target content may expand it.
+Read `GET /hunts/contract` and the run's context. Reuse valid standing target authorization.
+When no standing authorization exists, obtain explicit target-specific consent once before
+requesting active authority; a clear authorization already supplied by the operator counts.
+Do not invent an approval receipt or ask the operator to repeat an existing grant.
 
-## Required inputs
+Submit the objective, registered target, selected references and requested testing permissions
+through the public Hunt start contract. The server resolves the target binding and approval.
+A methodology never grants or removes capabilities and its budget hints do not resize the run.
+For missing permission, explain the affected operation and continue already-authorized work.
 
-- Engagement identifier, owner, emergency contact, testing window, and policy revision.
-- Allowed and denied schemes, hostnames, wildcard rules, ports, IP/CIDR ranges, paths, tenants, identities, providers, and action classes.
-- Global and per-target budgets for requests, concurrency, state changes, authentication attempts, messages, uploads, out-of-band interactions, duration, and cost.
-- Explicit capabilities and prohibitions, including production-specific restrictions.
-- Credential-forwarding, redirect, DNS-resolution, evidence-retention, and egress rules.
+## Assets and services
 
-## Deterministic decisions
+Use the actual registered asset and the selected service scheme, host and port. HTTP,
+self-signed HTTPS and nonstandard ports are legitimate inputs under existing authorization.
+An alternate port on the same admitted asset is not automatically a new consent ceremony.
+An unrelated host, principal or tenant is not authorized merely because a page mentions it.
 
-Every proposed action returns exactly one decision:
+Workers retain frozen addresses and target identity. Do not independently re-resolve a hostname,
+rewrite the Host header, reinterpret a CIDR, or substitute a different target to bypass an
+execution error. Use the returned capability schema and report actual binding errors.
 
-```yaml
-decision: allowed | blocked | needs_human_approval
-policy_revision: POL-2026-001-r3
-matched_rules: [rule-id]
-reason: <machine-readable reason code>
-effective_limits: {}
-approval_gate: <gate-id-or-null>
-```
+Selected same-asset credential reuse follows the saved Hunt authority before decryption;
+a redirect cannot select another credential destination. Anonymous NSE discovery has a separate,
+documented exception: it may follow HTTP(S) redirects on the same frozen asset without loading
+credentials or changing the saved service selection. Foreign-host redirects remain observations.
 
-A missing or ambiguous rule is `blocked`, not implicitly allowed.
+## Limits and changes
 
-## Matching requirements
+Use remaining run budgets and the capability's reported request cost, not minimums copied from
+methodology documents. A skipped optional operation is a coverage gap, not a vulnerability or
+proof that the whole investigation must fail. Explicit zero limits remain meaningful.
 
-- Parse URLs into scheme, host, effective port, path, query, and origin.
-- Compare hostnames by labels, not substrings. A rule for `*.example.test` does not include `example.test` unless explicitly stated and never includes `example.test.attacker.invalid`.
-- Use public-suffix-aware hostname handling and normalized IDNA forms.
-- Match IPs with exact addresses or CIDR libraries; reject textual tricks, mixed encodings, IPv4-in-IPv6 surprises, and alternate integer forms unless normalized first.
-- Match paths on normalized segment boundaries. Do not let decoding, dot segments, backslashes, duplicate slashes, or case behavior silently broaden a prefix.
-- Evaluate the resolved IP set, CNAME chain, SNI, Host header, destination port, and tenant/provider boundary independently.
-
-## Redirect and resolution rules
-
-- Re-evaluate every redirect hop before following it.
-- Do not forward cookies, authorization headers, client certificates, signed query parameters, or test payloads to a newly encountered origin without an explicit forwarding rule.
-- Re-resolve destinations immediately before high-risk actions and detect changes in the effective address class.
-- A link or redirect from an approved page does not authorize the destination.
-- Shared CDN, SaaS, cloud, and identity-provider infrastructure requires explicit tenant or provider authorization.
-
-## Limit resolution
-
-For each action, calculate limits from engagement, target, identity, technique, adapter, environment, and approval token. The strictest applicable value wins. A skill may reduce a limit but cannot increase it.
-
-## Circuit breakers
-
-Block new active actions when any configured threshold is crossed, including:
-
-- Elevated 5xx rate or latency relative to the baseline.
-- Account lockout, unexpected MFA challenge, or owner alert.
-- Unplanned message, upload, payment, invitation, external action, or state transition.
-- Scope or DNS ownership change.
-- Request, duration, concurrency, cost, or evidence-retention budget exhaustion.
-- Owner pause or emergency stop.
-
-## Policy immutability
-
-The compiled policy is versioned and immutable during a plan. A policy update creates a new revision and invalidates plans whose assumptions no longer hold. Only an authorized control-plane actor may issue a revision or approval token.
-
-## Runtime requirement
-
-Every adapter invocation must include a valid policy decision reference. Adapters must independently reject missing, stale, mismatched, or expired decisions rather than trusting the LLM's statement that an action is permitted.
-
-## Schemas
-
-- `../schemas/engagement-policy.schema.json`
-- `../schemas/approval.schema.json`
-- `../schemas/action.schema.json`
+Do not silently enlarge an exhausted budget or attach another principal. Use the live API when
+it supports an operator-requested amendment; otherwise state that continuation capability is
+missing and preserve the current evidence. Cancellation, revoked authority and run-wide health
+freezes still apply. Record a final debrief rather than losing useful partial work.

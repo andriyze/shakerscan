@@ -52,6 +52,9 @@ function ObservedPosture({ scan, compact = false }: { scan: Scan; compact?: bool
   if (scan.status !== 'completed') {
     return <span className="text-gray-500">Not available</span>
   }
+  if (scan.risk_assessment_state === 'not_examined' || scan.application_observed === false) {
+    return <span className="text-amber-200">Application not examined</span>
+  }
   if (!scan.grade) {
     return <span className="text-gray-500">No observed posture</span>
   }
@@ -588,7 +591,7 @@ function ScansContent() {
                     <ObservedPosture scan={scan} compact />
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
-                        href={`/findings?scan_id=${scan.id}`}
+                        href={`/findings?scan_id=${scan.id}&freshness=all`}
                         className="text-blue-400 hover:text-blue-300"
                       >
                         {scan.findings_count} finding{scan.findings_count === 1 ? '' : 's'}
@@ -759,7 +762,7 @@ function ScansContent() {
                   <td className="px-4 py-3">
                     {(scan.findings_count || 0) > 0 ? (
                       <Link
-                        href={`/findings?scan_id=${scan.id}`}
+                        href={`/findings?scan_id=${scan.id}&freshness=all`}
                         className="text-sm text-blue-400 hover:text-blue-300"
                       >
                         {scan.findings_count}

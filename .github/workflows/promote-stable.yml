@@ -51,7 +51,13 @@ jobs:
           gh release view "v${VERSION}" --json isPrerelease,isDraft --jq '(.isPrerelease == false) and (.isDraft == false)' | grep -qx true
           release_sha="$(gh release view "v${VERSION}" --json targetCommitish --jq .targetCommitish)"
           [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
-          gh release download "v${VERSION}" --pattern release-image-lock.env --output release-image-lock.env
+          # GitHub's tag-detail asset listing can lag behind a newly published release even
+          # while its direct asset URL is already available. Fetch the exact named asset;
+          # the digest bindings are checked against the public smoke receipt below.
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/release-image-lock.env" \
+            --output release-image-lock.env
           curl --fail --silent --show-error --location \
             --proto '=https' --tlsv1.2 "$SMOKE_URL" --output public-smoke-receipt.json
           echo "${SMOKE_SHA256}  public-smoke-receipt.json" | sha256sum --check --strict
@@ -82,7 +88,7 @@ jobs:
               raise SystemExit(f"refusing to move the stable channel backwards from {current} to {sys.argv[1]}")
           PY
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:

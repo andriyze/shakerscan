@@ -60,9 +60,9 @@ def test_support_level_matches_the_declared_gap(library):
             assert spec.missing_capabilities
 
 
-def test_only_supported_skills_are_bindable(library):
+def test_supported_and_useful_partial_skills_are_bindable(library):
     for spec in library.list():
-        assert spec.bindable is (spec.support == "supported")
+        assert spec.bindable is (spec.support in {"supported", "partial"} and bool(spec.capabilities))
 
 
 def test_no_skill_can_reach_shell_or_planner_supplied_argv(library):
@@ -106,20 +106,25 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
     assert suggestions[0]["auto_bound"] is False
     assert suggestions[0]["reason"].startswith("Objective matches:")
+    assert suggestions[0]["execution"]["fully_executable"] is True
+    assert suggestions[0]["execution"]["unavailable_capabilities"] == []
     assert "description" not in suggestions[0]
     assert "capabilities" not in suggestions[0]
+    assert set(suggestions[0]["execution"]) == {
+        "fully_executable", "unavailable_capabilities", "missing_capabilities",
+    }
 
 
-def test_suggestions_respect_the_hunt_authority_allowlist(library):
+def test_suggestions_do_not_hide_methodology_when_authority_is_narrow(library):
     suggestions = library.suggest(
         goal="Validate Cloudflare WAF and direct origin exposure",
         target_kind="web",
         allowed_capabilities=("http.request",),
     )
-    assert all(
-        item["skill_id"] != "skill.web.edge-waf-and-origin-exposure-validation"
-        for item in suggestions
-    )
+    assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
+    assert suggestions[0]["auto_bound"] is False
+    assert suggestions[0]["execution"]["fully_executable"] is False
+    assert suggestions[0]["execution"]["unavailable_capabilities"]
 
 
 def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
@@ -133,6 +138,22 @@ def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
     assert bound.context_section["bound"] == []
     assert "suggested" in bound.context_section
     assert len(bound.context_section["suggested"]) <= 3
+
+
+def test_binding_methodology_does_not_fail_only_because_some_techniques_are_withheld(library):
+    skill_id = "skill.web.edge-waf-and-origin-exposure-validation"
+    budget = object()
+    bound = bind_skills_to_hunt(
+        [skill_id],
+        target_kind="web",
+        allowed_capabilities=("http.request",),
+        budget=budget,
+        library=library,
+        goal="Investigate edge and origin exposure",
+    )
+    assert any(spec.skill_id == skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == ("http.request",)
+    assert bound.budget is budget
 
 
 def test_binding_methodology_preserves_the_run_authority_and_budget(library):
@@ -151,10 +172,14 @@ def test_binding_methodology_preserves_the_run_authority_and_budget(library):
     assert "body_sha256" in bound.context_section["bound"][0]
 
 
-def test_a_partial_skill_cannot_be_bound_to_a_hunt(library):
-    partial = next(s for s in library.list(support="partial"))
-    with pytest.raises(HuntSkillError, match="cannot be bound"):
-        library.resolve_for_hunt([partial.skill_id], target_kind="web")
+def test_a_partial_skill_keeps_its_available_parts_and_declared_gaps(library):
+    partial = next(s for s in library.list(target_kind="web", support="partial") if s.capabilities)
+    bound = bind_skills_to_hunt([partial.skill_id], target_kind="web",
+                               allowed_capabilities=("http.request",), budget=None, library=library)
+    entry = next(row for row in bound.context_section["bound"] if row["skill_id"] == partial.skill_id)
+    assert entry["support"] == "partial"
+    assert set(partial.missing_capabilities) <= set(entry["missing_capabilities"])
+    assert bound.allowed_capabilities == ("http.request",)
 
 
 def test_a_reference_skill_cannot_be_bound_to_a_hunt(library):
@@ -187,7 +212,7 @@ def test_binding_more_skills_than_the_cap_is_refused(library):
 def test_a_skill_cannot_be_bound_to_the_wrong_target_kind(library):
     web_skill = library.bindable(target_kind="web")[0]
     with pytest.raises(HuntSkillError, match="does not support target kind"):
-        library.resolve_for_hunt([web_skill.skill_id], target_kind="device")
+        library.resolve_for_hunt([web_skill.skill_id], target_kind="model")
 
 
 def test_an_unknown_skill_is_refused(library):
@@ -298,7 +323,7 @@ def test_a_deferred_technique_must_say_what_it_needs():
 
 def test_a_skill_cannot_require_one_that_is_not_bindable():
     unbindable = _spec(
-        id="skill.web.gap", name="gap", support="partial",
+        id="skill.web.gap", name="gap", support="partial", capabilities=[],
         missing_capabilities=["oob.allocate"],
     )
     dependent = _spec(id="skill.web.dependent", requires_skills=["skill.web.gap"])
@@ -373,8 +398,11 @@ def test_forging_identity_requires_active_testing_and_an_approval_receipt():
             "target_id": "t1", "target_kind": "web", "goal": "g", "policy": policy,
         })
 
-    with pytest.raises(HuntStartContractError, match="requires active_testing"):
-        start({"allow_identity_headers": True})
+    implied = start({
+        "allow_identity_headers": True, "authorization_confirmed": True,
+        "approval_receipt_id": "approval-1",
+    })
+    assert implied.policy.active_testing is True
     with pytest.raises(HuntStartContractError, match="authorization_confirmed"):
         start({"allow_identity_headers": True, "active_testing": True})
     with pytest.raises(HuntStartContractError, match="approval receipt"):
@@ -405,20 +433,21 @@ def test_the_privileged_rule_has_one_owner():
         assert policy.is_privileged(credentials_requested=False) is True, field
 
 
-# --- binding must deliver the whole methodology, not part of it --------------------------
+# --- methodology remains useful even when only part is executable -----------------------
 
-def test_binding_is_refused_when_any_required_capability_is_withheld(library):
-    """A skill bound with part of its requirements would have the planner follow a
-    methodology it cannot carry out, then report the shortfall as a result."""
+def test_binding_keeps_methodology_when_some_required_capabilities_are_withheld(library):
+    """Binding is knowledge selection, not an authority grant. The planner may use the
+    compatible techniques while capability execution continues to enforce the Hunt envelope."""
     session_skill = library.require("skill.web.session-cookie-token-and-jwt-testing")
     passive_only = (
         "browser.interact", "browser.navigate", "http.request", "web.crawl", "web.probe",
     )
-    with pytest.raises(HuntSkillError, match="withholds"):
-        bind_skills_to_hunt(
-            [session_skill.skill_id], target_kind="web",
-            allowed_capabilities=passive_only, budget=None, library=library,
-        )
+    bound = bind_skills_to_hunt(
+        [session_skill.skill_id], target_kind="web",
+        allowed_capabilities=passive_only, budget=None, library=library,
+    )
+    assert any(spec.skill_id == session_skill.skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == passive_only
 
 
 def test_a_skill_whose_requirements_are_all_passive_still_binds_passively(library):

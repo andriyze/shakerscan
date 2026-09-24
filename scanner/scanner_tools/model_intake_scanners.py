@@ -347,6 +347,14 @@ def _safe_environment(scratch: Path) -> dict[str, str]:
         "NO_PROXY": "*",
         "no_proxy": "*",
         "OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": "/opt/osv-cache",
+        # OpenBLAS sizes per-thread buffers from the CPU count. On a many-core host (a 96-vCPU
+        # metal instance) that allocation fails and modelscan dies before it scans anything:
+        # "OpenBLAS error: Memory allocation still failed after 10 retries". The scanners are
+        # not BLAS bound; one thread is correct here, and the image self-test runs through
+        # this same sanitized environment.
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
     }
 
 

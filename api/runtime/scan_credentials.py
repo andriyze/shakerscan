@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .models import target_kinds_share_asset
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -327,6 +329,15 @@ def resolve_scan_http_principal(
     capability_denied = bool(lane_refs and not refs)
     if capability_denied:
         safe_headers = {}
+    reviewed_profiles = [item for item in options.get("credential_profile_refs") or ()
+        if isinstance(item, Mapping) and "authenticated_profile_snapshot" in item]
+    if reviewed_profiles:
+        selected = [item for item in reviewed_profiles
+            if str(item.get("scan_lane") or item.get("principal_slot") or "").lower() == normalized_lane]
+        expected = {(str(item.get("profile_id")), item.get("profile_version")) for item in selected}
+        actual = {(item["profile_id"], item["profile_version"]) for item in refs}
+        if not selected or expected != actual or not safe_headers or capability_denied or interactive:
+            raise ScanCredentialError("authenticated_profile_identity_unavailable")
     binding = {
         "schema_version": "scan-http-principal-binding/v1",
         "lane": normalized_lane,
@@ -599,8 +610,8 @@ def admit_scan_credential_profiles(
     if len(requested) != len(set(requested)):
         raise ScanCredentialError("Scan credential profile IDs must be distinct")
     normalized_kind = str(target_kind or "").strip().lower()
-    if normalized_kind not in {"web", "api"}:
-        raise ScanCredentialError("Scan credential target kind must be web or api")
+    if normalized_kind not in {"web", "api", "network"}:
+        raise ScanCredentialError("Scan credential target kind must be web, api, or network")
     normalized_target_id = str(target_id or "").strip()
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -620,7 +631,7 @@ def admit_scan_credential_profiles(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= current):
             raise ScanCredentialError("Scan credential profile is inactive or expired")
-        if profile.target_id != normalized_target_id or profile.target_kind != normalized_kind:
+        if profile.target_id != normalized_target_id or not target_kinds_share_asset(profile.target_kind, normalized_kind):
             raise ScanCredentialError("Scan credential profile target binding does not match")
         if profile.auth_kind not in HTTP_CREDENTIAL_KINDS:
             raise ScanCredentialError("Scan credentials must use an HTTP authentication kind")
@@ -658,6 +669,7 @@ def admit_scan_credential_profiles(
         rows.append({
             "profile_id": profile.profile_id,
             "profile_version": profile.current_version,
+            "credential_record_version": profile.record_version,
             "target_kind": profile.target_kind,
             "principal_slot": slot,
             "scan_lane": lane,

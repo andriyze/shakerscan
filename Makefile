@@ -83,16 +83,20 @@ e2e-api-overlay:
 fleet-acceptance:
 	$(PY) scripts/fleet_acceptance.py $(FLEET_ACCEPT_ARGS)
 
-## Fast unit tests (pure logic) — run inside the api container, which has the runtime
-## deps (asyncpg/fastapi/...). pytest ships in the image; we install it on the fly only
-## when running against an older image that predates it. The host can't run these (no
-## asyncpg), so they intentionally run in-container.
+## Fast unit tests in the API container with its pinned runtime dependencies.
+## The slim image includes pytest's module, but not its console script or pip.
 UNIT_TESTS = tests/test_deployment_gate.py tests/test_canonical_dedupe.py \
 	tests/test_api_id_validation.py \
 	tests/test_evidence_objects.py tests/test_worker_freshness.py \
 	tests/test_agent_receipt_verification.py tests/test_application_graph.py \
 	tests/test_runtime_hardening.py
 FOUNDATION_PACKAGE_TESTS = tests/test_http_archive.py \
+	tests/test_hunt_device_traffic.py tests/test_device_and_cors_regressions.py tests/test_same_host_cors.py \
+	tests/test_authenticated_assurance.py \
+	tests/test_assurance_capability_admission.py tests/test_hunt_semantic_registry.py \
+	tests/test_authenticated_assurance_snapshots.py tests/test_scan_health_plan.py tests/test_http_credential_destination.py \
+	tests/test_credential_resolver.py tests/test_runtime_receipts.py \
+	tests/test_budget_reservation_lifecycle.py tests/test_reservation_recovery.py tests/test_reservation_store.py \
 	tests/test_hunt_authority_integrity.py tests/test_hunt_direct_origin.py \
 	tests/test_hunt_http_capability.py tests/test_hunt_run_router.py \
 	tests/test_hunt_skills.py tests/test_hunt_skill_lifecycle.py \
@@ -101,11 +105,13 @@ FOUNDATION_PACKAGE_TESTS = tests/test_http_archive.py \
 	tests/test_hunt_browser_capability.py tests/test_hunt_browser_replay.py \
 	tests/test_hunt_browser_credentials.py tests/test_hunt_investigation_score.py \
 	tests/test_mcp_hunt_asgi_contract.py tests/test_runtime_credentials.py \
-	tests/test_scan_credentials.py tests/test_scan_finalizer.py \
+	tests/test_scan_credentials.py tests/test_scan_credential_guard.py tests/test_worker_action_executor.py tests/test_scan_finalizer.py \
+	tests/test_scan_identity_interruption.py tests/test_inline_capability_adapters.py \
 	tests/test_scan_risk_and_assurance.py
 test:
 	@docker compose exec -T api sh -lc '\
-		command -v pytest >/dev/null 2>&1 || pip install -q pytest >/dev/null 2>&1; \
+		set -e; \
+		python -c "import pytest" >/dev/null 2>&1 || { echo "pytest is missing; rebuild the API image" >&2; exit 1; }; \
 		cd /workspace; \
 		PYTHONPATH=/workspace/api:/workspace/scanner:/workspace python -m pytest -q -p no:cacheprovider $(UNIT_TESTS); \
 		PYTHONPATH=/workspace:/workspace/api:/workspace/scanner python -m pytest -q -p no:cacheprovider $(FOUNDATION_PACKAGE_TESTS)'

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 
@@ -187,7 +188,7 @@ def test_state_changing_authority_is_visible_in_child_provenance(monkeypatch):
     assert result["scan_metadata"]["state_changing_requests_authorized"] is True
 
 
-def test_untrusted_tls_withholds_imported_secrets_until_operator_override(monkeypatch):
+def test_untrusted_tls_does_not_withhold_selected_imported_secrets(monkeypatch):
     calls = []
 
     async def fake_request(**kwargs):
@@ -205,24 +206,16 @@ def test_untrusted_tls_withholds_imported_secrets_until_operator_override(monkey
     origin = {"origin": "https://192.0.2.10:3001", "connect_address": "192.0.2.10", "port": 3001}
     bound = [{"collection_id": "c1", "payload": payload}]
 
-    withheld = asyncio.run(device_web.run_pinned_device_web_scan(
-        origin, profile="quick", request_collections=bound, default_origin=True,
-    ))
-    assert withheld["device_web"]["imported_requests"]["executed"] == 0
-    assert any(
-        item["reason"] == "untrusted_tls_credentials_not_confirmed"
-        for item in withheld["device_web"]["imported_requests"]["skipped_requests"]
-    )
-    assert not any(call.get("path", "").startswith("/api/status") for call in calls)
-
-    calls.clear()
-    allowed = asyncio.run(device_web.run_pinned_device_web_scan(
-        origin, profile="quick", request_collections=bound, default_origin=True,
-        allow_untrusted_tls_credentials=True,
-    ))
-    assert allowed["device_web"]["imported_requests"]["executed"] == 1
-    assert any(item["title"] == "Sensitive API request sent over unverified TLS" for item in allowed["findings"])
-    assert any(call.get("path", "").startswith("/api/status") for call in calls)
+    for legacy_override in (False, True):
+        calls.clear()
+        result = asyncio.run(device_web.run_pinned_device_web_scan(
+            origin, profile="quick", request_collections=bound, default_origin=True,
+            allow_untrusted_tls_credentials=legacy_override,
+        ))
+        assert result["device_web"]["imported_requests"]["executed"] == 1
+        assert any(item["title"] == "Sensitive API request sent over unverified TLS" for item in result["findings"])
+        assert any(call.get("path", "").startswith("/api/status") for call in calls)
+        assert "top-secret-token" not in json.dumps(result)
 
 
 def test_postman_redacts_secret_path_segments_names_and_bounds_expansion():

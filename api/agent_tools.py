@@ -17,6 +17,8 @@ left to the model.
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import ipaddress
 import math
@@ -27,6 +29,7 @@ from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
 from runtime.request_shape import public_request_body_shape
+from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
     EnforcedProcessPlan,
@@ -232,6 +235,11 @@ _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
 # The reviewed katana crawl rate. The argv template documents 5 requests per
 # second; the enforced plan may go up to it but never past the reservation.
 _KATANA_MAX_RATE_PER_SECOND = 5
+# The time box a crawl may hold when its reservation funds one. The rate ceiling
+# above is the politeness control; this is only how long that polite rate runs,
+# and every run stays bounded by the reservation the operator authorized.
+_KATANA_MAX_CRAWL_SECONDS = 600
+_BROWSER_MAX_CRAWL_SECONDS = 900
 
 # The image's own Chromium. Katana downloads its own browser when this is absent,
 # which a worker with no general egress cannot do: it then reports a completed
@@ -245,6 +253,27 @@ _BROWSER_MAX_REQUESTS_PER_SECOND = 10
 # Both crawl tools are the same binary with the same compact output, so every
 # branch that parses, meters, or pins katana must cover the headless variant.
 KATANA_TOOLS = frozenset({"katana", "katana_headless"})
+
+# One retained crawl record (URL, method, status, source) is a few hundred bytes
+# of JSONL even with raw request and body omitted. A flat 80 KB cap therefore
+# ended every crawl that used more than ~300 of the 1,500 requests a thorough
+# profile reserves, and ended it as a failure that discarded the records it
+# had. The cap follows the reservation the operator already paid for.
+AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST = 512
+AGENT_TOOL_OUTPUT_BYTES_CEILING = 8_000_000
+
+
+def agent_tool_output_bytes(reserved_budget: Mapping[str, Any] | None, *, floor: int) -> int:
+    """Bytes of tool output to retain for a reservation, never below ``floor``."""
+    try:
+        requests = int((reserved_budget or {}).get("http_requests") or 0)
+    except (TypeError, ValueError):
+        requests = 0
+    return max(
+        int(floor),
+        min(AGENT_TOOL_OUTPUT_BYTES_CEILING, requests * AGENT_TOOL_OUTPUT_BYTES_PER_REQUEST),
+    )
+
 
 # Compact tool output is one short record per line, not katana's JSONL mode with
 # embedded request/response bodies, so these bounds cost little memory. They must
@@ -272,6 +301,8 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # remainder absorbs process start-up and teardown so a healthy run finishes
 # inside its deadline instead of being killed at it.
 _BATCH_ATTEMPT_WALL_UTILISATION = 0.6
+# nuclei's global request rate, as fixed in its argv; batch pacing may lower it, never raise it.
+_NUCLEI_RATE_CEILING = 10
 # The tool-keyed view of the shared per-attempt floors, so argv enforcement can
 # reason in tool terms. scan.external_process owns the numbers: duplicating them
 # is how the planner and the adapter drifted apart in the first place.
@@ -808,6 +839,34 @@ def _trusted_scanner_header_args(
     return [value for line in lines for value in (flag, line)]
 
 
+def httpx_credential_config_bytes(trusted_headers: Mapping[str, Any]) -> bytes:
+    """Serialize only validated header values, never arbitrary tool configuration."""
+    lines = _trusted_scanner_header_args("httpx", trusted_headers)[1::2]
+    encoded = json.dumps({"header": lines}, ensure_ascii=True, separators=(",", ":")).encode()
+    if not lines or len(encoded) > 65_536:
+        raise AgentToolError("HTTP probe configuration is invalid")
+    return encoded
+
+
+def scanner_credential_redaction_values(headers: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Worker-local reflection redaction, including supported Authorization and Cookie forms."""
+    values = set()
+    for name, value in (headers or {}).items():
+        value = str(value)
+        values.add(value)
+        if str(name).lower() in {"authorization", "proxy-authorization"} and " " in value:
+            scheme, material = value.split(" ", 1)
+            values.add(material)
+            if scheme.lower() == "basic":
+                try:
+                    values.update(base64.b64decode(material, validate=True).decode().split(":", 1))
+                except (ValueError, UnicodeError, binascii.Error):
+                    pass
+        if str(name).lower() == "cookie":
+            values.update(part.partition("=")[2].strip().strip('"') for part in value.split(";"))
+    return tuple(value for value in values if value)
+
+
 def build_scanner_argv(
     name: str,
     url: str,
@@ -821,6 +880,9 @@ def build_scanner_argv(
 ) -> tuple[str, list[str], int]:
     """Return (binary, argv, timeout_ms) for a scanner run. The binary name is NOT in argv
     (passed separately to the subprocess); every flag is hardcoded in the template."""
+    if name == "httpx" and trusted_headers:
+        _trusted_scanner_header_args(name, trusted_headers)
+        raise AgentToolError("httpx credentials require sealed worker configuration")
     template = SCANNER_ARG_TEMPLATES[name]
     execution_url = url
     pin_args: list[str] = []
@@ -956,6 +1018,12 @@ def build_enforced_scanner_plan(
     if scanner == "ffuf" and runtime.get("ffuf_wordlist"):
         internal_options["wordlist"] = "common"
 
+    httpx_config_fd = None
+    if scanner == "httpx" and trusted_headers:
+        httpx_credential_config_bytes(trusted_headers)
+        httpx_config_fd = runtime.get("httpx_config_fd")
+        if type(httpx_config_fd) is not int or httpx_config_fd < 3:
+            raise AgentToolError("httpx credentials require sealed worker configuration")
     binary, argv, template_timeout_ms = build_scanner_argv(
         scanner,
         url,
@@ -966,8 +1034,10 @@ def build_enforced_scanner_plan(
         # counted by the target-bound limiter, so it is always disabled here.
         oob_interactsh_server=None,
         oob_interactsh_token=None,
-        trusted_headers=trusted_headers,
+        trusted_headers=None if httpx_config_fd is not None else trusted_headers,
     )
+    if httpx_config_fd is not None:
+        argv.extend(["-config", f"/proc/self/fd/{httpx_config_fd}"])
     timeout_seconds = max(1, min(wall, int(math.ceil(template_timeout_ms / 1000))))
     timeout_ms = timeout_seconds * 1_000
     proof_inputs: dict[str, Any]
@@ -990,11 +1060,20 @@ def build_enforced_scanner_plan(
             raise AgentToolError(
                 "katana requires two reserved wall-clock seconds"
             )
-        desired_duration = min(30, max(0, http - 1))
-        duration = min(desired_duration, wall - 1)
+        # A flat 30-second box spent 150 of a thorough Scan's 60,000 authorized
+        # requests and returned one route from a real site. The reservation is
+        # already the ceiling -- rate is derived from it below -- so the crawl
+        # runs for the wall time it actually holds. More budget buys a longer
+        # look at the same polite rate, never a louder one.
+        # Reserve the teardown window first. Sizing the crawl to the whole wall
+        # and taking the grace from what is left gives the crawler and its
+        # supervisor the same deadline, which is the race this grace exists to
+        # avoid; a longer crawl must not buy itself a shorter shutdown.
+        shutdown_grace = min(5, max(1, wall // 10))
+        desired_duration = min(_KATANA_MAX_CRAWL_SECONDS, max(0, http - 1))
+        duration = min(desired_duration, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError("katana requires two reserved HTTP requests")
-        shutdown_grace = min(5, wall - duration)
         # Spend the reserved request budget instead of throttling to one request
         # per second and discarding it. A crawl that reserves 150 requests but
         # emits ~31 cannot enumerate a real application's surface: against an
@@ -1057,7 +1136,7 @@ def build_enforced_scanner_plan(
         # Deriving the duration from the reservation keeps the ceiling inside it:
         # rate_per_second * duration + 1 <= reserved http_requests.
         affordable = (http - 1) // _BROWSER_MAX_REQUESTS_PER_SECOND
-        duration = min(60, affordable, wall - shutdown_grace)
+        duration = min(_BROWSER_MAX_CRAWL_SECONDS, affordable, wall - shutdown_grace)
         if duration < 1:
             raise AgentToolError(
                 "headless crawl requires a reservation covering one bounded second"
@@ -1147,12 +1226,37 @@ def build_enforced_scanner_plan(
                 "public_oob": False,
             }
         elif batch_attempt and http >= 1:
-            hard = {"http_requests": http, "tool_wall_seconds": wall}
-            timeout_seconds, timeout_ms = wall, wall * 1_000
+            # Re-pace to the reservation, as every other batched tool already is. nuclei was
+            # the exception: its argv fixes `-rate-limit 10`, so a 45-second attempt holding
+            # 120 requests planned ~450 -- about 3.75x. It tripped the wire ceiling
+            # ("external_process_contract:wire limiter reported traffic above the hard
+            # ceiling"), was charged its whole reservation anyway, and surfaced as the
+            # catch-all `adapter_failed`, repeatedly and expensively.
+            #
+            # nuclei's knob is a rate, not a per-request delay, and the tool may run for the
+            # whole wall, so the bound is rate x wall <= hold across the entire wall. The
+            # delay-based _batch_attempt_pacing used by sqlmap/dalfox paces against a
+            # fraction of the wall, which would overshoot here.
+            # Derive the rate from the hold, but never above the rate this argv has always
+            # used: a large reservation must not become a way to send more than 10/s as a
+            # side effect of a throttling fix. Raising the ceiling is a separate decision.
+            rate_per_second = min(_NUCLEI_RATE_CEILING, max(1, http // max(1, wall)))
+            paced_wall = wall
+            if rate_per_second * paced_wall > http:
+                # One request per second is nuclei's floor: a hold thinner than the wall has
+                # to shorten the wall rather than let the rate outrun the hold.
+                paced_wall = max(1, http // rate_per_second)
+            burst = max(1, min(10, rate_per_second))
+            _replace_argv_value(argv, "-rate-limit", rate_per_second)
+            _replace_argv_value(argv, "-bulk-size", burst)
+            _replace_argv_value(argv, "-concurrency", burst)
+            hard = {"http_requests": http, "tool_wall_seconds": paced_wall}
+            timeout_seconds, timeout_ms = paced_wall, paced_wall * 1_000
             mode, method = "conservative", "runtime_transport_wall_limiter"
             proof_inputs = {
                 "profile": "batch_attempt", "targets": 1,
-                "connection_ceiling": http, "wall_seconds": wall,
+                "connection_ceiling": http, "wall_seconds": paced_wall,
+                "rate_per_second": rate_per_second, "burst": burst,
                 "retries": 0, "redirects": 0, "public_oob": False,
             }
         elif http >= 4_000 and wall >= 300:
@@ -1576,6 +1680,19 @@ def scanner_request_settlement(
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
     counters = _explicit_request_counters(decoded)
+    if counters and scanner == "nuclei":
+        # nuclei's stats `requests` is progress through its request plan, not traffic sent.
+        # Measured through the pinned proxy at a counting target: one paced attempt sent 33
+        # requests while the counter read 277 (total 2729, percent 10) -- about eight times the
+        # wire. Taken as exact it failed the hard-ceiling contract on every batch attempt
+        # regardless of pacing and charged each its full hold. It says nothing about the wire;
+        # the worker substitutes what the proxy actually relayed.
+        return {
+            "mode": "unavailable",
+            "actual": None,
+            "observed_minimum": 0,
+            "source": "progress_counter_is_not_wire_evidence",
+        }
     if counters:
         # Nested summaries sometimes repeat the same cumulative counter.  The maximum is the final
         # cumulative total and is safer than summing duplicate snapshots.
@@ -1612,6 +1729,65 @@ def scanner_request_settlement(
             "source": "typed_result_records",
         }
     return {"mode": "unavailable", "actual": None, "observed_minimum": 0, "source": None}
+
+
+def agent_scanner_request_settlement(
+    scanner_name: str, stdout: str, stderr: bytes | str | None,
+    *, file_counter: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Settle scanner traffic without exposing diagnostic stderr to the planner."""
+    normalized = str(scanner_name or "").strip().lower()
+    settlement_input = str(stdout or "")
+    if normalized == "nuclei" and stderr:
+        diagnostics = (
+            stderr.decode("utf-8", "replace")
+            if isinstance(stderr, bytes)
+            else str(stderr)
+        )
+        settlement_input = f"{settlement_input}\n{diagnostics}"
+    return scanner_request_settlement(
+        normalized, settlement_input, file_counter=file_counter,
+    )
+
+
+def wire_evidence_settlement(settlement: Mapping[str, Any], pinned_proxy: Any) -> dict[str, Any]:
+    """Prefer what the pinned proxy relayed over a tool's own non-exact accounting.
+
+    The proxy counts HTTP request lines toward the target: close to exact for plaintext, a lower
+    bound under TLS. A tool's exact counter from its own complete wire log is kept. Otherwise,
+    when the proxy saw requests, they become the lower bound the hard-ceiling contract checks --
+    real traffic, so a paced attempt passes its hold and an overrun still fails it.
+    """
+    current = dict(settlement or {})
+    observed = int(getattr(pinned_proxy, "http_requests_observed", 0) or 0) if pinned_proxy is not None else 0
+    if str(current.get("mode") or "") == "exact" or observed <= 0:
+        return current
+    return {"mode": "observed_lower_bound", "actual": None, "observed_minimum": observed,
+            "source": "proxy_request_lines"}
+
+
+def _redirect_preserves_request_target(raw_url: Any, raw_location: Any) -> bool | None:
+    """Whether a redirect changed only the origin, judged before redaction.
+
+    Returns None when either side is missing or unparsable, so a caller can tell
+    "not a pure origin move" apart from "could not be determined".
+    """
+    request = str(raw_url or "").strip()
+    location = str(raw_location or "").strip()
+    if not request or not location:
+        return None
+    try:
+        probed = urllib.parse.urlsplit(request)
+        moved = urllib.parse.urlsplit(urllib.parse.urljoin(request, location))
+    except ValueError:
+        return None
+    if not moved.netloc or not probed.netloc:
+        return None
+    return (
+        (moved.path or "/") == (probed.path or "/")
+        and moved.query == probed.query
+        and moved.fragment == probed.fragment
+    )
 
 
 def _public_observed_url(value: Any) -> str | None:
@@ -1734,12 +1910,29 @@ def parse_scanner_output(
                 })
             records.append(record)
         elif scanner == "ffuf":
+            observed = _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url"))
             records.append({
                 "kind": "content_discovery",
-                "url": _public_observed_url(item.get("url") or item.get("input", {}).get("FUZZ") if isinstance(item.get("input"), dict) else item.get("url")),
+                "url": observed,
                 "status": item.get("status"),
                 "length": item.get("length"),
                 "redirect_location": _public_observed_url(item.get("redirectlocation") or item.get("redirect_location")),
+                # Whether the redirect only moved the origin, decided on the raw
+                # pair before redaction. Redaction is not injective -- it strips
+                # the fragment outright and collapses every query value and
+                # secret-shaped path segment to one marker -- so this fact cannot
+                # be recovered downstream. One boolean carries it and leaks
+                # nothing: a route-specific redirect stays distinguishable from a
+                # blanket origin rewrite.
+                "redirect_preserves_request_target": _redirect_preserves_request_target(
+                    item.get("url") or (item.get("input", {}) or {}).get("FUZZ")
+                    if isinstance(item.get("input"), dict) else item.get("url"),
+                    item.get("redirectlocation") or item.get("redirect_location"),
+                ),
+                # How this host answers a path that cannot exist. Retained as an
+                # observation so the calibration is evidence in the receipt, not a
+                # filter applied out of band.
+                **({"negative_control": True} if is_negative_control_url(observed) else {}),
             })
         elif scanner == "httpx":
             technologies = item.get("tech") or item.get("technologies") or []

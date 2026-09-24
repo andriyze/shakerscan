@@ -7,7 +7,8 @@ import secrets
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 
-from .inventory import catalog, cascade_plan, decoded, digest, find_roots, inventory, lock_inventory
+from .inventory import (cancel_abandoned, catalog, cascade_plan, decoded, digest, find_roots, hashable,
+                        inventory, lock_inventory, quiesce_targets)
 
 COMMAND = 'data.records.delete'
 CONFIRMATIONS = {'confirm_authorized', 'confirm_scope_reviewed', 'confirm_delete_records'}
@@ -32,7 +33,7 @@ async def preview(pool, selection):
             scope_id = 'record-delete:' + str(preview_id)
             expires = datetime.now(timezone.utc) + timedelta(minutes=10)
             payload = {'selection': selection, 'manifest': manifest,
-                       'expires_at': expires.isoformat(), 'preview_hash': digest(manifest)}
+                       'expires_at': expires.isoformat(), 'preview_hash': digest(hashable(manifest))}
             targets = manifest['owners']['target_id']
             await conn.execute("""INSERT INTO scope_receipts
                 (id,target_id,input_scope,normalized_scope,verdict,warnings)
@@ -86,7 +87,7 @@ def inspect_execution_record(row, approval_id, *, preview_hash=None, kind=None, 
     payload = decoded(row['result_json'])
     if not isinstance(payload, dict) or not isinstance(payload.get('manifest'), dict):
         raise HTTPException(409, 'Stored deletion preview is invalid')
-    if digest(payload['manifest']) != payload.get('preview_hash'):
+    if digest(hashable(payload['manifest'])) != payload.get('preview_hash'):
         raise HTTPException(409, 'Stored deletion preview binding is inconsistent')
     check_expected(payload, kind, entity_id, selection)
     if preview_hash and not secrets.compare_digest(preview_hash, payload['preview_hash']):
@@ -139,8 +140,15 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 current, plan = await inventory(conn, payload['selection'], roots, columns, edges)
                 if current['blockers']:
                     raise HTTPException(409, {'message': 'Deletion is blocked', 'blockers': current['blockers']})
-                if not secrets.compare_digest(digest(current), payload['preview_hash']):
+                if not secrets.compare_digest(digest(hashable(current)), payload['preview_hash']):
                     raise HTTPException(409, 'Records or ownership changed; inspect a new preview')
+                # The approved manifest is confirmed. Under it: cancel unfinished rows that were
+                # never picked up or that nothing has touched for a while (live work blocked
+                # above), and stop automatic work on the targets so nothing is dispatched behind
+                # this deletion. Both change rows the hash covered, so they come after the check.
+                cancelled = await cancel_abandoned(conn, columns, current['owners'])
+                if current['kind'] == 'target':
+                    await quiesce_targets(conn, columns, roots)
                 # Preserve the storage index: removing a finding must not silently orphan
                 # blobs or delete shared content. External deletion uses evidence retention.
                 if plan[1].get('evidence_objects'):
@@ -161,6 +169,7 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                             WHERE t.id=ANY($1::uuid[])""", ids)
                 result = {'status': 'deleted', 'operation_id': str(preview_id), 'preview_id': str(preview_id),
                           'approval_receipt_id': str(approval_id), 'kind': current['kind'],
+                          'cancelled_unfinished': cancelled,
                           'deleted_ids': current['root_ids'], 'deleted': len(removed),
                           'deleted_records': {k: v['count'] for k, v in current['records']['delete'].items()},
                           'detached_records': {k: v['count'] for k, v in current['records']['detach'].items()},

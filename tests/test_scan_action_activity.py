@@ -180,6 +180,27 @@ def test_parallel_scan_activity_combines_child_logs_and_status_fallbacks():
     ]
 
 
+def test_parallel_scan_activity_names_the_discovery_child_and_orders_it_first():
+    """A thorough parent runs its discovery child alone for minutes before any
+    shard exists. The feed must carry that child, labelled for what it is
+    rather than as "Shard 0"."""
+    lines = parallel_scan_activity_lines(
+        shards=(
+            {"id": "disc", "shard_index": -1, "scan_role": "parallel_discovery",
+             "status": "running", "current_phase": "discover.web_content"},
+            {"id": "shard-a", "shard_index": 0, "scan_role": "shard",
+             "status": "queued", "current_phase": "queued"},
+        ),
+        child_logs={"disc": ("[scan] Started Discover Web Content \u00b7 35%",)},
+        limit=10,
+    )
+
+    assert lines == [
+        "[Discovery] [scan] Started Discover Web Content \u00b7 35%",
+        "[Shard 1] queued \u00b7 Queued",
+    ]
+
+
 def test_parallel_scan_activity_is_bounded_to_the_requested_tail():
     lines = parallel_scan_activity_lines(
         shards=({"id": "shard-a", "shard_index": 2, "status": "running"},),
@@ -188,3 +209,83 @@ def test_parallel_scan_activity_is_bounded_to_the_requested_tail():
     )
 
     assert lines == ["[Shard 3] two", "[Shard 3] three"]
+
+
+def test_a_generic_batch_label_does_not_mask_the_real_cause():
+    """A batch prepends `adapter_failed` to its errors, so classifying only the first token
+    reported `unclassified_adapter_error` for every batch failure and hid the cause.
+
+    Observed on a deep scan: `active.templates` failed three times, and the cause stored in
+    the receipt was the wire limiter. The operator log said `unclassified_adapter_error`.
+    """
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.PARTIAL,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+    )
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": [
+                "adapter_failed",
+                "external_process_contract:wire limiter reported traffic above the hard ceiling",
+            ],
+            "redacted_execution": {
+                "process_enforcement": {"hard_budget": {"http_requests": 120, "tool_wall_seconds": 45}},
+                "wire_telemetry": {"observed_http_requests_minimum": 450, "wall_seconds": 45, "limiter_status": "failed"},
+            },
+        },
+    )
+    assert line is not None
+    assert "error=external_process_contract" in line
+    assert "unclassified_adapter_error" not in line
+
+
+def test_an_output_overflow_is_named_rather_than_unclassified():
+    """`output_limit_exceeded` is a real worker outcome and was not in the vocabulary."""
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.PARTIAL,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+    )
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": ["adapter_failed", "output_limit_exceeded"],
+            "redacted_execution": {
+                "process_enforcement": {"hard_budget": {"http_requests": 9, "tool_wall_seconds": 5}},
+                "wire_telemetry": {"observed_http_requests_minimum": 7, "wall_seconds": 5, "limiter_status": "ok"},
+            },
+        },
+    )
+    assert line is not None and "error=output_limit_exceeded" in line
+
+
+def test_a_batch_carrying_only_its_generic_label_names_that_label():
+    """With nothing more specific, `adapter_failed` is the honest class -- it is still more
+    than `unclassified_adapter_error`, which says only that the classifier gave up."""
+    plan = _plan()
+    action = plan.actions[0]
+    result = _result(
+        action,
+        status=CapabilityResultStatus.PARTIAL,
+        reason=CapabilityResultReason.ADAPTER_FAILED,
+    )
+    line = scan_action_diagnostic_line(
+        action=action,
+        result=result,
+        receipt={
+            "errors": ["adapter_failed"],
+            "redacted_execution": {
+                "process_enforcement": {"hard_budget": {"http_requests": 9, "tool_wall_seconds": 5}},
+                "wire_telemetry": {"observed_http_requests_minimum": 7, "wall_seconds": 5, "limiter_status": "ok"},
+            },
+        },
+    )
+    assert line is not None and "error=adapter_failed" in line

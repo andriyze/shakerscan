@@ -192,6 +192,18 @@ class ScannerExecutionAdapter:
                     int(self._requested_budget["state_changing_requests"])
                     if self._state_changing and execution_started else 0
                 )
+            if "browser_actions" in self._requested_budget:
+                # A headless crawl emits no per-action telemetry we parse, so
+                # there is nothing exact to charge. Retain the full hold once
+                # execution started, exactly as an HTTP tool without wire
+                # telemetry does above: reserving a dimension and then settling
+                # it at zero is not accounting, and it left every Scan reporting
+                # browser actions 0 of the profile's ceiling while a real
+                # browser was driving the crawl.
+                actual["browser_actions"] = (
+                    int(self._requested_budget["browser_actions"])
+                    if execution_started else 0
+                )
 
         redacted_execution = dict(self._redacted_execution)
         if enforcement:

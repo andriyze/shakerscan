@@ -1,6 +1,6 @@
 # Multi-Node Architecture
 
-**Status:** Design authority + implementation complete; 2.3.2 broker physical-acceptance renewal pending. The fan-out
+**Status:** Design authority + implementation complete; 2.5.3 broker physical-acceptance renewal pending. The fan-out
 substrate is shipped (see the code-grounded capability table below), and the durable node identity,
 bounded enrollment, authenticated heartbeat, and one-time connection-bundle API foundation is now
 implemented. The digest-pinned worker-only Compose runtime, pull-based node-agent, and versioned
@@ -16,7 +16,7 @@ digest-pinned cross-node execution with centralized results and artifacts, and d
 worker-loss/reclaim acceptance. Because 2.0.0 changes the canonical Scan and Hunt execution boundary,
 that receipt is historical and may be renewed on the frozen 2.0.0 SHA as
 operational evidence. WireGuard physical acceptance is deferred, so WireGuard remains preview code
-and is explicitly outside the 2.3.2 supported deployment boundary. Redis Stream
+and is explicitly outside the 2.5.3 supported deployment boundary. Redis Stream
 lease/heartbeat/ack/reclaim delivery is implemented. The
 general artifact manifest, deterministic result/checkpoint/diagnostic upload, referenced screenshot
 centralization, hash-verified proxy download, cross-node stale recovery, fleet-worker fail-closed
@@ -40,7 +40,7 @@ in code versus what this document specifies as net-new. It deliberately does not
 capability matrix (that lives in [dast-asm-architecture.md](dast-asm-architecture.md) and drifted when
 duplicated). Each "Built" row is anchored to a source symbol so it stays verifiable instead of
 becoming stale prose. For product priority and phased order, see
-[proposed-next-steps.md](proposed-next-steps.md).
+the current architecture and decision records.
 
 | Substrate piece | Status | Where (symbol) |
 |---|---|---|
@@ -582,10 +582,15 @@ owner-only bundle file is durable, revoke that incomplete node, mint a fresh enr
 and run `shakerscan join` again. Do not weaken the delivery gate or copy a shared bundle by hand.
 
 `fleet init` first runs the same aggregated checks exposed by read-only `fleet preflight`: Linux and
-host dependencies, Docker Compose, public HTTPS or managed-gateway prerequisites, worker
-tag-to-digest resolution, requested
-port availability, overlay route collisions, enrollment policy, and reconciliation support. A
-running standalone deployment is backed up before the first fleet mutation. It then persists the control keypair, fleet CA, server certificate, private connection-bundle
+host dependencies, Docker Compose, queued or running scans (the conversion restarts the whole
+stack, so init refuses while work is in flight, and also when it cannot establish the answer
+because the API is unreachable or its list is malformed, unless `--allow-running-work` accepts
+the interruption; a stopped installation with no api container has nothing to interrupt; the
+census includes shards, internal, Model Intake and device rows but does not pause new
+submissions), public HTTPS or managed-gateway prerequisites, worker tag-to-digest resolution,
+requested port availability, overlay route collisions, enrollment policy, and reconciliation
+support. A running standalone deployment is backed up before the first fleet mutation, and that
+backup is kept even when init rolls back. It then persists the control keypair, fleet CA, server certificate, private connection-bundle
 JSON, generated operator token, and rendered WireGuard configuration with restrictive modes; refuses an existing fleet CIDR
 change; verifies the operator-provided public HTTPS URL; enables the fleet Compose profile; binds the
 data stores to the first overlay address; and installs a 10-second systemd peer reconciler. Operators
@@ -595,7 +600,9 @@ their first connection. The CLI never silently falls back to plaintext enrollmen
 local-lab insecure-enrollment escape hatch.
 
 For a broker fleet, HTTPS mode defaults to automatic. A healthy existing HTTPS origin is reused. If
-none is reachable, fleet init verifies DNS and TCP 80/443, enables a digest-pinned Caddy profile,
+none is reachable, fleet init verifies DNS and that TCP 80/443 are free on the host (it cannot see
+the cloud security group or firewall, so it says so and names the ports that must be open
+inbound), enables a digest-pinned Caddy profile,
 generates a route-restricted configuration, and lets Caddy obtain and renew the public certificate.
 The public gateway permits only `/health`, bounded join, authenticated node state/heartbeat, and
 authenticated `/fleet/broker/*` operations; it returns 404 for the UI and operator API. Public
@@ -604,7 +611,9 @@ signal to the API without trusting forwarded headers from workers or the whole D
 Preflight and post-restart acceptance require a credential-free protected-route probe to return 401;
 public health, the denylist, and artifact writes are also verified. Enrollment attempts are bounded
 per source through Redis. Any failure restores the prior
-environment and gateway configuration and restarts the previous runtime.
+environment and gateway configuration, removes fleet directories generated by that attempt, and
+restarts the previous runtime; a managed-gateway timeout is reported with the gateway's own ACME
+log lines and the inbound-firewall explanation, which is the usual cause.
 
 **5. Bootstrap response + post-overlay connection bundle.** `POST /fleet/nodes/join` returns only
 the material needed to establish the overlay plus the one-time node credential (the worker persists

@@ -1,80 +1,58 @@
----
-id: core.tool-execution-safety
-title: "Core 02 \u2014 Typed Tool Execution and Safety"
-version: 2.0.0
-kind: core_policy
-applies_to: all_skills
----
+# Hunt execution guide
 
-# Core 02 — Typed Tool Execution and Safety
+This is the shared execution contract for the methodology library. The running server is
+responsible for capability admission, credentials, transport, accounting and proof. There is
+no extra methodology-owned adapter registry, policy token or package-specific action schema.
 
-## Purpose
+## One capability path
 
-Ensure the LLM plans security tests while deterministic adapters enforce scope, arguments, budgets, isolation, and evidence capture.
+1. Read `GET /hunts/contract` and the created run's context/capability schemas.
+2. Query retained observations with `POST /hunts/{hunt_id}/query` before repeating discovery.
+3. Invoke `POST /hunts/{hunt_id}/capabilities/{capability_name}` using the advertised semantic
+   inputs and a fresh idempotency key. Reuse the key only when retrying that exact operation.
+4. Inspect actual action status, evidence and usage. A queued job is not completed verification.
+5. For a full investigation, follow child results with bounded checks, retain checkpoints and
+   continue. For a submission-only request, return the job ID without claiming its future result.
 
-## Execution model
+Use the capability names in the methodology declaration as a starting point, not a new allowlist.
+Other capabilities already admitted to the run remain available when useful. `withheld_capabilities`
+means the saved run lacks a required capability; `missing_capabilities` names an implementation
+gap. Neither list means the entire methodology must be discarded. Unfiltered catalog metadata is
+not an authority grant or proof that execution will succeed on a particular target.
 
-```text
-LLM/Planner -> Typed Test Plan -> Policy/Approval Check -> Adapter Validator
-            -> Deterministic Tool -> Normalized Result -> Evidence Store
-```
+## Current operation boundaries
 
-The LLM must not directly execute unrestricted shell commands, construct raw process command lines, or invent tool results.
+| Operation | Actual ShakerScan path | Important limit |
+|---|---|---|
+| Baseline request | `http.request` | Read-only request; not arbitrary body replay or a raw connection |
+| Paired object access | `authz.verify` | Read-only, evidence-backed principal comparison; not a generic diff engine |
+| Login session | `auth.session.establish` | Managed opaque references; never submit secret values in planner inputs |
+| Browser discovery | `browser.navigate`, `browser.interact` | Fresh context per call; up to eight read-only steps; no general writes, uploads or realtime sockets |
+| Client artifacts | `artifact.inspect`, `javascript.analyze` | Bounded redacted/static analysis, not arbitrary code or DOM execution |
+| Captured traffic | `collections.inspect`, `collections.select`, `collections.replay_safe` | Saved IDs; safe-method replay is not mutation or authentication replay |
+| SQL/XSS proof | `sqli.verify`, `xss.verify` | Use the specific live verifier contract; a scanner signal alone is not proof |
+| Candidate verification | `candidate.verify` | Only candidate families/contracts actually supported by the server |
+| Service discovery | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect` | Registered/frozen asset and selected operation; NSE observations are not vulnerability proof |
+| Device tasks | `device.inspect`, `device.capabilities.inspect`, `device.service.verify`, `device.ssh.propose` | Device-only schemas; SSH proposal is not execution or approval of a changed plan |
 
-## Adapter requirements
+This table is a description, not an execution schema. Read the live contract for the exact fields,
+selected principal support, admitted service and resource costs. An operation may require additional
+implemented transport/worker prerequisites even when its capability name is present.
 
-Every adapter must:
+## Gaps and recovery
 
-- Validate input with its versioned schema.
-- Resolve opaque references through the control plane, not through model-provided paths or secrets.
-- Re-check scope and approval immediately before execution.
-- Enforce the action and remaining engagement budgets.
-- Apply rate, concurrency, timeout, redirect, egress, and output-size limits.
-- Capture raw inputs and outputs locally before normalization.
-- Return a normalized result with timestamps, tool version, exit status, policy decision, safety counters, and artifact references.
-- Fail closed on unknown arguments, unsupported modes, stale sessions, or ambiguous destinations.
+Keep useful hypotheses for unsupported request shapes, token mutations, file uploads, realtime
+messages, synchronized races, OOB callbacks or arbitrary protocol exchanges. Do not invent adapters
+or disguise the operation as a read-only request. Use another compatible technique when it can
+answer the question; otherwise report a specific untested portion and the next required capability.
 
-## Atomic actions
+A capability error, missing optional executor, indeterminate response or skipped method does not
+by itself end a full Hunt. Distinguish admission rejection, transport failure, partial observation,
+queued work and completed verification. Preserve real usage, health freezes and cancellation.
 
-Plans should use small actions with one purpose. An action may contain several protocol messages only when the adapter itself needs an atomic sequence, such as a synchronized race batch or single-connection desynchronization probe. The adapter—not the LLM—controls that sequence.
+## Evidence and finish
 
-## Shell policy
-
-`shell.allowlisted` accepts only a registered template identifier and typed artifact references. It must never accept raw shell text, pipes, redirections, command substitution, environment-variable expansion, or unvalidated filenames. Prefer native adapters over shell templates.
-
-## Tool-output policy
-
-Scanner results are observations or hypotheses. They cannot create confirmed findings. Tool-reported severity, exploitability, or remediation is advisory until the evidence validator applies the relevant skill's promotion gate.
-
-## Isolation
-
-High-risk processors, browser payloads, document parsers, source-map execution, dependency analysis, and generated files should run in disposable, least-privileged environments with egress restrictions. Test workers must not possess unrelated production credentials.
-
-## Runtime safety counters
-
-At minimum, track:
-
-```yaml
-requests: 0
-concurrency_peak: 0
-state_changes: 0
-auth_attempts: 0
-messages: 0
-oob_interactions: 0
-uploaded_bytes: 0
-cost_units: 0
-duration_seconds: 0
-```
-
-Counters are updated by adapters and cannot be overridden by the model.
-
-## Result statuses
-
-Adapters return `completed`, `blocked`, `failed`, `timed_out`, or `cancelled`. A technical failure is never interpreted as a vulnerability signal without a stable control and explicit validation.
-
-## Schemas
-
-- `../schemas/action.schema.json`
-- `../schemas/test-plan.schema.json`
-- `../schemas/tool-result.schema.json`
-- `../schemas/actions/`
+Submit evidence-linked candidates through `POST /hunts/{hunt_id}/candidates`. Keep severity,
+confidence and proof status separate. Record methodology use against real action IDs through
+`POST /hunts/{hunt_id}/skills/{skill_id}/usage`. Finish with findings, unresolved leads, coverage
+gaps and remaining work; do not report a skipped technique as either vulnerable or clean.

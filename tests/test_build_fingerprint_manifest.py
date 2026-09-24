@@ -42,6 +42,7 @@ def test_source_manifest_is_complete_and_hashable_from_checkout():
         "runtime/requirements.lock",
         "runtime/entrypoint.sh",
         "runtime/scanner.Dockerfile",
+        "runtime/apt_install.sh",
         "model_intake_locks/firecracker-runtime.lock",
         "model_intake_locks/firecracker-guest-worker.py",
         "model_intake_locks/firecracker-guest-init",
@@ -154,3 +155,25 @@ def test_installed_support_directory_is_not_mistaken_for_source_checkout(tmp_pat
     assert "model_intake_control_plane.py" not in files
     assert files["scanner.py"] == str(workspace / "scanner" / "scanner.py")
     assert hash_source_files(files, require_all=True) is None
+
+
+def test_apt_build_helper_has_matching_source_and_runtime_identity(tmp_path):
+    from scanner.scanner_tools.build_fingerprint import runtime_file_map
+
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "app"
+    inputs = tmp_path / "build-inputs"
+    for folder in (workspace / "scanner", workspace / "api", runtime, inputs):
+        folder.mkdir(parents=True)
+    for source, destination in (("scanner/scanner.py", "scanner.py"), ("api/worker.py", "worker.py")):
+        (workspace / source).write_text("# identical execution anchor\n")
+        (runtime / destination).write_text("# identical execution anchor\n")
+    (workspace / "scanner/apt_install.sh").write_text("# first build helper\n")
+    (inputs / "apt_install.sh").write_text("# first build helper\n")
+    source = source_file_map(str(workspace))
+    image = runtime_file_map(str(runtime), str(tmp_path / "absent-locks"), str(inputs))
+    assert "runtime/apt_install.sh" in source.keys() & image.keys()
+    before = hash_source_files(source, require_all=True)
+    assert before == hash_source_files(image, require_all=True)
+    (workspace / "scanner/apt_install.sh").write_text("# corrected build helper\n")
+    assert hash_source_files(source, require_all=True) != before

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import urllib.parse
+from dataclasses import replace
 from typing import Any
 
 try:
@@ -19,6 +20,7 @@ try:
         BrowserCapabilityInputError,
         XSSBrowserProofAdapter,
     )
+    from hunt.capability_executor import CapabilityAdapterResult
     from runtime.models import TargetBinding
 except ModuleNotFoundError:  # package import in host-side tests
     from ..capabilities.browser import (
@@ -26,6 +28,62 @@ except ModuleNotFoundError:  # package import in host-side tests
         XSSBrowserProofAdapter,
     )
     from ..runtime.models import TargetBinding
+    from .capability_executor import CapabilityAdapterResult
+
+
+_BENIGN_BLOCK_REASONS = frozenset({"cross_origin"})
+
+
+def _normalize_hunt_browser_xss_result(
+    result: CapabilityAdapterResult,
+) -> CapabilityAdapterResult:
+    """Keep verified proofs complete, but do not hide incomplete negative attempts.
+
+    The pinned browser intentionally blocks off-origin subresources. Those blocks do not
+    invalidate either a verified same-origin DOM proof or a complete negative result. Other
+    block reasons mean the browser did not exercise the full admitted attempt. A verified
+    proof remains success because the vulnerability is already established; an unverified
+    attempt becomes partial (or cancelled) so Hunt coverage does not overclaim completeness.
+    """
+    if result.status != "success":
+        return result
+
+    verified = any(
+        item.get("kind") == "xss_browser_proof"
+        and item.get("proof_state") == "verified"
+        for item in result.observations
+        if isinstance(item, dict)
+    )
+    if verified:
+        return result
+
+    reasons = {
+        str(item.get("reason") or "")
+        for item in result.observations
+        if isinstance(item, dict) and item.get("kind") == "browser_request_blocked"
+    }
+    material = tuple(sorted(reason for reason in reasons - _BENIGN_BLOCK_REASONS if reason))
+    if not material:
+        return result
+
+    errors = tuple(
+        dict.fromkeys(
+            (*result.errors, *(f"browser_request_blocked:{reason}" for reason in material))
+        )
+    )
+    if "cancelled" in material:
+        return replace(result, status="cancelled", partial=False, errors=errors)
+    return replace(result, status="partial", partial=True, errors=errors)
+
+
+class HuntXSSBrowserProofAdapter(XSSBrowserProofAdapter):
+    """The pinned browser prover under the registry-authorized Hunt xss.verify identity."""
+
+    capability_name = "xss.verify"
+
+    async def execute(self, *, heartbeat, cancelled) -> CapabilityAdapterResult:
+        result = await super().execute(heartbeat=heartbeat, cancelled=cancelled)
+        return _normalize_hunt_browser_xss_result(result)
 
 
 def hunt_browser_xss_proof_adapter(
@@ -35,7 +93,7 @@ def hunt_browser_xss_proof_adapter(
     target: TargetBinding,
     execution_target: str,
     action_id: str,
-) -> XSSBrowserProofAdapter | None:
+) -> HuntXSSBrowserProofAdapter | None:
     """Return a pinned-browser XSS prover when xss.verify names a hash-route parameter.
 
     Returns None to leave the Dalfox scanner in place; a prepared adapter is only
@@ -59,7 +117,7 @@ def hunt_browser_xss_proof_adapter(
         f"{action_id}:{parameter_name}".encode()
     ).hexdigest()
     try:
-        prepared = XSSBrowserProofAdapter.prepare(
+        prepared = HuntXSSBrowserProofAdapter.prepare(
             target=target,
             execution_url=execution_target,
             candidate_id=candidate_id,
@@ -69,13 +127,10 @@ def hunt_browser_xss_proof_adapter(
         # The fragment authority is ambiguous or off-origin; let the scanner path
         # produce the honest not-proven result rather than inventing a browser run.
         return None
-    adapter = XSSBrowserProofAdapter(prepared)
-    # The prover's native capability is xss.browser_prove_batch, but here it executes the
-    # xss.verify action. The dispatcher and executor refuse any adapter whose capability
-    # name differs from the action's, so present the action's name; the registry already
-    # authorizes this (adapter, version) as an xss.verify runtime via alternate_adapters.
-    adapter.capability_name = capability_name
-    return adapter
+    return HuntXSSBrowserProofAdapter(prepared)
 
 
-__all__ = ["hunt_browser_xss_proof_adapter"]
+__all__ = [
+    "HuntXSSBrowserProofAdapter",
+    "hunt_browser_xss_proof_adapter",
+]

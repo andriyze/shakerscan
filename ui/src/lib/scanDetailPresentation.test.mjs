@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -87,6 +87,21 @@ test('an unobservable application leads with not examined instead of clean', () 
   assert.equal(result.notExamined, true)
 })
 
+test('a bound origin that only redirects is explained as a redirect, not a login wall', () => {
+  const result = scanResultPresentation({
+    result: {
+      findings: [],
+      result: { risk_assessment_state: 'not_examined', application_observed: false },
+      http: { status: 301, posture_observed: false, missing_security_headers: [] },
+      coverage: { reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  }, { band: 'limited', label: 'Limited coverage' })
+
+  assert.equal(result.headline, 'Application was not examined')
+  assert.match(result.explanation, /redirect to another origin/)
+  assert.doesNotMatch(result.explanation, /authentication challenge/)
+})
+
 test('confirmed and candidate material findings get distinct conclusions', () => {
   const confirmed = scanResultPresentation({
     result: { findings: [{ severity: 'high', verified: true, proof_state: 'verified' }] },
@@ -135,6 +150,17 @@ test('raw and persisted forms of the same scan finding share one UI identity', (
   assert.equal(scanFindingIdentity(raw), scanFindingIdentity(persistedSummary))
 })
 
+test('finding identity is the persisted fingerprint when there is one, and paths keep their case', () => {
+  const a = { fingerprint: 'fp-a', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }
+  const b = { fingerprint: 'fp-b', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }
+  assert.notEqual(scanFindingIdentity(a), scanFindingIdentity(b))
+  assert.equal(scanFindingIdentity(a), scanFindingIdentity({ fingerprint: 'fp-a', title: 'renamed' }))
+  assert.notEqual(
+    scanFindingIdentity({ title: 'Exposed panel', url: 'http://app/Admin', tool: 'probe' }),
+    scanFindingIdentity({ title: 'Exposed panel', url: 'http://app/admin', tool: 'probe' }),
+  )
+})
+
 test('requested coverage failures are promoted into the result summary', () => {
   const result = scanResultPresentation({
     result: {
@@ -148,4 +174,140 @@ test('requested coverage failures are promoted into the result summary', () => {
   }, { band: 'weak', label: 'Weak coverage' })
 
   assert.deepEqual(result.coverageWarnings, ['subdomain discovery failed'])
+})
+
+
+test('the testing tile names what active permission bought, or warns that it bought nothing', () => {
+  const ran = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive', 'xss', 'sqli', 'sensitive_exposure'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(ran.testingSummary, 'Active · XSS, SQLi, exposure')
+  assert.equal(ran.testingWarning, null)
+
+  const permittedOnly = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(permittedOnly.testingSummary, 'Active allowed · none selected')
+  assert.match(permittedOnly.testingWarning, /standard active preset/)
+
+  const passive = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: false }, resolved_families: ['recon'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(passive.testingSummary, 'Passive only')
+})
+
+
+test('the conclusion names the next step for each limit it reports', () => {
+  const redirected = scanResultPresentation({
+    target_url: 'https://a3sec.net',
+    result: {
+      findings: [],
+      result: { risk_assessment_state: 'not_examined', application_observed: false },
+      http: { status: 301, redirect_location: 'https://www.a3sec.net/' },
+      coverage: { reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
+    },
+  }, { band: 'weak', label: 'Weak coverage' })
+  assert.deepEqual(redirected.nextSteps.map((step) => step.key), ['serving-origin'])
+  assert.equal(redirected.nextSteps[0].label, 'Scan www.a3sec.net instead')
+  assert.equal(redirected.nextSteps[0].href, '/scan/new?target=https%3A%2F%2Fwww.a3sec.net')
+
+  const permittedOnly = scanResultPresentation({
+    target_url: 'http://crapi-web',
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'nuclei_passive'] } },
+    result: { findings: [], result: {} },
+  }, { band: 'limited', label: 'Limited coverage' })
+  assert.deepEqual(permittedOnly.nextSteps.map((step) => step.key), ['standard-active', 'credentials'])
+  assert.match(permittedOnly.nextSteps[0].href, /preset=standard_active/)
+
+  const authenticated = scanResultPresentation({
+    options: { scan_execution_plan: { policy: { active_testing: true }, resolved_families: ['recon', 'xss'] }, credential_profile_refs: ['cred-1'] },
+    result: { findings: [], result: {}, smart_coverage: { auth_states_tested: ['anonymous', 'user'] } },
+  }, { band: 'adequate', label: 'Adequate coverage' })
+  assert.deepEqual(authenticated.nextSteps, [])
+})
+
+
+test('carried over counts only active rows this run neither wrote, last saw, nor reported by fingerprint', () => {
+  const scan = { id: 'scan-2', result: { findings: [{ fingerprint: 'fp-xfo', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' }] } }
+  const rows = [
+    { severity: 'high', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Sensitive exposure: environment secret file', url: 'http://app/.env', tool: 'probe' },
+    { severity: 'high', status: 'resolved', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Old thing', url: 'http://app/x', tool: 't' },
+    { severity: 'medium', status: 'false_positive', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'FP', url: 'http://app/y', tool: 't' },
+    // Same fingerprint as a reported finding: observed by this run even though linkage lags.
+    { severity: 'info', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-3', fingerprint: 'fp-xfo', title: 'Missing HTTP response header: X-Frame-Options', url: 'http://app/', tool: 'nuclei' },
+    { severity: 'info', status: 'active', scan_id: 'scan-2', last_seen_scan_id: 'scan-2', title: 'Seen here', url: 'http://app/z', tool: 't' },
+  ]
+  const summary = carriedOverSummary(scan, rows)
+  assert.deepEqual(summary, { state: 'ready', count: 1, material: 1, highest: 'high', complete: true })
+  assert.equal(carriedOverSummary(scan, [], 'loading').state, 'loading')
+  assert.equal(carriedOverSummary(scan, [], 'error').count, 0)
+})
+
+test('a distinct fingerprint with the same display strings stays carried over', () => {
+  // The old display-string key collapsed these two and dropped an unresolved finding.
+  const scan = { id: 'scan-2', result: { findings: [{ fingerprint: 'fp-new', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss', template_id: 'xss-002' }] } }
+  const rows = [
+    { severity: 'high', status: 'active', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', fingerprint: 'fp-old', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss', template_id: 'xss-001' },
+  ]
+  assert.equal(carriedOverSummary(scan, rows).count, 1)
+  // No fingerprint and no linkage is uncertainty, never proof of re-observation.
+  const unlinked = [{ severity: 'medium', status: 'active', title: 'Reflected XSS', url: 'http://app/q', tool: 'xss' }]
+  assert.equal(carriedOverSummary(scan, unlinked).count, 1)
+})
+
+test('a partial history never reads as an all-clear', () => {
+  const scan = { id: 'scan-2', result: { findings: [] } }
+  const summary = carriedOverSummary(scan, [], 'partial')
+  assert.equal(summary.state, 'partial')
+  assert.equal(summary.complete, false)
+  assert.equal(summary.count, 0)
+})
+
+test('the release line claims an earlier-scan origin only when the decision says so', () => {
+  const carried = releaseLine({
+    decision: 'block',
+    blocking_findings: [{ id: 'f1', from_target_active: true, scan_id: 'scan-1' }],
+  }, 'scan-2', 0)
+  assert.match(carried.text, /from earlier scans that this run did not re-examine/)
+
+  const current = releaseLine({
+    decision: 'block',
+    blocking_findings: [{ id: 'f2', scan_id: 'scan-2' }],
+  }, 'scan-2', 0)
+  assert.doesNotMatch(current.text, /earlier scans/)
+  assert.match(current.text, /1 unresolved finding on this target/)
+
+  const review = releaseLine({ decision: 'needs_review', rationale: 'Required deployment evidence is missing or incomplete.', blocking_findings: [{ id: 'f1' }] }, 'scan-2', 0)
+  assert.equal(review.tone, 'review')
+  assert.match(review.text, /^Required deployment evidence is missing or incomplete\. 1 unresolved finding on this target\.$/)
+  assert.equal(releaseLine(null, 'scan-2', 0), null)
+})
+
+
+test('a parallel child prefix stays visible as the entry origin instead of being eaten as the source', () => {
+  const entry = scanLogEntry('[Discovery] [scan] Started Discover Web Probe · 5%')
+  assert.equal(entry.child, 'Discovery')
+  assert.equal(entry.source, 'scan')
+  assert.equal(entry.kind, 'milestone')
+  assert.match(entry.meta, /^Discovery/)
+  const shard = scanLogEntry('[Shard 3] [scan] Finished Verify XSS · timed_out · 44%')
+  assert.equal(shard.child, 'Shard 3')
+  assert.equal(scanLogEntry('[scan] plain line').child, '')
+})
+
+
+test('the server summary from the decision wins over the client fallback', () => {
+  assert.deepEqual(
+    carriedOverFromDecision({ carried_over: { count: 3, material: 2, highest: 'High', complete: true } }),
+    { state: 'ready', count: 3, material: 2, highest: 'high', complete: true, source: 'server' },
+  )
+  const partial = carriedOverFromDecision({ carried_over: { count: 0, complete: false, unloaded_active: 40 } })
+  assert.equal(partial.state, 'partial')
+  assert.equal(partial.complete, false)
+  assert.equal(carriedOverFromDecision({ carried_over: null }), null)
+  assert.equal(carriedOverFromDecision({}), null)
+  assert.equal(carriedOverFromDecision(null), null)
 })

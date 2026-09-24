@@ -24,5 +24,17 @@ test('subdomain finding counters have an accessible text label', () => {
 })
 
 test('pathological domain labels stay inside their card', () => {
-  assert.match(targets, /block max-w-full truncate font-medium text-white/)
+  assert.match(targets, /block min-w-\[10rem\] max-w-full truncate font-medium text-white/)
+})
+
+test('archived targets can be listed, restored and deleted from the Targets page', () => {
+  // Archive sets is_active=false and the default inventory hides such rows, so without this the
+  // group row showed no root-level control at all ("no exact root record") and an archived
+  // target could be neither deleted nor restored.
+  assert.match(targets, /includeInactive: archivedFilter/)
+  assert.match(targets, /id="targets-archived-filter"/)
+  assert.match(targets, /Show archived/)
+  assert.equal((targets.match(/>archived<\/span>/g) || []).length, 2, 'root and subdomain rows carry the badge')
+  assert.equal((targets.match(/void handleRestore\(/g) || []).length, 2, 'root and subdomain rows can be restored')
+  assert.equal((targets.match(/archived=\{!/g) || []).length, 2, 'the delete dialog knows the row is already archived')
 })

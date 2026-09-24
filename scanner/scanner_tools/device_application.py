@@ -39,6 +39,9 @@ except ImportError:  # pragma: no cover - flat scanner runtime
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "data" / "device_api_catalog.json"
 PROFILE_RANK = {"inventory": 0, "posture": 1, "thorough": 2}
 REQUEST_BUDGETS = {"inventory": 8, "posture": 20, "thorough": 40}
+# Conventional TLS ports so an auto_http probe on a non-standard HTTPS port
+# (9443, 4443, 10443, …) is attempted as HTTPS rather than plain HTTP.
+_CONVENTIONAL_TLS_PORTS = frozenset({443, 4443, 7443, 8443, 8843, 9443, 10443})
 MAX_DESCRIPTOR_BYTES = 256 * 1024
 MAX_DESCRIPTOR_URLS = 8
 _SAFE_AUTOMATIC_ACTIONS = {
@@ -448,7 +451,8 @@ def _marker_present(evidence: str, marker: Any) -> bool:
 def _origin_for_probe(hostname: str, port: int, transport: str, web_origins: list[dict[str, Any]]) -> tuple[str, str]:
     matched = next((item for item in web_origins if int(item.get("port") or 0) == port), None)
     if transport == "auto_http":
-        scheme = str((matched or {}).get("scheme") or ("https" if port == 443 else "http"))
+        scheme = str((matched or {}).get("scheme") or (
+            "https" if port in _CONVENTIONAL_TLS_PORTS else "http"))
     elif transport in {"wss", "https"}:
         scheme = "https"
     else:

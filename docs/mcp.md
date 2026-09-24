@@ -12,9 +12,30 @@ Start it from the source/runtime directory:
 ./scanner.sh mcp
 ```
 
+The same adapter runs without the engine from the `shakerscan` client
+(`pipx install shakerscan`, `uv tool install shakerscan`, or the Homebrew tap; see
+[client.md](client.md)):
+
+```bash
+shakerscan mcp --url https://scanner.example.com --token-file ./token
+```
+
 The scanner API must already be available at `http://127.0.0.1:8080`. Override
 the origin with `SHAKERSCAN_API_URL`. Non-loopback origins are rejected unless
 `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true` is explicitly set.
+
+Behind an authenticating gateway (for example a self-hosted Enterprise deployment that fronts
+the API with service tokens), set `SHAKERSCAN_API_TOKEN` as well: the adapter sends it as
+`Authorization: Bearer` on every call. A token is only ever sent over `https://`; the adapter
+refuses to start with a token and a plain-http origin, and it never prints the token. The
+product CLI (`./scanner.sh hunt ...`, `scripts/v2_cli.py`) honours the same variable with the
+same rule.
+
+```bash
+SHAKERSCAN_API_URL=https://scanner.example.com \
+SHAKERSCAN_MCP_ALLOW_REMOTE_API=true \
+SHAKERSCAN_API_TOKEN=<service token> ./scanner.sh mcp
+```
 
 Example client configuration:
 

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from hunt.contracts import capability_manifest
 from hunt.start_contract import normalize_hunt_start_payload
+from runtime.capability_registry import CAPABILITY_REGISTRY
 
 
 def _contract(
@@ -68,10 +69,19 @@ def test_hunt_with_valid_receipt_gets_active_capabilities_but_never_mutation():
     names = {item["name"] for item in capabilities}
     assert names >= {"device.inspect", "device.http.probe", "device.scan", "device.ssh.propose"}
     assert "device.ssh.execute_confirmed" not in names
+    # A device that serves HTTP now carries the web capabilities too, so the claim this test
+    # protects is the one in its name: mutation authority was never asked for, so nothing
+    # gated on it appears, whatever the target kind.
+    assert {"web.probe", "web.crawl", "http.request"} <= names
     assert not names & {
-        "web.probe", "templates.scan", "web.crawl", "web.content_discover",
-        "xss.verify", "sqli.verify", "service.fingerprint", "ports.discover", "tls.inspect",
+        spec.name for spec in CAPABILITY_REGISTRY.list(include_active=True)
+        if spec.risk_tier == "mutation"
+        or spec.required_approval == "state_changing_http"
+        or spec.placement_requirements.get("state_changing_http")
     }
+    assert not names & {"ports.discover", "service.fingerprint", "service.nse_check"}, (
+        "network discovery was not granted"
+    )
 
 
 def test_device_ssh_proposal_requires_bound_credentials():

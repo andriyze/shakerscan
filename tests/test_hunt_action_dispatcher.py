@@ -112,12 +112,16 @@ def test_one_action_and_result_schema_covers_all_target_kinds(
 
 
 def test_registry_exposes_the_supported_cross_target_acceptance_matrix():
+    # The kind is a label on one asset. A `network` Hunt resolves against the same targets
+    # table, URL and context pack as `web`, and a device that serves HTTP is the same host
+    # either way, so the HTTP capabilities accept both. Without that a network Hunt held three
+    # capabilities and a device Hunt six, neither able to speak HTTP to what they found.
     expected = {
-        "http.request": {"web", "api"},
-        "browser.navigate": {"web", "api"},
-        "ports.discover": {"web", "api", "network"},
-        "collections.replay_safe": {"web", "api", "device"},
-        "auth.session.establish": {"web", "api"},
+        "http.request": {"web", "api", "network", "device"},
+        "browser.navigate": {"web", "api", "network", "device"},
+        "ports.discover": {"web", "api", "network", "device"},
+        "collections.replay_safe": {"web", "api", "network", "device"},
+        "auth.session.establish": {"web", "api", "network", "device"},
         "device.http.probe": {"device"},
         "device.service.verify": {"device"},
         "device.ssh.propose": {"device"},
@@ -197,6 +201,15 @@ def test_native_device_policy_is_typed_paced_and_fail_closed():
     with pytest.raises(DeviceHuntPolicyError, match="circuit breaker"):
         second.require_admission(request_attempts=1)
 
+    # A healthy checkpoint clears the freeze so an authorized Hunt can resume
+    # rather than stay frozen for the rest of its life.
+    before_third = second.adapter_state(credential_refs=[], collection_refs=[])
+    after_third = {**before_third, "health_observed": True, "health_failed": False}
+    third = second.reconcile_adapter_state(before_third, after_third, health_failed=False)
+    assert third.traffic_frozen is False
+    assert third.consecutive_health_failures == 0
+    third.require_admission(request_attempts=0)
+
 
 def test_native_device_hunts_never_seed_legacy_agent_state():
     source = (ROOT / "api" / "api.py").read_text(encoding="utf-8")
@@ -236,3 +249,46 @@ def test_public_hunt_route_returns_the_canonical_action_result_on_first_and_retr
     assert '"schema_version": "hunt-action-result/v2"' in (
         ROOT / "api" / "hunt" / "action_dispatcher.py"
     ).read_text(encoding="utf-8")
+
+
+def test_worker_partial_parser_errors_survive_canonical_result_conversion():
+    from hunt.action_dispatcher import worker_result_errors
+
+    result = {
+        "status": "partial", "error": None,
+        "typed_output": {"errors": ["nse_script_no_output:http-security-headers:8008"]},
+    }
+    assert worker_result_errors(result) == (
+        "nse_script_no_output:http-security-headers:8008",
+    )
+    assert worker_result_errors({"error": "tool_failed", "typed_output": {
+        "errors": ["tool_failed", "malformed_nmap_xml:ParseError"]}}) == (
+        "tool_failed", "malformed_nmap_xml:ParseError",
+    )
+
+
+def test_canonical_device_hunt_is_not_capped_by_legacy_session_ceilings():
+    # The canonical Hunt device policy follows the resolved budget, not the
+    # legacy device-agent per-session constants. A realistic budget must admit
+    # far more than the old fixed 40-request ceiling.
+    from hunt.device_policy import DeviceHuntPolicyState
+
+    state = DeviceHuntPolicyState.initial(
+        safety_profile="authenticated_active",
+        fragility_limit=5_000,
+        request_limit=5_000,
+        scan_limit=8,
+        minimum_request_interval_ms=0,
+    )
+    # 41 sequential admissions (past the retired 40 ceiling) all succeed.
+    for _ in range(41):
+        state.require_admission(request_attempts=1, fragility_cost=1)
+    assert state.request_limit >= 5_000
+
+    # The native device policy/traffic modules must not import the legacy
+    # per-session ceilings, so they can never silently constrain a Hunt.
+    for module in ("api/hunt/device_policy.py", "api/hunt/device_traffic.py"):
+        source = (ROOT / module).read_text(encoding="utf-8")
+        for legacy in ("MAX_ACTIONS_PER_SESSION", "MAX_SCANS_PER_SESSION",
+                       "MAX_FRAGILITY_PER_SESSION", "DEVICE_HTTP_REQUEST_SESSION_LIMIT"):
+            assert legacy not in source, f"{module} references legacy {legacy}"

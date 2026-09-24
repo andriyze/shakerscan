@@ -7,6 +7,7 @@ from datetime import date, datetime
 import json
 from typing import Any, Mapping, Sequence
 
+from .activity import action_diagnostic_error_class
 from .parallel_compiler import (
     parallel_action_occurrence_id,
     summarize_parallel_action_coverage,
@@ -46,9 +47,12 @@ _REASON_LABELS = {
     "policy_disabled": "Disabled by scan policy",
     "insufficient_plan_budget": "Not enough admitted scan budget",
     "dependency_failed": "A required earlier action did not complete",
+    "dependency_incomplete": "The action producing this work did not complete, so nothing was published for this batch",
+    "dependency_private_state_unavailable": "Private state from an earlier action was not available to this worker",
     "placement_unavailable": "No eligible worker placement was available",
     "authorization_expired": "Testing approval expired before execution",
     "authorization_revoked": "Testing approval was revoked",
+    "authentication_uncertain": "Credential authority could not be confirmed; review the identity and approval before starting new work",
     "scope_invalid": "Target scope no longer matched the approved scope",
     "cancelled": "The scan was cancelled",
     "timed_out": "The action reached its fixed time limit",
@@ -205,7 +209,7 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
         key: _text(raw_provenance.get(key), maximum=300)
         for key in provenance_keys if _text(raw_provenance.get(key), maximum=300)
     }
-    return {
+    projection = {
         "receipt_id": receipt_id,
         "receipt_hash": receipt_hash,
         "started_at": _timestamp(receipt.get("started_at") or row.get("started_at")),
@@ -213,6 +217,29 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
         "parser_version": _text(receipt.get("parser_version"), maximum=200),
         "provenance": provenance,
     }
+    # Name the failure class. Without this an operator saw "The capability adapter failed"
+    # and nothing else, while the cause sat in receipt_json->errors in the database. Only the
+    # normalised class travels -- never the tool's own sentence, which can carry the target
+    # URL, a token or response text.
+    errors = receipt.get("errors")
+    errors = errors if isinstance(errors, (list, tuple)) else ()
+    started = execution.get("execution_started")
+    error_class = action_diagnostic_error_class(
+        status=row.get("status"), reason=row.get("reason_code"),
+        execution_started=started, errors=errors,
+    )
+    if error_class != "none":
+        counts = {
+            key: value for key in ("attempted_count", "unattempted_count")
+            if isinstance(value := execution.get(key), int) and not isinstance(value, bool)
+        }
+        projection["diagnostic"] = {
+            "error_class": error_class,
+            "error_count": len(errors),
+            **({"execution_started": started} if isinstance(started, bool) else {}),
+            **counts,
+        }
+    return projection
 
 
 def _work_manifests(execution: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -843,4 +870,5 @@ def coverage_response(explanation: Mapping[str, Any]) -> dict[str, Any]:
         "budget": dict(explanation.get("budget") or {}),
         **dict(explanation.get("coverage") or {}),
         "transport_parity": dict(explanation.get("transport_parity") or {}),
+        "authentication_assurance": dict(explanation.get("authentication_assurance") or {}),
     }

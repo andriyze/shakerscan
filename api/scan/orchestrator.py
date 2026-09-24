@@ -234,6 +234,7 @@ class ScanOrchestrator:
         if not isinstance(plan, ScanActionPlan):
             raise ScanOrchestrationError("ScanOrchestrator requires a canonical action plan")
         results = await self._load_terminal_results(plan)
+        health_actions = {action.action_id for action in plan.actions if "authentication_profile_ref" in action.capability_args}
         for action in plan.actions:
             if action.action_id in results:
                 await self._emit(action, "restored", results[action.action_id])
@@ -297,20 +298,54 @@ class ScanOrchestrator:
                         status=CapabilityResultStatus.BLOCKED,
                         reason=CapabilityResultReason.DEPENDENCY_PRIVATE_STATE_UNAVAILABLE,
                     )
-                elif (
-                    action.action_id != "finalize.report"
-                    and any(
-                        item.status not in _DEPENDENCY_SATISFIED
-                        for item in dependencies
-                        if item is not None
+                elif action.action_id != "finalize.report" and (unmet := [
+                    (dependency_id, item)
+                    for dependency_id, item in zip(action.dependencies, dependencies)
+                    if item is not None and (
+                        item.status not in _DEPENDENCY_SATISFIED or (
+                            dependency_id in health_actions
+                            and item.status != CapabilityResultStatus.SUCCESS
+                        )
                     )
-                ):
-                    result = await self._settle_without_execution(
-                        plan=plan,
-                        action=action,
-                        status=CapabilityResultStatus.BLOCKED,
-                        reason=CapabilityResultReason.DEPENDENCY_FAILED,
+                ]):
+                    # A verifier that had no candidate settles skipped and not
+                    # applicable. Its escalation then has nothing to prove: that
+                    # is the same clean outcome, not a failed prerequisite. Calling
+                    # it dependency_failed marked every family, shard and grade
+                    # unreliable on any target without a parameterised route.
+                    nothing_to_do = all(
+                        dependency_id not in health_actions
+                        and item.status is CapabilityResultStatus.SKIPPED
+                        and item.reason_code is CapabilityResultReason.NOT_APPLICABLE
+                        for dependency_id, item in unmet
                     )
+                    # A proof step depends on every verify slice of its family.
+                    # One slice with nothing to do does not cancel the work of
+                    # a sibling that produced observations: the step runs over
+                    # what the satisfied siblings settled, and settles skipped
+                    # only when every prerequisite had nothing to do.
+                    satisfied_sibling = nothing_to_do and any(
+                        item is not None
+                        and item.status in _DEPENDENCY_SATISFIED
+                        and (dependency_id not in health_actions
+                             or item.status is CapabilityResultStatus.SUCCESS)
+                        for dependency_id, item in zip(action.dependencies, dependencies)
+                    )
+                    if satisfied_sibling:
+                        result = await self._execute_action(plan=plan, action=action)
+                    else:
+                        result = await self._settle_without_execution(
+                            plan=plan,
+                            action=action,
+                            status=(
+                                CapabilityResultStatus.SKIPPED if nothing_to_do
+                                else CapabilityResultStatus.BLOCKED
+                            ),
+                            reason=(
+                                CapabilityResultReason.NOT_APPLICABLE if nothing_to_do
+                                else CapabilityResultReason.DEPENDENCY_FAILED
+                            ),
+                        )
                 else:
                     result = await self._execute_action(
                         plan=plan, action=action,

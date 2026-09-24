@@ -214,9 +214,11 @@ class FakeBackend:
 
 
 class FakeExecutor:
-    def __init__(self, *, fail_action: str | None = None, lose_action: str | None = None):
+    def __init__(self, *, fail_action: str | None = None, lose_action: str | None = None,
+                 inapplicable_action: str | None = None):
         self.fail_action = fail_action
         self.lose_action = lose_action
+        self.inapplicable_action = inapplicable_action
         self.executed: list[str] = []
         self.synthetic: list[tuple[str, str, bool]] = []
 
@@ -231,6 +233,12 @@ class FakeExecutor:
                 status=CapabilityResultStatus.FAILED,
                 reason=CapabilityResultReason.ADAPTER_FAILED,
                 charge_full=True,
+            )
+        if action.action_id == self.inapplicable_action:
+            return _result(
+                action,
+                status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.NOT_APPLICABLE,
             )
         return _result(action, status=CapabilityResultStatus.SUCCESS)
 
@@ -365,6 +373,71 @@ def test_failed_dependency_is_blocked_but_receipt_driven_finalizer_still_runs():
     }
     assert executor.executed == ["baseline.http", "finalize.report"]
     assert ("baseline.security_txt", "blocked", False) in executor.synthetic
+
+
+def test_a_prerequisite_with_nothing_to_do_leaves_its_dependent_nothing_to_do():
+    """A verify batch with no candidate settles skipped/not_applicable. The prove
+    step that depends on it was then blocked as `dependency_failed`, which put a
+    false failure on every family, shard and grade for a target with no
+    parameterised route: crAPI reported 3 of 4 shards partial over it."""
+    plan = _plan()
+    backend = FakeBackend(plan, "local")
+    executor = FakeExecutor(inapplicable_action="baseline.http")
+
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    assert report.status_matrix == {
+        "baseline.http": "skipped",
+        "baseline.security_txt": "skipped",
+        "finalize.report": "success",
+    }
+    assert ("baseline.security_txt", "skipped", False) in executor.synthetic
+    assert report.action_results["baseline.security_txt"].reason_code is CapabilityResultReason.NOT_APPLICABLE
+
+
+def test_a_prove_step_runs_when_one_verify_sibling_had_nothing_to_do_and_another_produced_work():
+    """verify.xss settles not_applicable, verify.xss.001 succeeds with observations.
+    The proof step that depends on both must run over the sibling that worked;
+    it was settled not_applicable and the executor was never called."""
+    first = _action("verify.xss", 0, capability_name="xss.verify_batch")
+    second = _action("verify.xss.001", 1, capability_name="xss.verify_batch")
+    prove = _action("prove.xss", 2, capability_name="xss.browser_prove_batch",
+                    dependencies=(first.action_id, second.action_id))
+    finalize = _action("finalize.report", 3, dependencies=(first.action_id, second.action_id, prove.action_id))
+    plan = ScanActionPlan(scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+                          target_binding_digest="a" * 64, actions=(first, second, prove, finalize))
+    backend = FakeBackend(plan, "local")
+    executor = FakeExecutor(inapplicable_action="verify.xss")
+
+    report = _run(ScanOrchestrator(backend=backend, executor=executor), plan)
+
+    assert report.status_matrix == {
+        "verify.xss": "skipped", "verify.xss.001": "success",
+        "prove.xss": "success", "finalize.report": "success",
+    }
+    assert "prove.xss" in executor.executed
+    assert not any(item[0] == "prove.xss" for item in executor.synthetic)
+
+
+@pytest.mark.parametrize("status", [CapabilityResultStatus.PARTIAL, CapabilityResultStatus.TIMED_OUT])
+@pytest.mark.parametrize("health", [True, False])
+def test_uncertain_health_never_satisfies_dependency_but_partial_evidence_still_does(status, health):
+    original = _plan()
+    first = replace(original.actions[0], capability_args={"authentication_profile_ref": {}} if health else {"method": "GET"}, action_digest=None)
+    plan = replace(original, actions=(first, *original.actions[1:]), plan_digest=None)
+
+    class Executor(FakeExecutor):
+        async def execute(self, action, lease, heartbeat):
+            if action.action_id == first.action_id:
+                self.executed.append(action.action_id)
+                return _result(action, status=status, reason=CapabilityResultReason.TIMED_OUT if status == CapabilityResultStatus.TIMED_OUT else CapabilityResultReason.OUTPUT_TRUNCATED)
+            return await super().execute(action, lease, heartbeat)
+
+    executor = Executor()
+    report = _run(ScanOrchestrator(backend=FakeBackend(plan, "local"), executor=executor), plan)
+    assert report.status_matrix[first.action_id] == status.value
+    assert report.status_matrix["baseline.security_txt"] == ("blocked" if health else "success")
+    assert report.status_matrix["finalize.report"] == "success"
 
 
 def test_precomputed_admission_skip_is_settled_with_a_terminal_receipt():

@@ -173,7 +173,8 @@ class XSSBrowserProofAdapter:
         body_field_names: tuple[str, ...] = (),
     ) -> PreparedXSSBrowserProof:
         origin = _origin(execution_url)
-        if origin not in target.allowed_origins or _origin_key(origin)[1] != target.canonical_host:
+        allowed_keys = {_origin_key(value) for value in target.allowed_origins}
+        if _origin_key(origin) not in allowed_keys or _origin_key(origin)[1] != target.canonical_host:
             raise BrowserCapabilityInputError("XSS proof URL differs from target binding")
         if not target.allowed_addresses:
             raise BrowserCapabilityInputError("XSS proof target has no frozen address")
@@ -319,12 +320,14 @@ def _prepare_browser_base(
         raise BrowserCapabilityInputError(
             f"unsupported browser input fields: {', '.join(unknown_fields)}"
         )
-    if target.target_kind not in {"web", "api"}:
+    if target.target_kind not in {"web", "api", "network", "device"}:
         raise BrowserCapabilityInputError(
             "browser actions support only web and API targets"
         )
-    base_origin = _origin(base_url)
-    if base_origin not in target.allowed_origins:
+    base_origin = _origin(args.get("origin") or base_url)
+    # Compare by normalized origin key so an explicit default port (host:80,
+    # host:443) matches a binding that stored the bare origin, and vice versa.
+    if _origin_key(base_origin) not in {_origin_key(value) for value in target.allowed_origins}:
         raise BrowserCapabilityInputError(
             "browser origin is not present in the target binding"
         )
@@ -451,7 +454,7 @@ class BrowserNavigateAdapter:
             target=target,
             base_url=base_url,
             args=args,
-            allowed_fields={"path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
+            allowed_fields={"origin", "path", "wait_until", "timeout_ms", "max_requests", "session_ref"},
         )
         normalized = {
             "target_id": target.target_id,
@@ -533,7 +536,7 @@ class BrowserInteractAdapter:
             base_url=base_url,
             args=args,
             allowed_fields={
-                "path", "selector", "wait_until", "timeout_ms",
+                "origin", "path", "selector", "wait_until", "timeout_ms",
                 "max_requests", "settle_ms", "steps", "session_ref",
             },
         )

@@ -12,6 +12,7 @@ import {
 } from '@/lib/api'
 import {
   createRequestCollection,
+  deactivateRequestCollection,
   deactivateRequestCollectionSelection,
   getRequestCollection,
   listRequestCollectionInventory,
@@ -29,6 +30,7 @@ import {
 import {
   Button,
   Card,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -95,6 +97,7 @@ export default function RequestCollectionsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [uploaderOpen, setUploaderOpen] = useState(false)
+  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)
 
   const [uploadName, setUploadName] = useState('')
   const uploadAttempt = useRef(new UploadAttempt())
@@ -361,6 +364,25 @@ export default function RequestCollectionsPage() {
     toast.info(clone ? 'Loaded a copy. Rename or adjust it, then save.' : 'Loaded for replacement. Saving the same name creates a new digest.')
   }
 
+  async function deleteCollection() {
+    if (!deleting) return
+    setBusy(true)
+    try {
+      const result = await deactivateRequestCollection(deleting.id)
+      setDeleting(null)
+      setDetail(null)
+      setSelectedId('')
+      await loadCollections()
+      toast.success(result.revoked_selections > 0
+        ? `Request collection deleted; ${result.revoked_selections} saved selection(s) revoked`
+        : 'Request collection deleted')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Collection deletion failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function deactivateSelection(selectionId: string) {
     if (!detail || !window.confirm('Deactivate this saved selection? Existing historical scan records are retained.')) return
     setBusy(true)
@@ -454,9 +476,12 @@ export default function RequestCollectionsPage() {
                       {detail.collection.request_count} requests · {detail.collection.safe_request_count} safe · {detail.collection.potentially_mutating_request_count} potentially state-changing
                     </p>
                   </div>
-                  <span className="rounded bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
-                    encrypted · digest {detail.collection.payload_sha256.slice(0, 12)}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
+                      encrypted · digest {detail.collection.payload_sha256.slice(0, 12)}
+                    </span>
+                    <Button variant="danger" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>
+                  </div>
                 </div>
               </Card>
 
@@ -575,6 +600,17 @@ export default function RequestCollectionsPage() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        title={deleting ? `Delete "${deleting.name}"?` : 'Delete request collection?'}
+        message="The collection disappears from this list and its saved selections, bindings and environments are revoked, so no new Scan or Hunt can use it. Historical scan records keep their immutable selection digests; the encrypted document is erased when the owning target's records are deleted."
+        confirmLabel="Delete"
+        danger
+        busy={busy}
+        onConfirm={() => void deleteCollection()}
+        onCancel={() => setDeleting(null)}
+      />
 
       <Modal open={uploaderOpen} onClose={() => setUploaderOpen(false)} title="Upload request collection" size="xl">
         <div className="space-y-4">

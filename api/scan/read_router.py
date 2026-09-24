@@ -23,6 +23,10 @@ from .explanation import (
     coverage_response,
 )
 from .parity import build_scan_semantic_parity_artifact
+try:
+    from authenticated_assurance.evaluation import scan_authentication_summary
+except ModuleNotFoundError:
+    from api.authenticated_assurance.evaluation import scan_authentication_summary
 
 
 router = APIRouter()
@@ -33,7 +37,9 @@ class ScanFamilyPreviewRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    preset: Literal["passive", "standard_active", "custom"] = "passive"
+    # None resolves exactly as a submission does: standard_active when active
+    # testing is allowed, passive otherwise.
+    preset: Literal["passive", "standard_active", "custom"] | None = None
     budget_profile: Literal["fast", "balanced", "thorough", "deep"] = "balanced"
     include_families: list[str] = Field(default_factory=list, max_length=100)
     exclude_families: list[str] = Field(default_factory=list, max_length=100)
@@ -100,7 +106,7 @@ def public_scan_execution_explanation(
 ) -> dict[str, Any]:
     """Build the allowlisted public projection shared by detail and read APIs."""
     report = _decode_json_value(scan.get("result"))
-    return build_scan_execution_explanation(
+    explanation = build_scan_execution_explanation(
         scan_id=str(scan.get("id") or ""),
         scan_status=str(scan.get("status") or "unknown"),
         plan_payload=_json_object(scan.get("scan_action_plan_json")),
@@ -111,6 +117,11 @@ def public_scan_execution_explanation(
         ),
         plan_budget_limits=_json_object(scan.get("budget_json")),
     )
+    explanation["authentication_assurance"] = scan_authentication_summary(_json_object(scan.get("options")),
+        interrupted_action_count=sum(row.get("reason_code") == "authentication_uncertain" or
+            _json_object(_json_object(_json_object(row.get("receipt_json")).get("redacted_execution")).get("identity_interruption")).get("reason_code") == "authentication_uncertain"
+            for row in action_rows))
+    return explanation
 
 
 async def load_public_scan_execution_explanation(
@@ -122,7 +133,7 @@ async def load_public_scan_execution_explanation(
     except (TypeError, ValueError, AttributeError) as exc:
         raise HTTPException(status_code=404, detail="Scan not found") from exc
     scan = await conn.fetchrow(
-        """SELECT id, status, result, budget_json, scan_action_plan_json,
+        """SELECT id, status, result, options, budget_json, scan_action_plan_json,
                   scan_action_plan_digest, scan_action_plan_schema
              FROM scans WHERE id=$1""",
         parsed_scan_id,

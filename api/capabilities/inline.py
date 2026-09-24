@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import asyncio
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -69,9 +70,30 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
         heartbeat: Heartbeat,
         cancelled: Cancelled,
     ) -> CapabilityAdapterResult:
-        del heartbeat, cancelled
+        del heartbeat
         started = time.perf_counter()
-        result = dict(await self._operation())
+        operation = asyncio.create_task(self._operation())
+        try:
+            while not operation.done():
+                await asyncio.wait({operation}, timeout=0.1)
+                if not operation.done() and cancelled():
+                    operation.cancel()
+                    try:
+                        await operation
+                    except asyncio.CancelledError:
+                        pass
+                    return CapabilityAdapterResult(status="cancelled", errors=("cancelled",),
+                        execution_started=True,
+                        actual_budget={**self._requested_budget, **self._wall_budget(started, execution_started=True)},
+                        redacted_execution={**self._redacted_execution, "usage_uncertain": True})
+            result = dict(await operation)
+        finally:
+            if not operation.done():
+                operation.cancel()
+                try:
+                    await operation
+                except asyncio.CancelledError:
+                    pass
         self.result = result
         execution_started = isinstance(result.get("request"), Mapping)
         followed = max(0, int(result.get("hops_followed") or 0))

@@ -29,12 +29,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 try:
     import asm_inventory
     import check_registry
+    import action_scope
     from api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
     from request_models import ScanOptions, ScanPublicCompatibilityOptions
     from scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
     from serialization import _decode_json_value, row_to_dict
 except ModuleNotFoundError:  # package import in host-side tests
-    from .. import asm_inventory, check_registry
+    from .. import asm_inventory, check_registry, action_scope
     from ..api_utils import LEGACY_SCAN_WRITE_FIELDS, _optional_uuid, _record_map, _uuid_or_400, utc_now, utc_now_iso
     from ..request_models import ScanOptions, ScanPublicCompatibilityOptions
     from ..scan.contracts import raw_scan_authentication_keys, resolve_scan_contract
@@ -591,10 +592,11 @@ async def validate_schedule_target_destination(
     *,
     resolver: Callable[[str, int], Any] | None = None,
 ) -> tuple[str, ...]:
-    """Resolve a recurring target and require every destination to be public.
+    """Resolve every destination under the same deployment policy as on-demand work.
 
-    Validation is repeated at dispatch because a hostname that was public when the
-    schedule was saved may later resolve to a private or metadata address.
+    Revalidate at dispatch: policy and DNS may both change after creation. Metadata,
+    link-local, multicast and unspecified destinations remain refused even when
+    private-network targets are enabled; a cohort label never grants authority.
     """
     try:
         parsed = urllib.parse.urlsplit(str(url or "").strip())
@@ -607,7 +609,7 @@ async def validate_schedule_target_destination(
             "Scheduled targets must use a valid HTTP(S) URL."
         ) from exc
 
-    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+    if (host == "localhost" or host.endswith((".localhost", ".local", ".internal"))) and not action_scope._deployment_allows_private_networks(None):
         raise ScheduleTargetSafetyError(
             "Scheduled targets must not resolve to a local or internal destination."
         )
@@ -639,12 +641,13 @@ async def validate_schedule_target_destination(
             "Scheduled target did not resolve to a usable IP address."
         )
     unsafe = sorted(
-        address for address in addresses if not ipaddress.ip_address(address).is_global
+        address for address in addresses
+        if action_scope._ip_scope_block_reason(address, "production") is not None
     )
     if unsafe:
         raise ScheduleTargetSafetyError(
-            "Scheduled targets must not resolve to private, loopback, link-local, "
-            "reserved, or metadata addresses."
+            "Scheduled targets must not resolve to destinations refused by the deployment "
+            "network policy (including link-local, multicast, unspecified or metadata addresses)."
         )
     return tuple(sorted(addresses, key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value)))))
 

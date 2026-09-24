@@ -68,20 +68,73 @@ def scan_action_activity_event(
     }
 
 
-def _diagnostic_error_class(value: Any) -> str:
+# A specific cause, safe to publish: every member is a fixed token this code produces, never
+# free text from a tool, so no target data can travel in it.
+_DIAGNOSTIC_ERROR_CLASSES = frozenset({
+    "timed_out", "timeout", "connection_limit_exceeded",
+    "external_process_contract", "scanner_not_available",
+    "cancelled_before_execution", "output_limit_exceeded", "output_truncated",
+    # A bound HTTP request that never got a response, by cause: a certificate the client
+    # would not trust is a different finding from a port nobody answers on.
+    "tls_certificate_untrusted", "request_error",
+})
+# Labels a batch prepends to say *that* it failed rather than *why*. They are honest answers
+# only when nothing more specific follows, so the scan must look past them.
+_DIAGNOSTIC_GENERIC_LABELS = frozenset({"adapter_failed", "parser_failed"})
+
+
+def diagnostic_error_class(value: Any) -> str:
+    """The most specific safe class in a receipt's errors.
+
+    A batch prepends `adapter_failed` and appends the real per-attempt errors, so returning
+    on the first unrecognised token classified every batch failure as
+    `unclassified_adapter_error` and hid the cause: a deep scan whose `active.templates`
+    actions died on the wire limiter reported nothing but that. The scan now keeps going
+    past a generic label, and falls back to it only when nothing more specific is present.
+    """
     errors = value if isinstance(value, (list, tuple)) else ()
+    fallback: str | None = None
     for raw in errors:
         token = str(raw or "").strip().lower().split(":", 1)[0]
         token = re.sub(r"[^a-z0-9_-]+", "_", token)[:80]
-        if token in {
-            "timed_out", "timeout", "connection_limit_exceeded",
-            "external_process_contract", "scanner_not_available",
-            "cancelled_before_execution",
-        } or re.fullmatch(r"exit_-?[0-9]+", token):
+        if not token:
+            continue
+        if token in _DIAGNOSTIC_ERROR_CLASSES or re.fullmatch(r"exit_-?[0-9]+", token):
             return token
-        if token:
-            return "unclassified_adapter_error"
-    return "none"
+        if fallback is None:
+            fallback = token if token in _DIAGNOSTIC_GENERIC_LABELS else "unclassified_adapter_error"
+    return fallback or "none"
+
+
+# Outcomes decided before any adapter launched. The reason for one of these is retained in
+# receipt.errors to explain the scheduler's decision, and is not an adapter error.
+_NEVER_LAUNCHED_STATUSES = frozenset({"skipped", "blocked"})
+_NEVER_LAUNCHED_REASONS = frozenset({
+    "insufficient_plan_budget", "not_applicable", "dependency_incomplete", "dependency_failed",
+})
+
+
+def action_diagnostic_error_class(
+    *, status: Any, reason: Any, execution_started: Any, errors: Any,
+) -> str:
+    """The failure class for an action, or "none" when no adapter ever ran.
+
+    The operator log had this rule and the public receipt projection did not, so a
+    `not_applicable` skip whose receipt retained ["target_is_http"] was published as
+    `unclassified_adapter_error` -- an empty candidate set dressed up as a broken adapter,
+    which is the confusion the diagnostic exists to remove. Both readers now share it.
+    """
+    if (
+        str(status or "") in _NEVER_LAUNCHED_STATUSES
+        and execution_started is False
+        and str(reason or "") in _NEVER_LAUNCHED_REASONS
+    ):
+        return "none"
+    return diagnostic_error_class(errors)
+
+
+def _diagnostic_error_class(value: Any) -> str:
+    return diagnostic_error_class(value)
 
 
 def scan_action_diagnostic_line(
@@ -111,16 +164,10 @@ def scan_action_diagnostic_line(
         else "unknown"
     )
     reason = result.reason_code.value if result.reason_code is not None else "none"
-    error_class = _diagnostic_error_class(public_receipt.get("errors"))
-    if (
-        result.status.value == "skipped"
-        and execution_started is False
-        and reason in {"insufficient_plan_budget", "not_applicable"}
-    ):
-        # Allocation/policy skips never launched an adapter. A retained internal
-        # diagnostic may explain the scheduler decision, but it is not an adapter
-        # error and must not be rendered as one in the operator log.
-        error_class = "none"
+    error_class = action_diagnostic_error_class(
+        status=result.status.value, reason=reason,
+        execution_started=execution_started, errors=public_receipt.get("errors"),
+    )
     label = _action_label(action.action_id)
     if not enforcement and not wire:
         if result.status.value == "success":
@@ -182,11 +229,16 @@ def parallel_scan_activity_lines(
     lines: list[str] = []
     for position, shard in enumerate(shards, start=1):
         shard_id = str(shard.get("id") or "")
-        try:
-            index = int(shard.get("shard_index")) + 1
-        except (TypeError, ValueError):
-            index = position
-        prefix = f"[Shard {index}]"
+        if str(shard.get("scan_role") or "") == "parallel_discovery":
+            # The discovery child is not one of the numbered shards: it runs
+            # before them and feeds them, so name it for what it does.
+            prefix = "[Discovery]"
+        else:
+            try:
+                index = int(shard.get("shard_index")) + 1
+            except (TypeError, ValueError):
+                index = position
+            prefix = f"[Shard {index}]"
         raw_lines = list(child_logs.get(shard_id) or ())
         if raw_lines:
             for raw_line in raw_lines:

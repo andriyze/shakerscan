@@ -20,6 +20,7 @@ DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
 ASSUME_YES=0
 CONFIRM_ACTIVE=0
 REMOTE_ACCESS=0
+LAN_ACCESS=0
 FOLLOW=""
 ARGS=()
 DOCKER_COMPOSE_CMD=()
@@ -53,6 +54,88 @@ first_tailscale_ipv4() {
     if command_exists tailscale; then
         tailscale ip -4 2>/dev/null | head -n 1
     fi
+}
+
+# Discover only up, private LAN interfaces. Never probe an external host or select
+# loopback, Docker bridges, Tailscale, or common VPN/tunnel interfaces.
+lan_ipv4_candidates() {
+    local records
+    if command_exists ip; then
+        records="$(ip -o -4 addr show up 2>/dev/null)" || return 1
+        records="$(printf '%s\n' "$records" | awk '{ iface=$2; sub(/@.*/, "", iface); split($4, a, "/"); print iface, a[1] }')"
+    elif command_exists ifconfig; then
+        records="$(ifconfig -a 2>/dev/null)" || return 1
+        records="$(printf '%s\n' "$records" | awk '
+            /^[^ \t]/ { iface=$1; sub(/:$/, "", iface); up=($0 ~ /[<,]UP[,>]/) }
+            up && $1 == "inet" { print iface, $2 }
+        ')"
+    else
+        echo 'Error: --lan needs ip (Linux) or ifconfig (macOS/BSD).' >&2
+        return 1
+    fi
+    printf '%s\n' "$records" | awk '
+        $1 ~ /^(lo[0-9]*|docker.*|br-.*|virbr.*|veth.*|cni.*|flannel.*|tailscale.*|tun[0-9]*|tap[0-9]*|utun[0-9]*|wg.*|zt.*)$/ { next }
+        {
+            n=split($2, a, "."); valid=(n == 4)
+            for (i=1; i<=n; i++) if (a[i] !~ /^[0-9]+$/ || a[i]+0 > 255) valid=0
+            if (valid && (a[1]+0 == 10 || (a[1]+0 == 172 && a[2]+0 >= 16 && a[2]+0 <= 31) || (a[1]+0 == 192 && a[2]+0 == 168)))
+                print $1, $2
+        }
+    ' | sort -u
+}
+
+lan_default_interface() {
+    if command_exists ip; then
+        ip -4 route show default 2>/dev/null | awk '{ for (i=1;i<NF;i++) if ($i == "dev") { print $(i+1); exit } }'
+    elif command_exists route; then
+        route -n get default 2>/dev/null | awk '$1 == "interface:" {print $2; exit}'
+    fi
+}
+
+select_lan_ipv4() {
+    local requested="${1:-}" candidates selected preferred count
+    candidates="$(lan_ipv4_candidates)" || return 1
+    if [ -n "$requested" ]; then
+        selected="$(printf '%s\n' "$candidates" | awk -v ip="$requested" '$2 == ip { print $2; exit }')"
+        if [ -z "$selected" ]; then
+            echo "Error: --lan bind address must be an assigned RFC1918 IPv4 on an up LAN interface: $requested" >&2
+            return 1
+        fi
+    else
+        selected="$(printf '%s\n' "$candidates" | awk 'NF == 2 { print $2 }' | sort -u)"
+        count="$(printf '%s\n' "$selected" | awk 'NF {n++} END {print n+0}')"
+        if [ "$count" -gt 1 ]; then
+            preferred="$(lan_default_interface)"
+            selected="$(printf '%s\n' "$candidates" | awk -v iface="$preferred" '$1 == iface { print $2 }' | sort -u)"
+            count="$(printf '%s\n' "$selected" | awk 'NF {n++} END {print n+0}')"
+        fi
+        if [ "$count" -ne 1 ]; then
+            echo 'Error: --lan could not select one private LAN IPv4 address.' >&2
+            echo 'Use: shakerscan start --lan --bind-host <assigned-LAN-IP>' >&2
+            [ -z "$candidates" ] || printf 'Candidates (interface address):\n%s\n' "$candidates" >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "$selected"
+}
+
+print_lan_client_help() {
+    [ "${LAN_ACCESS:-0}" -eq 1 ] || return 0
+    local url="http://${SHAKERSCAN_BIND_HOST}:${SHAKERSCAN_API_PORT:-8080}"
+    echo
+    echo '[lan] From another trusted machine on this network (client only; no Docker):'
+    echo '  pipx install shakerscan'
+    printf '  shakerscan doctor --url %s\n' "$url"
+    printf '  shakerscan api --url %s GET /health\n' "$url"
+    printf '  shakerscan mcp --url %s\n' "$url"
+    echo '[lan] Or select this instance for all client commands in this shell:'
+    printf '  export SHAKERSCAN_API_URL=%s\n' "$url"
+    echo '  export SHAKERSCAN_MCP_ALLOW_REMOTE_API=true'
+    echo '  shakerscan api GET /findings'
+    echo '  shakerscan mcp'
+    printf '[lan] Web UI: http://%s:%s\n' "$SHAKERSCAN_BIND_HOST" "${SHAKERSCAN_UI_PORT:-3000}"
+    echo '[lan] Configured client commands do not fall back to pub.shakerscan.com.'
+    echo '[lan] To return to localhost: shakerscan restart --bind-host 127.0.0.1 --public-host localhost'
 }
 
 format_url_host() {
@@ -309,7 +392,7 @@ ensure_model_intake_signer_credentials() {
 }
 
 persist_remote_access_env() {
-    if [ "$REMOTE_ACCESS" -ne 1 ]; then
+    if [ "$REMOTE_ACCESS" -ne 1 ] && [ "${LAN_ACCESS:-0}" -ne 1 ] && [ "${SHAKERSCAN_BIND_HOST_EXPLICIT:-0}" -ne 1 ]; then
         return 0
     fi
 
@@ -321,8 +404,25 @@ configure_access_mode() {
     local tailscale_ip
     local cached_bind="${SHAKERSCAN_BIND_HOST:-}"
     local explicit_shell_bind="${SHAKERSCAN_BIND_HOST_EXPLICIT:-0}"
+    local lan_ip requested_bind=""
 
-    if [ "$REMOTE_ACCESS" -eq 1 ]; then
+    if [ "${LAN_ACCESS:-0}" -eq 1 ]; then
+        if [ "$explicit_shell_bind" = 1 ]; then
+            requested_bind="$cached_bind"
+        fi
+        lan_ip="$(select_lan_ipv4 "$requested_bind")" || return 1
+        export SHAKERSCAN_BIND_HOST="$lan_ip"
+        if [ "${SHAKERSCAN_PUBLIC_HOST_EXPLICIT:-0}" != 1 ]; then
+            export SHAKERSCAN_PUBLIC_HOST="$lan_ip"
+        fi
+        # A private subnet is not an authenticated transport. Do not grant the
+        # Tailscale-only token-over-HTTP exception to ordinary LAN traffic.
+        unset SHAKERSCAN_TRUSTED_REMOTE_TRANSPORT
+        export SHAKERSCAN_PUBLIC_API_URL="http://$(format_url_host "$(public_access_host)"):${SHAKERSCAN_API_PORT:-8080}"
+        echo "[lan] UI/API will bind only to ${lan_ip}. Datastore bindings are unchanged."
+        echo '[lan] WARNING: reachable LAN users can operate this OSS instance. HTTP is unencrypted.' >&2
+        echo '[lan] Restrict access with a firewall; do not forward these ports to the Internet.' >&2
+    elif [ "$REMOTE_ACCESS" -eq 1 ]; then
         # Always re-resolve the Tailscale IP at start time so a reboot or
         # interface change doesn't leave the persisted .env value pointing at
         # an address that no longer exists. The .env cache is only honored
@@ -1335,7 +1435,7 @@ ensure_command_dependencies() {
         echo -e "${YELLOW}Missing dependencies: $missing${NC}"
 
         if ! confirm_install_missing; then
-            echo "Run './scanner.sh install-deps' to install prerequisites."
+            echo "Run '$(cli_hint) install-deps' to install prerequisites."
             return 1
         fi
 
@@ -1652,7 +1752,7 @@ total_memory_gb() {
         pages="$(getconf _PHYS_PAGES 2>/dev/null || echo "")"
         page_size="$(getconf PAGE_SIZE 2>/dev/null || echo "")"
         if [[ "$pages" =~ ^[0-9]+$ ]] && [[ "$page_size" =~ ^[0-9]+$ ]]; then
-            echo $(( (pages * page_size + 1073741823) / 1073741824 ))
+            echo $(( pages * page_size / 1073741824 ))
             return 0
         fi
     fi
@@ -1660,7 +1760,7 @@ total_memory_gb() {
     if [ -r /proc/meminfo ]; then
         kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo "")"
         if [[ "$kb" =~ ^[0-9]+$ ]]; then
-            echo $(( (kb + 1048575) / 1048576 ))
+            echo $(( kb / 1048576 ))
             return 0
         fi
     fi
@@ -1668,7 +1768,7 @@ total_memory_gb() {
     if command_exists sysctl; then
         bytes="$(sysctl -n hw.memsize 2>/dev/null || echo "")"
         if [[ "$bytes" =~ ^[0-9]+$ ]]; then
-            echo $(( (bytes + 1073741823) / 1073741824 ))
+            echo $(( bytes / 1073741824 ))
             return 0
         fi
     fi
@@ -1679,6 +1779,10 @@ total_memory_gb() {
 runtime_memory_gb() {
     local bytes
     local host_memory_gb
+
+    # Both sources round DOWN. They used to disagree (host RAM rounded up, Docker's
+    # MemTotal down), so the same 16GB host started 9 workers when Docker was not yet
+    # usable from the installer's shell and 8 on the next restart.
 
     # Docker Desktop and VM-backed engines can expose substantially less memory
     # than the host. Size the fleet against the memory the containers can
@@ -1733,14 +1837,16 @@ auto_workers_for_memory_gb() {
         per_worker_gb=1
     fi
 
-    # Very small installations cannot safely carry five scanner processes.
-    # Normal sub-16GB installations get a predictable five-worker fleet.
+    # Very small installations cannot safely carry five scanner processes; every larger one
+    # spends what memory it has, with five as the floor.
     if [ "$memory_gb" -lt 8 ]; then
         workers=$((memory_gb - 3))
         [ "$workers" -lt 1 ] && workers=1
-    elif [ "$memory_gb" -lt 16 ]; then
-        workers=5
     else
+        # No flat band between 8 and 16GB. That step was a cliff: this reads the host's memory
+        # while the API reads Docker's smaller MemTotal, so one 16GB machine could land on either
+        # side and the dashboard reported "9 running - max 5". Capacity now grows with memory in
+        # both places, and never falls below the five the flat band gave.
         # Reserve memory for Docker/the OS plus PostgreSQL, Redis, API and UI,
         # then spend the remaining budget at roughly 1GB per scanner worker.
         workers=$(( (memory_gb - platform_reserve_gb) / per_worker_gb ))
@@ -2060,6 +2166,9 @@ print_banner() {
 }
 
 print_help() {
+    echo "Trusted LAN: shakerscan start --lan [--bind-host <assigned-LAN-IPv4>]"
+    echo "Also supports restart --lan. Cannot combine --lan with --remote/--tailscale."
+    echo ""
     print_banner
     echo "Usage: ./scanner.sh [command] [options]"
     echo ""
@@ -2096,10 +2205,10 @@ print_help() {
     echo "  model-intake-runner status   Report microVM (Firecracker/KVM) host capability"
     echo "  model-intake-runner install  Opt-in install of the Model Intake microVM tier (root)"
     echo "  build              Build Docker images"
-    echo "  rebuild [opts]     Rebuild Docker images (cached; scope chosen from what changed)"
-    echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
+    echo "  rebuild [opts]     Rebuild Docker images (cached; auto scope by default)"
     echo "                       --no-smoke  Skip the post-rebuild execution smoke"
-    echo "                       auto        Smallest scope covering changes since the last build (default)"
+    echo "                       auto        Smallest safe scope since the last clean full build"
+    echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
@@ -2210,8 +2319,8 @@ start_services() {
     echo "  UI:  $(ui_base_url)"
     echo "  API: $(api_base_url)"
     echo ""
-    echo "Use './scanner.sh status' to check service health"
-    echo "Use './scanner.sh logs -f' to follow logs"
+    echo "Use '$(cli_hint) status' to check service health"
+    echo "Use '$(cli_hint) logs -f' to follow logs"
 }
 
 stop_services() {
@@ -2371,6 +2480,46 @@ show_status() {
             echo -e "  Uniform:  ${GREEN}yes — fleet safe to benchmark${NC}"
         else
             echo -e "  Uniform:  ${RED}NO — restart workers before trusting benchmark numbers${NC}"
+        fi
+    fi
+
+    # The UI is baked into its image while the API and workers run mounted
+    # source, so a rebuild that recreates the services still leaves the UI on
+    # whatever artifact was last built. Worker staleness has always been
+    # reported here; UI staleness was not, and a UI serving hours-old code
+    # reads to an operator as a flaky page rather than a stale build.
+    local ui_json ui_revision local_revision ui_expected_api api_fingerprint
+    ui_json="$(curl -fsS "$(ui_probe_url)/api/build-identity" 2>/dev/null || true)"
+    ui_revision="$(printf '%s' "$ui_json" | jq -r '.source_revision // empty' 2>/dev/null || true)"
+    ui_expected_api="$(printf '%s' "$ui_json" | jq -r '.expected_api_build_fingerprint // empty' 2>/dev/null || true)"
+    api_fingerprint="$(curl -fsS "$api_url/health" 2>/dev/null | jq -r '.build_fingerprint // empty' 2>/dev/null || true)"
+    local_revision="$(git -C "$SCRIPT_DIR" rev-parse --short=8 HEAD 2>/dev/null || true)"
+    if [ -n "$ui_revision" ]; then
+        echo ""
+        echo -e "${BLUE}UI Build:${NC}"
+        echo "  Serving:  $ui_revision"
+        # The same comparison the shell itself shows the operator, so the banner in
+        # the sidebar and this line can never disagree about one release identity.
+        if [ -n "$ui_expected_api" ] && [ "$ui_expected_api" != "unknown" ] \
+            && [ -n "$api_fingerprint" ] && [ "$ui_expected_api" != "$api_fingerprint" ]; then
+            echo -e "  API pair: ${RED}built against $ui_expected_api, API runs $api_fingerprint${NC}"
+            echo -e "            ${YELLOW}run './scanner.sh rebuild' to restore one release identity${NC}"
+        elif [ -n "$api_fingerprint" ]; then
+            echo -e "  API pair: ${GREEN}matches the running API ($api_fingerprint)${NC}"
+        fi
+        if [ -z "$local_revision" ]; then
+            echo "  Checkout: unknown (not a git checkout)"
+        elif build_versions_match "$local_revision" "$ui_revision"; then
+            echo -e "  Checkout: ${GREEN}$local_revision — UI matches this checkout${NC}"
+        elif git -C "$SCRIPT_DIR" cat-file -e "${ui_revision}^{commit}" 2>/dev/null \
+            && git -C "$SCRIPT_DIR" diff --quiet "$ui_revision" HEAD -- ui/ 2>/dev/null; then
+            # Built from an earlier commit, but nothing under ui/ has changed
+            # since. Saying STALE here would cry wolf on every backend commit and
+            # teach the operator to ignore the one that matters.
+            echo -e "  Checkout: ${GREEN}$local_revision — no UI changes since $ui_revision${NC}"
+        else
+            echo -e "  Checkout: ${RED}$local_revision — UI is STALE${NC}"
+            echo -e "            ${YELLOW}run './scanner.sh rebuild ui' before trusting the pages${NC}"
         fi
     fi
 
@@ -2557,14 +2706,14 @@ write_build_receipt() {
         --arg detail "$detail" \
         --arg steps "${BUILD_STEP_TIMINGS:-}" \
         --arg images "${BUILD_IMAGE_RESULTS:-}" \
-        --arg dirty "$(dirty_paths 2>/dev/null | head -n 20 | tr '\n' '\t')" \
+        --arg dirty "$(dirty_paths 2>/dev/null | head -n 20)" \
         --arg smoke "${BUILD_SMOKE_RESULT:-}" \
         --argjson exit_code "$exit_code" \
         --argjson free_kb "${free_kb:-null}" \
         '{schema_version:"shakerscan-build-receipt/v1",operation:$operation,scope:$scope,status:$status,phase:$phase,started_at:$started_at,finished_at:(if $finished_at == "" then null else $finished_at end),source_revision:$source_revision,exit_code:$exit_code,free_kb:$free_kb,detail:(if $detail == "" then null else $detail end),
-          steps:($steps | split(" ") | map(select(length > 0) | split("=") | {phase: .[0], seconds: (.[1] | tonumber)})),
-          images:($images | split("\n") | map(select(length > 0) | split(" ") | {tag: .[0], before: (if .[1] == "-" then null else .[1] end), after: (if .[2] == "-" then null else .[2] end), result: .[3]})),
-          dirty_paths:($dirty | split("\t") | map(select(length > 0))),
+          steps:($steps | split(" ") | map(select(length > 0) | split("=") | {phase:.[0],seconds:(.[1]|tonumber)})),
+          images:($images | split("\n") | map(select(length > 0) | split(" ") | {tag:.[0],before:(if .[1]=="-" then null else .[1] end),after:(if .[2]=="-" then null else .[2] end),result:.[3]})),
+          dirty_paths:($dirty | split("\n") | map(select(length > 0))),
           smoke:(if $smoke == "" then null else $smoke end)}' \
         > "$tmp" 2>/dev/null; then
         mv "$tmp" "$BUILD_RECEIPT_FILE"
@@ -2574,6 +2723,9 @@ write_build_receipt() {
 }
 
 begin_build_receipt() {
+    BUILD_STEP_TIMINGS=""
+    BUILD_IMAGE_RESULTS=""
+    BUILD_SMOKE_RESULT=""
     BUILD_RECEIPT_ACTIVE=1
     BUILD_RECEIPT_OPERATION="$1"
     BUILD_RECEIPT_SCOPE="${2:-all}"
@@ -2673,10 +2825,9 @@ check_build_storage() {
 run_build_step() {
     local phase="$1"
     shift
-    local exit_code started
+    local exit_code started="$SECONDS"
 
     BUILD_RECEIPT_PHASE="$phase"
-    started="$SECONDS"
     write_build_receipt running 0
     if "$@"; then
         BUILD_STEP_TIMINGS="${BUILD_STEP_TIMINGS:-}${phase}=$((SECONDS - started)) "
@@ -2690,80 +2841,40 @@ run_build_step() {
     fi
 }
 
-# The local image tags a rebuild can produce, in build order. Their IDs before and after a
-# rebuild tell the operator which images were actually rebuilt and which came from cache.
-rebuild_image_tags() {
-    printf '%s\n' \
-        "${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" \
-        "${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}" \
-        "shakerscan-api" \
-        "shakerscan-ui" \
-        "shakerscan-model-intake-signer"
-}
-
-# One line per tag: "tag=<12 hex of the layer digests>". Layers, not the image ID: BuildKit
-# writes a fresh manifest (provenance, timestamps) on every build, so the ID changes even when
-# every layer came from cache, while the layer list is the content an operator cares about.
-snapshot_image_ids() {
-    local tag layers
-    while IFS= read -r tag; do
-        [ -n "$tag" ] || continue
-        layers="$(docker image inspect --format '{{join .RootFS.Layers ","}}' "$tag" 2>/dev/null || true)"
-        if [ -n "$layers" ]; then
-            printf '%s=%s\n' "$tag" "$(printf '%s' "$layers" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
-        else
-            printf '%s=\n' "$tag"
-        fi
-    done < <(rebuild_image_tags)
-}
-
-# Prints "tag before after rebuilt|unchanged|new|missing" lines from two snapshots.
-diff_image_snapshots() {
-    local before="$1" after="$2" tag id_before id_after state
-    while IFS='=' read -r tag id_after; do
-        [ -n "$tag" ] || continue
-        id_before="$(printf '%s\n' "$before" | awk -F= -v t="$tag" '$1==t {print $2}')"
-        if [ -z "$id_after" ]; then state="missing"
-        elif [ -z "$id_before" ]; then state="new"
-        elif [ "$id_before" = "$id_after" ]; then state="unchanged"
-        else state="rebuilt"; fi
-        printf '%s %s %s %s\n' "$tag" "${id_before:--}" "${id_after:--}" "$state"
-    done <<< "$after"
-}
-
-print_build_summary() {
-    local before="$1" after="$2" tag id_before id_after state entry phase seconds
-    echo -e "${BLUE}Build summary (source ${GIT_COMMIT:-unknown}):${NC}"
-    printf '  %-42s %-10s %s\n' "image" "result" "content"
-    while read -r tag id_before id_after state; do
-        [ -n "$tag" ] || continue
-        printf '  %-42s %-10s %s\n' "$tag" "$state" "$id_after"
-    done < <(diff_image_snapshots "$before" "$after")
-    if [ -n "${BUILD_STEP_TIMINGS:-}" ]; then
-        printf '  steps:'
-        for entry in ${BUILD_STEP_TIMINGS}; do
-            phase="${entry%%=*}"; seconds="${entry#*=}"
-            printf ' %s %ss' "$phase" "$seconds"
-        done
-        printf '\n'
+# Print the ID of an image that was just built. On Docker 29 with the containerd image
+# store the tag is not queryable for a moment after `compose build` returns (the build
+# printed "Built" and a clean install still failed with "could not resolve the newly
+# built worker image"), so this asks again for a bounded time before giving up.
+# Run the Docker CLI the way this session's Compose runs: when Compose had to go through
+# sudo (the operator was just added to the docker group and the shell has not picked it
+# up), a plain `docker` call would still be refused at the socket.
+docker_cli() {
+    if [ "${DOCKER_COMPOSE_CMD[0]:-}" = "sudo" ]; then
+        sudo docker "$@"
+    else
+        docker "$@"
     fi
 }
 
-# Untracked and modified files make the build identity "-dirty". Say which, so an operator can
-# tell stray assets from real edits instead of guessing why a clean checkout reads as dirty.
-dirty_paths() {
-    git status --porcelain --untracked-files=all 2>/dev/null | cut -c4- | sed 's/^.* -> //'
-}
-
-print_dirty_summary() {
-    local paths count
-    paths="$(dirty_paths)"
-    [ -n "$paths" ] || return 0
-    count="$(printf '%s\n' "$paths" | grep -c .)"
-    echo -e "${YELLOW}Source tree is dirty (${count} modified or untracked path(s)); the build identity carries -dirty.${NC}"
-    printf '%s\n' "$paths" | head -n 5 | sed 's/^/    /'
-    [ "$count" -gt 5 ] && echo "    ... and $((count - 5)) more"
-    return 0
+resolve_built_image_id() {
+    local image="$1"
+    local attempts="${SHAKERSCAN_IMAGE_RESOLVE_ATTEMPTS:-15}"
+    local image_id error
+    local attempt=1
+    while [ "$attempt" -le "$attempts" ]; do
+        error=""
+        image_id="$(docker_cli image inspect --format '{{.Id}}' "$image" 2>/tmp/.shakerscan-inspect.$$ || true)"
+        error="$(cat /tmp/.shakerscan-inspect.$$ 2>/dev/null || true)"
+        rm -f /tmp/.shakerscan-inspect.$$
+        if [[ "$image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "$image_id"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    echo -e "${RED}Image ${image} is not resolvable after ${attempts} attempts: ${error:-no image ID returned}${NC}" >&2
+    return 1
 }
 
 build_local_scanner_family() {
@@ -2777,8 +2888,7 @@ build_local_scanner_family() {
     run_build_step scanner_runtime compose build $no_cache worker
     # The source Compose service builds and tags this exact explicit image.
     # Querying a running worker here can return the retired pre-build ID.
-    worker_image_id="$(docker image inspect --format '{{.Id}}' "$worker_image" 2>/dev/null || true)"
-    if ! [[ "$worker_image_id" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+    if ! worker_image_id="$(resolve_built_image_id "$worker_image")"; then
         fail_build 1 "could not resolve the newly built worker image"
         return 1
     fi
@@ -2811,84 +2921,129 @@ build_images() {
     echo -e "${BLUE}Local-build mode recorded. Use './scanner.sh start' or './scanner.sh restart' to run these local images.${NC}"
 }
 
-# Map changed repository paths to the smallest rebuild scope that covers them.
-# stdin: one path per line. stdout: none | ui | scanner | all.
-#   ui       only ui/ changed
-#   scanner  the scanner family (worker, Model Intake overlay, API) covers the change
-#   all      the UI or signer image is involved as well, or the input is outside any image
-#            (launcher, Compose files, installer) and every image must be rebuilt
-#   none     nothing that reaches an image changed (docs, tests, CI, receipts)
+# Rebuild summaries include runtime configuration as well as filesystem layers. An ENV,
+# entrypoint or label change matters even when every RootFS layer stays the same.
+rebuild_image_tags() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    printf '%s\n' "${SCANNER_LOCAL_WORKER_IMAGE:-shakerscan-worker:local}" \
+        "${MODEL_INTAKE_SANDBOX_IMAGE:-shakerscan-model-intake-sandbox:local}" \
+        "${project}-api:latest" "${project}-ui:latest" "${project}-model-intake-signer:latest"
+}
+
+snapshot_image_ids() {
+    local tag content digest
+    while IFS= read -r tag; do
+        content="$(docker_cli image inspect --format '{{json .Config}}|{{json .RootFS.Layers}}' "$tag" 2>/dev/null || true)"
+        digest=""
+        if [ -n "$content" ]; then
+            digest="$(printf '%s' "$content" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-12)"
+        fi
+        printf '%s=%s\n' "$tag" "$digest"
+    done < <(rebuild_image_tags)
+}
+
+diff_image_snapshots() {
+    local before="$1" after="$2" tag id_before id_after state
+    while IFS='=' read -r tag id_after; do
+        [ -n "$tag" ] || continue
+        id_before="$(printf '%s\n' "$before" | awk -F= -v t="$tag" '$1==t {print $2}')"
+        if [ -z "$id_after" ]; then state="missing"
+        elif [ -z "$id_before" ]; then state="new"
+        elif [ "$id_before" = "$id_after" ]; then state="unchanged"
+        else state="rebuilt"; fi
+        printf '%s %s %s %s\n' "$tag" "${id_before:--}" "${id_after:--}" "$state"
+    done <<< "$after"
+}
+
+print_build_summary() {
+    local tag before after state entry
+    echo -e "${BLUE}Build summary (source ${GIT_COMMIT:-unknown}):${NC}"
+    printf '  %-46s %-10s %s\n' image result content
+    while read -r tag before after state; do
+        [ -n "$tag" ] || continue
+        printf '  %-46s %-10s %s\n' "$tag" "$state" "$after"
+    done <<< "${BUILD_IMAGE_RESULTS:-}"
+    for entry in ${BUILD_STEP_TIMINGS:-}; do
+        printf '  %s: %ss\n' "${entry%%=*}" "${entry#*=}"
+    done
+}
+
+# Include both sides of renames. Quote unusual filenames conservatively: unrecognized
+# paths select all rather than accidentally hiding a runtime input from scope inference.
+dirty_paths() {
+    git diff --name-only --no-renames HEAD -- 2>/dev/null || return 1
+    git ls-files --others --exclude-standard 2>/dev/null
+}
+
 rebuild_scope_for_paths() {
     local path scope="none"
-    while IFS= read -r path; do
+    while IFS= read -r path || [ -n "$path" ]; do
         [ -n "$path" ] || continue
         case "$path" in
-            docs/*|tests/*|.github/*|.local-gate/*|*.md|LICENSE|.gitignore|artifacts/*|audit-results/*|results/*|benchmarks/*)
-                continue ;;
-            api/model_intake_signer.Dockerfile|api/model_intake_signer.requirements.lock|api/model_intake_signer_service.py|api/model_intake_control_plane.py)
-                scope="all" ;;
+            api/model_intake_signer*|api/model_intake_control_plane.py) scope="all" ;;
+            skills/*|AGENTS.md|.claude/*|.agents/*|.opencode/*|api/*|scanner/*|runner/*|db/*|requirements*.txt|requirements*.lock|pyproject.toml)
+                case "$scope" in none) scope="scanner" ;; ui) scope="all" ;; esac ;;
             ui/*)
                 case "$scope" in none) scope="ui" ;; scanner) scope="all" ;; esac ;;
-            api/*|scanner/*|runner/*|db/*|requirements*.txt|requirements*.lock|pyproject.toml)
-                case "$scope" in none) scope="scanner" ;; ui) scope="all" ;; esac ;;
-            *)
-                scope="all" ;;
+            docs/*|tests/*|.github/*|.local-gate/*|README.md|LICENSE|.gitignore|artifacts/*|audit-results/*|results/*|benchmarks/*) ;;
+            *) scope="all" ;;
         esac
     done
-    echo "$scope"
+    printf '%s\n' "$scope"
 }
 
-# Paths changed since the last completed build receipt: commits after its revision plus every
-# modified or untracked file now. Fails when the receipt is missing, failed, or names a
-# revision this checkout cannot resolve, in which case the caller rebuilds everything.
+# A partial build cannot move the baseline for untouched images. A dirty build cannot
+# describe a later reverted worktree by its commit alone. Fail conservatively to all.
 rebuild_changed_paths() {
     local base
-    base="$(jq -r 'select(.status == "completed") | .source_revision // empty' "$BUILD_RECEIPT_FILE" 2>/dev/null)"
-    base="${base%-dirty}"
-    case "$base" in ""|unknown|dev|image:*) return 1 ;; esac
+    base="$(jq -r 'select(.schema_version == "shakerscan-build-receipt/v1" and
+        .status == "completed" and .phase == "complete" and .scope == "all" and
+        ((.dirty_paths // []) | length) == 0) | .source_revision // empty' "$BUILD_RECEIPT_FILE" 2>/dev/null)" || return 1
+    case "$base" in ""|unknown|dev|image:*|*-dirty) return 1 ;; esac
+    [[ "$base" =~ ^[0-9a-f]{7,40}$ ]] || return 1
     git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || return 1
-    git diff --name-only "$base" HEAD 2>/dev/null
+    git diff --name-only --no-renames "$base" HEAD -- 2>/dev/null || return 1
     dirty_paths
-    return 0
 }
 
-# A worker can report the right build fingerprint and still be unable to execute: a tool binary
-# missing from the image, a runtime module that no longer imports. Prove both on one rebuilt
-# worker and the API contract route before calling the rebuild done. No target traffic.
+# Probe only services that were running and have just been rebuilt. Never start a
+# stopped stack or report absent workers as an execution pass. No target traffic.
 post_rebuild_smoke() {
-    local worker tool failures=0 api_url
-    api_url="$(api_probe_url)"
-    echo -e "${BLUE}Post-rebuild smoke (no target traffic)...${NC}"
-    if curl -fsS "${api_url}/scan/contracts" >/dev/null 2>&1; then
-        echo -e "  ${GREEN}ok${NC} API serves the scan contract"
-    else
-        echo -e "  ${RED}fail${NC} API does not serve /scan/contracts"; failures=$((failures + 1))
-    fi
-    worker="$(running_scan_worker_containers | head -n1)"
-    if [ -z "$worker" ]; then
-        echo -e "  ${YELLOW}skip${NC} no running scan worker to probe"
-    else
-        if docker exec "$worker" python3 -c 'import agent_tools, action_scope' >/dev/null 2>&1; then
-            echo -e "  ${GREEN}ok${NC} worker runtime modules import"
-        else
-            echo -e "  ${RED}fail${NC} worker runtime modules do not import"; failures=$((failures + 1))
-        fi
-        # ffuf answers -V; the ProjectDiscovery tools answer -version.
-        for tool in katana httpx nuclei naabu ffuf; do
-            if docker exec "$worker" sh -c "timeout 30 /opt/tools/$tool -version >/dev/null 2>&1 || timeout 30 /opt/tools/$tool -V >/dev/null 2>&1"; then
-                echo -e "  ${GREEN}ok${NC} $tool runs"
-            else
-                echo -e "  ${RED}fail${NC} $tool does not run in the rebuilt worker"; failures=$((failures + 1))
-            fi
-        done
-    fi
-    if [ "$failures" -eq 0 ]; then
-        BUILD_SMOKE_RESULT="passed"
+    local check_api="${1:-0}" check_workers="${2:-0}" worker tool flag failures=0
+    if [ "$check_api" -eq 0 ] && [ "$check_workers" -eq 0 ]; then
+        BUILD_SMOKE_RESULT="not_run:no_rebuilt_running_services"
         return 0
     fi
-    BUILD_SMOKE_RESULT="failed:${failures}"
-    echo -e "${RED}Post-rebuild smoke failed (${failures} check(s)); the stack runs the new images but is not proven to execute.${NC}" >&2
-    return 1
+    echo -e "${BLUE}Post-rebuild smoke (no target traffic)...${NC}"
+    if [ "$check_api" -gt 0 ]; then
+        if ! wait_for_url "API contract" "$(api_probe_url)/scan/contracts" 120; then
+            failures=$((failures + 1))
+        fi
+    fi
+    if [ "$check_workers" -gt 0 ]; then
+        worker="$(docker_cli ps --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-shakerscan}" \
+            --filter "label=com.docker.compose.service=worker" --format '{{.Names}}' | head -n 1)"
+        if [ -z "$worker" ]; then
+            echo '  fail: rebuilt worker is not running' >&2
+            failures=$((failures + 1))
+        else
+            if ! docker_cli exec "$worker" timeout 30 python3 -c 'import agent_tools, action_scope'; then
+                failures=$((failures + 1))
+            fi
+            for tool in katana httpx nuclei naabu ffuf; do
+                flag="-version"; [ "$tool" != ffuf ] || flag="-V"
+                if ! docker_cli exec "$worker" timeout 30 "/opt/tools/$tool" "$flag"; then
+                    echo "  fail: $tool does not execute" >&2
+                    failures=$((failures + 1))
+                fi
+            done
+        fi
+    fi
+    if [ "$failures" -gt 0 ]; then
+        BUILD_SMOKE_RESULT="failed:${failures}"
+        return 1
+    fi
+    BUILD_SMOKE_RESULT="passed"
 }
 
 rebuild_images() {
@@ -2898,9 +3053,9 @@ rebuild_images() {
     local SERVICES=""
     local SERVICE_DESC="all services"
     local BUILD_SCOPE="auto"
-    local REFRESH_WORKERS=1
     local RUN_SMOKE=1
-    local changed inferred changed_count images_before images_after
+    local changed inferred images_before images_after
+    local REFRESH_WORKERS=1
     local existing_workers
     local existing_agent_tool_worker
     local existing_device_workers
@@ -2940,6 +3095,7 @@ rebuild_images() {
                 shift
                 ;;
             all)
+                BUILD_SCOPE="all"
                 SERVICES=""
                 SERVICE_DESC="all services"
                 REFRESH_WORKERS=1
@@ -2952,36 +3108,36 @@ rebuild_images() {
                 ;;
         esac
     done
+
     if [ "$BUILD_SCOPE" = "auto" ]; then
-        # Choose the smallest scope that covers what changed since the last completed build.
-        if changed="$(rebuild_changed_paths)"; then
-            changed="$(printf '%s\n' "$changed" | grep . | sort -u || true)"
+        if [ -z "$NO_CACHE" ] && changed="$(rebuild_changed_paths)"; then
             inferred="$(printf '%s\n' "$changed" | rebuild_scope_for_paths)"
-            changed_count="$(printf '%s\n' "$changed" | grep -c . || true)"
-            case "$inferred" in
-                ui)
-                    SERVICES="ui"; SERVICE_DESC="UI (auto: only ui/ changed)"; BUILD_SCOPE="ui"; REFRESH_WORKERS=0 ;;
-                scanner)
-                    SERVICES="api worker"; SERVICE_DESC="scanner services (auto: api, worker)"; BUILD_SCOPE="scanner"; REFRESH_WORKERS=1 ;;
-                none)
-                    if [ -z "$NO_CACHE" ] && [ "$(snapshot_image_ids | grep -c '=.')" -ge 5 ]; then
-                        echo -e "${GREEN}Nothing to rebuild: no image input changed since the last completed build.${NC}"
-                        echo "Use './scanner.sh rebuild all' to rebuild anyway, or './scanner.sh restart' to recreate containers."
-                        return 0
-                    fi
-                    SERVICES=""; SERVICE_DESC="all services"; BUILD_SCOPE="all"; REFRESH_WORKERS=1 ;;
-                *)
-                    SERVICES=""; SERVICE_DESC="all services (auto)"; BUILD_SCOPE="all"; REFRESH_WORKERS=1 ;;
-            esac
-            echo -e "${BLUE}Auto scope: ${BUILD_SCOPE} (${changed_count:-0} changed path(s) since the last completed build)${NC}"
-            printf '%s\n' "$changed" | head -n 8 | sed 's/^/    /'
-            [ "${changed_count:-0}" -gt 8 ] && echo "    ... and $((changed_count - 8)) more"
+            if [ "$inferred" = "none" ]; then
+                images_before="$(snapshot_image_ids)"
+                if ! printf '%s\n' "$images_before" | grep -q '=$'; then
+                    echo -e "${GREEN}Nothing to rebuild: no image input changed since the last clean full build.${NC}"
+                    return 0
+                fi
+                inferred="all"
+            fi
+            BUILD_SCOPE="$inferred"
         else
-            SERVICES=""; SERVICE_DESC="all services"; BUILD_SCOPE="all"; REFRESH_WORKERS=1
-            echo -e "${BLUE}Auto scope: all (no completed build receipt for a revision this checkout knows)${NC}"
+            BUILD_SCOPE="all"
         fi
+        echo -e "${BLUE}Auto rebuild scope: ${BUILD_SCOPE}${NC}"
     fi
-    print_dirty_summary
+    # Derive these once after parsing, so explicit 'all' cannot be overridden by auto,
+    # and the last explicit scope never retains another option's service selection.
+    case "$BUILD_SCOPE" in
+        ui) SERVICES="ui"; SERVICE_DESC="UI"; REFRESH_WORKERS=0 ;;
+        scanner) SERVICES="api worker"; SERVICE_DESC="scanner services (api, worker)"; REFRESH_WORKERS=1 ;;
+        all) SERVICES=""; SERVICE_DESC="all services"; REFRESH_WORKERS=1 ;;
+    esac
+    changed="$(dirty_paths 2>/dev/null || true)"
+    if [ -n "$changed" ]; then
+        echo -e "${YELLOW}Source tree is dirty; modified/untracked paths:${NC}"
+        printf '%s\n' "$changed" | head -n 8 | sed 's/^/    /'
+    fi
 
     if [ -n "$NO_CACHE" ]; then
         echo -e "${YELLOW}Rebuilding $SERVICE_DESC (no cache - full rebuild)...${NC}"
@@ -2990,6 +3146,7 @@ rebuild_images() {
     fi
 
     begin_build_receipt rebuild "$BUILD_SCOPE"
+    images_before="$(snapshot_image_ids)"
     if [ "$SERVICES" = "ui" ]; then
         check_build_storage "$NO_CACHE" ui
     elif [ "$SERVICES" = "api worker" ]; then
@@ -3006,7 +3163,6 @@ rebuild_images() {
     existing_model_intake_signer="$(running_compose_service_count model-intake-signer)"
     existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
     existing_model_intake_worker="$(running_compose_service_count model-intake-worker)"
-    images_before="$(snapshot_image_ids)"
 
     if [ "$SERVICES" = "ui" ]; then
         run_build_step ui compose build $NO_CACHE ui
@@ -3019,7 +3175,7 @@ rebuild_images() {
 
     images_after="$(snapshot_image_ids)"
     BUILD_IMAGE_RESULTS="$(diff_image_snapshots "$images_before" "$images_after")"
-    print_build_summary "$images_before" "$images_after"
+    print_build_summary
     record_runtime_mode local
 
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
@@ -3056,12 +3212,16 @@ rebuild_images() {
         wait_for_url "UI" "$(ui_probe_url)" 120
         verify_running_build_identity
         verify_specialized_worker_identity "$existing_agent_tool_worker" "$existing_device_workers" "$existing_model_intake_worker"
-        if [ "$RUN_SMOKE" -eq 1 ]; then
-            BUILD_RECEIPT_PHASE="smoke"
-            post_rebuild_smoke || { fail_build 1 "post-rebuild smoke failed"; return 1; }
-        fi
     fi
 
+    if [ "$RUN_SMOKE" -eq 0 ]; then
+        BUILD_SMOKE_RESULT="not_run:operator_skipped"
+    elif [ "$SERVICES" = "ui" ]; then
+        BUILD_SMOKE_RESULT="not_run:ui_only"
+    else
+        BUILD_RECEIPT_PHASE="smoke"
+        post_rebuild_smoke "$existing_api" "$existing_workers" || { fail_build 1 "post-rebuild smoke failed"; return 1; }
+    fi
     finish_build_receipt
     echo -e "${GREEN}Rebuild complete${NC}"
     echo ""
@@ -3273,21 +3433,35 @@ doctor() {
     fi
 }
 
-show_env_help() {
+# The command an operator actually has: the installed `shakerscan` wrapper when one
+# execs this runtime, else this script. Hints that said './scanner.sh install-deps'
+# on an installed runtime named a file the operator never ran.
+installed_launcher_path() {
     local default_launcher="$HOME/.local/bin/shakerscan"
-    local launcher
     local path_launcher
-
     if [ -x "$default_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$default_launcher" >/dev/null 2>&1; then
-        launcher="$default_launcher"
+        printf '%s\n' "$default_launcher"
+        return 0
     fi
+    path_launcher="$(command -v shakerscan 2>/dev/null || true)"
+    if [ -n "$path_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$path_launcher" >/dev/null 2>&1; then
+        printf '%s\n' "$path_launcher"
+        return 0
+    fi
+    return 1
+}
 
-    if [ -z "$launcher" ]; then
-        path_launcher="$(command -v shakerscan 2>/dev/null || true)"
-        if [ -n "$path_launcher" ] && grep -F "exec \"$SCRIPT_DIR/scanner.sh\"" "$path_launcher" >/dev/null 2>&1; then
-            launcher="$path_launcher"
-        fi
+cli_hint() {
+    if installed_launcher_path >/dev/null 2>&1; then
+        printf 'shakerscan'
+    else
+        printf './scanner.sh'
     fi
+}
+
+show_env_help() {
+    local launcher
+    launcher="$(installed_launcher_path 2>/dev/null || true)"
 
     echo -e "${BLUE}ShakerScan Environment${NC}"
     echo "Runtime directory: $SCRIPT_DIR"
@@ -3354,7 +3528,7 @@ start_agent() {
             codex|claude|opencode)
                 if command_exists "$agent"; then
                     echo "Starting $agent in $SCRIPT_DIR"
-                    echo "This lets the agent read README.md, AGENTS.md, CLAUDE.md, skills/, and .claude/."
+                    echo "This lets the agent read README.md, AGENTS.md, skills/, and .claude/."
                     echo "Research planner: this agent session (no stored AI provider required)."
                     cd "$SCRIPT_DIR"
                     export SHAKERSCAN_AGENT_NAME="$agent"
@@ -3547,6 +3721,10 @@ while [[ $# -gt 0 ]]; do
             IMAGE_TAG_OVERRIDE="$2"
             shift 2
             ;;
+        --lan)
+            LAN_ACCESS=1
+            shift
+            ;;
         --remote|--tailscale)
             REMOTE_ACCESS=1
             shift
@@ -3577,14 +3755,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-load_access_env
-
-if ! configure_access_mode; then
-    exit 1
-fi
-
-configure_runtime_mode "$COMMAND"
 
 # Help must never mutate state. Commands with their own parser keep their
 # detailed help; simple wrapper commands are handled here before dependency
@@ -3627,6 +3797,25 @@ if [ "$COMMAND_HELP_ONLY" -eq 1 ]; then
     esac
 fi
 
+if [ "$LAN_ACCESS" -eq 1 ]; then
+    if [ "$REMOTE_ACCESS" -eq 1 ]; then
+        echo 'Error: --lan cannot be combined with --remote/--tailscale.' >&2
+        exit 2
+    fi
+    case "$COMMAND" in
+        start|restart) ;;
+        *) echo 'Error: --lan is supported only by start and restart.' >&2; exit 2 ;;
+    esac
+fi
+
+load_access_env
+
+if ! configure_access_mode; then
+    exit 1
+fi
+
+configure_runtime_mode "$COMMAND"
+
 case $COMMAND in
     help|--help|-h|install-deps|doctor|env|agent|ai)
         ;;
@@ -3641,12 +3830,14 @@ case $COMMAND in
     start)
         print_banner
         start_services
+        print_lan_client_help
         ;;
     stop)
         stop_services
         ;;
     restart)
         restart_services
+        print_lan_client_help
         ;;
     reload)
         reload_services
@@ -3665,6 +3856,13 @@ case $COMMAND in
         ;;
     hunt)
         run_v2_product_cli "hunt" "${ARGS[@]}"
+        ;;
+    api)
+        if [ ! -f "$SCRIPT_DIR/scripts/api_cli.py" ]; then
+            echo -e "${RED}Error: the API helper is missing from this runtime.${NC}" >&2
+            exit 1
+        fi
+        exec python3 "$SCRIPT_DIR/scripts/api_cli.py" --api-url "$(api_base_url)" "${ARGS[@]}"
         ;;
     credentials)
         run_v2_product_cli "credentials" "${ARGS[@]}"

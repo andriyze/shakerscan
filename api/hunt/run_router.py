@@ -12,10 +12,17 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .run_service import HuntRunService
+from .budget_amendments import HuntBudgetAmendmentRequest
 from .skills import HuntSkillError, skill_library
 from .start_contract import (
     HUNT_START_SCHEMA,
+    MAX_CAPABILITIES,
+    MAX_COLLECTIONS,
+    MAX_CREDENTIAL_REFS,
+    MAX_DIRECT_ORIGIN_ADDRESSES,
+    MAX_GOAL_CHARS,
     MAX_HUNT_BODY_BYTES,
+    MAX_SKILLS,
     HuntStartContract,
     HuntStartContractError,
     hunt_start_public_contract,
@@ -43,17 +50,27 @@ class HuntStartV2Request(BaseModel):
     schema_version: Literal["hunt-start/v2"] = HUNT_START_SCHEMA
     target_id: str = Field(min_length=1, max_length=256)
     target_kind: Literal["web", "api", "device", "network"]
-    goal: str | None = Field(default=None, max_length=20_000)
-    objective: str | None = Field(default=None, max_length=20_000)
+    # Every bound below is the authority constant itself, never a copy of its value. A literal
+    # here silently became the real limit: the request model rejected a fifth skill and a ninth
+    # direct-origin address before the contract that owns those limits ever saw the request, so
+    # raising them in one place changed nothing a caller could observe.
+    goal: str | None = Field(default=None, max_length=MAX_GOAL_CHARS)
+    objective: str | None = Field(default=None, max_length=MAX_GOAL_CHARS)
     budget_profile: Literal["fast", "balanced", "thorough"] | None = None
     policy_profile: Literal["fast", "balanced", "thorough"] | None = None
     budgets: dict[str, int] = Field(default_factory=dict, max_length=32)
     policy: HuntStartV2PolicyRequest
-    credential_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
-    capabilities: list[str] = Field(default_factory=list, max_length=128)
-    request_collection_ids: list[str] = Field(default_factory=list, max_length=32)
-    skill_ids: list[str] = Field(default_factory=list, max_length=4)
-    direct_origin_addresses: list[str] = Field(default_factory=list, max_length=8)
+    credential_refs: dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_CREDENTIAL_REFS,
+    )
+    capabilities: list[str] = Field(default_factory=list, max_length=MAX_CAPABILITIES)
+    request_collection_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_COLLECTIONS,
+    )
+    skill_ids: list[str] = Field(default_factory=list, max_length=MAX_SKILLS)
+    direct_origin_addresses: list[str] = Field(
+        default_factory=list, max_length=MAX_DIRECT_ORIGIN_ADDRESSES,
+    )
     approval_receipt_id: str | None = Field(default=None, max_length=256)
     scope_receipt_id: str | None = Field(default=None, max_length=256)
 
@@ -138,15 +155,14 @@ async def apply_standing_authorization(
     Authorize once per target: when the policy asks for active, network, mutation, OOB,
     identity-header or direct-origin authority without naming a receipt, the target's standing
     authorization (recorded through the target authorization endpoint) supplies the approval
-    and scope receipt ids and stands as the confirmed authorization. Credential use keeps its
-    explicit credential-tier receipt. A policy that names its own receipt is left untouched.
+    and scope receipt ids and stands as the confirmed authorization, including credentials
+    explicitly selected for this target. A policy naming its own receipt is left untouched.
     """
     policy = payload.get("policy")
-    if resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id"):
+    if (resolver is None or not isinstance(policy, dict) or policy.get("approval_receipt_id")
+            or payload.get("approval_receipt_id")):
         return payload
-    if payload.get("credential_refs"):
-        return payload
-    if not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
+    if not payload.get("credential_refs") and not any(policy.get(flag) for flag in PRIVILEGED_POLICY_FLAGS):
         return payload
     target_id = str(payload.get("target_id") or "").strip()
     if not target_id:
@@ -403,6 +419,19 @@ async def cancel_hunt(hunt_id: str):
 @router.post("/hunts/{hunt_id}/resume")
 async def resume_hunt(hunt_id: str):
     return await _service().resume(hunt_id)
+
+
+@router.post("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
+async def amend_hunt_budget(hunt_id: str, request: HuntBudgetAmendmentRequest):
+    """Apply explicit operator-selected total limits, without granting permissions."""
+    return await _service().amend_budget(hunt_id, request)
+
+
+@router.get("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
+async def get_hunt_budget_amendments(
+    hunt_id: str, after_revision: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+):
+    return await _service().budget_amendments(hunt_id, after_revision=after_revision, limit=limit)
 
 
 __all__ = [

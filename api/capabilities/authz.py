@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 import urllib.parse
 
-from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request
+from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request, _origin_key
 from runtime.models import TargetBinding
 from .authz_selected import compare_selected_objects, selected_object_pair
 
@@ -78,7 +78,7 @@ def _normalized_routes(
             or parsed.username is not None
             or parsed.fragment
             or parsed.hostname.lower().rstrip(".") != target.canonical_host
-            or origin not in target.allowed_origins
+            or _origin_key(origin) not in {_origin_key(value) for value in target.allowed_origins}
         ):
             continue
         url = urllib.parse.urlunsplit((

@@ -62,8 +62,12 @@ DECLARE
     raw TEXT;
     authority TEXT;
     host_part TEXT;
+    port_part TEXT;
+    scheme_part TEXT;
 BEGIN
-    raw := regexp_replace(lower(btrim(COALESCE(NEW.url, ''))), '^https?://', '');
+    raw := lower(btrim(COALESCE(NEW.url, '')));
+    scheme_part := substring(raw FROM '^(https?)://');
+    raw := regexp_replace(raw, '^https?://', '');
     IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
         NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
     ELSE
@@ -71,10 +75,21 @@ BEGIN
         authority := regexp_replace(authority, '^.*@', '');
         IF authority ~ '^\[[^]]+\]' THEN
             host_part := substring(authority FROM '^\[([^]]+)\]');
+            port_part := substring(authority FROM '^\[[^]]+\]:([0-9]+)$');
         ELSE
             host_part := regexp_replace(authority, ':[0-9]+$', '');
+            port_part := substring(authority FROM ':([0-9]+)$');
         END IF;
-        NEW.canonical_key := 'web:' || rtrim(host_part, '.');
+        -- A port that is not the scheme's default is part of the asset: a service on
+        -- https://host:8443 is not the application behind https://host.
+        IF port_part IS NULL
+           OR (scheme_part = 'https' AND port_part = '443')
+           OR (scheme_part = 'http' AND port_part = '80')
+           OR (scheme_part IS NULL AND port_part IN ('80', '443')) THEN
+            port_part := NULL;
+        END IF;
+        NEW.canonical_key := 'web:' || rtrim(host_part, '.')
+            || COALESCE(':' || port_part, '');
     END IF;
     RETURN NEW;
 END;
@@ -468,11 +483,12 @@ CREATE TABLE auth_sessions (
     id UUID PRIMARY KEY,
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('scan','hunt')),
     owner_id UUID NOT NULL,
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api','network','device')),
     target_id UUID NOT NULL,
     target_binding_digest TEXT NOT NULL CHECK (
         target_binding_digest ~ '^[0-9a-f]{64}$'
     ),
+    service_origin TEXT,
     profile_id UUID NOT NULL REFERENCES credential_profiles(id) ON DELETE CASCADE,
     profile_version INTEGER NOT NULL CHECK (profile_version > 0),
     principal_slot TEXT NOT NULL CHECK (
@@ -958,6 +974,7 @@ CREATE TABLE hunt_runs (
     status TEXT NOT NULL DEFAULT 'active' CHECK (
         status IN ('created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted')
     ),
+    budget_revision INTEGER NOT NULL DEFAULT 0,
     budget_profile TEXT NOT NULL DEFAULT 'balanced' CHECK (budget_profile IN ('fast','balanced','thorough')),
     policy_json JSONB NOT NULL DEFAULT '{"allow_oob_interactions":false}'::jsonb,
     budget_json JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -992,6 +1009,24 @@ CREATE TABLE hunt_actions (
     completed_at TIMESTAMPTZ
 );
 CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
+
+-- Operator budget history does not reset the traffic ledger.
+CREATE TABLE hunt_budget_amendments (
+    id UUID PRIMARY KEY,
+    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    request_key_sha256 TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    limits_before JSONB NOT NULL,
+    limits_after JSONB NOT NULL,
+    used_snapshot JSONB NOT NULL,
+    reason TEXT NOT NULL,
+    status_before TEXT NOT NULL,
+    status_after TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (hunt_run_id, revision),
+    UNIQUE (hunt_run_id, request_key_sha256)
+);
 
 -- Methodology lifecycle is separate from the planner context so the complete catalog and
 -- historical event stream never consume the model's working context.
@@ -1232,6 +1267,7 @@ CREATE INDEX idx_export_events_finding ON export_events(finding_id, created_at D
 CREATE TABLE application_graph_nodes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     target_id UUID REFERENCES targets(id) ON DELETE CASCADE,
+    device_target_id UUID REFERENCES device_targets(id) ON DELETE CASCADE,
     node_type TEXT NOT NULL,        -- route | object | principal
     node_key TEXT NOT NULL,         -- canonical, type-prefixed id
     label TEXT,
@@ -1254,6 +1290,7 @@ CREATE TABLE application_graph_edges (
     CONSTRAINT app_graph_edge_unique UNIQUE (target_id, src_key, dst_key, edge_type)
 );
 CREATE INDEX idx_app_graph_nodes_target ON application_graph_nodes(target_id);
+CREATE UNIQUE INDEX app_graph_device_node_unique ON application_graph_nodes(device_target_id,node_type,node_key);
 CREATE INDEX idx_app_graph_edges_target ON application_graph_edges(target_id);
 
 -- ============================================================

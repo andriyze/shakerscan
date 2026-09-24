@@ -7,6 +7,7 @@ import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { getFindings, getDomains, bulkUpdateFindings, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
 import {
   FINDING_STATUSES,
   FINDING_STATUS_LABELS,
@@ -52,6 +53,7 @@ interface FindingsFilters {
   research_campaign_id?: string
   search?: string
   last_seen?: number
+  freshness?: string
   first_seen_within?: number
   resolved_within?: number
   verification_verdict?: string
@@ -115,6 +117,7 @@ function FindingsContent() {
   const hasLoadedRef = useRef(false)
   const [domains, setDomains] = useState<string[]>([])
   const [total, setTotal] = useState(0)
+  const [hiddenOlder, setHiddenOlder] = useState(0)
   const [searchInput, setSearchInput] = useState<string>(filters.search || '')
   const searchTimeout = useRef<NodeJS.Timeout | null>(null)
   const [legendOpen, setLegendOpen] = useState(false)
@@ -156,6 +159,15 @@ function FindingsContent() {
   const researchCampaignFilter = filters.research_campaign_id || ''
   const searchQuery = filters.search || ''
   const lastSeenFilter = filters.last_seen ? Number(filters.last_seen) : 0
+  // Current / Stale / All. A finding's status says whether someone triaged it,
+  // not whether it is still there, so the list defaulted to showing every
+  // historical row: a fresh scan's one real result sat among dozens last seen
+  // months ago, indistinguishable. Default to what a recent scan observed, and
+  // say plainly how many older ones that leaves out. An explicit Last seen
+  // choice is more specific, so it wins.
+  // A scan-scoped view is that scan's evidence, however old, so it defaults to all
+  // rows; an explicit freshness choice still wins.
+  const freshnessFilter = lastSeenFilter ? 'all' : (filters.freshness || (scanIdFilter ? 'all' : 'current'))
   const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
   const resolvedWithinFilter = filters.resolved_within ? Number(filters.resolved_within) : 0
   const verificationVerdictFilter = filters.verification_verdict || ''
@@ -202,7 +214,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, freshnessFilter, rawPage, sortBy, sortOrder])
 
   async function fetchFindings() {
     try {
@@ -216,7 +228,9 @@ function FindingsContent() {
         ai_target_id: aiTargetIdFilter || undefined,
         device_target_id: deviceTargetIdFilter || undefined,
         search: searchQuery || undefined,
-        seen_within_days: lastSeenFilter || undefined,
+        seen_within_days: lastSeenFilter
+          || (freshnessFilter === 'current' ? STALE_AFTER_DAYS : undefined),
+        not_seen_within_days: freshnessFilter === 'stale' ? STALE_AFTER_DAYS : undefined,
         first_seen_within_days: firstSeenWithinFilter || undefined,
         resolved_within_days: resolvedWithinFilter || undefined,
         verification_verdict: verificationVerdictFilter ? (verificationVerdictFilter as 'exploited' | 'likely_vulnerable' | 'blocked_by_security' | 'out_of_scope_internal' | 'false_positive' | 'likely_fixed' | 'inconclusive' | 'error') : undefined,
@@ -241,6 +255,31 @@ function FindingsContent() {
 
       setFindings(data.findings || [])
       setTotal(fetchedTotal)
+      // Count what the Current view excludes, so the page can say so rather
+      // than quietly showing a shorter list.
+      if (freshnessFilter === 'current') {
+        try {
+          const older = await getFindings({
+            severity: severityFilter || undefined,
+            status: statusFilter || undefined,
+            source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
+            root_domain: domainFilter || undefined,
+            scan_id: scanIdFilter || undefined,
+            target_id: targetIdFilter || undefined,
+            ai_target_id: aiTargetIdFilter || undefined,
+            device_target_id: deviceTargetIdFilter || undefined,
+            search: searchQuery || undefined,
+            not_seen_within_days: STALE_AFTER_DAYS,
+            limit: 1,
+            offset: 0,
+          })
+          setHiddenOlder(Number(older?.total || 0))
+        } catch {
+          setHiddenOlder(0)
+        }
+      } else {
+        setHiddenOlder(0)
+      }
       setLoadError(false)
       hasLoadedRef.current = true
       setLoading(false)
@@ -491,6 +530,57 @@ function FindingsContent() {
         onClose={() => setCleanupConfirmOpen(false)} onDeleted={() => {
           setShowCleanup(false); setCleanupPreview(null); void fetchFindings()
         }} />
+
+      {/* Current / Stale / All. Placed above the toolbar because which findings
+          are even in view matters more than how they are sorted, and because a
+          list defaulting to every historical row buried this scan's real
+          results among months-old ones. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded border border-gray-800 bg-gray-900/60 p-0.5" role="group" aria-label="Finding freshness">
+          {([
+            ['current', 'Current', `Seen by a scan in the last ${STALE_AFTER_DAYS} days`],
+            ['stale', 'Not seen recently', `Not observed by any scan in the last ${STALE_AFTER_DAYS} days`],
+            ['all', 'All', 'Every finding on record, regardless of when it was last seen'],
+          ] as const).map(([value, label, hint]) => (
+            <button
+              key={value}
+              type="button"
+              title={hint}
+              aria-pressed={freshnessFilter === value}
+              onClick={() => setFilters({
+                freshness: value === 'current' ? undefined : value,
+                last_seen: undefined,
+                page: undefined,
+              })}
+              className={`px-3 py-1 text-xs rounded ${
+                freshnessFilter === value
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {freshnessFilter === 'current' && hiddenOlder > 0 && (
+          <span className="text-xs text-gray-400">
+            {hiddenOlder} older finding{hiddenOlder === 1 ? '' : 's'} not shown
+            {' '}
+            <button
+              type="button"
+              className="text-blue-400 hover:text-blue-300 underline"
+              onClick={() => setFilters({ freshness: 'all', last_seen: undefined, page: undefined })}
+            >
+              show all
+            </button>
+          </span>
+        )}
+        {freshnessFilter === 'stale' && (
+          <span className="text-xs text-amber-300/90">
+            Not seen recently is not the same as fixed: a later scan may never have reached these routes.
+          </span>
+        )}
+      </div>
 
       <FindingsToolbar
         searchInput={searchInput}

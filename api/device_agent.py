@@ -137,7 +137,11 @@ MAX_TOOL_CALLS_PER_TURN = 6
 MAX_ACTIONS_PER_SESSION = 36
 MAX_SCANS_PER_SESSION = 3
 MAX_FRAGILITY_PER_SESSION = 40
-MAX_FRAGILITY_PER_DEVICE_DAY = 80
+# A single thorough Hunt is allowed up to 500 device-fragility points, so the
+# per-device daily aggregate must sit above that (with headroom for repeat and
+# verification runs) or an authorized thorough run could never start. Per-run
+# fragility limits and pacing still bound each individual run's device wear.
+MAX_FRAGILITY_PER_DEVICE_DAY = 2_000
 CONFIRMED_SHELL_FRAGILITY_COST = 12
 DEVICE_HTTP_REQUEST_SESSION_LIMIT = 40
 DEVICE_HTTP_REQUEST_MIN_INTERVAL_SECONDS = 1.0
@@ -163,7 +167,8 @@ class DeviceHttpAttemptRejected(ValueError):
 def reserve_device_http_attempt(state: dict[str, Any], *, now_monotonic: float) -> int:
     """Charge one device HTTP attempt before its socket is opened."""
     used = int(state.get("device_http_requests_used") or 0)
-    if used >= DEVICE_HTTP_REQUEST_SESSION_LIMIT:
+    limit = int(state.get("device_http_request_limit", DEVICE_HTTP_REQUEST_SESSION_LIMIT))
+    if used >= limit:
         raise DeviceHttpAttemptRejected(
             "Session device HTTP request limit reached", status_code=409,
         )

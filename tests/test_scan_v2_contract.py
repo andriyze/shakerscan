@@ -68,15 +68,23 @@ def test_budget_profile_changes_ceilings_not_engine_or_policy_semantics():
 def test_active_permission_changes_policy_not_scan_identity():
     passive = resolve_scan_contract(budget_profile="balanced")
     active = resolve_scan_contract(
-        budget_profile="balanced", policy={"active_testing": True},
+        budget_profile="balanced", policy={"active_testing": True, "preset": "passive"},
         approval_receipt_id="approval-1",
     )
     assert passive.execution_plan.engine == active.execution_plan.engine == "scan"
     assert passive.execution_plan.schema_version == active.execution_plan.schema_version
     assert passive.policy.active_testing is False
     assert active.policy.active_testing is True
+    # Permission alone does not change the family set the operator chose.
     assert active.execution_plan.resolved_families == ("recon", "nuclei_passive")
     assert passive.execution_plan.digest != active.execution_plan.digest
+    # Without a chosen preset, permission selects the standard active set, and
+    # the run is still the one Scan engine.
+    implied = resolve_scan_contract(
+        budget_profile="balanced", policy={"active_testing": True}, approval_receipt_id="approval-1",
+    )
+    assert implied.execution_plan.engine == "scan"
+    assert "xss" in implied.execution_plan.resolved_families
 
 
 def test_advanced_limits_are_resolved_and_bounded():
@@ -159,6 +167,8 @@ def test_family_policy_uses_only_canonical_registry_names():
         "exclude_families": ["nuclei"],
     })
     assert contract.execution_plan.requested_families == ("sqli", "xss")
+    # The standard active set is implied by the permission; the explicit
+    # families join it rather than replace it.
     assert contract.execution_plan.resolved_families == (
         "recon", "nuclei_passive", "xss", "sqli",
     )
@@ -189,6 +199,14 @@ def test_standard_active_and_custom_presets_resolve_once():
         "recon", "nuclei_passive", "xss", "sqli",
     )
     assert standard.policy.include_families == standard.execution_plan.resolved_families
+    # Allowing active testing without naming a preset is a request for the
+    # standard active set, not a passive run that happens to be permitted.
+    implied = resolve_scan_contract(policy={"active_testing": True})
+    assert implied.execution_plan.family_preset == "standard_active"
+    assert implied.execution_plan.resolved_families == standard.execution_plan.resolved_families
+    assert resolve_scan_contract(policy={"active_testing": False}).execution_plan.family_preset == "passive"
+    explicit = resolve_scan_contract(policy={"active_testing": True, "preset": "passive"})
+    assert explicit.execution_plan.resolved_families == ("recon", "nuclei_passive")
 
     custom = resolve_scan_contract(policy={
         "preset": "custom",

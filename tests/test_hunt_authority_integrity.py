@@ -72,7 +72,10 @@ def test_runtime_uses_validated_scope_and_independent_network_permission():
     assert 'network_discovery=bool(policy.get("network_discovery"))' in native_api
     assert 'network_discovery=bool(policy.get("active_testing"))' not in native_api
     assert "scope_receipt_id=validated_scope_receipt_id" in native_api
-    assert 'scope_receipt_id=str(hunt_policy.get("scope_receipt_id") or "") or None' in worker
+    # Scope construction moved into the shared asset-binding function. Require
+    # workers to use that binding, not duplicate the old inline expression.
+    assert "from hunt.target_binding import web_hunt_target as _worker_hunt_web_target" in worker
+    assert "scope_receipt_id=target.scope_receipt_id" in worker
 
 
 def test_hunt_router_owns_the_only_hunt_start_route():
@@ -90,3 +93,51 @@ def test_hunt_router_owns_the_only_hunt_start_route():
     assert "LegacyHuntStartRequest" not in primary_api
     assert "LegacyHuntStartRequest" not in hunt_router
     assert "api_v2.py" not in entrypoint
+
+
+def test_a_privileged_hunt_without_authorization_is_told_how_to_get_it():
+    """The refusal names the standing-authorization route; "approval receipt" alone left an
+    agent with no way to find it and reading the refusal as a silent downgrade."""
+    payload = _passive_payload()
+    payload["policy"].update({"active_testing": True, "allow_state_changing_http": True, "network_discovery": True})
+    with pytest.raises(HuntStartContractError, match="authorization_confirmed=true"):
+        normalize_hunt_start_payload(payload)
+    payload["policy"]["authorization_confirmed"] = True
+    with pytest.raises(HuntStartContractError, match=r"POST /targets/\{target_id\}/authorization") as excinfo:
+        normalize_hunt_start_payload(payload)
+    assert "this target has none" in str(excinfo.value)
+    assert "approval_receipt_id" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+@pytest.mark.parametrize("network_discovery", [False, True])
+def test_worker_binding_preserves_validated_scope_and_independent_network_permission(kind, network_discovery):
+    from api.hunt.target_binding import web_hunt_target
+    from api.capabilities.http import resolve_hunt_http_origin
+    from api.capabilities.browser_login_worker import browser_worker_policy
+    from api.capabilities.network import CapabilityInputError, PortsDiscoverAdapter
+
+    run = {"target_kind": kind, "target_id": None if kind == "device" else "asset-1",
+           "device_target_id": "asset-1" if kind == "device" else None,
+           "scope_receipt_id": "untrusted-run-field"}
+    context = {"target": {"url": "https://fixture.test", "scope_receipt_id": "untrusted-context-field"},
+               "authorized_target_addresses": ["192.0.2.10"]}
+    persisted_policy = {"active_testing": True, "network_discovery": network_discovery,
+                        "scope_receipt_id": "validated-scope", "approval_receipt_id": "validated-approval"}
+    target, _ = web_hunt_target(run, context, persisted_policy)
+    service = resolve_hunt_http_origin(target, "https://fixture.test:9443", persisted_policy)
+    policy = browser_worker_policy("browser.navigate", policy=persisted_policy, target=service)
+    assert service.scope_receipt_id == policy.scope_receipt_id == "validated-scope"
+    assert service.target_id == "asset-1" and service.target_kind == kind
+    assert service.allowed_addresses == target.allowed_addresses == ("192.0.2.10",)
+    assert policy.approval_receipt_id == "validated-approval"
+    assert policy.active_testing is True and policy.network_discovery is network_discovery
+    # Choosing a known service does not grant permission to discover ports.
+    if network_discovery:
+        prepared = PortsDiscoverAdapter().prepare(target=service, args={"ports": [9443]}, policy=policy)
+        assert prepared.estimated_budget["tcp_ports_attempted"] == 1
+    else:
+        with pytest.raises(CapabilityInputError, match="network discovery policy is not enabled"):
+            PortsDiscoverAdapter().prepare(target=service, args={"ports": [9443]}, policy=policy)
+    no_scope, _ = web_hunt_target(run, context, {**persisted_policy, "scope_receipt_id": None})
+    assert no_scope.scope_receipt_id is None  # Never infer scope from context or run extras.

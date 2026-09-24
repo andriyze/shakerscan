@@ -553,6 +553,21 @@ def _provider_kind_from_url(ai_url: str) -> str:
     return "chat_completions"
 
 
+def _chat_completions_endpoint(ai_url: str) -> str:
+    """The URL to POST an OpenAI-style chat request to. Callers configure AI_URL as either the
+    base (``https://host/api/v1``) or the full endpoint; some engine paths append
+    ``/chat/completions`` and some (this module) POST verbatim, so a base URL used here hit the
+    provider's website and returned a 404 HTML page. Normalize to the full endpoint unless it is
+    already one, or an Anthropic ``/v1/messages`` URL (which this module handles separately)."""
+    trimmed = (ai_url or "").rstrip("/")
+    lowered = trimmed.lower()
+    if not trimmed or lowered.endswith("/chat/completions") or lowered.endswith("/v1/messages"):
+        return ai_url
+    if lowered.endswith("/responses"):  # OpenAI Responses API, used as-is
+        return ai_url
+    return trimmed + "/chat/completions"
+
+
 def _supports_structured_outputs(model: str) -> bool:
     # Attempt strict json_schema structured outputs for any chat-completions model. The per-mode
     # fallback (json_schema -> json_object -> none) in the request loop degrades gracefully for
@@ -1106,9 +1121,14 @@ async def call_ai_provider(
                         request_timeout_seconds = max(1.0, min(request_timeout_seconds, remaining_budget))
 
                     timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+                    post_url = (
+                        _chat_completions_endpoint(ai_url)
+                        if provider_kind == "chat_completions"
+                        else ai_url
+                    )
                     async with aiohttp.ClientSession(timeout=timeout) as sess:
                         attempt_route["request_sent"] = True
-                        async with sess.post(ai_url, json=body, headers=headers) as resp:
+                        async with sess.post(post_url, json=body, headers=headers) as resp:
                             latency_ms = int((time.time() - start) * 1000)
                             cumulative_latency_ms += latency_ms
 

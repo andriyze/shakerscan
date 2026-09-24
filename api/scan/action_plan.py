@@ -33,6 +33,7 @@ try:
     from runtime.browser_login_contract import browser_login_action_arguments
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
+from .capability_execution import scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
@@ -253,12 +254,10 @@ _FORBIDDEN_ACTION_KEYS = frozenset({
 })
 
 
-class ScanActionPlanError(ValueError):
-    """Action authority is malformed, ambiguous, or not content-addressed."""
-
-
-class ScanActionPlacementError(ScanActionPlanError):
-    """No selected backend can execute the complete deterministic action plan."""
+# Defined in a leaf module so health_plan can raise them without importing this one;
+# re-exported here because this is where every caller imports them from.
+from .plan_errors import ScanActionPlacementError, ScanActionPlanError  # noqa: E402
+from .health_plan import with_authentication_health  # noqa: E402
 
 
 def _digest(value: Any) -> str:
@@ -399,13 +398,32 @@ def credential_profile_action_refs(
             "target_kind": str(raw.get("target_kind") or "").strip().lower(),
             "auth_kind": auth_kind,
         }
-        result.append({
+        record_version = raw.get("credential_record_version")
+        if record_version is not None:
+            if type(record_version) is not int or record_version < 1:
+                raise ScanActionPlanError("credential metadata version is invalid")
+            material["credential_record_version"] = record_version
+        if "authenticated_profile_snapshot" in raw:
+            try:
+                from authenticated_assurance.snapshots import bound_snapshot
+            except ModuleNotFoundError:
+                from ..authenticated_assurance.snapshots import bound_snapshot
+            try:
+                material["authenticated_profile_snapshot"] = bound_snapshot(dict(raw)).model_dump(mode="json")
+            except (ValueError, TypeError) as exc:
+                raise ScanActionPlanError("authenticated profile snapshot is invalid") from exc
+        reduced = {
             "profile_id": profile_id,
             "version": version,
             "digest": digest_input_bindings(material),
             "lane": lane,
             "auth_kind": material["auth_kind"],
-        })
+        }
+        if "authenticated_profile_snapshot" in material:
+            pinned = material["authenticated_profile_snapshot"]
+            reduced["authentication_profile_ref"] = {key: pinned[key] for key in (
+                "profile_id", "revision", "configuration_digest")}
+        result.append(reduced)
     return tuple(result)
 
 
@@ -835,7 +853,7 @@ class ScanActionPlanCompiler:
             name="credential profile",
             allowed_keys=frozenset({
                 "profile_id", "version", "digest", "lane", "auth_kind",
-                "principal_ref",
+                "principal_ref", "authentication_profile_ref",
             }),
             required_keys=frozenset({
                 "profile_id", "version", "digest", "lane", "auth_kind",
@@ -1325,7 +1343,14 @@ class ScanActionPlanCompiler:
                     budget.pop("state_changing_requests", None)
                 return budget
             specification = self._registry.require(blueprint.capability_name)
-            requested = dict(specification.budget_cost)
+            # Discovery decides whether every later family has work, so its
+            # reservation scales with the authority the operator granted instead
+            # of staying at the constant sized for the smallest profile.
+            scaled_discovery = scan_discovery_reservation(
+                execution_plan.budget, blueprint.capability_name,
+                registry_cost=specification.budget_cost,
+            )
+            requested = dict(scaled_discovery or specification.budget_cost)
             if (
                 blueprint.capability_name == "http.request"
                 and blueprint.action_id == "baseline.http_redirect"
@@ -1900,6 +1925,11 @@ class ScanActionPlanCompiler:
             ))
         }
         blueprints.sort(key=lambda row: stage_order[row.stage])
+        blueprints = with_authentication_health(blueprints, credentials, self._registry)
+        if any("authentication_profile_ref" in ref for ref in credentials):
+            if "local" not in backends:
+                raise ScanActionPlacementError("authenticated profile health requires a local worker")
+            backends = ("local",)
 
         override_budgets = dict(action_budgets or {})
         known_action_ids = {row.action_id for row in blueprints}

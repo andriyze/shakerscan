@@ -8,13 +8,13 @@ Use these fields first when a completed scan already exists.
 ## Pull Scan Context
 
 ```bash
-curl -s "$API_BASE/scans/{scan_id}/result"
+shakerscan api GET /scans/{scan_id}/result
 ```
 
 Useful jq snippets:
 
 ```bash
-curl -s "$API_BASE/scans/{scan_id}/result" | jq '{
+shakerscan api GET /scans/{scan_id}/result | jq '{
   endpoints: .discovery.browser_api_endpoints[:25],
   tech: .discovery.tech.items,
   browser_crawl: .discovery.browser_crawl,
@@ -71,9 +71,7 @@ Return a `custom_endpoints` block in the exact ShakerScan format:
 Also include a ready deterministic Scan payload. Route seeds do not change execution authority:
 
 ```bash
-curl -X POST "$API_BASE/scans" \
-  -H "Content-Type: application/json" \
-  -d '{
+shakerscan api POST /scans '{
     "target": "https://example.com",
     "budget_profile": "balanced",
     "policy": {"active_testing": false},

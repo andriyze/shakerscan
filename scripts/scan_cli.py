@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Iterable
 import urllib.error
@@ -123,6 +124,41 @@ def _split_names(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _bearer_token() -> str | None:
+    """A bearer token (an Enterprise gateway service token) authenticates a remote API; it is
+    read from SHAKERSCAN_API_TOKEN_FILE by preference, else SHAKERSCAN_API_TOKEN, and only ever
+    sent over HTTPS, never printed."""
+    path = os.environ.get("SHAKERSCAN_API_TOKEN_FILE", "").strip()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError as exc:
+            raise ScanCliError(f"cannot read SHAKERSCAN_API_TOKEN_FILE: {exc.strerror or exc}") from exc
+    else:
+        token = os.environ.get("SHAKERSCAN_API_TOKEN", "").strip()
+    if token and (len(token) > 4096 or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token)):
+        raise ScanCliError("SHAKERSCAN_API_TOKEN must be printable ASCII without spaces")
+    return token or None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never replay an authenticated request against another origin.
+
+    The https:// guard above only covers the URL the operator supplied. Following a
+    redirect with urllib's default handler re-sends the Authorization header to
+    whatever Location names -- another host, or plain HTTP. Refuse instead, and let
+    the caller surface the 3xx.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_NoRedirect())
+
+
 def _request_json(
     url: str,
     *,
@@ -133,6 +169,11 @@ def _request_json(
         "Accept": "application/json",
         "User-Agent": "shakerscan-cli/scan-start-v2",
     }
+    token = _bearer_token()
+    if token:
+        if not url.startswith("https://"):
+            raise ScanCliError("SHAKERSCAN_API_TOKEN requires an https:// API URL")
+        headers["Authorization"] = "Bearer " + token
     data = None
     method = "GET"
     if payload is not None:
@@ -143,9 +184,14 @@ def _request_json(
         headers["Idempotency-Key"] = idempotency_key
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _opener().open(request, timeout=30) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ScanCliError(
+                f"the API answered HTTP {exc.code} with a redirect; an authenticated "
+                "request is never followed to another location"
+            ) from exc
         body = exc.read()
         try:
             error = json.loads(body)

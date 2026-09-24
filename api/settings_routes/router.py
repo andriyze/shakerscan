@@ -1082,6 +1082,13 @@ def _research_provider_contract_error(
 
 
 def _load_research_ai_provider():
+    # `importlib` is not imported at module scope in this file; without this local import the
+    # body raised NameError, which the bare except swallowed, so the loader always returned None
+    # and the configured-AI research planner reported "Shared AI provider client is unavailable"
+    # (its sibling _load_probe_ai_provider imports importlib locally, which is why the settings
+    # probe worked while the autopilot planner did not).
+    import importlib
+
     for module_name in ("scanner_tools.ai_classifier", "scanner.scanner_tools.ai_classifier"):
         try:
             fn = getattr(importlib.import_module(module_name), "call_ai_provider", None)

@@ -623,6 +623,62 @@
     "name": "asm_check_families"
   },
   {
+    "path": "/authenticated-scan-profiles",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_profiles"
+  },
+  {
+    "path": "/authenticated-scan-profiles",
+    "methods": [
+      "POST"
+    ],
+    "name": "write_profile"
+  },
+  {
+    "path": "/authenticated-scan-profiles/contract",
+    "methods": [
+      "GET"
+    ],
+    "name": "contract"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_validation"
+  },
+  {
+    "path": "/authenticated-scan-profiles/validations/{request_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_validation"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_profile"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/history",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_profile_history"
+  },
+  {
+    "path": "/authenticated-scan-profiles/{profile_id}/validate",
+    "methods": [
+      "POST"
+    ],
+    "name": "validate_profile"
+  },
+  {
     "path": "/credential-profiles",
     "methods": [
       "GET"
@@ -1022,6 +1078,13 @@
       "GET"
     ],
     "name": "exposure_nodes"
+  },
+  {
+    "path": "/exposure/services",
+    "methods": [
+      "GET"
+    ],
+    "name": "exposure_services"
   },
   {
     "path": "/finding-exceptions",
@@ -1435,6 +1498,20 @@
       "POST"
     ],
     "name": "skip_authorization_investigation"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_budget_amendments"
+  },
+  {
+    "path": "/hunts/{hunt_id}/budget-amendments",
+    "methods": [
+      "POST"
+    ],
+    "name": "amend_hunt_budget"
   },
   {
     "path": "/hunts/{hunt_id}/cancel",
@@ -2057,6 +2134,13 @@
   {
     "path": "/request-collections/{collection_id}",
     "methods": [
+      "DELETE"
+    ],
+    "name": "deactivate_request_collection"
+  },
+  {
+    "path": "/request-collections/{collection_id}",
+    "methods": [
       "GET"
     ],
     "name": "get_request_collection"
@@ -2298,6 +2382,13 @@
       "GET"
     ],
     "name": "download_scan_artifact"
+  },
+  {
+    "path": "/scans/{scan_id}/authentication-assurance",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_scan_assurance"
   },
   {
     "path": "/scans/{scan_id}/cancel",

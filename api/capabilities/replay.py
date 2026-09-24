@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
 from runtime.capability_registry import CapabilitySpec
 from runtime.request_replay_executor import execute_replay_plan
+from hunt.service_binding import replay_uses_service_origin
+from hunt.target_binding import web_hunt_target
+
+
+def hunt_replay_additional_budget(
+    *, wall_seconds: int, device_requests: int = 0, managed_principal: bool = False,
+    uses_service_origin: bool = False,
+) -> dict[str, int]:
+    """Reserve Hunt dimensions owned by the worker alongside the exact replay plan."""
+    budget = {
+        "agent_actions": 1,
+        "tool_wall_seconds": max(1, min(int(wall_seconds), 300)),
+    }
+    if device_requests:
+        budget["device_fragility_points"] = int(device_requests)
+    if managed_principal or uses_service_origin:
+        budget["active_actions"] = 1
+    return budget
+
+
+def worker_hunt_replay_budget(
+    *, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
+    origins: Sequence[str], wall_seconds: int, request_count: int, managed_principal: bool,
+) -> dict[str, int]:
+    """Derive the durable worker charge from revalidated server-owned selection.
+
+    Do not trust an active/passive flag supplied by the planner or queued caller.
+    Reuse the same normalized-origin predicate as admission, and never ask the
+    operator for another receipt merely because the selected port changed.
+    """
+    original, _ = web_hunt_target(run, context, policy)
+    return hunt_replay_additional_budget(
+        wall_seconds=wall_seconds,
+        device_requests=request_count if run.get("device_target_id") else 0,
+        managed_principal=managed_principal,
+        uses_service_origin=replay_uses_service_origin(original, origins),
+    )
 
 
 class ReplayExecutionAdapter:

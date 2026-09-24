@@ -1,5 +1,6 @@
 {
   "middleware": [
+    "SameHostCorsMiddleware",
     "CORSMiddleware",
     "UnsafeOriginGuardMiddleware",
     "PublicV2BodyLimitMiddleware",
@@ -12,5 +13,5 @@
     "ValueError",
     "WebSocketRequestValidationError"
   ],
-  "route_count": 411
+  "route_count": 424
 }

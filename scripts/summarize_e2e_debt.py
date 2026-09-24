@@ -8,12 +8,13 @@ from typing import Any, Sequence
 
 
 def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
-              required_checks: Sequence[str] = ()) -> dict[str, Any]:
+              required_checks: Sequence[str] = (),
+              required_passes: Sequence[str] = ()) -> dict[str, Any]:
     if not isinstance(card, dict) or not isinstance(card.get('areas'), list):
         raise ValueError('Expected an E2E scorecard with an areas array')
     counts = dict(passed=0, failed=0, skipped=0, unknown=0, accepted_failures=0, unexpected_failures=0, debt_xpasses=0)
     exceptions, errors = [], []
-    area_names, executed_checks = set(), set()
+    area_names, executed_checks, passed_checks = set(), set(), set()
     for area in card['areas']:
         if not isinstance(area, dict) or not isinstance(area.get('rows'), list):
             raise ValueError('Each area must have a rows array')
@@ -47,6 +48,8 @@ def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
             if actual in {'passed', 'failed'}:
                 area_executed += 1
                 executed_checks.add((name, check))
+            if actual == 'passed' and not debt:
+                passed_checks.add((name, check))
             if actual == 'failed':
                 counts['accepted_failures' if debt else 'unexpected_failures'] += 1
             if debt and actual == 'passed':
@@ -68,6 +71,12 @@ def summarize(card: dict[str, Any], *, required_areas: Sequence[str] = (),
             raise ValueError('Required checks use AREA:EXACT ASSERTION NAME')
         if (area, check) not in executed_checks:
             errors.append(f'Required assertion did not execute: {requirement}')
+    for requirement in required_passes:
+        area, separator, check = requirement.partition(':')
+        if not separator or not area or not check:
+            raise ValueError('Required passes use AREA:EXACT ASSERTION NAME')
+        if (area, check) not in passed_checks:
+            errors.append(f'Required assertion did not pass without a waiver: {requirement}')
     executed = counts['passed'] + counts['failed']
     observed_clean = executed > 0 and counts['failed'] == 0 and counts['unknown'] == 0
     complete = executed > 0 and counts['unknown'] == 0 and not errors
@@ -90,10 +99,13 @@ def main() -> int:
     parser.add_argument('--strict', action='store_true', help='Reject actual failures including accepted debt')
     parser.add_argument('--require-area', action='append', default=[])
     parser.add_argument('--require-check', action='append', default=[], metavar='AREA:NAME')
+    parser.add_argument('--require-pass', action='append', default=[], metavar='AREA:NAME',
+                        help='Require a real pass; missing, skipped, failed or waived checks fail')
     args = parser.parse_args()
     try:
         result = summarize(json.loads(args.scorecard.read_text()),
-            required_areas=args.require_area, required_checks=args.require_check)
+            required_areas=args.require_area, required_checks=args.require_check,
+            required_passes=args.require_pass)
     except (OSError, ValueError, TypeError) as exc:
         parser.exit(2, f'Cannot summarize scorecard: {exc}\n')
     print(json.dumps(result, indent=2))

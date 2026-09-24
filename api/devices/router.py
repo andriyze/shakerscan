@@ -301,9 +301,10 @@ class DeviceRequestCollectionUpdate(BaseModel):
 class DeviceScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     profile: Literal["inventory", "posture", "thorough"] = "inventory"
-    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    safety_profile: Literal["observe_only", "safe_remote", "authenticated_active"] = "safe_remote"
     confirm_authorized: bool = False
-    confirm_lab_invasive: bool = False
+    # Accepted and ignored so older clients are not rejected by extra="forbid".
+    confirm_lab_invasive: bool = Field(default=False, deprecated=True)
     include_web_dast: bool = True
     web_scan_type: Literal["quick", "standard", "deep"] = "standard"
     max_web_origins: int = Field(default=8, ge=0, le=32)
@@ -317,7 +318,7 @@ class DeviceScanRequest(BaseModel):
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
-    allow_untrusted_tls_credentials: bool = False
+    allow_untrusted_tls_credentials: bool = Field(default=False, deprecated=True)
     capability_ids: list[str] = Field(default_factory=list, max_length=8)
     approval_receipt_id: Optional[str] = None
     candidate_id: Optional[str] = None
@@ -335,9 +336,10 @@ class DeviceServiceVerifyRequest(BaseModel):
     transport: Literal["tcp", "udp"]
     port: int = Field(ge=1, le=65535)
     expected_state: Literal["open", "closed"]
-    safety_profile: Literal["safe_remote", "authenticated_active", "lab_invasive"] = "safe_remote"
+    safety_profile: Literal["safe_remote", "authenticated_active"] = "safe_remote"
     confirm_authorized: bool = False
-    confirm_lab_invasive: bool = False
+    # Accepted and ignored so older clients are not rejected by extra="forbid".
+    confirm_lab_invasive: bool = Field(default=False, deprecated=True)
     reason: str = Field(min_length=1, max_length=500)
     candidate_id: Optional[str] = None
     approval_receipt_id: Optional[str] = None
@@ -566,6 +568,25 @@ async def _validate_device_credential_refs(
     return refs
 
 
+async def _device_has_standing_authorization(device_id: str) -> bool:
+    """Whether this device carries the same standing authorization a web target can.
+
+    Authorizing once is the operator's confirmation. Re-asking per scan taught nothing and
+    made a device the one asset whose permission could not be recorded and reused.
+    """
+    try:
+        try:
+            import target_authorization
+        except ModuleNotFoundError:
+            from .. import target_authorization  # type: ignore[no-redef]
+        async with _pool().acquire() as conn:
+            standing = await target_authorization.current_target_authorization(conn, device_id)
+    except Exception:
+        # Unknown authority is not authority: fall back to the explicit confirmation.
+        return False
+    return bool(standing and standing.get("standing") and standing.get("approval_receipt_id"))
+
+
 def _device_worker_readiness() -> dict[str, Any]:
     """Return fresh, build-current device-worker capacity without touching Web DAST telemetry."""
     enabled = _device_posture_enabled()
@@ -605,20 +626,36 @@ def _device_worker_readiness() -> dict[str, Any]:
             "capable": build_current is True and {"nmap", "naabu"}.issubset(tools),
         })
     capable_count = sum(1 for report in reports if report["capable"])
+    # The connected-device worker is a separate, opt-in container, so a fresh install has none
+    # and every device scan waits forever. Saying only "not ready" left the operator to guess;
+    # each reason now carries the one command that resolves it.
+    remedy = None
     if not enabled:
         status, reason = "disabled", "feature_disabled"
+        remedy = "Set DEVICE_POSTURE_ENABLED=true for the API, then restart it."
     elif capable_count:
         status, reason = "ready", None
     elif reports and any(report["build_current"] is False for report in reports):
         status, reason = "not_ready", "device_worker_build_stale"
+        remedy = "The device worker is running an older build. Run: ./scanner.sh devices restart"
     elif reports:
         status, reason = "not_ready", "device_worker_missing_nmap_naabu_or_build_identity"
+        remedy = (
+            "The device worker is running but does not report Nmap and Naabu with the expected "
+            "release identity. Run: ./scanner.sh devices restart"
+        )
     else:
         status, reason = "not_ready", "no_fresh_device_worker"
+        remedy = (
+            "No connected-device worker is running. It is a separate opt-in container and a new "
+            "install does not start one. Start it with: shakerscan devices start "
+            "(./scanner.sh devices start from a source checkout)"
+        )
     return {
         "enabled": enabled,
         "status": status,
         "reason": reason,
+        "remedy": remedy,
         "queue_name": DEVICE_QUEUE_NAME,
         "worker_count": len(reports),
         "capable_worker_count": capable_count,
@@ -1368,8 +1405,16 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
                 "worker_count": readiness["worker_count"],
             },
         )
-    if not request.confirm_authorized:
-        raise HTTPException(status_code=409, detail="Re-submit with confirm_authorized=true after confirming permission to scan this device")
+    if not request.confirm_authorized and not await _device_has_standing_authorization(device_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Re-submit with confirm_authorized=true, or authorize this device once with "
+                "POST /targets/{device_id}/authorization "
+                '{"approved_by": "<name>", "risk_tier": "active"}, which every later scan '
+                "and Hunt then reuses"
+            ),
+        )
     if request.request_collection_ids and not request.include_web_dast:
         raise HTTPException(status_code=422, detail="Imported request collections require include_web_dast=true")
     if request.request_collection_ids and not request.confirm_request_replay:
@@ -1378,14 +1423,9 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         raise HTTPException(status_code=422, detail="State-changing request replay requires at least one request collection")
     if request.allow_state_changing_requests and request.safety_profile != "authenticated_active":
         raise HTTPException(status_code=422, detail="POST, PUT, PATCH, and DELETE replay requires authenticated_active safety")
-    if request.allow_untrusted_tls_credentials and request.safety_profile != "authenticated_active":
-        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires authenticated_active safety")
-    if request.allow_untrusted_tls_credentials and not (request.web_credential_profile_id or request.request_collection_ids):
-        raise HTTPException(status_code=422, detail="Untrusted-TLS credential replay requires a web credential or imported request collection")
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
         })
     except ValueError as exc:
@@ -1584,7 +1624,6 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_profile": request.profile,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": request.include_web_dast,
             "web_scan_type": request.web_scan_type,
             "max_web_origins": request.max_web_origins,
@@ -1716,7 +1755,6 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
     try:
         safety_contract = validate_safety_request({
             "safety_profile": request.safety_profile,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "include_web_dast": False,
         })
     except ValueError as exc:
@@ -1785,7 +1823,6 @@ async def verify_device_service(device_id: str, request: DeviceServiceVerifyRequ
             "reason": request.reason,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
-            "confirm_lab_invasive": request.confirm_lab_invasive,
             "approval_receipt_id": request.approval_receipt_id,
             "candidate_id": str(candidate_uuid) if candidate_uuid else None,
             "proof_contract_id": str(candidate["verifier_contract_id"] or "") if candidate else None,
@@ -2626,7 +2663,7 @@ async def _execute_device_capability_operation(
     if name == "queue_device_scan":
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
-        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+        if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
             raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
         include_web_dast = bool(args.get("include_web_dast")) and safety_profile != "observe_only"
         use_imported = bool(args.get("include_imported_requests"))
@@ -2686,14 +2723,26 @@ async def _execute_device_capability_operation(
         if state.get("traffic_frozen"):
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
         origins = await _device_confirmed_web_origins(device_target_id)
-        if not origins:
-            raise HTTPException(status_code=409, detail="No confirmed-open web origin is available; run a device scan first")
         requested_port = args.get("origin_port")
         origin = next((
             item for item in origins if requested_port is not None and int(item["port"]) == int(requested_port)
         ), None)
-        if requested_port is not None and not origin:
-            raise HTTPException(status_code=409, detail="origin_port does not match a confirmed-open web origin on this device")
+        if origin is None and requested_port is not None:
+            # An operator who names the port already knows the service is there. Requiring a
+            # discovery scan first made a device the one asset whose known port could not be
+            # reached, and a device locator cannot carry a port to say it any other way. The
+            # port is still one address on the bound device, inside the same scope and budget.
+            origin = await _device_operator_named_web_origin(
+                device_target_id, int(requested_port),
+            )
+        if origin is None and not origins:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No confirmed-open web origin is available: run a device scan, or name the "
+                    "port directly with origin_port"
+                ),
+            )
         if origin is None:
             origin = origins[0]
         try:
@@ -2749,7 +2798,7 @@ async def _execute_device_capability_operation(
             raise HTTPException(status_code=409, detail="Device traffic is frozen after a health circuit breaker")
         if safety_profile == "observe_only":
             raise HTTPException(status_code=409, detail="observe_only does not permit service verification traffic")
-        if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+        if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
             raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
         queued = await verify_device_service(str(device_target_id), DeviceServiceVerifyRequest(
             transport=args["transport"],
@@ -2925,6 +2974,46 @@ async def _device_confirmed_web_origins(device_target_id: uuid.UUID) -> list[dic
     return origins
 
 
+# Conventional HTTPS/TLS ports for devices. A service the operator named on one
+# of these is reached as HTTPS; every other port defaults to HTTP.
+_CONVENTIONAL_TLS_PORTS = frozenset({443, 4443, 7443, 8443, 8843, 9443, 10443})
+
+
+async def _device_operator_named_web_origin(
+    device_target_id: uuid.UUID, port: int,
+) -> dict[str, Any] | None:
+    """One web origin on the bound device at a port the operator named.
+
+    Built from the device's own locator, never from planner input, so this reaches exactly the
+    asset the run is bound to and nothing else. Scheme follows the port's convention; scope,
+    budget and fragility accounting are unchanged.
+    """
+    if not 1 <= int(port) <= 65535:
+        return None
+    async with _pool().acquire() as conn:
+        device = await conn.fetchrow(
+            "SELECT primary_locator FROM device_targets WHERE id=$1 AND is_active=true",
+            device_target_id,
+        )
+    locator = str((device or {}).get("primary_locator") or "").strip() if device else ""
+    if not locator:
+        return None
+    # Conventional TLS ports beyond 443/8443 so an HTTPS service the operator
+    # named on a non-standard port (9443, 4443, 10443, …) is reached as HTTPS
+    # rather than plain HTTP. Built from the device locator, never planner input.
+    scheme = "https" if int(port) in _CONVENTIONAL_TLS_PORTS else "http"
+    bracketed = f"[{locator}]" if ":" in locator and not locator.startswith("[") else locator
+    return {
+        "origin": f"{scheme}://{bracketed}:{port}",
+        "scheme": scheme,
+        "hostname": locator,
+        "port": int(port),
+        "connect_address": locator,
+        "host_header": "",
+        "operator_named": True,
+    }
+
+
 def _bounded_device_scan_result(row: Any) -> dict[str, Any]:
     item = row_to_dict(row) if row is not None and not isinstance(row, dict) else dict(row or {})
     result = _decode_json_value(item.get("result")) or {}
@@ -3066,7 +3155,7 @@ async def _device_verify_candidate_tool(
         )
     if safety_profile == "observe_only":
         raise HTTPException(status_code=409, detail="observe_only does not permit candidate verification traffic")
-    if int(state.get("scans_queued") or 0) >= device_agent.MAX_SCANS_PER_SESSION:
+    if int(state.get("scans_queued") or 0) >= int(state.get("scan_budget_limit", device_agent.MAX_SCANS_PER_SESSION)):
         raise HTTPException(status_code=409, detail="Connected-device agent scan budget exhausted")
     transport = str(locus.get("transport") or "").lower()
     port = int(locus.get("port") or 0)

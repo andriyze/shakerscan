@@ -20,17 +20,22 @@ from runtime.models import (
     ScanPolicy,
     TargetBinding,
 )
-
-
-class CapabilityInputError(ValueError):
-    pass
+from .network_inputs import (
+    CapabilityInputError, _addresses, _port_range, _ports, _require_network_policy,
+)
 
 
 NETWORK_CAPABILITY_ADAPTERS = {
     "ports.discover": lambda: PortsDiscoverAdapter(),
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
+    "service.nse_check": lambda: _nse_check_adapter(),
     "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
 }
+
+
+def _nse_check_adapter():
+    from .nse import NseCheckAdapter
+    return NseCheckAdapter()
 
 
 def network_capability_adapter(name: str) -> Any:
@@ -76,7 +81,16 @@ class NetworkExecutionAdapter:
         if self._heartbeat_interval_seconds <= 0:
             raise ValueError("network capability heartbeat interval must be positive")
 
-    async def _run_command_with_heartbeats(
+    async def _run_command_with_heartbeats(self, command, **kwargs):
+        if self.capability_name != "service.nse_check":
+            return await self._run_process_with_heartbeats(command, **kwargs)
+        from .nse_http_runtime import NseCommandResult, command_transport
+        async with command_transport(self._prepared, command, heartbeat=kwargs["heartbeat"],
+                                     cancelled=kwargs["cancelled"]) as (bound_command, bridge):
+            process = await self._run_process_with_heartbeats(bound_command, **kwargs)
+        return NseCommandResult(process, bridge)
+
+    async def _run_process_with_heartbeats(
         self,
         command: PreparedCommand,
         *,
@@ -129,6 +143,9 @@ class NetworkExecutionAdapter:
             // command_count,
         )
         status = "failed"
+        process_failed = False
+        nse_http_actual = {"http_requests": 0, "state_changing_requests": 0}
+        coverage_gaps: list[dict[str, Any]] = []
 
         for command in prepared.commands:
             if cancelled():
@@ -159,8 +176,27 @@ class NetworkExecutionAdapter:
                 parse_kwargs["root_domain"] = str(
                     prepared.redacted_execution["root_domain"]
                 )
+            elif prepared.capability_name == "service.nse_check":
+                parse_kwargs["expected_ports"] = tuple(
+                    int(item) for item in prepared.redacted_execution.get("ports") or ()
+                )
+                parse_kwargs["expected_scripts"] = tuple(
+                    str(item) for item in prepared.redacted_execution.get("scripts") or ()
+                )
             parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
-            observations.extend(dict(row) for row in parsed.observations)
+            parsed_observations = parsed.observations
+            if prepared.capability_name == "service.nse_check":
+                coverage_gaps.extend(dict(gap) for gap in parsed.metadata.get("coverage_gaps", ()))
+            bridge = getattr(streamed, "nse_http", None)
+            if bridge is not None:
+                from .nse_http_runtime import decorate_observations
+                parsed_observations = decorate_observations(parsed_observations, bridge)
+                for key in nse_http_actual:
+                    nse_http_actual[key] += bridge.actual[key]
+                errors.extend(bridge.errors)
+                coverage_gaps.extend(dict(gap) for gap in bridge.coverage_gaps)
+                partial = partial or bool(bridge.errors)
+            observations.extend(dict(row) for row in parsed_observations)
             errors.extend(str(item) for item in parsed.errors)
             partial = bool(
                 partial
@@ -176,15 +212,17 @@ class NetworkExecutionAdapter:
                 status = "cancelled"
                 errors.insert(0, "cancelled")
                 break
-            if streamed.returncode != 0 and not streamed.stdout.strip():
-                status = "failed"
+            if streamed.returncode != 0:
+                process_failed = True
+                partial = True
                 errors.insert(
                     0,
                     f"{prepared.adapter_name}_exit_{streamed.returncode}",
                 )
-                break
+                # A failed host must not discard its usable output or prevent
+                # examination of the other admitted addresses.
         else:
-            status = "partial" if partial else "success"
+            status = "failed" if process_failed and not observations else "partial" if partial else "success"
 
         actual: dict[str, int] = {}
         for dimension, reserved_amount in prepared.estimated_budget.items():
@@ -201,6 +239,16 @@ class NetworkExecutionAdapter:
                     )
                     // command_count,
                 )
+            elif prepared.capability_name == "service.nse_check":
+                if dimension in nse_http_actual:
+                    actual[dimension] = nse_http_actual[dimension]
+                elif dimension == "device_fragility_points":
+                    # Native connects/TLS retain an explicitly labelled cost
+                    # estimate; HTTP is measured and unused HTTP grant released.
+                    non_http = reserved_amount - int(prepared.estimated_budget.get("http_requests") or 0)
+                    actual[dimension] = ((non_http * attempted_commands + command_count - 1) // command_count
+                                         + nse_http_actual["http_requests"])
+
 
         return CapabilityAdapterResult(
             status=status,
@@ -211,7 +259,10 @@ class NetworkExecutionAdapter:
             timed_out=timed_out,
             execution_started=attempted_commands > 0,
             parser_version=prepared.parser_version,
-            redacted_execution=dict(prepared.redacted_execution),
+            redacted_execution={
+                **dict(prepared.redacted_execution),
+                **({"coverage_gaps": coverage_gaps} if coverage_gaps else {}),
+            },
         )
 
 
@@ -223,39 +274,6 @@ PORT_PROFILES: Mapping[str, tuple[int, ...] | str] = {
     "device_common": (22, 23, 53, 80, 81, 443, 445, 554, 631, 1883, 1900, 5000,
                       7000, 8008, 8009, 8060, 8080, 8443, 8883, 9000, 9100, 49152, 55000),
 }
-
-
-def _ports(values: Any, *, maximum: int) -> tuple[int, ...]:
-    if not isinstance(values, (list, tuple)) or not values:
-        raise CapabilityInputError("ports must be a non-empty array")
-    result: list[int] = []
-    for value in values:
-        if isinstance(value, bool):
-            raise CapabilityInputError("ports must contain integers")
-        try:
-            port = int(value)
-        except (TypeError, ValueError) as exc:
-            raise CapabilityInputError("ports must contain integers") from exc
-        if not 1 <= port <= 65_535:
-            raise CapabilityInputError("ports must be between 1 and 65535")
-        if port not in result:
-            result.append(port)
-        if len(result) > maximum:
-            raise CapabilityInputError(f"at most {maximum} ports are allowed")
-    return tuple(sorted(result))
-
-
-def _require_network_policy(policy: ScanPolicy) -> None:
-    if not policy.network_discovery:
-        raise CapabilityInputError("network discovery policy is not enabled")
-    if not policy.active_testing or not policy.approval_receipt_id:
-        raise CapabilityInputError("network discovery requires active approval")
-
-
-def _addresses(target: TargetBinding) -> tuple[str, ...]:
-    if not target.allowed_addresses:
-        raise CapabilityInputError("target binding has no approved runtime addresses")
-    return tuple(str(ipaddress.ip_address(value)) for value in target.allowed_addresses)
 
 
 class PortsDiscoverAdapter:
@@ -271,11 +289,21 @@ class PortsDiscoverAdapter:
         addresses = _addresses(target)
         profile = str(args.get("profile") or "top_100").strip().lower()
         custom = args.get("ports")
+        port_range = args.get("port_range")
+        selected = None
         if custom is not None:
             selected = _ports(custom, maximum=1_000)
             port_args = ("-p", ",".join(map(str, selected)))
             attempted_per_host = len(selected)
             profile = "custom"
+        elif port_range is not None:
+            # A contiguous range on the authorized host. Bounded to the same
+            # per-call ceiling as a custom list so one call never becomes a
+            # full-range sweep; the planner chunks a wider span across calls.
+            start, end = _port_range(port_range, maximum=1_000)
+            port_args = ("-p", f"{start}-{end}")
+            attempted_per_host = end - start + 1
+            profile = "range"
         else:
             configured = PORT_PROFILES.get(profile)
             if configured is None:
@@ -296,7 +324,10 @@ class PortsDiscoverAdapter:
             )
             for address in addresses
         )
-        normalized = {"profile": profile, "ports": list(selected) if custom is not None else None,
+        # port_args is part of the digest so two different ranges/profiles never
+        # collide on the same idempotency key.
+        normalized = {"profile": profile, "ports": list(selected) if selected is not None else None,
+                      "port_args": list(port_args),
                       "target_id": target.target_id, "addresses": list(addresses)}
         return PreparedExecution(
             self.capability_name, self.adapter_name, self.adapter_version, commands,
@@ -309,6 +340,7 @@ class PortsDiscoverAdapter:
     def parse(self, output: str, *, timed_out: bool = False) -> ParsedCapabilityResult:
         observations: list[Mapping[str, Any]] = []
         errors: list[str] = []
+        seen_ports: set[tuple[str, int]] = set()
         for line in str(output or "").splitlines():
             line = line.strip()
             if not line:
@@ -319,8 +351,10 @@ class PortsDiscoverAdapter:
                 port = int(row.get("port"))
                 if not 1 <= port <= 65_535:
                     raise ValueError("invalid port")
-                observations.append({"kind": "open_port", "address": address, "port": port,
-                                     "transport": "tcp"})
+                if (address, port) not in seen_ports:
+                    seen_ports.add((address, port))
+                    observations.append({"kind": "open_port", "address": address, "port": port,
+                                         "transport": "tcp"})
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 errors.append(f"malformed_naabu_record:{type(exc).__name__}")
         partial = bool(timed_out or errors)
@@ -382,6 +416,11 @@ class ServiceFingerprintAdapter:
                 for port_node in host.findall("./ports/port"):
                     state_node = port_node.find("state")
                     service_node = port_node.find("service")
+                    attributes = service_node.attrib if service_node is not None else {}
+                    raw_confidence = attributes.get("conf", "")
+                    confidence = int(raw_confidence) if re.fullmatch(r"[0-9]{1,2}", raw_confidence) else None
+                    if confidence is not None and not 0 <= confidence <= 10:
+                        confidence = None
                     state = (state_node.attrib if state_node is not None else {}).get("state")
                     port = int(port_node.attrib["portid"])
                     transport = port_node.attrib.get("protocol", "tcp")
@@ -392,6 +431,11 @@ class ServiceFingerprintAdapter:
                         })
                     observations.append({
                         "kind": "service",
+                        **{key: value for key, value in {
+                            "method": attributes.get("method"),
+                            "confidence": confidence,
+                            "tunnel": attributes.get("tunnel"),
+                        }.items() if value is not None},
                         "address": address,
                         "port": port,
                         "transport": transport,

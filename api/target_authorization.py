@@ -22,8 +22,10 @@ try:
 except ModuleNotFoundError:  # package-native import layout
     from api.action_scope import evaluate_scope, receipt_to_dict
 
-STANDING_ACTION_NAME = "target.authorization"
-STANDING_RISK_TIERS = ("active", "intrusive")
+try:
+    from runtime.approval_policy import STANDING_ACTION_NAME, STANDING_RISK_TIERS
+except ModuleNotFoundError:
+    from api.runtime.approval_policy import STANDING_ACTION_NAME, STANDING_RISK_TIERS
 
 
 class TargetAuthorizationError(ValueError):
@@ -104,6 +106,28 @@ async def persist_scope_receipt(conn: Any, receipt: Mapping[str, Any], target_id
     )
 
 
+def effective_target_environment(
+    metadata: Any, *, requested: str | None = None,
+) -> str:
+    """The one environment a target is judged under.
+
+    Creation stores the operator's choice as `metadata.cohort`, while authorization used to read
+    `metadata.environment` and default to production. So a target saved as Lab authorized under a
+    Lab evaluation at creation and a Production one when authorized later, and the two paths
+    could reach opposite verdicts on the same row.
+
+    `environment` wins where both exist -- it is the older, explicitly-set field -- then the
+    stored cohort, then production. A caller may still pass one explicitly; it does not change
+    what is stored.
+    """
+    stored = metadata if isinstance(metadata, Mapping) else {}
+    for value in (requested, stored.get("environment"), stored.get("cohort")):
+        text = str(value or "").strip().lower()
+        if text and text != "unclassified":
+            return text
+    return "production"
+
+
 async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
     """The target's standing (or still valid bounded) authorization, or None.
 
@@ -116,7 +140,18 @@ async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, A
         return None
     target = _row(await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid))
     if not target:
-        return None
+        # The same id may name a connected device. Reading only the web table made every
+        # standing receipt recorded for a device invisible to the readers that gate scans and
+        # Hunts, so the receipt existed and nothing could resolve it.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator FROM device_targets WHERE id=$1", target_uuid,
+        ))
+        if not device:
+            return None
+        locator = str(device.get("primary_locator") or "").strip()
+        target = {"id": device.get("id"), "url": locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )}
     rows = await conn.fetch(
         """
         SELECT a.*, s.id AS scope_id, s.allowed_hosts AS scope_allowed_hosts,
@@ -127,7 +162,13 @@ async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, A
            AND a.approved_by IS NOT NULL
            AND a.status = 'active'
            AND a.risk_tier = ANY($2::text[])
-           AND (a.action_name IS NULL OR a.action_name = $3)
+           -- A receipt recorded before the standing-authorization contract has no
+           -- action_name. Counting it as standing made the target report itself
+           -- authorized while the submission gate, which requires the exact
+           -- action_name, refused every active scan of it -- and revoke, which
+           -- matches the same name, could never clear it. One definition here,
+           -- at the gate, and at revoke, so re-authorizing is the way out.
+           AND a.action_name = $3
            AND (a.expires_at IS NULL OR a.expires_at > NOW())
          ORDER BY (a.expires_at IS NULL) DESC, a.created_at DESC
          LIMIT 20
@@ -174,11 +215,26 @@ async def authorize_target(
     if existing and existing.get("standing") and existing.get("risk_tier") == risk_tier:
         return existing
     target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
-    if not target:
-        raise TargetAuthorizationError("target not found")
-    metadata = _json(target.get("metadata_json")) or {}
-    env = str(environment or (metadata.get("environment") if isinstance(metadata, dict) else "") or "production").strip().lower()
-    url = str(target.get("url") or "")
+    if target:
+        metadata = _json(target.get("metadata_json")) or {}
+        env = effective_target_environment(metadata, requested=environment)
+        url = str(target.get("url") or "")
+    else:
+        # A connected device is an asset the operator owns exactly as a web target is. Reading
+        # only the web table meant `POST /targets/{id}/authorization` answered 404 for a device,
+        # so every device scan re-asked for permission inline and no device Hunt could resolve a
+        # standing receipt. The device's own environment wins when the caller names none.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator, environment FROM device_targets WHERE id=$1",
+            target_uuid,
+        ))
+        if not device:
+            raise TargetAuthorizationError("target not found")
+        locator = str(device.get("primary_locator") or "").strip()
+        env = str(environment or device.get("environment") or "production").strip() or "production"
+        url = locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )
     host = _host(url)
     receipt = receipt_to_dict(evaluate_scope(
         url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),

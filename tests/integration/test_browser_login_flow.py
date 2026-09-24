@@ -24,12 +24,71 @@ pytestmark = pytest.mark.skipif(not CHROMIUM, reason="explicit installed Chromiu
 ORIGIN = "http://127.0.0.1:8765"
 
 
-@pytest.mark.parametrize("storage", ["cookie", "local_storage"])
-@pytest.mark.parametrize("mode", ["fixed_qa", "expiry"])
-def test_real_login_protected_navigation_and_expiry(storage, mode):
+def test_real_login_follows_only_saved_redirect_destinations():
+    """Fulfilled redirects must re-enter the pinned browser route before login."""
     async def scenario():
         from playwright.async_api import async_playwright
 
+        login = b'''<div id="root"></div><script>
+document.getElementById('root').innerHTML='<form action="/login" method="post"><input id="username" name="username"><input id="password" name="password" type="password"><button id="submit" type="submit">Sign in</button></form>';
+</script>'''
+        calls = []
+
+        async def transport(request, phase):
+            path = request.url.removeprefix(ORIGIN)
+            calls.append((phase, request.method, path))
+            if path == "/dashboard" and phase == "anonymous":
+                return bl.BrowserLoginResponse(303, {"Location": "/login"}, b"")
+            if path == "/login" and request.method == "GET":
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/html"}, login)
+            if path == "/login" and request.method == "POST":
+                return bl.BrowserLoginResponse(303, {
+                    "Location": "/dashboard", "Set-Cookie": "session=synthetic; Path=/",
+                }, b"")
+            if path == "/dashboard":
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/html"},
+                                               b'<div id="authenticated">okay</div>')
+            return bl.BrowserLoginResponse(404, {}, b"")
+
+        workflow = bl.BrowserLoginWorkflow(
+            origin=ORIGIN, login_url=ORIGIN + "/login", submit_url=ORIGIN + "/login",
+            check_url=ORIGIN + "/dashboard", username_selector="#username",
+            password_selector="#password", submit_selector="#submit",
+            authenticated_selector="#authenticated", rejected_selector="#rejected",
+            timeout_ms=5_000,
+        )
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(executable_path=CHROMIUM, headless=True,
+                args=["--no-sandbox", "--disable-background-networking"])
+            try:
+                receipt = await bl.run_browser_login_checks(
+                    browser, workflow=workflow,
+                    values=bl.BrowserLoginValues("synthetic-user", "synthetic-password"),
+                    transport=transport,
+                    checks=(bl.BrowserReadOnlyCheck(workflow.check_url, "#authenticated"),),
+                )
+            finally:
+                await browser.close()
+        assert receipt["status"] == "completed"
+        assert receipt["anonymous_check_verified"] is True
+        assert receipt["login_response_status"] == 303
+        assert receipt["checks_completed"] == 1
+        assert ("anonymous", "GET", "/login") in calls
+        assert ("login", "POST", "/login") in calls
+        assert all(path in {"/login", "/dashboard"} for _, _, path in calls)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("storage", ["cookie", "local_storage"])
+@pytest.mark.parametrize("mode", ["fixed_qa", "expiry"])
+@pytest.mark.parametrize("decoded_gzip_response", [False, True])
+def test_real_login_protected_navigation_and_expiry(storage, mode, decoded_gzip_response):
+    async def scenario():
+        from playwright.async_api import async_playwright
+
+        polling = storage == "cookie" and mode == "fixed_qa" and decoded_gzip_response
+        poll_script = b"<script>setInterval(() => fetch('/poll'), 20); fetch('/poll');</script>" if polling else b""
         login = b'''<!doctype html><input id="username"><input id="password" type="password">
 <button id="sign-in" type="button">Sign in</button><div id="login-error" hidden>Rejected</div>
 <script>
@@ -40,12 +99,19 @@ document.querySelector('#sign-in').onclick=async()=>{
  if(r.ok){localStorage.setItem('synthetic-session','active');location.href='/account';}
  else document.querySelector('#login-error').hidden=false;
 };
-</script>'''
+</script>''' + poll_script
         async def transport(request, phase):
             path = request.url.removeprefix(ORIGIN)
             headers = {"Content-Type": "text/html"}
+            if decoded_gzip_response:
+                # The pinned HTTP sender has already decoded the gzip body,
+                # while its response headers still describe the wire encoding.
+                headers["Content-Encoding"] = "gzip"
             if path == "/login":
                 return bl.BrowserLoginResponse(200, headers, login)
+            if path == "/poll":
+                await asyncio.sleep(0.15)
+                return bl.BrowserLoginResponse(200, {"Content-Type": "text/plain"}, b"ok")
             if path == "/session" and request.method == "POST":
                 assert json.loads(request.post_data) == {"username": "synthetic-user", "password": "synthetic-password"}
                 headers["Set-Cookie"] = "synthetic-session=active; Path=/; HttpOnly; SameSite=Lax"
@@ -53,7 +119,8 @@ document.querySelector('#sign-in').onclick=async()=>{
             if path == "/account":
                 if storage == "cookie":
                     authenticated = "synthetic-session=active" in (await request.all_headers()).get("cookie", "")
-                    body = b'<div id="private-account">Account</div>' if authenticated else b'<div id="login-error">Expired</div>'
+                    body = (b'<div id="private-account">Account</div>' if authenticated else
+                            b'<div id="login-error">Expired</div>') + poll_script
                 else:
                     body = b'''<div id="private-account" hidden>Account</div><div id="login-error" hidden>Expired</div>
 <script>document.querySelector(localStorage.getItem('synthetic-session')==='active'?'#private-account':'#login-error').hidden=false;</script>'''
@@ -65,7 +132,7 @@ document.querySelector('#sign-in').onclick=async()=>{
             check_url=ORIGIN + "/account", username_selector="#username",
             password_selector="#password", submit_selector="#sign-in",
             authenticated_selector="#private-account", rejected_selector="#login-error",
-            timeout_ms=5_000,
+            timeout_ms=10_000 if polling else 5_000,
         )
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(executable_path=CHROMIUM, headless=True,

@@ -140,6 +140,9 @@ services:
     user: "${SHAKERSCAN_API_UID:-10002}:${SHAKERSCAN_API_GID:-10002}"
     group_add:
       - "${SHAKERSCAN_DOCKER_GID:-0}"
+      # The API stages quarantined artifacts for the Firecracker runner, and the
+      # quarantine is readable only by the sandbox group.
+      - "${MODEL_INTAKE_SANDBOX_GID:-10001}"
     # Resolve host-published services (e2e fixtures / honey targets) from inside
     # the container on Linux CI too, matching docker-compose.yml. No-op on Docker
     # Desktop. Without this the exact-manifest E2E cannot reach the fixtures
@@ -151,6 +154,8 @@ services:
     ports:
       - "${SHAKERSCAN_BIND_HOST:-127.0.0.1}:${SHAKERSCAN_API_PORT:-8080}:8080"
     environment:
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
       - RESULTS_DIR=/results
@@ -195,6 +200,7 @@ services:
       # Browser/API origin contract. Keep this in sync with docker-compose.yml.
       - SHAKERSCAN_UI_PORT=${SHAKERSCAN_UI_PORT:-3000}
       - SHAKERSCAN_BIND_HOST=${SHAKERSCAN_BIND_HOST:-127.0.0.1}
+      - SHAKERSCAN_AUTHENTICATED_ASSURANCE=${SHAKERSCAN_AUTHENTICATED_ASSURANCE:-0}
       - SHAKERSCAN_PUBLIC_HOST=${SHAKERSCAN_PUBLIC_HOST:-}
       - SHAKERSCAN_RUNTIME_DIR=${SHAKERSCAN_RUNTIME_DIR:-}
       - SHAKERSCAN_INSTALL_KIND=${SHAKERSCAN_INSTALL_KIND:-}
@@ -380,10 +386,14 @@ services:
       - "host.docker.internal:host-gateway"
       - "shakerscan-fixtures.internal:host-gateway"
     environment:
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
       - RESULTS_DIR=/results
+      - MODEL_INTAKE_SANDBOX_UID=${MODEL_INTAKE_SANDBOX_UID:-10001}
+      - MODEL_INTAKE_SANDBOX_GID=${MODEL_INTAKE_SANDBOX_GID:-10001}
       - SCANNER_VERSION=${SCANNER_VERSION:-latest}
       - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
       - GIT_COMMIT=${GIT_COMMIT:-image:latest}
@@ -462,6 +472,8 @@ services:
       - "host.docker.internal:host-gateway"
       - "shakerscan-fixtures.internal:host-gateway"
     environment:
+      - SHAKERSCAN_PRIVATE_NETWORK_TARGETS=${SHAKERSCAN_PRIVATE_NETWORK_TARGETS:-}
+      - SHAKERSCAN_DNS_DOH_RESOLVERS=${SHAKERSCAN_DNS_DOH_RESOLVERS-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}
       - PYTHONUNBUFFERED=1
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
       - DATABASE_URL=postgresql://scanner:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/scanner
@@ -513,6 +525,8 @@ services:
       - SCANNER_EXPECTED_VERSION=${SCANNER_RELEASE_VERSION:-}
       - GIT_COMMIT=${GIT_COMMIT:-image:latest}
       - MODEL_INTAKE_ONLY_WORKER=true
+      - MODEL_INTAKE_SANDBOX_UID=${MODEL_INTAKE_SANDBOX_UID:-10001}
+      - MODEL_INTAKE_SANDBOX_GID=${MODEL_INTAKE_SANDBOX_GID:-10001}
       - MODEL_INTAKE_QUEUE_NAME=${MODEL_INTAKE_QUEUE_NAME:-model_intake_jobs}
       - SHAKERSCAN_QUEUE_CONSUMER_GROUP=${SHAKERSCAN_QUEUE_CONSUMER_GROUP:-shakerscan-workers}
       - SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS=${SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}

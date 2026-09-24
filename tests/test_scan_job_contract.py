@@ -611,3 +611,33 @@ def test_unsafe_shard_labels_remain_rejected(label):
                 options, parent.execution_plan.budget,
             ),
         )
+
+
+@pytest.mark.parametrize("placement", [
+    {"node_scope": "remote"},
+    {"node_scope": "remote", "node_id": "10000000-0000-4000-8000-000000000001"},
+])
+def test_executable_scan_recovers_durable_placement_after_a_local_queue_rewrite(placement):
+    from job_queue import worker_matches_placement
+    job = _job()
+    row = _persisted_row(job)
+    row["options"]["placement"] = placement
+    queued = job.queue_payload(placement={"node_scope": "local"})
+    materialized = materialize_canonical_scan_job(queued, row, resolved_addresses=("192.0.2.10",))
+    assert materialized["placement"] == placement
+    assert materialized["_canonical_queue_payload"]["placement"] == placement
+    assert "options" not in materialized["_canonical_queue_payload"]
+    assert worker_matches_placement({"node_id": "local", "node_scope": "local"}, materialized["placement"]) is False
+    assert worker_matches_placement({"node_scope": "remote", "node_id": "10000000-0000-4000-8000-000000000001"}, materialized["placement"]) is True
+    assert "options" not in queued, "routing repair must not move private options into Redis"
+
+
+def test_remote_scan_coordinator_stays_local_without_changing_execution_placement():
+    job = _job()
+    row = _persisted_row(job)
+    row["options"]["placement"] = {"node_scope": "remote"}
+    queued = job.queue_payload(placement={"node_scope": "local"})
+    queued.update(type="scan_plan", attempt=1, plan_version=1, parallel_worker_count=2)
+    materialized = materialize_canonical_scan_job(queued, row, resolved_addresses=("192.0.2.10",))
+    assert materialized["placement"] == {"node_scope": "local"}
+    assert materialized["options"]["placement"] == {"node_scope": "remote"}

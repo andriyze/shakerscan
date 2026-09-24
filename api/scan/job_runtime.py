@@ -25,6 +25,7 @@ from .jobs import (
     admitted_request_collection_job_refs,
     scan_job_options_digest,
     scan_job_queue_transport,
+    _placement_payload,
 )
 
 
@@ -99,6 +100,15 @@ def materialize_canonical_scan_job(
         raise CanonicalScanJobMaterializationError("queued target identity changed after admission")
 
     options = _json_object(_row_value(persisted_row, "options"), name="Scan options")
+    if transport.get("type") != "scan_plan" and options.get("placement"):
+        # Queue placement is only a delivery hint. In particular, an old broker
+        # fallback must not turn a node-pinned Scan into local execution. The
+        # worker matcher will requeue it using this persisted placement. Only
+        # control-plane planning is legitimately local for a remote Scan.
+        try:
+            transport["placement"] = _placement_payload(options["placement"])
+        except CanonicalScanJobError as exc:
+            raise CanonicalScanJobMaterializationError("persisted Scan placement is invalid") from exc
     if options.get("scan_execution_plan") != job.execution_plan.canonical_dict():
         raise CanonicalScanJobMaterializationError(
             "persisted Scan execution plan does not match scan-job/v2"
@@ -241,7 +251,9 @@ def materialize_canonical_scan_job(
         ),
         "options": options,
         "submitted_at": job.created_at,
-        "_canonical_queue_payload": dict(queue_payload),
+        # Repairs must survive _safe_requeue_payload without serializing any
+        # materialized private options back into the queue.
+        "_canonical_queue_payload": {**dict(queue_payload), **transport},
         "_canonical_scan_job_digest": job.payload_digest,
         "_canonical_queue_schema": SCAN_JOB_SCHEMA,
     }
