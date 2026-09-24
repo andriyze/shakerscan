@@ -106,20 +106,25 @@ def test_edge_objective_suggests_the_edge_methodology(library):
     assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
     assert suggestions[0]["auto_bound"] is False
     assert suggestions[0]["reason"].startswith("Objective matches:")
+    assert suggestions[0]["execution"]["fully_executable"] is True
+    assert suggestions[0]["execution"]["unavailable_capabilities"] == []
     assert "description" not in suggestions[0]
     assert "capabilities" not in suggestions[0]
+    assert set(suggestions[0]["execution"]) == {
+        "fully_executable", "unavailable_capabilities",
+    }
 
 
-def test_suggestions_respect_the_hunt_authority_allowlist(library):
+def test_suggestions_do_not_hide_methodology_when_authority_is_narrow(library):
     suggestions = library.suggest(
         goal="Validate Cloudflare WAF and direct origin exposure",
         target_kind="web",
         allowed_capabilities=("http.request",),
     )
-    assert all(
-        item["skill_id"] != "skill.web.edge-waf-and-origin-exposure-validation"
-        for item in suggestions
-    )
+    assert suggestions[0]["skill_id"] == "skill.web.edge-waf-and-origin-exposure-validation"
+    assert suggestions[0]["auto_bound"] is False
+    assert suggestions[0]["execution"]["fully_executable"] is False
+    assert suggestions[0]["execution"]["unavailable_capabilities"]
 
 
 def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
@@ -133,6 +138,22 @@ def test_unselected_hunt_gets_an_actionable_nonempty_skill_context(library):
     assert bound.context_section["bound"] == []
     assert "suggested" in bound.context_section
     assert len(bound.context_section["suggested"]) <= 3
+
+
+def test_binding_methodology_does_not_fail_only_because_some_techniques_are_withheld(library):
+    skill_id = "skill.web.edge-waf-and-origin-exposure-validation"
+    budget = object()
+    bound = bind_skills_to_hunt(
+        [skill_id],
+        target_kind="web",
+        allowed_capabilities=("http.request",),
+        budget=budget,
+        library=library,
+        goal="Investigate edge and origin exposure",
+    )
+    assert any(spec.skill_id == skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == ("http.request",)
+    assert bound.budget is budget
 
 
 def test_binding_methodology_preserves_the_run_authority_and_budget(library):
@@ -408,20 +429,21 @@ def test_the_privileged_rule_has_one_owner():
         assert policy.is_privileged(credentials_requested=False) is True, field
 
 
-# --- binding must deliver the whole methodology, not part of it --------------------------
+# --- methodology remains useful even when only part is executable -----------------------
 
-def test_binding_is_refused_when_any_required_capability_is_withheld(library):
-    """A skill bound with part of its requirements would have the planner follow a
-    methodology it cannot carry out, then report the shortfall as a result."""
+def test_binding_keeps_methodology_when_some_required_capabilities_are_withheld(library):
+    """Binding is knowledge selection, not an authority grant. The planner may use the
+    compatible techniques while capability execution continues to enforce the Hunt envelope."""
     session_skill = library.require("skill.web.session-cookie-token-and-jwt-testing")
     passive_only = (
         "browser.interact", "browser.navigate", "http.request", "web.crawl", "web.probe",
     )
-    with pytest.raises(HuntSkillError, match="withholds"):
-        bind_skills_to_hunt(
-            [session_skill.skill_id], target_kind="web",
-            allowed_capabilities=passive_only, budget=None, library=library,
-        )
+    bound = bind_skills_to_hunt(
+        [session_skill.skill_id], target_kind="web",
+        allowed_capabilities=passive_only, budget=None, library=library,
+    )
+    assert any(spec.skill_id == session_skill.skill_id for spec in bound.specs)
+    assert bound.allowed_capabilities == passive_only
 
 
 def test_a_skill_whose_requirements_are_all_passive_still_binds_passively(library):

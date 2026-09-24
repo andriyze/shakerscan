@@ -41,7 +41,9 @@ _GUIDANCE = (
     "test_status; kind='findings' returns what earlier runs already reported, including which "
     "are deterministically verified. Endpoints marked untested are the unexplored frontier; "
     "findings whose last_verification_verdict is 'exploited' are already proven and need no "
-    "further hunting. Narrow with the filter object: endpoints and endpoint_groups accept id, test_status, "
+    "further hunting. Query kind='service_intelligence' before repeating port/service discovery; "
+    "it exposes retained service evidence for the same target and may reveal protocol-specific "
+    "methodology signals. Narrow with the filter object: endpoints and endpoint_groups accept id, test_status, "
     "auth_state, method and path_contains; findings accept status, severity and verified_only."
 )
 
@@ -199,7 +201,7 @@ def _pack(
         "last_completed_scan": {"id": scan_id, "completed_at": completed_at},
         "query_kinds": [
             "endpoints", "findings", "candidates", "principals", "notes", "receipts",
-            "hypotheses", "graph_nodes", "graph_edges",
+            "hypotheses", "graph_nodes", "graph_edges", "service_intelligence",
         ],
     }
 

@@ -278,9 +278,13 @@ Do not preload them all or spend the context window on an index dump.
 5. Bind only when used and record usage/completion/deferral.
 
 These are descriptive context controls. They never grant, remove, narrow, widen, or resize scope,
-capabilities, policy, approval, or budget. Binding validates that all required capabilities already
-survived policy filtering; missing requirements reject it. Do not claim a passive methodology
-fences an otherwise broader run.
+capabilities, policy, approval, or budget. Binding keeps supported methodologies available even
+when this Hunt cannot execute every technique. Each bound skill reports `withheld_capabilities`
+for required capabilities, including prerequisites, outside the saved Hunt capability set. Skip
+techniques needing those capabilities, continue compatible work, and report the omissions as
+coverage gaps, never findings or clean results. An empty list is not proof that a technique ran;
+credentials, scope, approvals, budgets, and runtime checks still apply to each action. Do not claim
+a passive methodology fences an otherwise broader run.
 
 ### Context, accounting, and completion
 

@@ -91,7 +91,7 @@ def test_census_tells_the_agent_how_to_read_the_rows():
     # The census is a signpost, so it must name the query that returns the rows behind it.
     pack = asyncio.run(prior_knowledge.web_prior_knowledge(_web_conn(), "t1"))
     assert "POST /hunts/{hunt_id}/query" in pack["guidance"]
-    assert {"endpoints", "findings", "candidates"} <= set(pack["query_kinds"])
+    assert {"endpoints", "findings", "candidates", "service_intelligence"} <= set(pack["query_kinds"])
 
 
 def test_census_carries_counts_only_and_never_target_content():

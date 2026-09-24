@@ -17,6 +17,7 @@ from .skills import (
     HuntSkillError,
     HuntSkillSpec,
     skill_library,
+    skill_context_section,
 )
 
 try:
@@ -156,23 +157,6 @@ def _skill_signal_values(context: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _bound_skill_projection(
-    specs: tuple[HuntSkillSpec, ...], requested: set[str],
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "skill_id": spec.skill_id,
-            "title": spec.title,
-            "version": spec.version,
-            "body_sha256": spec.body_sha256,
-            "phase": spec.phase,
-            "requested": spec.skill_id in requested,
-            "methodology_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/read",
-        }
-        for spec in specs
-    ]
-
-
 def public_hunt_skill_event(row: Any) -> dict[str, Any]:
     item = _row_dict(row)
     return {
@@ -230,59 +214,12 @@ def _refresh_skill_context(
 ) -> tuple[dict[str, Any], tuple[HuntSkillSpec, ...]]:
     library = skill_library()
     specs = library.resolve_for_hunt(requested, target_kind=target_kind)
-    available = set(allowed_capabilities)
-    unavailable = sorted({
-        capability
-        for spec in specs
-        for capability in spec.capabilities
-        if capability not in available
-    })
-    if unavailable:
-        raise HuntSkillError(
-            "methodology requires capabilities outside this Hunt authority: "
-            + ", ".join(unavailable)
-        )
-    context["skills"] = {
-        "schema_version": "hunt-skill/v2",
-        "catalog": {
-            "url": "/hunt/skills",
-            "suggestions_url": "/hunts/{hunt_id}/skills/suggestions",
-            "status": library.catalog_status,
-            "loaded_count": len(library),
-            "bindable_for_policy_count": len(library.available_for_hunt(
-                target_kind=target_kind,
-                allowed_capabilities=allowed_capabilities,
-            )),
-        },
-        "selection": {
-            "requested_skill_ids": list(requested),
-            "selection_optional": True,
-            "binding_is_explicit": True,
-            "auto_bound": False,
-            "maximum": MAX_SKILLS_PER_HUNT,
-            "instruction": (
-                "Do not read the whole catalog. Fetch one suggested methodology only when "
-                "its evidence trigger is relevant, then bind it explicitly if used."
-            ),
-        },
-        "suggested": [
-            {
-                **item,
-                "methodology_url": (
-                    f"/hunts/{{hunt_id}}/skills/{item['skill_id']}/read"
-                ),
-            }
-            for item in library.suggest(
-                goal=objective,
-                signals=signals,
-                target_kind=target_kind,
-                allowed_capabilities=allowed_capabilities,
-                exclude=(spec.skill_id for spec in specs),
-                limit=MAX_CONTEXT_SKILL_SUGGESTIONS,
-            )
-        ],
-        "bound": _bound_skill_projection(specs, set(requested)),
-    }
+    # Start, mid-run bind, and unbind share the same advisory context. Only execution
+    # enforces capability authority; unavailable techniques remain explicit coverage gaps.
+    context["skills"] = skill_context_section(
+        specs, requested=requested, library=library, target_kind=target_kind,
+        allowed_capabilities=allowed_capabilities, goal=objective, signals=signals,
+    )
     return context, specs
 
 
@@ -824,6 +761,9 @@ class HuntRunService:
                                 if spec.skill_id == explicit.skill_id else []
                             ),
                         )
+                # Rebinding the same revision also refreshes older context packs that lack
+                # capability-gap metadata, without inventing a second binding event.
+                if changed or context != _decode_json(row["context_pack"], {}):
                     await connection.execute(
                         "UPDATE hunt_runs SET context_pack=$2, updated_at=NOW() WHERE id=$1",
                         hunt_uuid, json.dumps(context),
