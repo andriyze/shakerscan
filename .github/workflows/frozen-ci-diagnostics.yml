@@ -17,11 +17,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p diagnostics
-          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/107723844843/logs" > diagnostics/stack-build.log
+          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/107723844843/logs" > diagnostics/stack-build.log
           python3 - <<'PY'
           from pathlib import Path
           import re
-          lines = Path('diagnostics/stack-build.log').read_text(errors='replace').splitlines()
+          text = Path('diagnostics/stack-build.log').read_text(errors='replace')
+          text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+          Path('diagnostics/stack-build.log').write_text(text)
+          lines = text.splitlines()
           selected = set()
           for n, line in enumerate(lines):
               if re.search(r'(?i)(error:|failed to solve|E: |404 |403 |401 |unable to|not found|NO_PUBKEY|EXPKEYSIG|exit code)', line):
