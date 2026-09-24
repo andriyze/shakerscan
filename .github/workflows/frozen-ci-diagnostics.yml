@@ -1,40 +1,135 @@
-name: Frozen integration diagnostics
+name: Frozen overlay repair validation
 on:
   push:
     branches: [feat/hunt-operator-workflows]
     paths: ['.github/workflows/frozen-ci-diagnostics.yml']
 permissions:
-  contents: read
-  actions: read
+  contents: write
 jobs:
-  collect:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Preserve the failed stack build log for diagnosis
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 3e76233ad315ac2af2760b76982cc291b01ad334
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Apply the minimal reviewed overlay repair
         shell: bash
         run: |
-          mkdir -p diagnostics
-          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/107723844843/logs" > diagnostics/stack-build.log
-          python3 - <<'PY'
+          git apply <<'PATCH'
+          diff --git a/scanner/Dockerfile.api b/scanner/Dockerfile.api
+          index 043747a..36da24d 100644
+          --- a/scanner/Dockerfile.api
+          +++ b/scanner/Dockerfile.api
+          @@ -7,9 +7,8 @@ FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime
+           
+           FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
+           
+          -RUN apt-get update && apt-get install -y --no-install-recommends \
+          -        ca-certificates curl jq \
+          -    && rm -rf /var/lib/apt/lists/*
+          +RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
+          +    sh /tmp/apt_install.sh ca-certificates curl jq
+           
+           # /app includes API modules and the shared policy/evidence code. Small static
+           # fingerprint inputs remain so the API can compute the expected worker build;
+          diff --git a/scanner/Dockerfile.model-intake b/scanner/Dockerfile.model-intake
+          index f561299..10d3aeb 100644
+          --- a/scanner/Dockerfile.model-intake
+          +++ b/scanner/Dockerfile.model-intake
+          @@ -59,9 +59,11 @@ COPY runner/guest/requirements.lock /opt/model-intake-locks/firecracker-runtime.
+           COPY runner/guest/guest_worker.py /opt/model-intake-locks/firecracker-guest-worker.py
+           COPY runner/guest/guest-init /opt/model-intake-locks/firecracker-guest-init
+           COPY runner/guest/Dockerfile /opt/model-intake-locks/firecracker-guest.Dockerfile
+          -RUN set -eu; \
+          -    apt-get update; \
+          -    apt-get install -y --no-install-recommends make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3-pip-whl python3-setuptools-whl; \
+          +# The overlay refreshes indexes independently of its scanner base. Use the same
+          +# bounded installer so a mirror publication race cannot leave stale indexes in use.
+          +RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
+          +    set -eu; \
+          +    sh /tmp/apt_install.sh make gcc libcurl4-openssl-dev libssl-dev python3-dev python3-venv python3-pip-whl python3-setuptools-whl; \
+               for tool in modelscan fickling semgrep safetensors pip-audit; do \
+                 python3 -m venv "/opt/model-intake-tools/${tool}"; \
+                 "/opt/model-intake-tools/${tool}/bin/pip" install \
+          diff --git a/tests/test_apt_install_retry.py b/tests/test_apt_install_retry.py
+          index 5d70a55..096f17f 100644
+          --- a/tests/test_apt_install_retry.py
+          +++ b/tests/test_apt_install_retry.py
+          @@ -166,3 +166,36 @@ def test_source_symlink_target_is_not_modified(tmp_path):
+               assert result.returncode == 0
+               assert (tmp_path / "apt/sources.list.d/local.list").is_symlink()
+               assert outside.read_text() == before
+          +
+          +
+          +@pytest.mark.parametrize("image, expected", [
+          +    ("Dockerfile.api", ["ca-certificates", "curl", "jq"]),
+          +    ("Dockerfile.model-intake", [
+          +        "make", "gcc", "libcurl4-openssl-dev", "libssl-dev", "python3-dev",
+          +        "python3-venv", "python3-pip-whl", "python3-setuptools-whl",
+          +    ]),
+          +])
+          +@pytest.mark.parametrize("updates, status", [((100, 0), 0), ((100,), 100)])
+          +def test_overlay_installs_recover_from_index_mismatch_without_omitting_packages(
+          +    tmp_path, image, expected, updates, status,
+          +):
+          +    """Exercise the package argv actually wired into each independent image build.
+          +
+          +    Exit 100 covers the signed-index size/hash mismatch seen in Model Intake CI.
+          +    No install may run until update succeeds; a persistent mismatch must fail.
+          +    """
+          +    dockerfile = (ROOT / "scanner" / image).read_text().replace("\\\n", " ")
+          +    mount = "source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro"
+          +    assert dockerfile.count(mount) == 1
+          +    assert "apt-get update" not in dockerfile
+          +    command = next(line for line in dockerfile.splitlines()
+          +                   if "sh /tmp/apt_install.sh " in line)
+          +    packages = shlex.split(command.split("sh /tmp/apt_install.sh ", 1)[1].split(";", 1)[0])
+          +    assert packages == expected
+          +    result, calls = run_install(tmp_path, packages=packages, updates=updates)
+          +    assert result.returncode == status
+          +    assert len(apt_calls(calls, "update")) == (2 if status == 0 else 3)
+          +    installs = apt_calls(calls, "install")
+          +    assert len(installs) == (1 if status == 0 else 0)
+          +    if installs:
+          +        assert installs[0][-len(expected):] == expected
+          PATCH
+          git diff --check
+          git add scanner/Dockerfile.api scanner/Dockerfile.model-intake tests/test_apt_install_retry.py
+          test "$(git write-tree)" = 50209f84652d3c8161855a4d6acd13f82e2ec6ed
+      - name: Validate under locked runtime dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+          python -m pytest -q tests/test_apt_install_retry.py tests/test_model_intake_image_split.py tests/test_api_image_boundary.py tests/test_build_fingerprint_manifest.py
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_hunt_methodologies.py
+          python scripts/check_installed_import_closure.py
+          python scripts/check_module_size.py
+      - name: Export verified blobs without committing or moving any ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, subprocess
           from pathlib import Path
-          import re
-          text = Path('diagnostics/stack-build.log').read_text(errors='replace')
-          text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
-          Path('diagnostics/stack-build.log').write_text(text)
-          lines = text.splitlines()
-          selected = set()
-          for n, line in enumerate(lines):
-              if re.search(r'(?i)(error:|failed to solve|E: |404 |403 |401 |unable to|not found|NO_PUBKEY|EXPKEYSIG|exit code)', line):
-                  selected.update(range(max(0,n-2), min(len(lines),n+3)))
-          excerpt = '\n'.join(lines[n] for n in sorted(selected))
-          Path('diagnostics/build-errors.txt').write_text(excerpt + '\n')
-          print(excerpt[-24000:])
+          entries = []
+          for name in ['scanner/Dockerfile.api', 'scanner/Dockerfile.model-intake', 'tests/test_apt_install_retry.py']:
+              data = Path(name).read_bytes()
+              expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              request = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'})
+              response = subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs', '--input', '-'], input=request.encode())
+              sha = json.loads(response)['sha']
+              assert sha == expected
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          Path('verified-tree-entries.json').write_text(json.dumps(entries, indent=2))
+          print(json.dumps(entries))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: frozen-stack-diagnostics
-          path: diagnostics/
+          name: frozen-overlay-repair
+          path: verified-tree-entries.json
           retention-days: 3
