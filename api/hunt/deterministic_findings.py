@@ -13,6 +13,8 @@ from typing import Any, Mapping
 import urllib.parse
 import uuid
 
+from .authz_findings import verified_authz_observations
+
 try:
     from findings import template_path, templated_finding_identity
 except ModuleNotFoundError:
@@ -150,7 +152,7 @@ async def materialize_verified_hunt_findings(
     *, target_kind: str = "web",
 ) -> list[str]:
     """Persist proof-bearing capability output without trusting planner fields."""
-    if capability_name != "xss.verify":
+    if capability_name not in {"xss.verify", "authz.verify"}:
         return []
     target_column = "device_target_id" if target_kind == "device" else "target_id"
     target_table = "device_targets" if target_kind == "device" else "targets"
@@ -158,24 +160,49 @@ async def materialize_verified_hunt_findings(
     method = str(capability_input.get("method") or "GET").strip().upper()
     if not method.isalpha() or not 3 <= len(method) <= 12:
         method = "GET"
-    for proof in verified_xss_observations(observations, target_url=target_url):
-        fingerprint = _verified_xss_fingerprint(proof, method=method)
-        browser_proof = proof.get("proof_producer") == "browser"
-        proof_contract = (
-            "xss_browser_proof/v1" if browser_proof
-            else "dalfox_browser_or_alert_execution/v1"
-        )
-        tool = "playwright" if browser_proof else "dalfox"
-        description = (
-            "The pinned browser executed the injected payload on the bound target's "
-            "client route and observed the deterministic DOM marker."
-            if browser_proof else
-            "Dalfox observed deterministic browser or alert execution on the bound target."
-        )
-        verdict_reason = (
-            "Canonical browser DOM execution proof" if browser_proof
-            else "Canonical Dalfox execution proof"
-        )
+    authz = capability_name == "authz.verify"
+    proofs = (verified_authz_observations if authz else verified_xss_observations)(
+        observations, target_url=target_url,
+    )
+    seen_fingerprints: set[str] = set()
+    for proof in proofs:
+        if authz:
+            method = "GET"
+            identity = templated_finding_identity({
+                "tool": "smart_authz", "cwe": "CWE-639", "url": proof["url"], "evidence": proof,
+            })
+            if not identity:
+                continue
+            fingerprint = "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+            proof_contract, tool = "authz-differential/v1", "smart_authz"
+            title, cwe, finding_type = "Verified broken object authorization", "CWE-639", "bola"
+            description = (
+                "The canonical verifier replayed an owner object absent from the secondary "
+                "principal's successful listing and received equivalent resource data."
+            )
+            verdict_reason = "Canonical cross-principal owner-object replay proof"
+        else:
+            title, cwe, finding_type = "Verified cross-site scripting", "CWE-79", "xss"
+            fingerprint = _verified_xss_fingerprint(proof, method=method)
+            browser_proof = proof.get("proof_producer") == "browser"
+            proof_contract = (
+                "xss_browser_proof/v1" if browser_proof
+                else "dalfox_browser_or_alert_execution/v1"
+            )
+            tool = "playwright" if browser_proof else "dalfox"
+            description = (
+                "The pinned browser executed the injected payload on the bound target's "
+                "client route and observed the deterministic DOM marker."
+                if browser_proof else
+                "Dalfox observed deterministic browser or alert execution on the bound target."
+            )
+            verdict_reason = (
+                "Canonical browser DOM execution proof" if browser_proof
+                else "Canonical Dalfox execution proof"
+            )
+        if fingerprint in seen_fingerprints:
+            continue
+        seen_fingerprints.add(fingerprint)
         evidence = {
             "schema_version": "hunt-deterministic-finding/v1",
             "authoritative": True,
@@ -189,14 +216,15 @@ async def materialize_verified_hunt_findings(
             "method": method,
             **proof,
         }
-        apply_xss_execution_evidence(
-            {"evidence": evidence},
-            location="client_route" if proof.get("client_route") else "request_parameter",
-            parameter=proof.get("param"),
-            signal="dom_execution" if browser_proof else "browser_or_alert_execution",
-            verifier=capability_name,
-            dom_marker_executed=proof.get("dom_marker_executed") if browser_proof else None,
-        )
+        if not authz:
+            apply_xss_execution_evidence(
+                {"evidence": evidence},
+                location="client_route" if proof.get("client_route") else "request_parameter",
+                parameter=proof.get("param"),
+                signal="dom_execution" if browser_proof else "browser_or_alert_execution",
+                verifier=capability_name,
+                dom_marker_executed=proof.get("dom_marker_executed") if browser_proof else None,
+            )
         finding_id = await conn.fetchval(
             f"""INSERT INTO findings (
                    {target_column}, hunt_run_id, fingerprint, title, description,
@@ -204,9 +232,9 @@ async def materialize_verified_hunt_findings(
                    last_verification_status, last_verification_verdict,
                    last_verification_confidence, last_verified_at, verification_count
                ) VALUES (
-                   $1,$2,$3,'Verified cross-site scripting',
+                   $1,$2,$3,$8,
                    $6,
-                   'high',NULL,$7,'CWE-79',$4,$5::jsonb,'deep_hunt','active',
+                   'high',NULL,$7,$9,$4,$5::jsonb,'deep_hunt','active',
                    'still_vulnerable','exploited',1.0,NOW(),1
                ) ON CONFLICT ({target_column}, fingerprint) WHERE {target_column} IS NOT NULL
                DO UPDATE SET
@@ -229,6 +257,8 @@ async def materialize_verified_hunt_findings(
             json.dumps(evidence),
             description,
             tool,
+            title,
+            cwe,
         )
         await conn.execute(
             f"""INSERT INTO finding_verifications (
@@ -238,7 +268,7 @@ async def materialize_verified_hunt_findings(
                    contract_version, proof_basis, started_at, completed_at, updated_at
                ) VALUES (
                    $1,$2,$3,'completed','success','exploited',
-                   $6,'xss',$4,$4,$5::jsonb,1.0,
+                   $6,$8,$4,$4,$5::jsonb,1.0,
                    'deterministic',$7,
                    'v1','tool_execution',NOW(),NOW(),NOW()
                )""",
@@ -249,6 +279,7 @@ async def materialize_verified_hunt_findings(
             json.dumps(evidence),
             verdict_reason,
             proof_contract.split("/", 1)[0],
+            finding_type,
         )
         findings.append(str(finding_id))
     if findings:

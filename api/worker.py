@@ -122,6 +122,7 @@ from hunt.capability_reservations import (
 )
 from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
 from hunt.deterministic_findings import materialize_verified_hunt_findings
+from hunt.http_outcome import http_action_result
 from hunt.worker_accounting import worker_hunt_budget_accounting
 from runtime.budget_reservations import DurableBudgetReservation
 from runtime.auth_session_store import (
@@ -22657,6 +22658,12 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                             settled_session.evidence_receipt_digest
                         ),
                     )
+                verified_finding_ids = await materialize_verified_hunt_findings(
+                    conn, hunt_id, action_id, uuid.UUID(target.target_id),
+                    authz_base if capability_name == "authz.verify" else target_url,
+                    capability_name, receipt_id, capability_input, observations,
+                    target_kind=target.target_kind,
+                )
                 persisted = await reservation_store.persist_terminal(
                     conn,
                     previous=latest,
@@ -22670,30 +22677,13 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     hunt_id,
                     json.dumps(current_used),
                 )
-                action_result = {
-                    "status": status,
-                    "ok": status == "success",
-                    "error": error,
-                    "partial": partial,
-                    "timed_out": timed_out,
-                    "record_count": len(observations),
-                    "parser_errors": parser_errors[:20],
-                    "budget_consumed": dict(terminal.actual),
-                    "budget_accounting": worker_hunt_budget_accounting(
-                        latest.record.requested,
-                        terminal.actual,
-                        reconciled,
-                        reservation_id=reservation_id,
-                        settlement_status="succeeded",
-                    ),
-                    "budget_reservation_id": reservation_id,
-                    "budget_reservation_state": terminal.status,
-                    "receipt_id": str(receipt_id),
-                    "session": (
-                        settled_session.public_dict()
-                        if settled_session is not None else None
-                    ),
-                }
+                action_result = http_action_result(
+                    status=status, error=error, partial=partial, timed_out=timed_out,
+                    observations=observations, parser_errors=parser_errors,
+                    requested=latest.record.requested, terminal=terminal, reconciled=reconciled,
+                    reservation_id=reservation_id, receipt_id=receipt_id, session=settled_session,
+                    verified_finding_ids=verified_finding_ids,
+                )
                 updated = await conn.execute(
                     """UPDATE hunt_actions
                        SET status=$2, result_summary=$3, receipt_id=$4,
@@ -22736,6 +22726,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             "budget_reservation_state": terminal.status,
             "receipt_id": str(receipt_id),
             "receipt": capability_receipt.public_dict(),
+            "verified_finding_ids": verified_finding_ids,
             "session": (
                 settled_session.public_dict()
                 if settled_session is not None else None

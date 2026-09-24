@@ -4,7 +4,7 @@ name: authorization-idor-bola-bfla-and-property-level-testing
 title: 09. Authorization, IDOR, BOLA, BFLA, and Property-Level Testing
 description: Systematically test horizontal, vertical, tenant, function, object, and property-level authorization
   across UI, API, batch, export, file, and realtime surfaces.
-version: 2.2.0
+version: 2.2.1
 kind: specialist
 phase: active_testing
 risk: medium
@@ -141,6 +141,22 @@ Optional techniques may use `collections.inspect` when available.
 Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques` in the returned
 metadata. A name in the library is not a guarantee that every technique below is executable;
 match the actual operation, request shape and evidence requirements to the live schema.
+
+### Carry promising access-control evidence through verification
+
+Do not stop at a candidate when the existing `authz.verify` contract can test the hypothesis.
+Reuse the selected primary and secondary identities and the actual captured service origin.
+When successful per-principal collection responses exist, include that observed collection route
+so the canonical verifier can test listing membership and replay an owner-only object. Never
+invent a parent listing or replace an unavailable listing with a successful object response.
+
+An ordered pair of two concrete object routes selects the no-listing comparison instead. It can
+establish cross-access but deliberately does not prove entitlement: a shared object is not a bug.
+For an inconclusive result, inspect its comparison reason and existing action-linked captures;
+collect the missing control or change hypothesis instead of repeating the same unchanged request.
+A canonical verified result returns `verified_finding_ids`; retrieve those findings and retain the
+run/action/receipt references. A missing proof remains a lead, not a reason to abandon other
+operator-authorized testing or to rebuild already-working sessions without evidence.
 
 ## Core security hypotheses
 
