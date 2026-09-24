@@ -1,102 +1,95 @@
-name: Verify pinned MinIO mirror content
+name: Validate exact-content SBOM recovery
 on:
   push:
     branches: [diagnostics/pr217-minio-content-identity]
     paths: ['.github/workflows/minio-content-identity.yml']
 permissions:
-  contents: read
+  contents: write
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
-      - name: Verify original index digests and every amd64/arm64 content blob
-        shell: bash
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Reconstruct the exact reviewed product tree without updating the PR
         run: |
-          mkdir -p evidence
-          python3 - <<'PY'
-          import hashlib, json, urllib.error, urllib.parse, urllib.request
+          cp .github/ci/sbom-mirror.patch "$RUNNER_TEMP/sbom-mirror.patch"
+          git fetch --depth=1 origin 2631fd389bc5266e9dd9a340a9e5b5bdcc944bc3
+          git checkout --detach 2631fd389bc5266e9dd9a340a9e5b5bdcc944bc3
+          git apply "$RUNNER_TEMP/sbom-mirror.patch"
+          git add docs/sbom.md scripts/release_sbom.py scripts/release_sbom_stage2.py tests/test_release_sbom_mirrors.py
+          git diff --cached --check
+          test "$(git write-tree)" = fbad38fdade1b160359128bf97e3762ae42bc099
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Install locked test dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+      - uses: ./.github/actions/sbom-tools
+      - name: Offline formats, source contracts, integrity and mirror regressions
+        run: |
+          python -m pytest -q tests/test_release_sbom*.py --junitxml=mirror-tests.xml
+          python scripts/generate_install_manifest.py --check
+          python scripts/check_module_size.py
+          python scripts/check_documentation_policy.py
+      - name: Reproduce the unchanged historical release fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2.4.0 --repo "$GITHUB_REPOSITORY" --pattern release-candidate-receipt.json --dir fixture
+          git fetch --depth=1 origin tag v2.4.0
+          git worktree add --detach "$RUNNER_TEMP/sbom-release-source" 'v2.4.0^{commit}'
+          git show 'v2.4.0:install/release-images.json' > fixture/release-images.json
+          python scripts/release_sbom.py engine --receipt fixture/release-candidate-receipt.json --inventory fixture/release-images.json --version 2.4.0 --source-sha "$(git rev-parse 'v2.4.0^{commit}')" --generator-source-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --output engine-sbom-smoke
+          python scripts/release_sbom.py verify --directory engine-sbom-smoke
+      - name: Full independent catalogs and supporting-service coverage, no omissions
+        run: |
+          python scripts/release_sbom_stage2.py --directory engine-sbom-smoke --source-root "$RUNNER_TEMP/sbom-release-source" --tools "$SHAKERSCAN_SBOM_TOOLS" --output engine-sbom-expanded
+          python scripts/release_sbom.py verify --directory engine-sbom-expanded
+          python - <<'PY'
+          import json
           from pathlib import Path
-          from datetime import datetime, timezone
-          class HTTPSRedirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, req, fp, code, msg, headers, newurl):
-                  if urllib.parse.urlsplit(newurl).scheme != 'https':
-                      raise ValueError('non-HTTPS content redirect')
-                  redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-                  if redirected is not None:
-                      redirected.remove_header('Authorization')
-                  return redirected
-          opener = urllib.request.build_opener(HTTPSRedirect())
-          accept = ', '.join([
-              'application/vnd.oci.image.index.v1+json',
-              'application/vnd.docker.distribution.manifest.list.v2+json',
-              'application/vnd.oci.image.manifest.v1+json',
-              'application/vnd.docker.distribution.manifest.v2+json',
-          ])
-          identities = [
-              ('quay.io/minio/minio', 'teableio/minio', 'sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e'),
-              ('quay.io/minio/mc', 'teableio/minio-mc', 'sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3'),
-          ]
-          records = []
-          for original, repo, digest in identities:
-              params = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': f'repository:{repo}:pull'})
-              with opener.open('https://ghcr.io/token?' + params, timeout=60) as response:
-                  auth = json.load(response)
-              token = auth.get('token') or auth.get('access_token')
-              if not token:
-                  raise ValueError('public pull token unavailable')
-              headers = {'Accept': accept, 'Authorization': 'Bearer ' + token}
-              def content(kind, expected, maximum, retain=False):
-                  if not expected.startswith('sha256:') or len(expected) != 71:
-                      raise ValueError('invalid content digest')
-                  request = urllib.request.Request(f'https://ghcr.io/v2/{repo}/{kind}/{expected}', headers=headers)
-                  hashed, size, chunks = hashlib.sha256(), 0, []
-                  with opener.open(request, timeout=90) as response:
-                      while True:
-                          chunk = response.read(1024 * 1024)
-                          if not chunk:
-                              break
-                          size += len(chunk)
-                          if size > maximum:
-                              raise ValueError('content exceeds bounded verification size')
-                          hashed.update(chunk)
-                          if retain:
-                              chunks.append(chunk)
-                  if 'sha256:' + hashed.hexdigest() != expected:
-                      raise ValueError('content digest mismatch')
-                  return b''.join(chunks), size
-              raw, index_size = content('manifests', digest, 4 * 1024 * 1024, True)
-              index = json.loads(raw)
-              platforms, checked = [], {}
-              for descriptor in index.get('manifests', []):
-                  platform = descriptor.get('platform', {})
-                  if platform.get('os') != 'linux' or platform.get('architecture') not in {'amd64', 'arm64'}:
-                      continue
-                  platform_digest = descriptor['digest']
-                  raw, size = content('manifests', platform_digest, 4 * 1024 * 1024, True)
-                  if size != descriptor['size']:
-                      raise ValueError('platform manifest size mismatch')
-                  manifest = json.loads(raw)
-                  blobs = []
-                  for item in [manifest['config'], *manifest['layers']]:
-                      blob_digest = item['digest']
-                      if blob_digest not in checked:
-                          _, blob_size = content('blobs', blob_digest, 512 * 1024 * 1024)
-                          checked[blob_digest] = blob_size
-                      if checked[blob_digest] != item['size']:
-                          raise ValueError('blob size mismatch')
-                      blobs.append({'digest': blob_digest, 'size': checked[blob_digest]})
-                  platforms.append({'os': 'linux', 'architecture': platform['architecture'], 'digest': platform_digest, 'blobs': blobs})
-              if {p['architecture'] for p in platforms} != {'amd64', 'arm64'}:
-                  raise ValueError('missing required platform')
-              record = {'original_reference': original + '@' + digest, 'retrieval_reference': 'ghcr.io/' + repo + '@' + digest, 'index_digest': digest, 'index_size': index_size, 'platforms': platforms, 'verified_bytes': sum(checked.values()), 'verified_at': datetime.now(timezone.utc).isoformat()}
-              records.append(record)
-              print('Verified original content identity:', record['original_reference'], 'platforms:', [p['architecture'] for p in platforms], 'bytes:', record['verified_bytes'])
-          Path('evidence/minio-content-identity.json').write_text(json.dumps({'schema_version': 1, 'images': records}, indent=2) + '\n')
+          root = Path('engine-sbom-expanded')
+          index = json.loads((root / 'sbom-index.json').read_text())
+          rows = index['extension']['catalogs']
+          mirrored = [r for r in rows if 'retrieval_reference' in r]
+          assert {(r['image'], r['platform']) for r in mirrored} == {(name, arch) for name in ['service-minio', 'service-minio-init'] for arch in ['linux/amd64', 'linux/arm64']}
+          assert all(r['image_reference'].split('@')[1] == r['retrieval_reference'].split('@')[1] for r in mirrored)
+          assert len([r for r in rows if r['scope'] == 'first-party-runtime']) == 10
+          assert len([r for r in rows if r['scope'] == 'supporting-service-runtime']) == 10
+          print('Verified all ten first-party and ten supporting-service platform catalogs, with original MinIO digests and explicit retrieval provenance.')
+          PY
+      - name: Export verified product blobs, never move a branch or publish a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          entries = []
+          for name in ['docs/sbom.md', 'scripts/release_sbom.py', 'scripts/release_sbom_stage2.py', 'tests/test_release_sbom_mirrors.py']:
+              data = Path(name).read_bytes()
+              expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              payload = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'})
+              response = subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs', '--input', '-'], input=payload.encode())
+              actual = json.loads(response)['sha']
+              assert actual == expected
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': actual})
+          Path('verified-tree-entries.json').write_text(json.dumps(entries, indent=2))
+          print(json.dumps(entries))
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: minio-content-identity
-          path: evidence/minio-content-identity.json
+          name: minio-sbom-recovery-validation
+          path: |
+            mirror-tests.xml
+            verified-tree-entries.json
+            engine-sbom-expanded/sbom-index.json
+            engine-sbom-expanded/sbom-source-inputs.json
+            engine-sbom-expanded/sbom-coverage.json
           if-no-files-found: error
           retention-days: 14
