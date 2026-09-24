@@ -1,0 +1,366 @@
+diff --git a/.github/workflows/hunt-record-integrity.yml b/.github/workflows/hunt-record-integrity.yml
+index 89d9ed8..23d12b3 100644
+--- a/.github/workflows/hunt-record-integrity.yml
++++ b/.github/workflows/hunt-record-integrity.yml
+@@ -81,4 +81,5 @@ jobs:
+             tests/test_hunt_service_sources.py \
+             tests/test_hunt_service_sources_postgres.py \
++            tests/test_hunt_budget_amendments_postgres.py \
+             tests/test_service_intelligence_postgres.py
+           python scripts/check_module_size.py
+diff --git a/AGENTS.md b/AGENTS.md
+index 5e98f1c..5a04b97 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -304,6 +304,11 @@ Count attempted, admitted/executed, successful, rejected, and indeterminate acti
+ missing/malformed result is not success. Report settled actual usage separately from ceilings.
+ 
+-Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Cancellation
+-is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
++Budget exhaustion must still preserve the final debrief, unresolved leads, and reason. Before
++finalizing, an operator may explicitly extend the same unfinished Hunt through
++`/hunts/{id}/budget-amendments`: read the current revision, set new total limits, and reuse the same
++idempotency key on retries. Never increase limits automatically. `resume` allows the planner to
++continue only when the reported exhausted dimension has headroom; it does not execute traffic,
++clear device pauses, change permissions, or reset usage. The admission snapshot remains historical.
++Cancellation is distinct. `GET /hunts` is durable searchable history; `/hunts/{id}/record` exports the explicit
+ decision record and debrief, never hidden chain-of-thought. Requests-only export stays separate.
+ 
+diff --git a/api/hunt/run_router.py b/api/hunt/run_router.py
+index 284acaa..162a5a6 100644
+--- a/api/hunt/run_router.py
++++ b/api/hunt/run_router.py
+@@ -13,4 +13,5 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
+ 
+ from .run_service import HuntRunService
++from .budget_amendments import HuntBudgetAmendmentRequest
+ from .skills import HuntSkillError, skill_library
+ from .start_contract import (
+@@ -421,4 +422,17 @@ async def resume_hunt(hunt_id: str):
+ 
+ 
++@router.post("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
++async def amend_hunt_budget(hunt_id: str, request: HuntBudgetAmendmentRequest):
++    """Apply explicit operator-selected total limits, without granting permissions."""
++    return await _service().amend_budget(hunt_id, request)
++
++
++@router.get("/hunts/{hunt_id}/budget-amendments", tags=["Hunt"])
++async def get_hunt_budget_amendments(
++    hunt_id: str, after_revision: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
++):
++    return await _service().budget_amendments(hunt_id, after_revision=after_revision, limit=limit)
++
++
+ __all__ = [
+     "HuntFinishRequest",
+diff --git a/api/hunt/run_service.py b/api/hunt/run_service.py
+index ad08d34..43ded63 100644
+--- a/api/hunt/run_service.py
++++ b/api/hunt/run_service.py
+@@ -12,4 +12,8 @@ import uuid
+ from fastapi import HTTPException
+ 
++from .budget_amendments import (
++    HuntBudgetAmendmentRequest, amendable_dimensions, apply_budget_amendment, read_amendments,
++)
++
+ from .skills import (
+     MAX_CONTEXT_SKILL_SUGGESTIONS,
+@@ -505,4 +509,7 @@ def public_hunt_run(
+         "policy": policy,
+         "budget": _decode_json(item.get("budget_json"), {}),
++        "budget_revision": int(item.get("budget_revision") or 0),
++        "budget_amendable_dimensions": amendable_dimensions({**item, "policy_json": policy}),
++        "budget_amendments_url": f"/hunts/{item.get('id')}/budget-amendments",
+         "budget_used": _decode_json(item.get("budget_used_json"), {}),
+         "final_debrief": _decode_json(item.get("final_debrief"), {}),
+@@ -601,4 +608,16 @@ class HuntRunService:
+         return result
+ 
++    async def amend_budget(self, hunt_id: str, request: HuntBudgetAmendmentRequest) -> dict[str, Any]:
++        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
++        async with self._pool().acquire() as connection:
++            async with connection.transaction():
++                return await apply_budget_amendment(connection, hunt_uuid, request)
++
++    async def budget_amendments(self, hunt_id: str, *, after_revision: int = 0, limit: int = 50) -> dict[str, Any]:
++        hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
++        async with self._pool().acquire() as connection:
++            await hunt_run_or_404(connection, hunt_id)
++            return await read_amendments(connection, hunt_uuid, after_revision=after_revision, limit=limit)
++
+     async def skill_suggestions(
+         self, hunt_id: str, *, signals: list[str] | None = None,
+@@ -924,4 +943,9 @@ class HuntRunService:
+         async with self._pool().acquire() as connection:
+             row = await hunt_run_or_404(connection, hunt_id)
++            budget_history = (
++                await read_amendments(connection, hunt_uuid, limit=MAX_EXPORT_ROWS)
++                if int(dict(row).get("budget_revision") or 0) else
++                {"amendments": [], "has_more": False, "next_revision": None}
++            )
+             actions = await connection.fetch(
+                 """SELECT id, capability_name, status, input_summary,
+@@ -962,5 +986,5 @@ class HuntRunService:
+                     "objective", "bound_skills", "policy", "budgets",
+                     "planner_capability_inputs", "action_outcomes", "receipt_references",
+-                    "persisted_notes", "final_debrief", "http_transactions",
++                    "persisted_notes", "final_debrief", "http_transactions", "budget_amendments",
+                 ],
+                 "excludes": ["hidden_model_chain_of_thought", "context_pack"],
+@@ -974,4 +998,5 @@ class HuntRunService:
+             },
+             "hunt": run,
++            "budget_amendments": budget_history,
+             "decision_trace": [public_hunt_action_trace(action) for action in actions],
+             "methodology_trace": [
+@@ -1144,5 +1169,6 @@ class HuntRunService:
+                 """UPDATE hunt_runs SET status='cancelled', stop_reason='cancelled',
+                           completed_at=NOW(), updated_at=NOW()
+-                   WHERE id=$1 AND status IN ('created','active','awaiting_planner')
++                   WHERE id=$1 AND status IN ('created','active','awaiting_planner','budget_exhausted')
++                     AND completed_at IS NULL
+                    RETURNING *""",
+                 run_uuid,
+diff --git a/api/hunt/start_contract.py b/api/hunt/start_contract.py
+index 5ba1ff1..750e857 100644
+--- a/api/hunt/start_contract.py
++++ b/api/hunt/start_contract.py
+@@ -174,4 +174,11 @@ def hunt_start_public_contract() -> dict[str, Any]:
+         },
+         "skill_catalog": "/hunt/skills",
++        "budget_amendments": {
++            "schema_version": "hunt-budget-amendment/v1",
++            "url_template": "/hunts/{hunt_id}/budget-amendments",
++            "operator_requested_only": True,
++            "limits_are_totals": True,
++            "preserves_usage_and_authority": True,
++        },
+         "budget_profiles": {
+             name: asdict(value) for name, value in HUNT_BUDGET_PROFILES.items()
+diff --git a/api/retest_contract.py b/api/retest_contract.py
+index 4cbe209..8ec5abd 100644
+--- a/api/retest_contract.py
++++ b/api/retest_contract.py
+@@ -3473,4 +3473,6 @@ async def _run_schema_migrations_once(pool) -> None:
+                 )
+             """)
++            from hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
++            await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
+             await conn.execute("""
+                 CREATE TABLE IF NOT EXISTS hunt_skill_events (
+diff --git a/db/init.sql b/db/init.sql
+index b6ede08..bfc015d 100644
+--- a/db/init.sql
++++ b/db/init.sql
+@@ -975,4 +975,5 @@ CREATE TABLE hunt_runs (
+         status IN ('created','active','awaiting_planner','completed','cancelled','failed','budget_exhausted')
+     ),
++    budget_revision INTEGER NOT NULL DEFAULT 0,
+     budget_profile TEXT NOT NULL DEFAULT 'balanced' CHECK (budget_profile IN ('fast','balanced','thorough')),
+     policy_json JSONB NOT NULL DEFAULT '{"allow_oob_interactions":false}'::jsonb,
+@@ -1010,4 +1011,22 @@ CREATE TABLE hunt_actions (
+ CREATE INDEX idx_hunt_actions_run ON hunt_actions(hunt_run_id, started_at);
+ 
++-- Operator budget history does not reset the traffic ledger.
++CREATE TABLE hunt_budget_amendments (
++    id UUID PRIMARY KEY,
++    hunt_run_id UUID NOT NULL REFERENCES hunt_runs(id) ON DELETE CASCADE,
++    revision INTEGER NOT NULL CHECK (revision > 0),
++    request_key_sha256 TEXT NOT NULL,
++    request_digest TEXT NOT NULL,
++    limits_before JSONB NOT NULL,
++    limits_after JSONB NOT NULL,
++    used_snapshot JSONB NOT NULL,
++    reason TEXT NOT NULL,
++    status_before TEXT NOT NULL,
++    status_after TEXT NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++    UNIQUE (hunt_run_id, revision),
++    UNIQUE (hunt_run_id, request_key_sha256)
++);
++
+ -- Methodology lifecycle is separate from the planner context so the complete catalog and
+ -- historical event stream never consume the model's working context.
+diff --git a/docs/hunt-operator-workflows.md b/docs/hunt-operator-workflows.md
+index e7a66a8..405c04b 100644
+--- a/docs/hunt-operator-workflows.md
++++ b/docs/hunt-operator-workflows.md
+@@ -35,6 +35,8 @@ A missing executor is a capability gap, not an authorization problem.
+ - [ ] Build authorized state-changing collection and multi-step browser execution with real
+   credential handling, accounting, cancellation, and evidence. Visibility alone is not implementation.
+-- [ ] Add deliberate operator budget/resource amendments, including complete port-range work,
+-  additional selected identities, and request collections. Preserve earlier action snapshots/history.
++- [x] Add operator-requested total-budget extensions above startup presets and resume unfinished
++  exhausted Hunts. Preserve live holds, usage, identity, permissions, initial snapshots and history.
++- [ ] Extend resource amendments to additional selected identities and request collections. Budget
++  amendments do not attach credentials/collections or enable additional capabilities.
+ - [x] Reuse normalized Hunt service observations in shared durable knowledge through canonical
+   settlement receipts, with idempotent action identity, provenance, locator checks and existing
+@@ -98,2 +100,53 @@ declaration/body agreement, all delivered body hashes, protocol selection/read/b
+ priority-only web signals, installation and unchanged run authority. Independent vulnerability
+ recall measurements, general workflow execution and operator amendments remain open.
++
++
++## Operator budget extensions
++
++The Hunt UI now offers **Extend this Hunt's budget** for unfinished active, awaiting-planner and
++budget-exhausted runs. An explicit operator edit sets a new **total**, not a delta. Startup profiles
++remain convenient defaults; this endpoint can increase their limits, including total TCP attempts
++for full-port work. Actual calls still use their existing per-action limits and batching.
++
++Read the current run's `budget_revision`, `budget`, `budget_used`, and
++`budget_amendable_dimensions`. Submit `POST /hunts/{id}/budget-amendments`, for example:
++
++```json
++{
++  "schema_version": "hunt-budget-amendment/v1",
++  "limits": {"max_tcp_ports": 65535},
++  "expected_revision": 0,
++  "idempotency_key": "operator-port-range-extension-1",
++  "operator_confirmed": true,
++  "resume": true,
++  "reason": "Operator requested all TCP ports on the same authorized asset"
++}
++```
++
++Use the revision actually returned by the server, and a fresh retry key for each distinct operator
++edit. Reuse the same body/key after a lost response; it cannot apply the increase twice. A concurrent
++edit returns a revision conflict rather than overwriting another operator's choice. The API accepts
++multiple dimensions in one transaction; the UI edits one dimension at a time.
++
++`resume: true` moves an unfinished budget-exhausted run to `awaiting_planner` only when its reported
++exhausted dimension has headroom. No action is started automatically. Without resume, exhaustion
++remains until deliberately addressed. Completed, failed, cancelled or finalized exhausted runs
++are not reopened. Exhausted unfinished runs remain cancellable, including their owned child jobs.
++
++The existing Hunt row lock serializes amendments with admission/settlement/cancellation. Usage and
++outstanding holds never reset; earlier action/reservation objects and the admission snapshot stay
++unchanged. The denormalized current policy budget mirrors the new limits, but its permissions and
++capability allowlist do not change. Increased device request/fragility ceilings preserve pacing,
++health/traffic freezes and all usage; device daily and child-scan limits remain independent. A zero
++ceiling can be increased only where the saved policy already permits it; this does not add a
++capability originally excluded from the run.
++
++`GET /hunts/{id}/budget-amendments?after_revision=0&limit=50` pages the durable history, which also
++appears in `/record` with explicit truncation. Events retain before/after limits, the usage snapshot,
++redacted reason and status transition. Retry-key hashes are internal. Deleting the owning Hunt or
++target cascades the event history; this audit table is not a second traffic ledger.
++
++This completes budget-only amendments, not adding principals/collections, clearing device health
++pauses, arbitrary protocol execution, or an autonomous child-result driver. Each remains separate
++unfinished work above. Budget extensions must reflect a real operator request, never an agent's
++silent response to an exhausted allowance.
+diff --git a/skills/hunt/SKILL.md b/skills/hunt/SKILL.md
+index d4ba9fd..da06699 100644
+--- a/skills/hunt/SKILL.md
++++ b/skills/hunt/SKILL.md
+@@ -136,4 +136,16 @@ require a separate typed, approval-gated verifier and are never enabled by the s
+ capability.
+ 
++## Operator-requested budget extension
++
++When the operator asks for more budget, use `POST /hunts/{hunt_id}/budget-amendments` with the
++current run's `expected_revision`, new **total** `limits`, a stable retry `idempotency_key`, and
++`operator_confirmed: true`. Never fabricate confirmation or silently increase an allowance.
++`resume: true` permits continuing an unfinished exhausted Hunt once the exhausted dimension has
++headroom; no action starts automatically. Existing usage, queued holds, identities and permissions
++stay in place. Device pauses and independent device/per-action limits still apply. Inspect current
++state after a conflict; retry a lost response with the same key/body, not an extra increase.
++Completed/cancelled/finalized runs stay terminal. Read `GET /openapi.json` for the request schema;
++`GET /hunts/{hunt_id}/budget-amendments` pages the saved before/after history.
++
+ ## Candidates and proof
+ 
+diff --git a/tests/test_hunt_cancel_cascade.py b/tests/test_hunt_cancel_cascade.py
+index c993cca..d3dab2d 100644
+--- a/tests/test_hunt_cancel_cascade.py
++++ b/tests/test_hunt_cancel_cascade.py
+@@ -55,5 +55,6 @@ def test_cancelling_an_already_terminal_hunt_does_not_cascade():
+     # that some other path has since legitimately restarted or completed.
+     source = _cancel_source()
+-    live_guard = source.index("status IN ('created','active','awaiting_planner')")
++    live_guard = source.index("status IN ('created','active','awaiting_planner','budget_exhausted')")
++    assert "AND completed_at IS NULL" in source
+     early_return = source.index("return public_hunt_run(row)")
+     cascade = source.index("options->'hunt_dispatch'")
+diff --git a/tests/test_hunt_run_router.py b/tests/test_hunt_run_router.py
+index f2239f9..bbd4484 100644
+--- a/tests/test_hunt_run_router.py
++++ b/tests/test_hunt_run_router.py
+@@ -641,4 +641,6 @@ def test_hunt_run_router_owns_the_complete_public_hunt_lifecycle():
+         (frozenset({"POST"}), "/hunts/{hunt_id}/cancel", "cancel_hunt"),
+         (frozenset({"POST"}), "/hunts/{hunt_id}/resume", "resume_hunt"),
++        (frozenset({"POST"}), "/hunts/{hunt_id}/budget-amendments", "amend_hunt_budget"),
++        (frozenset({"GET"}), "/hunts/{hunt_id}/budget-amendments", "get_hunt_budget_amendments"),
+         (
+             frozenset({"POST"}),
+diff --git a/ui/src/app/hunt/page.tsx b/ui/src/app/hunt/page.tsx
+index 4a133ec..22e173d 100644
+--- a/ui/src/app/hunt/page.tsx
++++ b/ui/src/app/hunt/page.tsx
+@@ -43,4 +43,5 @@ import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
+ import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
+ import HttpArchiveExport from '@/components/HttpArchiveExport'
++import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
+ import { usableWebTargets } from '@/lib/targetChoices'
+ 
+@@ -819,5 +820,5 @@ function HuntContent() {
+                 <div className="rounded bg-gray-950 p-3">
+                   <span className="block text-xs text-gray-500">Budget</span>
+-                  <span className="text-white">{hunt.budget_profile}</span>
++                  <span className="text-white">{hunt.budget_profile}{(hunt.budget_revision ?? 0) > 0 ? ' (amended)' : ''}</span>
+                 </div>
+                 <div className="rounded bg-gray-950 p-3">
+@@ -887,5 +888,5 @@ function HuntContent() {
+                 The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
+               </div>
+-              {['active', 'awaiting_planner'].includes(hunt.status) && (
++              {['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at && (
+                 <Button variant="danger" onClick={cancel}>Cancel session</Button>
+               )}
+@@ -895,4 +896,6 @@ function HuntContent() {
+             </Card>
+ 
++            <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
++
+             <Card className="space-y-4 p-5">
+               <div>
+diff --git a/ui/src/lib/huntV2.ts b/ui/src/lib/huntV2.ts
+index 5520ddc..18fc6e8 100644
+--- a/ui/src/lib/huntV2.ts
++++ b/ui/src/lib/huntV2.ts
+@@ -56,4 +56,7 @@ export interface HuntV2 {
+   policy_adjustments?: string[]
+   budget: Record<string, number>
++  budget_revision?: number
++  budget_amendable_dimensions?: string[]
++  budget_amendments_url?: string
+   budget_used: Record<string, number>
+   context_pack?: Record<string, unknown>
+@@ -301,4 +304,24 @@ export async function cancelHuntV2(huntId: string): Promise<HuntV2> {
+ }
+ 
++export interface HuntBudgetAmendmentInput {
++  limits: Record<string, number>
++  expected_revision: number
++  idempotency_key: string
++  operator_confirmed: true
++  resume?: boolean
++  reason?: string
++}
++
++export async function amendHuntBudget(huntId: string, request: HuntBudgetAmendmentInput): Promise<{
++  budget_revision: number; status: HuntV2['status']; replayed: boolean; device_traffic_frozen: boolean
++}> {
++  const response = await fetch(`${API_URL}/hunts/${encodeURIComponent(huntId)}/budget-amendments`, {
++    method: 'POST', headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({ schema_version: 'hunt-budget-amendment/v1', ...request }),
++  })
++  if (!response.ok) throw new Error(await getApiErrorMessage(response, `Failed to extend Hunt budget (${response.status})`))
++  return response.json()
++}
++
+ export async function confirmHuntShellPlan(huntId: string, plan: DeviceAgentShellPlan): Promise<HuntV2> {
+   const response = await fetch(

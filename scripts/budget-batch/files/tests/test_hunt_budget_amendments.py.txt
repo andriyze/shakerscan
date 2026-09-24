@@ -1,0 +1,322 @@
+"""Operator budget extensions preserve authority, holds, history and cancellation."""
+
+import asyncio
+from copy import deepcopy
+from dataclasses import asdict
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
+import uuid
+
+import httpx
+import pytest
+from fastapi import FastAPI, HTTPException
+
+from api.hunt import run_router
+from api.hunt.budget_amendments import (
+    BUDGET_AMENDMENT_SCHEMA_SQL, HuntBudgetAmendmentRequest, read_amendments,
+)
+from api.hunt.device_policy import DeviceHuntPolicyState
+from api.hunt.run_service import HuntRunService, public_hunt_run
+from api.hunt.start_contract import HUNT_BUDGET_PROFILES, HuntBudget
+from api.runtime.budgets import reserve_budget_snapshot, reconcile_budget_snapshot
+
+
+NOW = datetime(2026, 9, 24, tzinfo=timezone.utc)
+
+
+def run_row(kind="network", **overrides):
+    budget = asdict(HUNT_BUDGET_PROFILES["thorough"])
+    context = {"hunt_start_contract": {"resolved_budget": deepcopy(budget)}, "skills": {"bound": []}}
+    if kind == "device":
+        context["device_policy_state"] = DeviceHuntPolicyState.initial(
+            safety_profile="authenticated_active", fragility_limit=budget["max_device_fragility_points"],
+            request_limit=budget["max_http_requests"],
+        ).public_dict()
+    return {
+        "id": uuid.uuid4(), "target_kind": kind, "target_id": uuid.uuid4(), "device_target_id": None,
+        "objective": "Investigate this authorized asset", "budget_json": budget,
+        "budget_used_json": {"tcp_ports_attempted": 10_000, "http_requests": 50, "agent_actions": 5},
+        "budget_revision": 0, "status": "budget_exhausted", "stop_reason": "budget_exhausted:tcp_ports_attempted",
+        "policy_json": {"active_testing": True, "network_discovery": True, "allowed_capabilities": ["ports.discover", "http.request"]},
+        "context_pack": context, "completed_at": None, "created_at": NOW, "updated_at": NOW,
+        **overrides,
+    }
+
+
+def request(**overrides):
+    return HuntBudgetAmendmentRequest(**{
+        "limits": {"max_tcp_ports": 65_535}, "expected_revision": 0,
+        "idempotency_key": "operator-request-1", "operator_confirmed": True, "resume": True, **overrides,
+    })
+
+
+class Connection:
+    def __init__(self, row=None):
+        self.row = deepcopy(row or run_row())
+        self.events = []
+        self.lock = asyncio.Lock()
+
+    def transaction(self):
+        connection = self
+
+        class Transaction:
+            async def __aenter__(self):
+                await connection.lock.acquire()
+                self.before = deepcopy((connection.row, connection.events))
+
+            async def __aexit__(self, exc, *_):
+                if exc:
+                    connection.row, connection.events = self.before
+                connection.lock.release()
+        return Transaction()
+
+    async def fetchrow(self, sql, *args):
+        if sql.startswith("SELECT * FROM hunt_runs"):
+            return deepcopy(self.row) if args[0] == self.row["id"] else None
+        if sql.startswith("SELECT * FROM hunt_budget_amendments"):
+            return next((deepcopy(e) for e in self.events if e["hunt_run_id"] == args[0] and e["request_key_sha256"] == args[1]), None)
+        if sql.startswith("INSERT INTO hunt_budget_amendments"):
+            names = ("id", "hunt_run_id", "revision", "request_key_sha256", "request_digest", "limits_before", "limits_after", "used_snapshot", "reason", "status_before", "status_after")
+            event = {**dict(zip(names, args, strict=True)), "created_at": NOW}
+            self.events.append(deepcopy(event))
+            return event
+        if sql.startswith("UPDATE hunt_runs SET budget_json"):
+            assert "budget_used_json=" not in sql
+            self.row.update(budget_json=json.loads(args[1]), budget_revision=args[2], context_pack=json.loads(args[3]), status=args[4], stop_reason=args[5], policy_json=json.loads(args[6]))
+            return deepcopy(self.row)
+        raise AssertionError(sql)
+
+    async def fetch(self, sql, *args):
+        assert sql.startswith("SELECT * FROM hunt_budget_amendments")
+        return [deepcopy(e) for e in self.events if e["hunt_run_id"] == args[0] and e["revision"] > args[1]][:args[2]]
+
+
+class Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        conn = self.conn
+
+        class Acquire:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *_):
+                return False
+        return Acquire()
+
+
+def apply(conn, req=None):
+    return asyncio.run(HuntRunService(lambda: Pool(conn)).amend_budget(str(conn.row["id"]), req or request()))
+
+
+def test_full_port_total_extends_existing_hunt_without_resetting_work():
+    conn = Connection()
+    before = deepcopy(conn.row)
+    result = apply(conn)
+    assert result["budget"]["max_tcp_ports"] == 65_535
+    assert result["budget_revision"] == 1 and result["status"] == "awaiting_planner"
+    assert result["stop_reason"] is None and result["execution_started"] is False
+    assert result["authority_changed"] is False
+    for name in ("id", "budget_used_json", "context_pack", "target_id", "completed_at"):
+        assert conn.row[name] == before[name], name
+    assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}
+    limits = HuntBudget(**result["budget"]).ledger_limits()
+    # Previously consumed ports and a live hold are still counted after extension.
+    used = {name: result["budget_used"].get(name, 0) for name in limits}
+    held = reserve_budget_snapshot(limits, used, {"tcp_ports_attempted": 55_535})
+    assert held["tcp_ports_attempted"] == 65_535
+    assert reconcile_budget_snapshot(held, {"tcp_ports_attempted": 55_535}, {"tcp_ports_attempted": 100})["tcp_ports_attempted"] == 10_100
+    assert result["amendment"]["limits_before"]["max_tcp_ports"] == 10_000
+
+
+def test_idempotence_and_revisions_survive_retry_and_cancel():
+    conn = Connection()
+    first = apply(conn)
+    repeated = apply(conn)
+    assert repeated["amendment"] == first["amendment"] and repeated["replayed"] is True
+    assert len(conn.events) == 1
+    conn.row["status"] = "cancelled"
+    conn.row["completed_at"] = NOW
+    assert apply(conn)["status"] == "cancelled"
+    with pytest.raises(HTTPException, match="different budget amendment"):
+        apply(conn, request(limits={"max_tcp_ports": 70_000}))
+    with pytest.raises(HTTPException, match="unfinished"):
+        apply(conn, request(idempotency_key="new-key", expected_revision=1, limits={"max_tcp_ports": 70_000}))
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "completed", "created"])
+def test_terminal_or_unstarted_hunt_is_not_reopened(status):
+    conn = Connection(run_row(status=status))
+    with pytest.raises(HTTPException, match="unfinished"):
+        apply(conn)
+    assert not conn.events
+
+
+def test_finalized_budget_exhausted_run_is_not_reopened():
+    with pytest.raises(HTTPException, match="unfinished"):
+        apply(Connection(run_row(completed_at=NOW)))
+
+
+@pytest.mark.parametrize("limits,match", [
+    ({"max_tcp_ports": 9999}, "decrease"), ({"max_tcp_ports": 10000}, "increase"),
+    ({"max_http_requests": -1}, "between"), ({"max_duration_seconds": 2**53}, "between"),
+    ({"magic_budget": 5}, "Unknown"), ({"max_state_changing_requests": 81}, "permission"),
+])
+def test_invalid_or_permission_expanding_request_does_not_mutate(limits, match):
+    conn = Connection()
+    before = deepcopy(conn.row)
+    with pytest.raises(HTTPException, match=match):
+        apply(conn, request(limits=limits))
+    assert conn.row == before and not conn.events
+
+
+def test_unrelated_extension_does_not_clear_exhaustion_and_no_resume_is_honored():
+    conn = Connection()
+    with pytest.raises(HTTPException, match="exhausted dimension"):
+        apply(conn, request(limits={"max_http_requests": 30_000}))
+    assert not conn.events
+    assert apply(conn, request(resume=False))["status"] == "budget_exhausted"
+
+
+@pytest.mark.parametrize("freeze", ["operator_pause", "health_degradation", "policy_violation", "budget_exhausted"])
+def test_device_extension_preserves_health_pacing_and_freezes(freeze):
+    row = run_row("device")
+    state = row["context_pack"]["device_policy_state"]
+    state.update(traffic_frozen=True, freeze_reason=freeze, consecutive_health_failures=2, requests_used=7, fragility_used=8)
+    conn = Connection(row)
+    apply(conn, request(limits={"max_tcp_ports": 65_535, "max_http_requests": 40_000, "max_device_fragility_points": 1000}))
+    expected = {**state, "request_limit": 40_000, "fragility_limit": 1000}
+    assert conn.row["context_pack"]["device_policy_state"] == expected
+
+
+def test_two_concurrent_operator_edits_do_not_overwrite_each_other():
+    conn = Connection()
+    service = HuntRunService(lambda: Pool(conn))
+
+    async def race():
+        return await asyncio.gather(
+            service.amend_budget(str(conn.row["id"]), request()),
+            service.amend_budget(str(conn.row["id"]), request(idempotency_key="second-edit")),
+            return_exceptions=True,
+        )
+    results = asyncio.run(race())
+    assert sum(isinstance(item, HTTPException) and item.status_code == 409 for item in results) == 1
+    assert conn.row["budget_revision"] == 1 and len(conn.events) == 1
+
+
+def test_history_pages_and_current_projection_do_not_duplicate_the_event_stream():
+    conn = Connection()
+    apply(conn)
+    apply(conn, request(expected_revision=1, idempotency_key="second", limits={"max_tcp_ports": 70_000}))
+    first = asyncio.run(read_amendments(conn, conn.row["id"], limit=1))
+    assert first["has_more"] and first["next_revision"] == 1
+    second = asyncio.run(read_amendments(conn, conn.row["id"], after_revision=1, limit=1))
+    assert not second["has_more"] and second["amendments"][0]["revision"] == 2
+    public = public_hunt_run(conn.row)
+    assert public["budget_revision"] == 2 and "budget_amendments" not in public["context_pack"]
+    assert "request_key_sha256" not in repr(first) and "request_digest" not in repr(first)
+
+
+@pytest.mark.parametrize("bad", [
+    {"operator_confirmed": False}, {"operator_confirmed": "true"},
+    {"limits": {"max_tcp_ports": True}}, {"limits": {"max_tcp_ports": "65535"}},
+    {"limits": {}}, {"expected_revision": True}, {"target_id": "foreign"},
+    {"policy": {"active_testing": True}}, {"resume": "true"},
+])
+def test_public_route_validates_explicit_bounded_inputs(monkeypatch, bad):
+    conn = Connection()
+    monkeypatch.setattr(run_router, "_service_provider", lambda: HuntRunService(lambda: Pool(conn)))
+    app = FastAPI()
+    app.include_router(run_router.router)
+
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
+            return await client.post(f"/hunts/{conn.row['id']}/budget-amendments", json={**request().model_dump(), **bad})
+    response = asyncio.run(send())
+    assert response.status_code == 422, response.text
+    assert not conn.events
+
+
+def test_fresh_and_upgrade_schema_agree():
+    initial = (Path(__file__).resolve().parents[1] / "db/init.sql").read_text()
+    definition = re.search(r"CREATE TABLE hunt_budget_amendments \(.*?\n\);", initial, re.S)[0]
+    assert definition in BUDGET_AMENDMENT_SCHEMA_SQL.replace("IF NOT EXISTS ", "")
+    assert "ON DELETE CASCADE" in definition and "UNIQUE (hunt_run_id, request_key_sha256)" in definition
+
+
+def test_public_route_extends_and_reads_history_without_starting_an_action(monkeypatch):
+    conn = Connection()
+    monkeypatch.setattr(run_router, "_service_provider", lambda: HuntRunService(lambda: Pool(conn)))
+    app = FastAPI()
+    app.include_router(run_router.router)
+
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
+            path = f"/hunts/{conn.row['id']}/budget-amendments"
+            before = await client.get(path)
+            assert before.json()["amendments"] == []
+            first = await client.post(path, json=request().model_dump())
+            assert first.status_code == 200, first.text
+            duplicate = await client.post(path, json=request().model_dump())
+            assert duplicate.status_code == 200 and duplicate.json()["replayed"] is True
+            history = await client.get(path, params={"limit": 1})
+            assert history.status_code == 200 and len(history.json()["amendments"]) == 1
+            other = await client.get(f"/hunts/{uuid.uuid4()}/budget-amendments")
+            assert other.status_code == 404
+            assert (await client.get(path, params={"limit": 201})).status_code == 422
+            assert first.json()["execution_started"] is False
+            assert first.json()["budget_used"]["tcp_ports_attempted"] == 10000
+    asyncio.run(send())
+
+
+def test_amendment_reason_uses_existing_secret_redaction():
+    result = apply(Connection(), request(reason="Authorization: Bearer private-test-token-value"))
+    assert "private-test-token-value" not in result["amendment"]["reason"]
+
+
+def test_record_export_includes_bounded_budget_history(monkeypatch):
+    from api.hunt import run_service
+
+    class ExportConnection(Connection):
+        async def fetch(self, sql, *args):
+            if "FROM hunt_actions" in sql or "FROM hunt_skill_events" in sql:
+                return []
+            return await super().fetch(sql, *args)
+
+    async def zero(*args, **kwargs):
+        return 0
+
+    async def empty(*args, **kwargs):
+        return []
+
+    async def stats(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(run_service, "MAX_EXPORT_ROWS", 1)
+    monkeypatch.setattr(run_service, "count_transactions", zero)
+    monkeypatch.setattr(run_service, "read_transactions", empty)
+    monkeypatch.setattr(run_service, "read_archive_stats", stats)
+    conn = ExportConnection()
+    apply(conn)
+    apply(conn, request(expected_revision=1, idempotency_key="another", limits={"max_tcp_ports": 70000}))
+    result = asyncio.run(HuntRunService(lambda: Pool(conn)).export_record(str(conn.row["id"])))
+    assert result["hunt"]["budget_revision"] == 2
+    assert result["budget_amendments"]["has_more"] is True
+    assert result["budget_amendments"]["next_revision"] == 1
+    assert len(result["budget_amendments"]["amendments"]) == 1
+    assert "request_key_sha256" not in json.dumps(result, default=str)
+
+
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+def test_multi_dimension_extension_keeps_disabled_permissions_and_original_snapshot(kind):
+    conn = Connection(run_row(kind, status="active", stop_reason=None))
+    before = deepcopy(conn.row)
+    result = apply(conn, request(limits={"max_http_requests": 40000, "max_capability_calls": 5000}, resume=False))
+    assert result["status"] == "active" and result["authority_changed"] is False
+    assert conn.row["context_pack"]["hunt_start_contract"] == before["context_pack"]["hunt_start_contract"]
+    assert conn.row["policy_json"] == {**before["policy_json"], "budget": result["budget"]}
+    assert result["budget_used"] == before["budget_used_json"]
