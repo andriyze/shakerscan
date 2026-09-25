@@ -389,6 +389,78 @@ async def materialize_ai_boundary_proposal(request: AIBoundaryMaterializeRequest
     }
 
 
+@router.post("/ai/targets/{target_id}/boundary/verify")
+async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyRequest):
+    """Queue a ready proposal through the existing AI Boundary worker path.
+
+    This is intentionally not a new execution engine. Materialization validates the
+    proposal against PR #149's executable contracts, then the normal AI target scan
+    lifecycle resolves principals/credentials, authorization receipts, budgets,
+    evidence manifests and finding promotion.
+    """
+    try:
+        materialized = materialize_boundary_contract(
+            request.proposal,
+            boundary_base=request.boundary_base,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if request.environment not in {"preview", "staging", "development"}:
+        raise HTTPException(status_code=422, detail="AI Boundary verification remains non-production")
+    if request.scan_profile not in AI_SCAN_PROFILES:
+        raise HTTPException(status_code=422, detail="Unsupported AI scan profile")
+
+    target_uuid = _uuid_or_400(target_id, "AI target id")
+    async with _pool().acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM ai_targets WHERE id=$1", target_uuid)
+        if not row:
+            raise HTTPException(status_code=404, detail="AI target not found")
+        target = row_to_dict(row)
+        metadata = _decode_json_value(target.get("metadata_json")) or {}
+        # Per-run override only: never mutate the saved target or make a Hunt proposal
+        # silently become standing policy.
+        metadata["boundary_contract"] = materialized["boundary_contract"]
+        metadata["boundary_proposal"] = {
+            "hypothesis_id": materialized["hypothesis_id"],
+            "proposal_sha256": materialized["proposal_sha256"],
+            "boundary_contract_sha256": materialized["boundary_contract_sha256"],
+            "provenance": materialized["provenance"],
+        }
+        target["metadata_json"] = metadata
+
+        credential_row = await conn.fetchrow(
+            "SELECT * FROM ai_target_credentials WHERE ai_target_id=$1", target_uuid
+        )
+        principal_rows = await conn.fetch(
+            """SELECT * FROM ai_target_principals
+               WHERE ai_target_id=$1 AND is_active=true ORDER BY role,label""",
+            target_uuid,
+        )
+        credential_profile_ref, principal_refs = await _resolve_ai_gate_credential_refs(
+            conn, target_id=target_id, credential_row=credential_row,
+            principal_rows=list(principal_rows),
+        )
+
+    # Reuse the normal queue helper with a one-run metadata override rather than
+    # duplicating its authorization/credential/evidence path.
+    scan_request = AITargetScanRequest(
+        probe_pack="shaker-ai-boundary",
+        scan_profile=request.scan_profile,
+        environment=request.environment,
+        approval_receipt_id=request.approval_receipt_id,
+        ai_judge_enabled=False,
+        semantic_judge_enabled=False,
+    )
+    return await _queue_ai_target_scan(
+        target_id,
+        scan_request,
+        target_override=target,
+        resolved_credential_profile_ref=credential_profile_ref,
+        resolved_principal_refs=principal_refs,
+    )
+
+
 @router.get("/ai/inventory")
 async def get_ai_inventory(
     root_domain: Optional[str] = None,
@@ -2023,6 +2095,13 @@ class AIBoundaryMaterializeRequest(BaseModel):
     boundary_base: dict[str, Any]
 
 
+class AIBoundaryVerifyRequest(AIBoundaryMaterializeRequest):
+    """Materialize and queue through the existing AI Gate scan lifecycle."""
+    environment: str = "preview"
+    scan_profile: str = "standard"
+    approval_receipt_id: Optional[str] = None
+
+
 class AITargetConnectivityTestRequest(BaseModel):
     prompt: str = "ShakerScan connectivity check. Reply with a short safe response."
     timeout_seconds: int = Field(default=15, ge=1, le=60)
@@ -2324,7 +2403,14 @@ async def _fetch_honey_ai_gate_registry(base_url: str) -> dict[str, Any]:
     return await asyncio.to_thread(_fetch_json_url, url)
 
 
-async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) -> dict[str, Any]:
+async def _queue_ai_target_scan(
+    target_id: str,
+    request: AITargetScanRequest,
+    *,
+    target_override: dict[str, Any] | None = None,
+    resolved_credential_profile_ref: dict[str, Any] | None = None,
+    resolved_principal_refs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if request.probe_pack not in AI_PROBE_PACKS:
         raise HTTPException(status_code=400, detail=f"probe_pack must be one of: {', '.join(sorted(AI_PROBE_PACKS))}")
     if request.scan_profile not in AI_SCAN_PROFILES:
@@ -2384,9 +2470,27 @@ async def _queue_ai_target_scan(target_id: str, request: AITargetScanRequest) ->
             require_expiry=credentials_selected,
         )
 
-        target = row_to_dict(target_row)
+        target = copy.deepcopy(target_override) if target_override is not None else row_to_dict(target_row)
         for key in ("headers_template", "request_template", "metadata_json"):
             target[key] = _decode_json_value(target.get(key)) or {}
+        if target_override is not None:
+            # The override may change only ephemeral metadata for this run. Identity,
+            # transport, production classification and budgets remain the saved target.
+            saved = row_to_dict(target_row)
+            immutable = (
+                "id", "name", "target_type", "endpoint_url", "method", "headers_template",
+                "request_template", "response_path", "streaming_mode", "rate_limit_rps",
+                "token_budget", "request_budget", "production_mode", "is_active",
+            )
+            for key in immutable:
+                if key in saved:
+                    saved_value = _decode_json_value(saved[key]) if key in {"headers_template", "request_template"} else saved[key]
+                    if target.get(key) != (saved_value or {} if key in {"headers_template", "request_template"} else saved_value):
+                        raise HTTPException(status_code=409, detail=f"AI boundary run override cannot change saved target field: {key}")
+        if resolved_credential_profile_ref is not None:
+            credential_profile_ref = resolved_credential_profile_ref
+        if resolved_principal_refs is not None:
+            principal_refs = resolved_principal_refs
         worker_options, storage_options = _build_ai_worker_options(
             target=target,
             credential_profile_ref=credential_profile_ref,
