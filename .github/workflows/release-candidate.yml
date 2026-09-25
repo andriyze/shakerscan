@@ -1296,6 +1296,8 @@ jobs:
             --require-check 'dast:D-2 retains request-based SQLi result' \
             --require-check 'dast:D-3 retains request-based XSS result' \
             --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
+            --require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding' \
+            --require-pass 'hunt:H-20 protected and shared objects remain unverified' \
             --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
             --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
             --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \

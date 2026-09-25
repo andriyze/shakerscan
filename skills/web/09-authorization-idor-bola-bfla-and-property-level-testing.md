@@ -142,6 +142,28 @@ Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques`
 metadata. A name in the library is not a guarantee that every technique below is executable;
 match the actual operation, request shape and evidence requirements to the live schema.
 
+### Complete an observed read-access lead
+
+When a relevant object read has evidence and two selected principals, establish their opaque
+sessions with `auth.session.establish` and invoke `authz.verify` rather than ending with a
+candidate count. Supply the actual caller-scoped collection/listing and its observed item route
+on the same service. Preserve parent/tenant identifiers and the method/query shape from the
+capture. Use retained collections or authorized reads to resolve a missing route; do not invent
+an ownership listing or an entitlement rule.
+
+The current collection verifier funds one producer and one replay per call. Keep its routes
+focused on this lead, not the whole crawl inventory. A pair of concrete object URLs with no
+listing selects the separate two-object comparison: useful cross-access evidence, but not by
+itself proof that the access violates entitlement. An inconclusive result here is not a session
+failure; read its reason and seek the missing evidence without restarting the Hunt or asking for
+the same authorization again. Continue other compatible work when that evidence is unavailable.
+
+On completed verification, inspect the canonical receipt and `verified_finding_ids`, then read
+the persisted findings. A successful request or candidate submission is not proof completion.
+Reuse the same action idempotency key after a lost response; a deliberate retest gets a new key.
+Record the proof, refutation, or exact unresolved evidence gap. Do not change budgets or count an
+unverified candidate as a verified result just to finish the lead.
+
 ## Core security hypotheses
 
 - A peer can read or modify another user's object by changing an identifier.

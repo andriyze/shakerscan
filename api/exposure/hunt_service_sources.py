@@ -26,7 +26,7 @@ SERVICE_OBSERVATION_KINDS = {
     "service.fingerprint": frozenset({"open_port", "service"}),
     "web.probe": frozenset({"http_fingerprint"}),
     "http.request": frozenset({"http_observation"}),
-    "collections.replay_safe": frozenset({"http_observation"}),
+    "collections.replay_safe": frozenset({"http_observation", "request_replay"}),
 }
 MAX_HUNT_SOURCES = 12
 MAX_RECEIPT_BYTES = 2 * 1024 * 1024

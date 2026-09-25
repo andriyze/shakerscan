@@ -2010,6 +2010,13 @@ def run_hunt() -> H.Scorecard:
                     "next_actions": [],
                 })
 
+    try:
+        from . import hunt_authz_proof
+    except ImportError:  # plain-script runner uses its own directory on sys.path
+        import hunt_authz_proof
+    hunt_authz_proof.run(H, sc, authority=_hunt_fixture_authority,
+        start_payload=_hunt_start_payload, fixture_base=FIXTURES_BASE, nonce=_RUN_NONCE)
+
     return sc
 
 

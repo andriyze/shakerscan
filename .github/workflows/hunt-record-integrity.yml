@@ -78,11 +78,18 @@ jobs:
         run: |
           test -n "$HUNT_TEST_POSTGRES_DSN"
           python -m pytest -q --junitxml=artifacts/hunt-services.xml \
+            tests/test_hunt_findings_attribution.py \
+            tests/test_hunt_replay_service_evidence.py \
             tests/test_hunt_service_sources.py \
             tests/test_hunt_service_sources_postgres.py \
             tests/test_hunt_budget_amendments_postgres.py \
             tests/test_service_intelligence_postgres.py
           python scripts/check_module_size.py
+      - name: Canonical authorization proof and real PostgreSQL materialization
+        run: |
+          test -n "$HUNT_TEST_POSTGRES_DSN"
+          python -m pytest -q --junitxml=artifacts/hunt-authz-proof.xml \
+            tests/test_hunt_authz_proof_materialization.py
       - name: Retain the test result for this exact revision
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -91,6 +98,7 @@ jobs:
           path: |
             artifacts/hunt-records.xml
             artifacts/hunt-services.xml
+            artifacts/hunt-authz-proof.xml
           if-no-files-found: error
           retention-days: 14
   review-ui:
