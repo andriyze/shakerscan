@@ -58,6 +58,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
 
 
+from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
+
+
 router = APIRouter()
 
 _pool_provider: Callable[[], Any] | None = None
@@ -472,14 +475,13 @@ async def list_findings(
             param_idx += 1
 
         if hunt_id:
-            # A Hunt-created finding stores its originating run in findings.hunt_run_id.
-            # Expose it under the caller-facing ``hunt_id`` name so "what did this Hunt
-            # produce?" is answerable, symmetric with scan_id.
+            # A family-proof promotion may have no direct hunt_run_id. Its actual
+            # producing verification is durable; another run's observation is not proof.
             try:
                 hunt_uuid = uuid.UUID(str(hunt_id))
             except ValueError:
                 raise HTTPException(status_code=400, detail="hunt_id must be a UUID")
-            query += f" AND f.hunt_run_id = ${param_idx}"
+            query += " AND " + finding_hunt_predicate(param_idx)
             params.append(hunt_uuid)
             param_idx += 1
 
@@ -639,6 +641,10 @@ async def list_findings(
             candidate_params: list = [list(_CANDIDATE_OPEN_STATUSES)]
             cand_idx = 2
             # Mirror the findings filters that candidates can satisfy.
+            if hunt_id:
+                candidate_query += " AND " + candidate_hunt_predicate(cand_idx)
+                candidate_params.append(hunt_uuid)
+                cand_idx += 1
             if severity:
                 candidate_query += f" AND c.claimed_severity = ${cand_idx}"
                 candidate_params.append(severity)

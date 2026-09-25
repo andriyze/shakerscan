@@ -14,6 +14,10 @@ second scanner, change entitlement predicates, add permissions, or change execut
 - The HTTP worker materializes proof, verification history, action result and measured budget in
   its existing settlement transaction. Both initial responses and idempotent replays retain
   `verified_finding_ids`; history reads do not create findings or rerun verification.
+- Per-Hunt finding queries include actual completed deterministic verifications by that run,
+  including family-proof findings without direct Hunt ownership; opt-in candidates are scoped
+  to the same run. Shared service intelligence also accepts collection replay observations when
+  the worker recorded a real final URL, connected address and HTTP response.
 - The methodology directs a supported lead toward its correct producer/consumer verification
   path. Two concrete object reads without entitlement evidence remain observations, not proof.
 
@@ -44,6 +48,6 @@ and budgets. Count additional unique verified findings, conversion rate, operato
 and request/time cost, rather than candidates or HTTP successes.
 
 General child-result continuation, state-changing workflows, candidate-to-finding attribution
-through the separate family-proof workflow, historical service-replay projection, and richer
+through the separate family-proof workflow, and richer
 investigation-frontier tracking are not implemented by this focused change. It does not rewrite
 sessions, grant new authority, or silently extend exhausted runs.

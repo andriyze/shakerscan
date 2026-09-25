@@ -103,7 +103,23 @@ def normalized_observation(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     kind = row.get("kind")
     app_origin = origin(row.get("web_origin"))
     network_address = address(row.get("address"))
-    if kind in {"http_observation", "http_fingerprint"}:
+    if kind == "request_replay":
+        # The requested collection URL does not prove a service was reached.
+        # Project only the final URL and connected address from the worker receipt.
+        status = row.get("status_code")
+        network_address = address(row.get("connected_address"))
+        app_origin = origin(row.get("final_url"))
+        if (type(status) is not int or not 100 <= status <= 599
+                or network_address is None or app_origin is None):
+            return None
+        parts = urlsplit(app_origin)
+        row = {
+            "state": "open", "transport": "tcp",
+            "port": parts.port or (443 if parts.scheme == "https" else 80),
+            "service": parts.scheme, "method": "http_response",
+            "encrypted": parts.scheme == "https",
+        }
+    elif kind in {"http_observation", "http_fingerprint"}:
         request, response = object_value(row.get("request")), object_value(row.get("response"))
         status = response.get("status") if kind == "http_observation" else row.get("status")
         if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
