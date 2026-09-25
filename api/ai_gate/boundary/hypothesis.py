@@ -25,6 +25,13 @@ HypothesisKind = Literal[
     "tool_principal",
 ]
 
+DEFAULT_TOOL_TELEMETRY = {
+    "tool_calls_path": "tool_calls",
+    "tool_name_field": "name",
+    "executed_field": "executed",
+    "principal_field": "principal",
+}
+
 _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,160}\Z")
 _FIELD_RE = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\Z")
 _ALLOWED_KINDS = {
@@ -116,6 +123,10 @@ class BoundaryHypothesis:
     tool_name: str | None
     expected_principal: str | None
     prompt: str | None
+    tool_calls_path: str | None
+    tool_name_field: str | None
+    executed_field: str | None
+    principal_field: str | None
     provenance: tuple[dict[str, str], ...]
     source: dict[str, Any]
 
@@ -130,7 +141,8 @@ class BoundaryHypothesis:
             "expected_rule", "expected_rule_source", "verifier_path", "state_path",
             "initial_value", "forbidden_value", "approval_path",
             "approval_state_path", "required_approval_value", "tool_name",
-            "expected_principal", "prompt", "provenance",
+            "expected_principal", "prompt", "tool_calls_path", "tool_name_field",
+            "executed_field", "principal_field", "provenance",
         }
         required = {"version", "hypothesis_id", "kind", "owner", "attacker", "provenance"}
         if not isinstance(raw, dict) or set(raw) - allowed or required - set(raw):
@@ -184,6 +196,10 @@ class BoundaryHypothesis:
             expected_principal=_identifier(raw["expected_principal"], "expected_principal")
                 if raw.get("expected_principal") is not None else None,
             prompt=_bounded_text(raw["prompt"], "prompt") if raw.get("prompt") is not None else None,
+            tool_calls_path=_field(raw["tool_calls_path"], "tool_calls_path") if raw.get("tool_calls_path") is not None else None,
+            tool_name_field=_field(raw["tool_name_field"], "tool_name_field") if raw.get("tool_name_field") is not None else None,
+            executed_field=_field(raw["executed_field"], "executed_field") if raw.get("executed_field") is not None else None,
+            principal_field=_field(raw["principal_field"], "principal_field") if raw.get("principal_field") is not None else None,
             provenance=_provenance(raw["provenance"]),
             source=copy.deepcopy(raw),
         )
@@ -306,7 +322,11 @@ def compile_boundary_hypothesis(raw: Any) -> dict[str, Any]:
                 "tool": {
                     "name": h.hypothesis_id,
                     "prompt": h.prompt,
+                    "tool_calls_path": h.tool_calls_path or DEFAULT_TOOL_TELEMETRY["tool_calls_path"],
+                    "tool_name_field": h.tool_name_field or DEFAULT_TOOL_TELEMETRY["tool_name_field"],
                     "tool_name": h.tool_name,
+                    "executed_field": h.executed_field or DEFAULT_TOOL_TELEMETRY["executed_field"],
+                    "principal_field": h.principal_field or DEFAULT_TOOL_TELEMETRY["principal_field"],
                     "expected_principal": h.expected_principal,
                 }
             }
@@ -336,3 +356,79 @@ def compile_boundary_hypothesis(raw: Any) -> dict[str, Any]:
         contract_fragment=fragment,
         provenance=h.provenance,
     ).to_dict()
+
+
+def materialize_boundary_contract(
+    proposal: dict[str, Any],
+    *,
+    boundary_base: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge one ready proposal into an existing deterministic BoundaryContract base.
+
+    The base supplies application-specific identity/resource/response bindings and
+    remains authoritative for those bindings. The proposal contributes only the
+    tested hypothesis fragment plus provenance metadata. No credentials are
+    accepted or emitted here.
+    """
+    if not isinstance(proposal, dict) or proposal.get("schema_version") != "boundary-proposal/v1":
+        raise ContractError("boundary_materialization_requires_v1_proposal")
+    if proposal.get("status") != "ready" or proposal.get("missing_facts"):
+        raise ContractError("boundary_materialization_requires_ready_proposal")
+    fragment = proposal.get("contract_fragment")
+    if not isinstance(fragment, dict):
+        raise ContractError("boundary_materialization_requires_contract_fragment")
+    if not isinstance(boundary_base, dict):
+        raise ContractError("boundary_materialization_requires_contract_base")
+
+    allowed_base = {
+        "version", "name", "owner", "attacker", "identity", "resource",
+        "response_path", "baseline_prompt", "attacks", "repetitions",
+    }
+    if set(boundary_base) - allowed_base:
+        raise ContractError("boundary_materialization_base_contains_execution_fragment")
+    required_base = {"version", "name", "owner", "attacker", "identity", "resource", "response_path"}
+    if required_base - set(boundary_base):
+        raise ContractError("boundary_materialization_base_incomplete")
+
+    materialized = copy.deepcopy(boundary_base)
+    kind = proposal.get("kind")
+    if kind == "cross_tenant_read":
+        expected = {
+            "owner": {
+                "role": fragment.get("owner_role"),
+                "resource_id": fragment.get("owner_resource_id"),
+            },
+            "attacker": {
+                "role": fragment.get("attacker_role"),
+                "resource_id": fragment.get("attacker_resource_id"),
+            },
+        }
+        for slot in ("owner", "attacker"):
+            actual = materialized.get(slot)
+            if not isinstance(actual, dict) or any(actual.get(k) != v for k, v in expected[slot].items()):
+                raise ContractError("boundary_materialization_principal_binding_mismatch")
+    else:
+        keys = [key for key in ("action", "approval", "tool") if key in fragment]
+        if len(keys) != 1:
+            raise ContractError("boundary_materialization_requires_one_execution_fragment")
+        materialized[keys[0]] = copy.deepcopy(fragment[keys[0]])
+
+    # Parse the exact final shape through the existing verifier contract parsers.
+    # This catches drift between discovery/compiler output and executable proof.
+    from .contract import BoundaryContract
+    parsed = BoundaryContract.parse(materialized)
+    from .action_contract import ActionContract
+    from .approval_contract import ApprovalContract
+    from .tool_contract import ToolContract
+    ActionContract.parse(parsed.action_raw)
+    ApprovalContract.parse(parsed.approval_raw)
+    ToolContract.parse(parsed.tool_raw)
+
+    return {
+        "schema_version": "boundary-materialization/v1",
+        "proposal_sha256": proposal.get("hypothesis_sha256"),
+        "hypothesis_id": proposal.get("hypothesis_id"),
+        "provenance": copy.deepcopy(proposal.get("provenance") or []),
+        "boundary_contract": materialized,
+        "boundary_contract_sha256": parsed.digest,
+    }
