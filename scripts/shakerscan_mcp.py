@@ -595,6 +595,33 @@ class ArsenalClient:
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 60.0))
         self.max_response_bytes = max(1_024, min(int(max_response_bytes), MAX_RESPONSE_BYTES))
         self.opener = urllib.request.build_opener(_NoRedirect())
+        self._posture_check_available: bool | None = None
+
+    def has_posture_check(self) -> bool:
+        """Advertise the fixed check only when this instance has its POST route."""
+        if self._posture_check_available is not None:
+            return self._posture_check_available
+        request = urllib.request.Request(
+            self.base_url + "/public/check",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "ShakerScan-MCP/" + SERVER_VERSION,
+                **({"Authorization": "Bearer " + self.api_token} if self.api_token else {}),
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=self.timeout_seconds) as response:
+                # A GET must not run a check; a 2xx response is not evidence of the POST route.
+                available = response.status == 405
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {404, 405}:
+                raise MCPError(-32002, f"ShakerScan API returned HTTP {exc.code}") from exc
+            available = exc.code == 405
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise MCPError(-32001, "ShakerScan API is unavailable", str(exc)[:1_000]) from exc
+        self._posture_check_available = available
+        return available
 
     def request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -753,9 +780,10 @@ class ArsenalClient:
             if command.get("status") != "read_only" or command.get("risk_tier") != "read_only" or command.get("method") != "GET":
                 raise MCPError(-32006, f"Arsenal command {tool.command} is no longer read-only")
             descriptors.append(tool.descriptor())
-        return descriptors + [tool.descriptor() for tool in _hunt_tools(self.hunt_contract())] + [
-            _posture_check_descriptor(connected=True)
-        ]
+        descriptors.extend(tool.descriptor() for tool in _hunt_tools(self.hunt_contract()))
+        if self.has_posture_check():
+            descriptors.append(_posture_check_descriptor(connected=True))
+        return descriptors
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "shakerscan_public_check":

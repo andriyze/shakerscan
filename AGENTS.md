@@ -46,6 +46,12 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
     reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
     or refusal paths that do not improve those outcomes.
 
+The read-only posture check is a bounded standalone lookup outside Scan/Hunt capability execution.
+Unconfigured clients use the hosted service's public-target restrictions. Connected clients use
+their OSS or Enterprise instance's `/public/check` without a per-check target authorization; the
+instance's network boundary and authenticated connection, where present, govern access. This
+exception does not grant Scan or Hunt authority or relax their target binding.
+
 ## Environment and startup
 
 The local stack normally exposes UI at `http://localhost:3000` and API at
