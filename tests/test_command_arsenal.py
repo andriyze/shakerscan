@@ -27,6 +27,7 @@ def test_command_catalog_contains_required_initial_commands():
     for name in (
         "target.list",
         "target.get",
+        "ai.boundary.proposal.materialize",
         "ai.boundary.hypothesis.compile",
         "target.principals",
         "target.principal_matrix",
