@@ -1,11 +1,9 @@
-"""A hash-route DOM XSS is proved in the pinned browser, not Dalfox.
+"""Hunt XSS browser proof selection and deterministic finding materialization.
 
 The Hunt's xss.verify runs Dalfox, which drops the URL fragment and cannot test a
-client-route parameter (why the H-18 adaptive real-target check never settled to a
-verified finding). The registry now declares the browser prover as an alternate
-runtime for xss.verify, the worker routes a single fragment parameter to it, the
-dispatcher accepts its identity, and the materializer turns its execution proof into
-a verified finding.
+client-route parameter. The browser prover also handles an explicit deep check of
+one server query parameter. The dispatcher accepts its registered runtime identity,
+and the materializer turns execution proof into a verified finding.
 """
 from __future__ import annotations
 
@@ -62,7 +60,7 @@ def test_worker_routes_a_single_fragment_parameter_to_the_browser_prover():
 
 def test_worker_keeps_a_server_visible_parameter_on_the_scanner():
     spec = CAPABILITY_REGISTRY.require("xss.verify")
-    # A server query parameter is Dalfox's job; the browser prover is not selected.
+    # Without an explicit deep request, a server query parameter stays on Dalfox.
     assert hunt_browser_xss_proof_adapter(
         capability_name="xss.verify", spec=spec, target=TARGET,
         execution_target="http://host.docker.internal:3001/search?q=x", action_id="a1",
@@ -71,6 +69,24 @@ def test_worker_keeps_a_server_visible_parameter_on_the_scanner():
     assert hunt_browser_xss_proof_adapter(
         capability_name="xss.verify", spec=spec, target=TARGET,
         execution_target="http://host.docker.internal:3001/#/dashboard", action_id="a1",
+    ) is None
+
+
+def test_explicit_deep_query_uses_pinned_browser_for_one_parameter():
+    spec = CAPABILITY_REGISTRY.require("xss.verify")
+    adapter = hunt_browser_xss_proof_adapter(
+        capability_name="xss.verify", spec=spec, target=TARGET,
+        execution_target="http://host.docker.internal:3001/search?q=x",
+        action_id="query-a1", deep_domxss=True,
+    )
+    assert adapter is not None
+    assert adapter.prepared.injection_location == "query"
+    assert adapter.prepared.parameter_name == "q"
+    assert adapter.prepared.estimated_budget["http_requests"] == 50
+    assert hunt_browser_xss_proof_adapter(
+        capability_name="xss.verify", spec=spec, target=TARGET,
+        execution_target="http://host.docker.internal:3001/search?q=x&next=y",
+        action_id="query-a2", deep_domxss=True,
     ) is None
     # Only xss.verify routes to the browser.
     assert hunt_browser_xss_proof_adapter(
@@ -165,3 +181,40 @@ def test_browser_execution_proof_materializes_a_verified_finding():
     assert len(ids2) == 1
     assert db2.tool == "dalfox"
     assert db2.evidence["proof_contract"] == "dalfox_browser_or_alert_execution/v1"
+
+
+def test_browser_proof_on_authorized_alternate_port_persists_separately():
+    class DB:
+        async def fetchval(self, _query, *args):
+            self.fingerprint, self.url = args[2], args[3]
+            self.evidence = json.loads(args[4])
+            return uuid.uuid4()
+
+        async def execute(self, *_args):
+            pass
+
+    def proof(port):
+        return [{
+            "kind": "xss_browser_proof", "proof_state": "verified",
+            "parameter_name": "q",
+            "request_url": f"http://host.docker.internal:{port}/search?q=",
+            "payload_sha256": "a" * 64,
+            "dom_marker_executed": True,
+        }]
+
+    async def persist(db, observations):
+        return await materialize_verified_hunt_findings(
+            db, uuid.uuid4(), uuid.uuid4(), uuid.uuid4(),
+            "http://host.docker.internal:3001", "xss.verify", uuid.uuid4(),
+            {"path": "/search?q=test", "origin": "http://host.docker.internal:3002"},
+            observations, allowed_origins=("http://host.docker.internal:3002",),
+        )
+
+    primary = DB()
+    alternate = DB()
+    assert len(asyncio.run(persist(primary, proof(3001)))) == 1
+    assert len(asyncio.run(persist(alternate, proof(3002)))) == 1
+    assert alternate.url == "http://host.docker.internal:3002/search?q="
+    assert alternate.evidence["proof_state"] == "verified"
+    assert alternate.fingerprint != primary.fingerprint
+    assert asyncio.run(persist(DB(), proof(3003))) == []

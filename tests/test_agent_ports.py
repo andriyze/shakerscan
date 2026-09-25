@@ -1060,8 +1060,12 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     assert argv[0] == "url" and argv[argv.index("url") + 1] == "http://t/search?q=1"
     assert "--skip-headless" in argv and "--skip-bav" in argv and "--skip-mining-all" in argv
     assert argv[argv.index("--worker") + 1] == "3" and argv[argv.index("--delay") + 1] == "1000"
-    assert argv[argv.index("--only-poc") + 1] == "v"  # default severity -> verified-only PoCs
+    assert argv[argv.index("--only-poc") + 1] == "r,v"  # no browser: preserve reflected candidates
     assert argv[argv.index("--format") + 1] == "jsonl"
+    assert "--skip-discovery" in argv
+    assert argv[argv.index("-p") + 1] == "q"
+    assert "--only-custom-payload" in argv
+    assert argv[argv.index("--custom-payload") + 1] == "/app/payloads/xss/hunt-verify.txt"
 
     _, dom_argv, _ = at.build_scanner_argv(
         "dalfox", "http://t/#/search?q=1",
@@ -1069,6 +1073,7 @@ def test_attack_scanners_dalfox_sqlmap_present_and_bounded():
     )
     assert "--skip-headless" not in dom_argv
     assert "--force-headless-verification" in dom_argv
+    assert dom_argv[dom_argv.index("--only-poc") + 1] == "v"
     # --deep-domxss never converges inside the capability wall ceiling.
     assert "--deep-domxss" not in dom_argv
     assert dom_argv[dom_argv.index("--delay") + 1] == "0"

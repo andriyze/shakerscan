@@ -19055,7 +19055,11 @@ async def _execute_agent_scanner_process(
         stdout = stdout.replace(pinned_origin, original_origin)
         if overflow.is_set() and status not in {"cancelled", "timeout"}:
             status, error = "success", "output_truncated"
-        if status not in {"cancelled", "timeout"} and error != "output_truncated":
+        # The pinned proxy may stop a tool at its connection ceiling. The resulting
+        # SIGKILL is a consequence of that limit, not the primary failure reason.
+        if status not in {"cancelled", "timeout"} and error not in {
+            "output_truncated", "connection_limit_exceeded",
+        }:
             if returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = (
@@ -20624,6 +20628,7 @@ async def process_canonical_scanner_capability_job(
             target=target,
             execution_target=execution_target,
             action_id=str(action_id),
+            deep_domxss=scanner_options.get("deep_domxss") is True,
         )
         scanner_adapter = ScannerExecutionAdapter(
             specification=spec,
@@ -20647,9 +20652,9 @@ async def process_canonical_scanner_capability_job(
             },
         )
         # A hash-route DOM XSS lives in the URL fragment the server never receives, so
-        # Dalfox cannot reach it. The browser prover (the runtime the Scan uses for
-        # fragment candidates) attempts it in the pinned browser under this action's own
-        # reservation; every server-visible parameter keeps the scanner adapter.
+        # Dalfox cannot reach it. Explicit deep verification of one query parameter also
+        # belongs in the pinned browser. The alternate runtime uses this action's own
+        # reservation; ordinary server-visible parameters keep the scanner adapter.
         active_adapter = browser_proof_adapter or scanner_adapter
         adapter_name = str(active_adapter.adapter_name)
         adapter_version = str(active_adapter.adapter_version)
@@ -20796,7 +20801,12 @@ async def process_canonical_scanner_capability_job(
                         finished_at.replace("Z", "+00:00")
                     ),
                 )
-                verified_finding_ids = await materialize_verified_hunt_findings(conn, hunt_id, action_id, uuid.UUID(target.target_id), registered_target, capability_name, receipt_id, capability_input, observations, target_kind=target.target_kind)
+                verified_finding_ids = await materialize_verified_hunt_findings(
+                    conn, hunt_id, action_id, uuid.UUID(target.target_id),
+                    registered_target, capability_name, receipt_id,
+                    capability_input, observations, target_kind=target.target_kind,
+                    allowed_origins=target.allowed_origins,
+                )
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,
