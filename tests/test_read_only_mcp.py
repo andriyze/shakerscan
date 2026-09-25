@@ -21,7 +21,7 @@ def test_public_mode_has_only_fixed_tool_and_no_discovery():
     calls = []
     def request(method, path, payload):
         calls.append((method, path, payload))
-        return {"schema_version": "1", "target": "example.com", "checks": []}
+        return {"schema_version": "2", "target": payload["target"], "observations": []}
     client.transport.request_json = request
     server = mcp.MCPServer(client)
     initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
@@ -34,10 +34,26 @@ def test_public_mode_has_only_fixed_tool_and_no_discovery():
     assert calls == [("POST", "/v1/check", {"target": "example.com"})]
     assert client.transport.api_token is None
     assert client.transport.max_response_bytes == 32768
-    for name, args in [("shakerscan_hunt_start", {}), ("shakerscan_public_check", {"target": "example.com", "headers": {}}), ("shakerscan_public_check", {"target": "https://example.com/path"})]:
+    for name, args in [("shakerscan_hunt_start", {}), ("shakerscan_public_check", {"target": "example.com", "headers": {}}),
+                       ("shakerscan_public_check", {"target": "https://example.com/path"}), ("shakerscan_public_check", {"target": "example.com:8443"}),
+                       ("shakerscan_public_check", {"target": "example.com", "path": "//evil"}), ("shakerscan_public_check", {"target": "example.com", "path": "/a?b"}),
+                       ("shakerscan_public_check", {"target": "example.com", "dkim_selector": "bad.selector"})]:
         with pytest.raises(mcp.MCPError):
             client.call_tool(name, args)
     assert len(calls) == 1
+    client.call_tool("shakerscan_public_check", {"target": "1.1.1.1", "path": "/api"})
+    client.call_tool("shakerscan_public_check", {"target": "[2606:4700:4700::1111]"})
+    client.call_tool("shakerscan_public_check", {"target": "example.com", "dkim_selector": "google"})
+    assert calls[1:] == [("POST", "/v1/check", {"target": "1.1.1.1", "path": "/api"}),
+                         ("POST", "/v1/check", {"target": "[2606:4700:4700::1111]"}),
+                         ("POST", "/v1/check", {"target": "example.com", "dkim_selector": "google"})]
+
+
+def test_public_mode_rejects_the_retired_verdict_schema():
+    client = mcp.PublicClient()
+    client.transport.request_json = lambda *a: {"schema_version": "1", "target": "example.com", "checks": []}
+    with pytest.raises(mcp.MCPError):
+        client.call_tool("shakerscan_public_check", {"target": "example.com"})
 
 
 def test_public_upstream_failure_is_tool_error_without_raw_body():

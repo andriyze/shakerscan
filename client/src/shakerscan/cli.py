@@ -649,24 +649,61 @@ _PUBLIC_DOMAIN = re.compile(
 )
 
 
-def normalize_public_target(value: str) -> str:
-    """Return a canonical public hostname for the hosted posture service."""
+_INSTANCE_HOST = re.compile(r"(?=^.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?)*$")
+
+
+def _ip_literal(host: str, *, public: bool) -> str | None:
+    """The canonical form of an IP literal, or None for a hostname. The hosted service accepts
+    only global addresses; a connected instance decides for itself and is sent any address."""
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+    if public and (not address.is_global or getattr(address, "ipv4_mapped", None)):
+        raise ClientError("public checks require a public IP address or DNS hostname")
+    return str(address)
+
+
+def split_public_target(value: str, *, public: bool = True) -> tuple[str, str | None]:
+    """Return the canonical hostname or IP address, and the URL path when one was given.
+
+    ``public`` applies the hosted service's rules (public DNS names and global addresses).
+    A connected OSS or Enterprise instance applies its own policy, so only syntax is checked."""
     raw = str(value or "").strip()
     if not raw:
-        raise ClientError("give a public domain, for example: shakerscan check example.com")
+        raise ClientError("give a public domain or IP address, for example: shakerscan check example.com")
+    path = None
     if "://" in raw:
         parts = urllib.parse.urlsplit(raw)
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
-            raise ClientError("public checks accept a domain or http(s) URL")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ClientError("public checks accept a domain, IP address or http(s) URL") from exc
+        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password or port is not None:
+            raise ClientError("public checks accept a domain, IP address or http(s) URL without credentials or a port")
         host = parts.hostname
+        if parts.path not in {"", "/"}:
+            path = parts.path
     else:
         if any(ch in raw for ch in "/?#@"):
-            raise ClientError("public checks accept a domain or http(s) URL, not a path or credential")
+            raise ClientError("public checks accept a domain, IP address or http(s) URL, not a path or credential")
         host = raw
+    address = _ip_literal(host, public=public)
+    if address:
+        return address, path
     host = host.rstrip(".").lower()
+    if not public:
+        if not _INSTANCE_HOST.fullmatch(host):
+            raise ClientError("checks require an IP address or DNS hostname")
+        return host, path
     if host in LOOPBACK_HOSTS or not _PUBLIC_DOMAIN.fullmatch(host):
-        raise ClientError("public checks require a public DNS hostname")
-    return host
+        raise ClientError("public checks require a public IP address or DNS hostname")
+    return host, path
+
+
+def normalize_public_target(value: str) -> str:
+    """Return a canonical public hostname or IP address for the hosted posture service."""
+    return split_public_target(value)[0]
 
 
 def public_request_json(path: str, payload: Mapping[str, object], *, timeout: float = 20.0, opener=None):
@@ -703,39 +740,152 @@ def public_request_json(path: str, payload: Mapping[str, object], *, timeout: fl
     return data
 
 
+# A few observed values that almost always need attention. The service returns facts only;
+# these short hints are the client's reading of them and never replace the facts.
+def _public_hint(item: Mapping[str, object]) -> str | None:
+    result = item.get("result")
+    if not isinstance(result, Mapping):
+        return None
+    ident = item.get("id")
+    if ident == "mail.spf":
+        return {"+": "SPF +all lets any server send as this domain",
+                "?": "SPF ends with neutral ?all, which authorizes nothing",
+                "absent": "SPF has no terminal all/redirect policy" if result.get("record_count") == 1 else None}.get(str(result.get("all_qualifier")))
+    if ident == "mail.dmarc" and result.get("applied_policy") == "none":
+        return "DMARC policy is p=none (monitoring only)"
+    if ident == "dns.dnssec" and result.get("local_validation") == "bogus":
+        return "DNSSEC validation failed"
+    if ident == "tls.handshake":
+        days = result.get("certificate_days_remaining")
+        if result.get("certificate_verified") is False:
+            return "certificate was not verified"
+        if isinstance(days, int) and days < 30:
+            return f"certificate expires in {days} days"
+    return None
+
+
+def _brief(value: object, limit: int = 4) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, list):
+        items = [_brief(v) for v in value[:limit]]
+        more = f" (+{len(value) - limit})" if len(value) > limit else ""
+        return ", ".join(items) + more if items else "none"
+    if isinstance(value, Mapping):
+        return " ".join(f"{k}={_brief(v)}" for k, v in value.items() if not isinstance(v, (list, Mapping)))
+    return str(value)
+
+
+def _public_facts(item: Mapping[str, object]) -> list[str]:
+    """Readable lines for one observation; nested address and connection records get one line each."""
+    result = item.get("result")
+    ident = item.get("id")
+    if not isinstance(result, Mapping):
+        return []
+    if ident == "ip.network":
+        lines = [" ".join(str(part) for part in (a.get("ip"), a.get("asn"), a.get("as_name"), a.get("country_code")) if part)
+                 for a in result.get("addresses") or [] if isinstance(a, Mapping)]
+        if result.get("reverse_dns"):
+            lines.append("reverse DNS: " + _brief(result["reverse_dns"]))
+        return lines
+    if ident == "http.connections":
+        lines = []
+        for c in result.get("connections") or []:
+            if not isinstance(c, Mapping):
+                continue
+            cert = c.get("certificate") if isinstance(c.get("certificate"), Mapping) else {}
+            parts = [str(c.get("ip")), f"HTTP {c.get('status_code')}", c.get("tls_protocol"), c.get("cipher"),
+                     f"cert {cert.get('subject')}" if cert.get("subject") else None,
+                     f"expires {cert.get('valid_to')}" if cert.get("valid_to") else None,
+                     None if cert.get("ip_address_match") is None else f"lists IP: {_brief(cert['ip_address_match'])}"]
+            lines.append(" ".join(str(p) for p in parts if p))
+        return lines
+    return [f"{key}: {_brief(value)}" for key, value in result.items() if value not in (None, "", [], {})]
+
+
+def render_public_check(data: Mapping[str, object], target: str,
+                        service: str = f"{PUBLIC_API_URL} (no saved ShakerScan credential is sent)") -> str:
+    """Plain-text view of the public service's factual observations (schema 2)."""
+    lines = [f"ShakerScan Public Check\nTarget: {data.get('target') or target}"]
+    if isinstance(data.get("checked_at"), str):
+        cache = data.get("cache")
+        cached = isinstance(cache, Mapping) and cache.get("hit") is True
+        lines.append(f"Checked: {data['checked_at']}" + (" (cached)" if cached else ""))
+    observations = [o for o in data.get("observations") or [] if isinstance(o, Mapping)]
+    if not observations:
+        lines.append(json.dumps(data, indent=2, sort_keys=True))
+        return "\n".join(lines)
+    hints = [(str(o.get("name") or o.get("id")), h) for o in observations if (h := _public_hint(o))]
+    if hints:
+        lines.append("\nReview:")
+        lines.extend(f"  ! {name}: {hint}" for name, hint in hints)
+    missing: list[str] = []
+    for group in ("dns", "mail", "http", "tls", "ip"):
+        members = [o for o in observations if o.get("group") == group]
+        shown = False
+        for item in members:
+            facts = _public_facts(item)
+            name = str(item.get("name") or item.get("id") or "observation")
+            if not facts:
+                missing.append(name)
+                continue
+            if not shown:
+                lines.append(f"\n{group.upper()}")
+                shown = True
+            lines.append(f"  {name}")
+            lines.extend(f"      {fact[:160]}" for fact in facts[:12])
+    if missing:
+        lines.append("\nNot observed or not applicable: " + ", ".join(missing))
+    for limitation in data.get("limitations") or []:
+        if isinstance(limitation, str):
+            lines.append(f"Note: {limitation}")
+    lines.append(f"\nService: {service}")
+    return "\n".join(lines)
+
+
+def instance_check_json(payload: Mapping[str, object], *, timeout: float = 60.0) -> dict:
+    """POST /public/check on the connected instance with its saved credential."""
+    url = apply_connection(argparse.Namespace(url=None, token_file=None, timeout=timeout))
+    api = load("_api_cli")
+    try:
+        request = api.build_request("POST", "/public/check", json.dumps(dict(payload)), api_url=url, token=api.bearer_token())
+        status, text = api.call(request, timeout=timeout)
+    except api.ApiCliError as exc:
+        raise ClientError(str(exc)) from exc
+    if status >= 300:
+        raise ClientError(api.render(status, text)[0])
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ClientError("the instance returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise ClientError("the instance returned an unexpected response")
+    return data
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Run a bounded public posture lookup without an engine, account, or saved connection."""
-    target = normalize_public_target(args.target)
-    if has_configured_instance():
+    instance = has_configured_instance()
+    target, url_path = split_public_target(args.target, public=not instance)
+    path = getattr(args, "path", None) or url_path
+    selector = getattr(args, "dkim_selector", None)
+    payload: dict[str, object] = {"target": target}
+    if path:
+        payload["path"] = path
+    if selector:
+        payload["dkim_selector"] = selector
+    if instance:
         # A configured/local ShakerScan instance owns all requests. Never send the target to
-        # the public service once the user has chosen a private instance.
-        url = apply_connection(argparse.Namespace(url=None, token_file=None, timeout=args.timeout))
-        api = load("_api_cli")
-        payload = json.dumps({"target": target})
-        return int(api.main(["--api-url", url, "POST", "/public/check", payload]))
-    data = public_request_json("/v1/check", {"target": target}, timeout=float(args.timeout or 20.0))
+        # the public service once the user has chosen a private instance. The instance runs
+        # the same check engine and answers in the same schema, so output is identical.
+        data = instance_check_json(payload, timeout=float(args.timeout or 60.0))
+    else:
+        data = public_request_json("/v1/check", payload, timeout=float(args.timeout or 20.0))
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
-    print(f"ShakerScan Public Check\nTarget: {target}")
-    summary = data.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        print("\n" + summary.strip())
-    checks = data.get("checks")
-    if isinstance(checks, list):
-        for item in checks:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or item.get("id") or "check")
-            status = str(item.get("status") or "unknown")
-            detail = str(item.get("detail") or item.get("message") or "").strip()
-            print(f"{name:24} {status}" + (f"  {detail}" if detail else ""))
-    elif not summary:
-        print(json.dumps(data, indent=2, sort_keys=True))
-    for limitation in data.get("limitations", []):
-        if isinstance(limitation, str):
-            print(f"Note: {limitation}")
-    print(f"\nService: {PUBLIC_API_URL} (no saved ShakerScan credential is sent)")
+    print(render_public_check(data, target, "the connected ShakerScan instance" if instance else
+                              f"{PUBLIC_API_URL} (no saved ShakerScan credential is sent)"))
     return 0
 
 
@@ -942,7 +1092,9 @@ def build_parser() -> argparse.ArgumentParser:
         "check",
         help="run a free bounded public posture check via https://pub.shakerscan.com (no engine or account)",
     )
-    check.add_argument("target", help="public domain or http(s) URL, e.g. example.com")
+    check.add_argument("target", help="public domain, IP address or http(s) URL, e.g. example.com or 1.1.1.1")
+    check.add_argument("--path", help="URL path for the CORS probe (default /); a URL target's path is used when given")
+    check.add_argument("--dkim-selector", help="DKIM selector to check, e.g. google or selector1")
     check.add_argument("--json", action="store_true", help="print the public service JSON response")
     check.add_argument("--timeout", type=float, help="seconds to wait for the public service (default 20)")
     mcp = commands.add_parser(
