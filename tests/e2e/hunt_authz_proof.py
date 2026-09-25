@@ -18,7 +18,7 @@ def run(harness, scorecard, *, authority, start_payload, fixture_base: str, nonc
                 "auth_kind": "oauth_client_credentials", "principal_slot": slot,
                 "principal_label": f"proof-{slot}", "secret": "authz-fixture-secret",
                 "client_id": client_id, "endpoint_url": fixture_base + "/authz/token",
-                "allowed_capabilities": ["auth.session.establish", "authz.verify"],
+                "allowed_capabilities": ["auth.session.establish", "authz.verify", "http.request"],
                 # authz.verify is an active credential consumer. Reuse the same
                 # target-bound credential-tier approval that authorizes this Hunt
                 # instead of weakening the profile contract for an E2E fixture.

@@ -1,6 +1,6 @@
 # Hunt authorization proof completion
 
-**Status:** Implemented follow-up; full-stack acceptance pending.
+**Status:** Implemented; H-19 and H-20 are required built-stack acceptance checks.
 
 This follow-up to #217 improves the existing read-only authorization path. It does not add a
 second scanner, change entitlement predicates, add permissions, or change execution budgets.
