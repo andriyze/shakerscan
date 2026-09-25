@@ -40,6 +40,7 @@ try:
     import asm_inventory
     from ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ai_demo_scenarios import get_ai_test_scenarios
+    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -70,6 +71,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import asm_inventory
     from ..ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ..ai_demo_scenarios import get_ai_test_scenarios
+    from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -340,6 +342,27 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
         "honey_registry_url": f"{public_base_url}/api/ai-gate/scenarios",
         "queued": queued,
         "failed": failed,
+    }
+
+
+@router.post("/ai/boundary/hypotheses/compile")
+async def compile_ai_boundary_hypothesis(request: AIBoundaryHypothesisCompileRequest):
+    """Compile discovered facts into a deterministic AI Boundary proposal.
+
+    This endpoint is intentionally dry-run: it does not queue a scan, expand scope,
+    read credentials, approve business policy, or create a finding. Hunt can use it
+    to learn exactly which authoritative facts are still missing before proposing
+    deterministic verification.
+    """
+    try:
+        proposal = compile_boundary_hypothesis(request.hypothesis)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "proposal": proposal,
+        "execution_enabled": False,
+        "planning_authority": False,
+        "promotion_authority": False,
     }
 
 
@@ -1869,6 +1892,7 @@ AI_AUTH_KINDS = {
 AI_PRINCIPAL_ROLES = {"attacker", "victim", "admin", "service", "observer"}
 
 AI_PROBE_PACKS = {
+    "shaker-ai-boundary",
     "shaker-ai-smoke",
     "shaker-owasp-llm",
     "shaker-agent-abuse",
@@ -1963,6 +1987,11 @@ class AITargetScanRequest(BaseModel):
         default=None,
         description="Optional durable approval receipt to validate and stamp on the queued AI Gate scan.",
     )
+
+
+class AIBoundaryHypothesisCompileRequest(BaseModel):
+    """Secret-free discovered facts; compilation performs no target interaction."""
+    hypothesis: dict[str, Any]
 
 
 class AITargetConnectivityTestRequest(BaseModel):
