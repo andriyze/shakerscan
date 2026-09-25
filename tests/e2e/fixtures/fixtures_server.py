@@ -138,6 +138,10 @@ AUTHZ_PRINCIPALS = {
     "authz-token-b": {"principal": "user-b", "expired": False},
     "authz-token-expired": {"principal": "user-a", "expired": True},
 }
+AUTHZ_OAUTH_CLIENTS = {
+    "user-a": "authz-token-a",
+    "user-b": "authz-token-b",
+}
 
 # Owner-scoped objects. user-a owns 1001/1002; user-b owns 2001.
 # These carry realistic private content on purpose. A cross-principal read is only worth
@@ -288,6 +292,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, {"status": "reset"})
             return
         _record_traffic(self, "POST")
+        if path == "/authz/token":
+            form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+            client_id = (form.get("client_id") or [""])[0]
+            token = AUTHZ_OAUTH_CLIENTS.get(client_id)
+            if (form.get("grant_type") == ["client_credentials"]
+                    and form.get("client_secret") == ["authz-fixture-secret"]
+                    and token):
+                self._send(200, {"access_token": token, "token_type": "Bearer", "expires_in": 600})
+            else:
+                self._send(401, {"error": "invalid_client"})
+            return
         try:
             body = json.loads(raw or b"{}")
         except Exception:

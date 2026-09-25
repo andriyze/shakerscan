@@ -11,12 +11,13 @@ def run(harness, scorecard, *, authority, start_payload, fixture_base: str, nonc
     try:
         target_id, scope_id, approval_id = authority(risk_tier="credential")
         profiles = {}
-        for slot, token in (("primary", "authz-token-a"), ("secondary", "authz-token-b")):
+        for slot, client_id in (("primary", "user-a"), ("secondary", "user-b")):
             status, created = harness.post("/credential-profiles", {
                 "target_kind": "web", "target_id": target_id,
                 "name": f"Hunt proof {slot} {nonce}",
-                "auth_kind": "authorization_header", "principal_slot": slot,
-                "principal_label": f"proof-{slot}", "secret": f"Bearer {token}",
+                "auth_kind": "oauth_client_credentials", "principal_slot": slot,
+                "principal_label": f"proof-{slot}", "secret": "authz-fixture-secret",
+                "client_id": client_id, "endpoint_url": fixture_base + "/authz/token",
                 "allowed_capabilities": ["auth.session.establish", "authz.verify"],
                 # authz.verify is an active credential consumer. Reuse the same
                 # target-bound credential-tier approval that authorizes this Hunt
