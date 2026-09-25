@@ -59,4 +59,4 @@ coverage gaps. Hold stronger and weaker planner results separately.
 
 Still deferred: independent paired Hunt scoring/benchmark automation, durable child-result
 continuation, state-changing multi-step workflows and broader protocol execution. None is implied
-by a green component test. Nothing on this branch requests a merge, release or deployment.
+by a green component test.

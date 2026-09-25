@@ -26,6 +26,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Hunt investigation evaluation](hunt-investigation-evaluation.md)
 - [Operator-complete Hunt implementation](hunt-operator-workflows.md)
 - [Hunt review integrity](hunt-review-integrity.md)
+- [Hunt verified-discovery work](hunt-verified-discovery.md)
 - [Authenticated assurance](authenticated-assurance.md)
 - [Browser login QA](browser-login-qa.md)
 - [Browser session integrity](browser-session-integrity.md)
