@@ -48,26 +48,16 @@ tests enforce both. There is deliberately no query parameter for the endpoint, s
 cannot redirect what someone types to another host. `_headers` adds `frame-ancestors`, HSTS and
 the other response headers on hosts that read it (Cloudflare, Netlify).
 
-Deploying:
+Hosting:
 
-- **Page:** serve `web/` as static files from Cloudflare (Workers static assets or Pages) at
-  `check.shakerscan.com`, beside the `install.shakerscan.com` Worker. Deploy from a release tag or
-  a manual dispatch rather than on every merge, like the installer.
-- **Hosted service:** the browser calls `pub.shakerscan.com` directly, so its API Gateway HTTP
-  API needs a CORS configuration for exactly that origin: `POST`, request header `content-type`,
-  exposed header `retry-after`, no credentials. API Gateway then answers preflights itself; the
-  Lambda (which allows only `POST`) is unchanged, and the CLI and MCP send no `Origin`.
-- **No proxy in front of the service:** quotas and the region check are keyed on the API Gateway
-  source address and never trust forwarded headers. A same-origin proxy would put every visitor
-  behind one shared quota and move the region check to the proxy's location.
+- **check.shakerscan.com** is published from `deploy/check-page/` as Cloudflare Workers static
+  assets, by a manual, reviewed workflow; its README covers the one-time setup, the CORS setting
+  the hosted API needs, and rollback.
+- **No proxy in front of the service:** wherever the page is served, the check goes from the
+  browser straight to the API. Quotas and the region check are keyed on the API Gateway source
+  address and never trust forwarded headers, so a proxy would put every visitor behind one shared
+  quota and move the region check to the proxy's location.
 - **Self-hosted instance:** set the endpoint to `https://<instance>/public/check`, add that origin
   to `connect-src`, and add the page's origin to `SHAKERSCAN_CORS_ALLOW_ORIGINS` (the API refuses
   browser POSTs from other origins). The page sends no credentials, so an instance that
   authenticates API calls answers it with a refusal; use the CLI or MCP there.
-
-Check the preflight after changing CORS:
-
-```sh
-curl -si -X OPTIONS https://pub.shakerscan.com/v1/check -H 'Origin: https://check.shakerscan.com' \
-  -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type'
-```

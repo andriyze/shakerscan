@@ -1,0 +1,17 @@
+// check.shakerscan.com: posture/web served as Cloudflare Workers static assets. No Worker script
+// runs, so there is no server code to patch; posture/web/_headers sets the response headers.
+// The custom domain creates a proxied DNS record for check.shakerscan.com that takes precedence
+// over the zone's *.shakerscan.com wildcard. Publish through .github/workflows/check-page.yml.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "shakerscan-check",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "../../posture/web"
+  },
+  "routes": [
+    { "pattern": "check.shakerscan.com", "custom_domain": true }
+  ],
+  "workers_dev": false,
+  "preview_urls": false
+}

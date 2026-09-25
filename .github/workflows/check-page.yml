@@ -1,0 +1,98 @@
+name: Check page deploy
+
+# Publishes posture/web to https://check.shakerscan.com as Cloudflare Workers static assets
+# (deploy/check-page). Manual only, from main or a v* release tag chosen under "Use workflow
+# from": a merge never changes the live page, the rule the installer follows. The check-page
+# environment holds CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID and requires a reviewer; the
+# token reaches only the publish step. Setup and rollback: deploy/check-page/README.md.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-page-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish only main or a release tag on main
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/tags/v*) ;;
+            *) echo "publish from main or a v* tag, not $GITHUB_REF" >&2; exit 1 ;;
+          esac
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+      - name: Test the page against the engine
+        working-directory: posture
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck
+          npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: check-page
+      url: https://check.shakerscan.com
+    defaults:
+      run:
+        working-directory: deploy/check-page
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+      - name: Install the pinned deploy tool
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Publish
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx wrangler deploy --tag "${GITHUB_SHA::12}" --message "$GITHUB_REF_NAME $GITHUB_SHA"
+      - name: Check the live page
+        run: |
+          set -euo pipefail
+          page=https://check.shakerscan.com
+          # A new custom domain needs a moment for its record and edge certificate.
+          for attempt in $(seq 1 12); do
+            if curl -fsS --max-time 10 -D headers.txt -o index.html "$page/"; then break; fi
+            [ "$attempt" = 12 ] && { echo "$page did not answer" >&2; exit 1; }
+            sleep 10
+          done
+          grep -q 'name="shakerscan-check-endpoint"' index.html
+          grep -qi "^content-security-policy: frame-ancestors 'none'" headers.txt
+          grep -qi '^x-content-type-options: nosniff' headers.txt
+          curl -fsS --max-time 10 "$page/sample.json" | grep -q '"schema_version": "2"'
+          if curl -fsS --max-time 10 -o /dev/null "$page/_headers"; then
+            echo "_headers must not be served as a file" >&2
+            exit 1
+          fi
+          # Every live check fails in the browser until the hosted API allows this origin.
+          curl -sS --max-time 10 -o /dev/null -D preflight.txt -X OPTIONS https://pub.shakerscan.com/v1/check \
+            -H "Origin: $page" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type'
+          if ! grep -qi "^access-control-allow-origin: $page" preflight.txt; then
+            echo "::warning::pub.shakerscan.com does not allow $page yet; see deploy/check-page/README.md (CORS)"
+          fi

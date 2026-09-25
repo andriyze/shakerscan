@@ -1,0 +1,17 @@
+{
+  "name": "shakerscan-check-page-deploy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Publishes posture/web to https://check.shakerscan.com as Cloudflare Workers static assets.",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.131.2"
+  }
+}
