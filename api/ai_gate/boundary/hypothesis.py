@@ -432,3 +432,115 @@ def materialize_boundary_contract(
         "boundary_contract": materialized,
         "boundary_contract_sha256": parsed.digest,
     }
+
+
+_AI_FAMILY_KIND = {
+    "cross_tenant_retrieval": "cross_tenant_read",
+    "bola": "cross_tenant_read",
+    "forbidden_agent_action": "cross_tenant_action",
+    "agent_action": "cross_tenant_action",
+    "approval_bypass": "approval_bypass",
+    "tool_principal_boundary": "tool_principal",
+    "tool_boundary": "tool_principal",
+}
+
+
+def hypothesis_from_hunt_candidate(
+    candidate: dict[str, Any],
+    *,
+    principal_context: dict[str, Any],
+    policy_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project one evidence-backed Hunt candidate into a boundary hypothesis draft.
+
+    This is intentionally conservative. Only typed candidate/context fields are
+    consumed; title/claim prose never becomes policy or executable prompt text.
+    Missing facts are left absent so compile_boundary_hypothesis reports them.
+    """
+    if not isinstance(candidate, dict):
+        raise ContractError("boundary_hunt_candidate_required")
+    family = str(candidate.get("family") or "").strip().lower().replace("-", "_")
+    kind = _AI_FAMILY_KIND.get(family)
+    if kind is None:
+        raise ContractError("hunt_candidate_family_not_boundary_compilable")
+    candidate_id = _identifier(candidate.get("id"), "candidate_id")
+    evidence_refs = candidate.get("evidence_refs")
+    if isinstance(evidence_refs, str):
+        try:
+            evidence_refs = json.loads(evidence_refs)
+        except json.JSONDecodeError:
+            evidence_refs = []
+    if not isinstance(evidence_refs, list) or not evidence_refs:
+        raise ContractError("boundary_hunt_candidate_requires_evidence")
+
+    if not isinstance(principal_context, dict):
+        raise ContractError("boundary_principal_context_required")
+    owner = principal_context.get("owner")
+    attacker = principal_context.get("attacker")
+    if not isinstance(owner, dict) or not isinstance(attacker, dict):
+        raise ContractError("boundary_principal_context_requires_owner_and_attacker")
+
+    provenance = [
+        {"kind": "hunt_candidate", "id": candidate_id},
+        *[
+            {"kind": "evidence", "id": _identifier(ref, "evidence_ref")}
+            for ref in evidence_refs[:20]
+        ],
+    ]
+    raw: dict[str, Any] = {
+        "version": 1,
+        "hypothesis_id": f"hunt-{candidate_id}"[:160],
+        "kind": kind,
+        "owner": copy.deepcopy(owner),
+        "attacker": copy.deepcopy(attacker),
+        "provenance": provenance,
+    }
+
+    locus = candidate.get("canonical_locus")
+    if isinstance(locus, str):
+        try:
+            locus = json.loads(locus)
+        except json.JSONDecodeError:
+            locus = {}
+    locus = locus if isinstance(locus, dict) else {}
+    typed = candidate.get("boundary_context")
+    typed = typed if isinstance(typed, dict) else {}
+
+    # Only explicit typed fields are projected. Never derive a prompt, expected
+    # policy, state value or principal from free-form claim/title prose.
+    for key in (
+        "verifier_path", "state_path", "initial_value", "forbidden_value",
+        "approval_path", "approval_state_path", "required_approval_value",
+        "tool_name", "expected_principal", "prompt", "tool_calls_path",
+        "tool_name_field", "executed_field", "principal_field",
+    ):
+        if key in typed:
+            raw[key] = copy.deepcopy(typed[key])
+    if "verifier_path" not in raw:
+        route = locus.get("route")
+        if isinstance(route, str) and route.startswith("/"):
+            raw["verifier_path"] = route
+
+    policy = policy_context if isinstance(policy_context, dict) else {}
+    if policy.get("expected_rule") is not None:
+        raw["expected_rule"] = policy["expected_rule"]
+        raw["expected_rule_source"] = policy.get("expected_rule_source")
+
+    return raw
+
+
+def compile_hunt_candidate_boundary(
+    candidate: dict[str, Any],
+    *,
+    principal_context: dict[str, Any],
+    policy_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw = hypothesis_from_hunt_candidate(
+        candidate,
+        principal_context=principal_context,
+        policy_context=policy_context,
+    )
+    return {
+        "hypothesis": raw,
+        "proposal": compile_boundary_hypothesis(raw),
+    }
