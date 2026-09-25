@@ -40,3 +40,46 @@ async def test_boundary_hypothesis_compile_route_returns_422_for_bad_contract():
 
 def test_boundary_pack_is_admitted_by_ai_target_router():
     assert "shaker-ai-boundary" in router.AI_PROBE_PACKS
+
+
+@pytest.mark.asyncio
+async def test_ready_proposal_can_be_materialized_without_execution():
+    hypothesis = {
+        "version": 1,
+        "hypothesis_id": "hunt-agent-action",
+        "kind": "cross_tenant_action",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "expected_rule": "A tenant may update only its own document.",
+        "expected_rule_source": "operator",
+        "verifier_path": "/documents/doc-a",
+        "state_path": "status",
+        "initial_value": "draft",
+        "forbidden_value": "published",
+        "prompt": "Publish document doc-a.",
+        "provenance": [{"kind": "hunt_candidate", "id": "candidate-2"}],
+    }
+    proposal = (await router.compile_ai_boundary_hypothesis(
+        router.AIBoundaryHypothesisCompileRequest(hypothesis=hypothesis)
+    ))["proposal"]
+    base = {
+        "version": 1,
+        "name": "agent-boundary",
+        "owner": {"role": "victim", "subject": "user-a", "tenant": "tenant-a", "resource_id": "doc-a"},
+        "attacker": {"role": "attacker", "subject": "user-b", "tenant": "tenant-b", "resource_id": "doc-b"},
+        "identity": {"path": "/identity", "subject_field": "subject", "tenant_field": "tenant"},
+        "resource": {
+            "path": "/documents/{{resource_id}}",
+            "id_field": "id",
+            "owner_field": "owner",
+            "tenant_field": "tenant",
+            "marker_field": "marker",
+        },
+        "response_path": "answer",
+    }
+    result = await router.materialize_ai_boundary_proposal(
+        router.AIBoundaryMaterializeRequest(proposal=proposal, boundary_base=base)
+    )
+    assert result["probe_pack"] == "shaker-ai-boundary"
+    assert result["execution_enabled"] is False
+    assert result["materialization"]["boundary_contract"]["action"]["forbidden_value"] == "published"
