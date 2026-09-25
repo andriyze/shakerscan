@@ -17,6 +17,7 @@ capabilities:
 - http.request
 - browser.navigate
 - candidate.verify
+- ai.boundary.hypothesis.compile
 optional_capabilities: []
 missing_capabilities:
 - ai.invoke
@@ -145,7 +146,7 @@ methodology contributes hypotheses and controls, not another execution engine or
 Start from retained evidence and the operator's current objective; do not rebuild scope policy,
 request copied approval receipts, or impose the example budgets as additional run limits.
 
-Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`.
+Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`, `ai.boundary.hypothesis.compile`.
 
 Declared implementation gaps: `ai.invoke`, `ai.tool_observe`. These are not callable
 operations. Continue the compatible techniques and report the specific untested portion.
@@ -153,6 +154,26 @@ operations. Continue the compatible techniques and report the specific untested 
 Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques` in the returned
 metadata. A name in the library is not a guarantee that every technique below is executable;
 match the actual operation, request shape and evidence requirements to the live schema.
+
+## Agent authorization workflow
+
+For AI agents that can read private data or take actions, prefer the authorization workflow over
+generic prompt-only conclusions:
+
+1. Discover principals, tenants, owned resources, tools, actions, approvals and independent read-back paths.
+2. Record evidence-backed boundary hypotheses. Do not invent the expected business rule.
+3. Use `ai.boundary.hypothesis.compile` to turn secret-free discovered facts into a deterministic
+   proposal. A `needs_context` response names the exact authoritative facts still missing.
+4. Ask the operator only for an ambiguous business-policy fact that cannot be established from
+   authoritative application evidence. Do not ask them to re-authorize the Hunt.
+5. Execute supported proof through the server-owned AI Boundary verifier. A model claim is never
+   a substitute for canary disclosure, cross-principal differential, tool-principal telemetry or
+   an independently observed postcondition.
+6. Preserve the verified invariant and legitimate control as regression material.
+
+The compiler is dry-run and has no execution, scope-expansion, approval or finding-promotion
+authority. It is the bridge from Hunt discovery to the existing deterministic AI Boundary engine,
+not a second permission system.
 
 ## Core security hypotheses
 
