@@ -104,7 +104,13 @@ def _assert_wire_bound(
     if str(result.get("error") or "").startswith("contract:"):
         raise RuntimeError(f"{tool} process contract failed: {result.get('error')}")
     status = str(result.get("status") or "failed")
-    if status not in {"success", "timeout"}:
+    error = str(result.get("error") or "")
+    # A fired connection limiter is the pinned proxy enforcing the egress ceiling —
+    # the same outcome the receipt records as ``limiter_triggered`` alongside a wall
+    # ``timeout``, and the behaviour this gate exists to prove. Treat it as a bounded
+    # pass, not a tool failure. The target-observed ceiling checks below still fail the
+    # case if traffic actually leaked past the limit.
+    if status not in {"success", "timeout"} and error != "connection_limit_exceeded":
         raise RuntimeError(f"{tool} did not execute successfully: {result.get('error')}")
     request_count = len([
         item for item in traffic.get("traffic") or []
