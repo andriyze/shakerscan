@@ -428,6 +428,21 @@ def _workflow_step_schema() -> dict[str, Any]:
 
 COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
+        name="ai.boundary.proposal.materialize",
+        family="ai_gate",
+        description="Validate a ready agent-authorization proposal against the executable AI Boundary contract without executing a target.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/ai/boundary/proposals/materialize",
+        parameters_schema={
+            "proposal": {"type": "object"},
+            "boundary_base": {"type": "object"},
+        },
+        evidence_contract=("boundary_contract", "proposal_sha256", "provenance"),
+        timeout_seconds=15,
+    ),
+    ArsenalCommand(
         name="ai.boundary.hypothesis.compile",
         family="ai_gate",
         description="Compile discovered agent-authorization facts into a deterministic boundary proposal without executing a target.",
