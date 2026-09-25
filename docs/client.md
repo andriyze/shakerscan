@@ -13,8 +13,8 @@ issues tokens, assigns roles and enables Hunt is documented at
 It is the same code the engine runtime already exposes as `scanner.sh mcp` and `scanner.sh hunt`:
 the package vendors `scripts/shakerscan_mcp.py` and `scripts/v2_cli.py` at build time
 (`client/hatch_build.py`), so a client and a runtime of the same release run identical code, and
-every tool the adapter offers comes from the instance's live contracts (`GET /arsenal/commands`,
-`GET /hunts/contract`), not from the client version.
+the Arsenal and Hunt tools come from the instance's live contracts (`GET /arsenal/commands`,
+`GET /hunts/contract`); the fixed posture-check tool calls that instance's `/public/check` route.
 
 ## One command, two install channels
 
@@ -63,28 +63,46 @@ Python 3.10 or newer; no third-party dependencies.
 
 A pipx/Homebrew client can use the bounded ShakerScan public service immediately:
 
-Client 0.7.1 adds a dedicated public stdio MCP mode exposing only
-`shakerscan_public_check(target)`. It uses the same credential-free `/v1/check`
-pipeline as `check`; no private-engine discovery, Hunt, Arsenal, shell or target
-management tools are available. A configured private instance retains its own tools.
-The service observes DNS, direct email policy and bounded HTTP/HTTPS root HEAD
-responses through its AWS Lambda backend. Connections use validated public IPs;
-TLS verifies certificate trust, validity and the requested hostname. Only the
-negotiated TLS version is reported. Redirects are reported, never followed;
-unavailable evidence is unknown, and missing headers are posture observations.
-Public checks share a 100-uncached-attempts/IP/day quota, resetting at midnight UTC.
-
 ```bash
 shakerscan check example.com
-shakerscan check https://example.com --json
+shakerscan check 1.1.1.1
+shakerscan check https://example.com/api          # the URL path is used for the CORS probe
+shakerscan check example.com --dkim-selector google --json
 shakerscan mcp
 ```
 
+`check` observes DNS (addresses, name servers, DNSSEC, CAA, HTTPS records), email policy (MX,
+SPF, DMARC, DKIM with a selector, MTA-STS, TLS-RPT), bounded HTTP/HTTPS probes (response,
+headers, CORS, redirects, security.txt) and TLS (certificate chain, protocols, ciphers), plus IP
+network ownership. The answer (`schema_version` `2`) is a list of factual `observations` with the
+probe scope of each; the service makes no pass/fail judgment. The CLI groups them and lists a few
+clearly risky values (for example SPF `+all`/`?all`, DMARC `p=none`, a certificate close to
+expiry) under "Review". An IP-address target gets the HTTP/TLS probes against the address itself
+(the certificate is verified and reported with whether it lists the address) and its reverse
+DNS; DNS and email observations do not apply to it.
+
+The public MCP mode exposes only `shakerscan_public_check(target, path?, dkim_selector?)`. It
+uses the same credential-free `/v1/check` pipeline as `check`; no private-engine discovery,
+Hunt, Arsenal, shell or target management tools are available. When connected to an OSS or
+Enterprise instance, MCP also exposes that check alongside the instance's existing tools and
+sends it to the instance's `POST /public/check` using the saved connection. There is no public
+fallback or per-check approval prompt on a connected client.
+
+The hosted service accepts only public DNS names and global IP addresses, refuses government and
+military targets, and applies per-caller limits: 30 requests a minute, and 25 uncached checks an
+hour and 100 a day. Cached answers are reused for 10 minutes.
+
 With no local, remote, or saved ShakerScan instance configured, the client defaults to
-`https://pub.shakerscan.com`. Once an instance is configured, `check` and `mcp` use that instance;
-a failed private connection never falls back to public. The public backend owns the
-actual DNS/TLS/HTTP posture capabilities and rate limits; the lightweight client only validates
-the target, submits the request, prints the result, or exposes the public MCP catalogue.
+`https://pub.shakerscan.com`. Once an instance is configured, `check` sends the same request to
+that instance's `POST /public/check`; a failed private connection never falls back to public.
+The instance runs the same posture engine (`posture/`, bundled into the API image), so it answers
+with the same schema and the CLI prints it the same way. An instance applies none of the hosted
+restrictions: internal names, private addresses and any other target are the operator's decision,
+with no quota or cache. `SHAKERSCAN_POSTURE_RESOLVER=system` makes the engine use the instance's
+own DNS resolver (for internal names) instead of DNS over HTTPS, and
+`SHAKERSCAN_POSTURE_IPINFO_TOKEN` enables IP ownership facts.
+The OSS API is tokenless, so anyone who can reach it on the trusted LAN can invoke checks of
+addresses reachable from the API container; keep its network boundary intentional.
 
 ## Connect the client to a server
 

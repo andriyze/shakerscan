@@ -1591,8 +1591,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 429 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 358 | `api/**/*.py` |
+| Public REST operations | 430 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 359 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 82 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1602,7 +1602,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 386 | Python sources + Compose manifests |
+| Runtime environment keys | 391 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 122 | `scanner/scanner_tools/` |
 | UI pages | 38 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -1919,6 +1919,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/policy-profiles` | `create_policy_profile` |
 | `DELETE` | `/policy-profiles/{profile_id}` | `delete_policy_profile` |
 | `PATCH` | `/policy-profiles/{profile_id}` | `update_policy_profile` |
+| `POST` | `/public/check` | `public_check` |
 | `DELETE` | `/queue/clear` | `clear_queue` |
 | `GET` | `/queue/stats` | `queue_stats` |
 | `GET` | `/request-collections` | `list_request_collections` |
@@ -2693,6 +2694,11 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |
 | `SHAKERSCAN_PER_WORKER_MEM_GB` | `api/api.py`, `docker-compose.yml` |
 | `SHAKERSCAN_PLATFORM_MEMORY_RESERVE_GB` | `api/api.py`, `docker-compose.yml` |
+| `SHAKERSCAN_POSTURE_CONCURRENCY` | `api/public_check.py` |
+| `SHAKERSCAN_POSTURE_ENGINE` | `api/public_check.py` |
+| `SHAKERSCAN_POSTURE_IPINFO_TOKEN` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_POSTURE_NODE` | `api/public_check.py` |
+| `SHAKERSCAN_POSTURE_RESOLVER` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |

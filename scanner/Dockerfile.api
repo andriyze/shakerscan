@@ -5,6 +5,18 @@
 ARG SCANNER_RUNTIME_IMAGE=shakerscan-worker:local
 FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime
 
+# The posture check engine (posture/) is the same TypeScript code that serves
+# pub.shakerscan.com. It is bundled into one file here; the final image gets
+# only that bundle and this stage's pinned Node runtime, never npm or sources.
+FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS posture-engine
+WORKDIR /src
+COPY posture/package.json posture/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY posture/tsconfig.json ./
+COPY posture/src ./src
+RUN npm run typecheck && npm run build && \
+    printf '{}' | node dist/instance.cjs | grep -q '"status":400'
+
 FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
 
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
@@ -54,6 +66,8 @@ COPY --from=scanner-runtime /opt/model-intake-locks /opt/model-intake-locks
 COPY --from=scanner-runtime /opt/build-inputs/scanner.Dockerfile /opt/build-inputs/scanner.Dockerfile
 COPY --from=scanner-runtime /opt/build-inputs/apt_install.sh /opt/build-inputs/apt_install.sh
 COPY --from=scanner-runtime /opt/shakerscan/release-manifest.json /opt/shakerscan/release-manifest.json
+COPY --from=posture-engine /usr/local/bin/node /usr/local/bin/node
+COPY --from=posture-engine /src/dist/instance.cjs /opt/shakerscan/posture/instance.cjs
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
@@ -127,6 +141,8 @@ COPY scanner/api-entrypoint.sh /app/api-entrypoint.sh
 RUN chmod 0755 /app/api-entrypoint.sh && \
     python3 -c 'import asyncpg, fastapi, playwright, redis' && \
     PYTHONPATH=/app python3 -c 'from data_lifecycle.router import router; assert len(router.routes) == 2' && \
+    PYTHONPATH=/app python3 -c 'from public_check import router; assert [r.path for r in router.routes] == ["/public/check"]' && \
+    printf '{}' | /usr/local/bin/node /opt/shakerscan/posture/instance.cjs | grep -q '"status":400' && \
     test -n "$SCANNER_VERSION" && test -n "$SHAKERSCAN_SOURCE_REVISION" && \
     SCANNER_EXPECTED_VERSION="$SCANNER_VERSION" \
     SCANNER_EXPECTED_REVISION="$SHAKERSCAN_SOURCE_REVISION" \

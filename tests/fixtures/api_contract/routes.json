@@ -2096,6 +2096,13 @@
     "name": "update_policy_profile"
   },
   {
+    "path": "/public/check",
+    "methods": [
+      "POST"
+    ],
+    "name": "public_check"
+  },
+  {
     "path": "/queue/clear",
     "methods": [
       "DELETE"

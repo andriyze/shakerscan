@@ -35,16 +35,43 @@ class _Opener:
         return _Response({"summary": "ok"})
 
 
+_FACTS = {
+    "schema_version": "2", "target": "example.com", "checked_at": "2026-09-25T00:00:00Z", "cache": {"hit": True},
+    "observations": [
+        {"id": "mail.spf", "name": "SPF", "group": "mail", "result": {"record_count": 1, "all_qualifier": "?"}},
+        {"id": "mail.dmarc", "name": "DMARC", "group": "mail", "result": {"applied_policy": "none"}},
+        {"id": "mail.dkim", "name": "DKIM", "group": "mail", "result": None},
+        {"id": "tls.handshake", "name": "TLS handshake", "group": "tls", "result": {"certificate_days_remaining": 12, "certificate_verified": True}},
+        {"id": "ip.network", "name": "IP network", "group": "ip", "result": {"addresses": [
+            {"ip": "1.1.1.1", "asn": "AS13335", "as_name": "Cloudflare, Inc.", "country_code": "US"}], "reverse_dns": ["one.one.one.one"]}},
+        {"id": "http.connections", "name": "Sampled HTTPS connections", "group": "http", "result": {"connections": [
+            {"ip": "1.1.1.1", "status_code": 301, "tls_protocol": "TLSv1.3", "certificate": {"subject": "cloudflare-dns.com", "ip_address_match": True}}]}},
+    ],
+    "limitations": ["Only samples."],
+}
+
+
 class PublicClientTests(unittest.TestCase):
     def test_public_endpoint_is_fixed(self):
         self.assertEqual(cli.PUBLIC_API_URL, "https://pub.shakerscan.com")
 
     def test_normalize_public_target(self):
         self.assertEqual(cli.normalize_public_target("HTTPS://Example.COM/path"), "example.com")
+        self.assertEqual(cli.split_public_target("https://example.com/api"), ("example.com", "/api"))
+        self.assertEqual(cli.normalize_public_target("1.1.1.1"), "1.1.1.1")
+        self.assertEqual(cli.normalize_public_target("[2606:4700:4700:0:0:0:0:1111]"), "2606:4700:4700::1111")
+        self.assertEqual(cli.split_public_target("https://[2606:4700:4700::1111]/x"), ("2606:4700:4700::1111", "/x"))
+        for bad in ("localhost", "example.com/path", "127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:8.8.8.8",
+                    "https://user:pw@example.com/", "https://example.com:8443/", "jira"):
+            with self.assertRaises(cli.ClientError, msg=bad):
+                cli.normalize_public_target(bad)
+
+    def test_instance_targets_are_not_restricted_by_public_policy(self):
+        for value, expected in (("10.0.0.5", ("10.0.0.5", None)), ("jira", ("jira", None)), ("127.0.0.1", ("127.0.0.1", None)),
+                                ("http://intranet.local/api", ("intranet.local", "/api"))):
+            self.assertEqual(cli.split_public_target(value, public=False), expected)
         with self.assertRaises(cli.ClientError):
-            cli.normalize_public_target("localhost")
-        with self.assertRaises(cli.ClientError):
-            cli.normalize_public_target("example.com/path")
+            cli.split_public_target("bad host", public=False)
 
     def test_public_request_sends_no_authorization_header(self):
         opener = _Opener()
@@ -85,18 +112,46 @@ class PublicClientTests(unittest.TestCase):
                 self.assertEqual(cli.cmd_check(args), 0)
             public.assert_called_once_with("/v1/check", {"target": "example.com"}, timeout=20.0)
 
+    def test_check_sends_path_and_selector(self):
+        args = argparse.Namespace(target="https://example.com/api", json=True, timeout=None, path=None, dkim_selector="google")
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(cli, "profile", return_value={}), \
+             mock.patch.object(cli, "engine_launcher", return_value=None), \
+             mock.patch.object(cli, "public_request_json", return_value={"schema_version": "2"}) as public, \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(cli.cmd_check(args), 0)
+        public.assert_called_once_with("/v1/check", {"target": "example.com", "path": "/api", "dkim_selector": "google"}, timeout=20.0)
+
     def test_check_uses_configured_instance_not_public(self):
         fake_api = mock.Mock()
-        fake_api.main.return_value = 0
-        args = argparse.Namespace(target="example.com", json=True, timeout=None)
+        fake_api.ApiCliError = RuntimeError
+        fake_api.bearer_token.return_value = "secret-token"
+        fake_api.build_request.return_value = "REQUEST"
+        fake_api.call.return_value = (200, json.dumps(_FACTS))
+        args = argparse.Namespace(target="10.0.0.5", json=False, timeout=None, path=None, dkim_selector=None)
         env = {cli.ENV_URL: "https://private.example.com", cli.ENV_TOKEN: "secret-token"}
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch.object(cli, "load", return_value=fake_api), \
-             mock.patch.object(cli, "public_request_json") as public:
+             mock.patch.object(cli, "public_request_json") as public, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
             self.assertEqual(cli.cmd_check(args), 0)
             public.assert_not_called()
-            call = fake_api.main.call_args.args[0]
-            self.assertEqual(call[:4], ["--api-url", "https://private.example.com", "POST", "/public/check"])
+        method, path, body = fake_api.build_request.call_args.args
+        self.assertEqual((method, path, json.loads(body)), ("POST", "/public/check", {"target": "10.0.0.5"}))
+        self.assertEqual(fake_api.build_request.call_args.kwargs, {"api_url": "https://private.example.com", "token": "secret-token"})
+        self.assertIn("SPF ends with neutral ?all", stdout.getvalue())
+        self.assertIn("the connected ShakerScan instance", stdout.getvalue())
+
+    def test_instance_errors_surface_the_instance_detail(self):
+        fake_api = mock.Mock()
+        fake_api.ApiCliError = RuntimeError
+        fake_api.call.return_value = (404, '{"detail":"Not Found"}')
+        fake_api.render.return_value = ("HTTP 404: Not Found", 1)
+        args = argparse.Namespace(target="example.com", json=True, timeout=None, path=None, dkim_selector=None)
+        env = {cli.ENV_URL: "https://private.example.com", cli.ENV_TOKEN: "secret-token"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(cli, "load", return_value=fake_api):
+            with self.assertRaisesRegex(cli.ClientError, "HTTP 404"):
+                cli.cmd_check(args)
 
     def test_scan_uses_lan_ui_port_and_keeps_gateway_origin(self):
         fake_scan = mock.Mock()
@@ -114,20 +169,20 @@ class PublicClientTests(unittest.TestCase):
         self.assertEqual(cli.scan_ui_url("http://[::1]:8080"),
                          "http://[::1]:3000")
 
-    def test_check_prints_observations_and_limitations_with_summary(self):
-        args = argparse.Namespace(target="example.com", json=False, timeout=None)
-        data = {"summary": "One observation to review", "checks": [
-            {"name": "HTTPS", "status": "pass", "detail": "HTTPS responded."}
-        ], "limitations": ["Only the negotiated TLS version was observed."]}
+    def test_check_renders_factual_observations_hints_and_limitations(self):
+        args = argparse.Namespace(target="example.com", json=False, timeout=None, path=None, dkim_selector=None)
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch.object(cli, "profile", return_value={}), \
              mock.patch.object(cli, "engine_launcher", return_value=None), \
-             mock.patch.object(cli, "public_request_json", return_value=data), \
+             mock.patch.object(cli, "public_request_json", return_value=_FACTS), \
              mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
             self.assertEqual(cli.cmd_check(args), 0)
-            for text in (data["summary"], "HTTPS responded.", data["limitations"][0]):
-                self.assertIn(text, stdout.getvalue())
-
+        text = stdout.getvalue()
+        for expected in ("Target: example.com", "(cached)", "Review:", "SPF ends with neutral ?all", "DMARC policy is p=none",
+                         "certificate expires in 12 days", "all_qualifier: ?", "1.1.1.1 AS13335 Cloudflare, Inc. US",
+                         "reverse DNS: one.one.one.one", "1.1.1.1 HTTP 301 TLSv1.3", "lists IP: yes",
+                         "Not observed or not applicable: DKIM", "Note: Only samples.", "pub.shakerscan.com"):
+            self.assertIn(expected, text)
 
 if __name__ == "__main__":
     unittest.main()

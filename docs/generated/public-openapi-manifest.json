@@ -185,9 +185,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "fc77528e7991e00c25109f396132de0162f4b399cf69566b451eb86aad910da0",
+  "contract_sha256": "98fe8060745aee595911de7ac1591b2948402f7bbbf9cc1a4c1242a98cc27f3e",
   "openapi": "3.1.0",
-  "operation_count": 419,
+  "operation_count": 420,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -5020,6 +5020,20 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "POST /public/check": {
+      "deprecated": false,
+      "operation_id": "public_check_public_check_post",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "Public check"
+      ]
     },
     "POST /request-collections": {
       "deprecated": false,

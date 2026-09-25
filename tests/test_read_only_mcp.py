@@ -21,7 +21,7 @@ def test_public_mode_has_only_fixed_tool_and_no_discovery():
     calls = []
     def request(method, path, payload):
         calls.append((method, path, payload))
-        return {"schema_version": "1", "target": "example.com", "checks": []}
+        return {"schema_version": "2", "target": payload["target"], "observations": []}
     client.transport.request_json = request
     server = mcp.MCPServer(client)
     initialized = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
@@ -34,10 +34,26 @@ def test_public_mode_has_only_fixed_tool_and_no_discovery():
     assert calls == [("POST", "/v1/check", {"target": "example.com"})]
     assert client.transport.api_token is None
     assert client.transport.max_response_bytes == 32768
-    for name, args in [("shakerscan_hunt_start", {}), ("shakerscan_public_check", {"target": "example.com", "headers": {}}), ("shakerscan_public_check", {"target": "https://example.com/path"})]:
+    for name, args in [("shakerscan_hunt_start", {}), ("shakerscan_public_check", {"target": "example.com", "headers": {}}),
+                       ("shakerscan_public_check", {"target": "https://example.com/path"}), ("shakerscan_public_check", {"target": "example.com:8443"}),
+                       ("shakerscan_public_check", {"target": "example.com", "path": "//evil"}), ("shakerscan_public_check", {"target": "example.com", "path": "/a?b"}),
+                       ("shakerscan_public_check", {"target": "example.com", "dkim_selector": "bad.selector"})]:
         with pytest.raises(mcp.MCPError):
             client.call_tool(name, args)
     assert len(calls) == 1
+    client.call_tool("shakerscan_public_check", {"target": "1.1.1.1", "path": "/api"})
+    client.call_tool("shakerscan_public_check", {"target": "[2606:4700:4700::1111]"})
+    client.call_tool("shakerscan_public_check", {"target": "example.com", "dkim_selector": "google"})
+    assert calls[1:] == [("POST", "/v1/check", {"target": "1.1.1.1", "path": "/api"}),
+                         ("POST", "/v1/check", {"target": "[2606:4700:4700::1111]"}),
+                         ("POST", "/v1/check", {"target": "example.com", "dkim_selector": "google"})]
+
+
+def test_public_mode_rejects_the_retired_verdict_schema():
+    client = mcp.PublicClient()
+    client.transport.request_json = lambda *a: {"schema_version": "1", "target": "example.com", "checks": []}
+    with pytest.raises(mcp.MCPError):
+        client.call_tool("shakerscan_public_check", {"target": "example.com"})
 
 
 def test_public_upstream_failure_is_tool_error_without_raw_body():
@@ -48,6 +64,29 @@ def test_public_upstream_failure_is_tool_error_without_raw_body():
     result = client.call_tool("shakerscan_public_check", {"target": "example.com"})
     assert result["isError"] is True
     assert "SECRET" not in json.dumps(result)
+
+
+def test_connected_check_uses_the_instance_without_an_approval_prompt():
+    client = FakeClient()
+    calls = []
+    def request(method, path, payload=None):
+        calls.append((method, path, payload))
+        if path == "/public/check":
+            return {"schema_version": "2", "target": payload["target"], "observations": []}
+        return FakeClient.request_json(client, method, path, payload)
+    client.request_json = request
+
+    names = {tool["name"] for tool in client.list_tools()}
+    assert "shakerscan_public_check" in names
+    result = client.call_tool("shakerscan_public_check", {"target": "10.0.0.5", "path": "/api"})
+    assert result["structuredContent"]["target"] == "10.0.0.5"
+    assert calls[-1] == ("POST", "/public/check", {"target": "10.0.0.5", "path": "/api"})
+    assert all(path != "/v1/check" for _, path, _ in calls)
+
+    count = len(calls)
+    with pytest.raises(mcp.MCPError):
+        client.call_tool("shakerscan_public_check", {"target": "https://example.com"})
+    assert len(calls) == count
 
 
 def _catalog(*, drift_command=None):
@@ -380,7 +419,7 @@ def test_mcp_server_protocol_and_notifications():
     assert initialized["result"]["serverInfo"]["version"] == (ROOT / "VERSION").read_text().strip()
     assert notification is None
     assert cancelled is None
-    assert len(tools["result"]["tools"]) == 7 + len(mcp.HUNT_TOOLS)
+    assert len(tools["result"]["tools"]) == 8 + len(mcp.HUNT_TOOLS)
 
 
 def test_mcp_hunt_tools_wrap_canonical_api_and_validate_ids():
@@ -714,7 +753,7 @@ def test_mcp_main_sends_a_service_token_to_a_remote_https_gateway_only(monkeypat
 
         @staticmethod
         def read(_limit):
-            return b'{"ok":true}'
+            return b'{"schema_version":"2","target":"example.com","observations":[]}'
 
     sent = {}
 
@@ -724,9 +763,10 @@ def test_mcp_main_sends_a_service_token_to_a_remote_https_gateway_only(monkeypat
         return Response()
 
     monkeypatch.setattr(client.opener, "open", fake_open)
-    client.request_json("GET", "/hunts")
+    result = client.call_tool("shakerscan_public_check", {"target": "example.com"})
+    assert result["structuredContent"]["target"] == "example.com"
     assert sent["authorization"] == "Bearer st_0123456789abcdef"
-    assert sent["url"] == "https://gateway.example/hunts"
+    assert sent["url"] == "https://gateway.example/public/check"
     assert "st_0123456789abcdef" not in capsys.readouterr().err
 
     # Plain http with a token is refused before any request is made.

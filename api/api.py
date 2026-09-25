@@ -5612,6 +5612,11 @@ except ModuleNotFoundError:
     from .data_lifecycle.router import configure_data_lifecycle_router, router as data_lifecycle_router
 configure_data_lifecycle_router(lambda: db_pool)
 app.include_router(data_lifecycle_router)
+try:
+    from public_check import router as public_check_router
+except ModuleNotFoundError:
+    from .public_check import router as public_check_router
+app.include_router(public_check_router)
 
 try:
     from scan import sharding_policy

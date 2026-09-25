@@ -13,6 +13,7 @@ API_PROCESS_SUBPROCESS_MODULES = {
     "api/asm_inventory.py",
     "api/command_arsenal.py",
     "api/model_intake/router.py",
+    "api/public_check.py",
 }
 NON_API_ENTRYPOINT_SUBPROCESS_MODULES = {
     "api/gungnir_worker.py",
@@ -76,6 +77,12 @@ def test_api_process_execution_reasons_remain_narrow_and_named():
     assert "version probe" in arsenal
     assert 'shutil.which("docker")' in model_intake
     assert "subprocess.Popen" in model_intake
+    # The public posture check runs only the bundled engine with a fixed argv and a
+    # minimal environment; target input travels on stdin, never in argv.
+    public_check = (API / "public_check.py").read_text(encoding="utf-8")
+    assert "NODE_BINARY, ENGINE_PATH," in public_check
+    assert "env=_engine_environment()" in public_check
+    assert "process.communicate(body)" in public_check
 
 
 def test_api_image_omits_worker_executables_and_defaults_to_non_root():

@@ -1,0 +1,28 @@
+{
+  "name": "shakerscan-posture",
+  "version": "0.6.0",
+  "private": true,
+  "description": "ShakerScan bounded DNS, email, HTTP and TLS posture check engine, shared by pub.shakerscan.com and self-hosted instances.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/instance.ts --bundle --platform=node --target=node22 --format=cjs --minify --outfile=dist/instance.cjs"
+  },
+  "dependencies": {
+    "@relaycorp/dnssec": "1.12.1",
+    "ipaddr.js": "2.5.0",
+    "tr46": "6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/tr46": "5.0.1",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}
