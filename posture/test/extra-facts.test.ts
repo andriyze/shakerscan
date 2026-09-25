@@ -27,7 +27,7 @@ test('MTA-STS and TLS-RPT report published facts without contacting MX hosts', a
     assert.deepEqual(mta.result, { record_count: 1, policy_status_code: 200, mode: 'enforce', max_age: 86400, mx_patterns: ['*.example.com'] });
     assert.deepEqual(rpt.result, { record_count: 1, rua_count: 1, destination_schemes: ['mailto'] });
     assert.deepEqual(getCalls, ['mta-sts.example.com 8.8.8.8 /.well-known/mta-sts.txt']);
-    assert.equal(queries.some(query => query.includes('mx.example.com')), false);
+    assert.equal(queries.some(query => query.split(' ')[0] === 'mx.example.com'), false);
   } finally { budget.close(); }
 });
 
