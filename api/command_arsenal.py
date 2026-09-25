@@ -428,6 +428,23 @@ def _workflow_step_schema() -> dict[str, Any]:
 
 COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
+        name="ai.boundary.hypothesis.compile",
+        family="ai_gate",
+        description="Compile discovered agent-authorization facts into a deterministic boundary proposal without executing a target.",
+        status="dry_run",
+        risk_tier="read_only",
+        method="POST",
+        path="/ai/boundary/hypotheses/compile",
+        parameters_schema={
+            "hypothesis": {
+                "type": "object",
+                "description": "Secret-free boundary hypothesis with controlled principals, provenance, and optional authoritative business rule.",
+            },
+        },
+        evidence_contract=("boundary_proposal", "missing_facts", "provenance"),
+        timeout_seconds=15,
+    ),
+    ArsenalCommand(
         name="target.list",
         family="inventory",
         description="List configured targets.",
