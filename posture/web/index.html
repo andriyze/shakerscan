@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Where checks are sent: the hosted service by default. A self-hosted instance serving this
+       page sets its own https://<instance>/public/check here and adds that origin to connect-src. -->
+  <meta name="shakerscan-check-endpoint" content="https://pub.shakerscan.com/v1/check">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https://pub.shakerscan.com; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="DNS, email, HTTP and TLS facts for a domain or IP address, from the same engine as the shakerscan check command.">
+  <title>ShakerScan posture check</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="view.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#target">Skip to the check form</a>
+  <header class="topbar">
+    <a class="brand" href="./">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="14" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+        <path d="M16 8 L12 16 L16 14 L20 16 Z" fill="#3b82f6"/>
+        <path d="M16 14 L12 16 L16 24 L20 16 Z" fill="#60a5fa"/>
+      </svg>
+      <span class="brand-name">ShakerScan</span>
+      <span class="brand-page">Posture check</span>
+    </a>
+    <nav class="toplinks" aria-label="Project">
+      <a href="https://github.com/andriyze/shakerscan/blob/main/docs/client.md" rel="noopener">CLI</a>
+      <a href="https://github.com/andriyze/shakerscan" rel="noopener">Source</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>How is this domain set up?</h1>
+      <p class="lead">DNS, email, HTTP and TLS facts for any public domain or IP address, measured by the same engine as <code>shakerscan check</code>. No account, no scores: just what was observed and how.</p>
+
+      <form id="check-form" class="search" novalidate>
+        <label for="target" class="sr-only">Domain, IP address or URL</label>
+        <div class="field">
+          <svg class="icon field-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13z"/><path d="M15.5 15.5L20 20"/></svg>
+          <input id="target" name="target" type="text" inputmode="url" autocomplete="off" autocapitalize="none"
+                 spellcheck="false" maxlength="300" placeholder="example.com, 1.1.1.1 or https://example.com/api"
+                 aria-describedby="target-error service-note">
+        </div>
+        <button id="submit" class="primary" type="submit">Check</button>
+      </form>
+      <p id="target-error" class="field-error" role="alert" hidden></p>
+
+      <details id="options" class="options">
+        <summary>Options</summary>
+        <div class="option">
+          <label for="selector">DKIM selector</label>
+          <input id="selector" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63" placeholder="selector1">
+          <p class="help">A DKIM key can only be looked up by its selector, and selectors are never guessed. Leave empty to skip.</p>
+        </div>
+        <p class="help">To test CORS on a specific path, enter a full URL such as <code>https://example.com/api</code>; the path is probed with a fixed foreign Origin.</p>
+      </details>
+
+      <div class="alt-actions">
+        <button type="button" id="open-file" class="link">Open a saved result</button>
+        <span aria-hidden="true">·</span>
+        <button type="button" id="load-sample" class="link">View a sample</button>
+        <input id="file" type="file" accept="application/json,.json" hidden>
+      </div>
+      <p id="service-note" class="note"></p>
+    </section>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <div id="output" class="output"></div>
+  </main>
+
+  <footer class="footer">
+    <p>Each observation is a measured fact with the scope of the probe that produced it. The service makes no pass/fail judgment; the Review list is this page&rsquo;s short reading of a few clearly risky values, the same as the command line shows.</p>
+    <p id="privacy-note"></p>
+    <p>From a terminal: <code>pipx install shakerscan</code> then <code>shakerscan check example.com</code>. Results saved with <code>--json</code> open here too, without leaving your device.</p>
+  </footer>
+
+  <noscript><p class="noscript">This page needs JavaScript to run checks. The same check is available as <code>shakerscan check example.com</code>.</p></noscript>
+  <div id="drop" class="drop" hidden><p>Drop a result file to view it</p></div>
+</body>
+</html>

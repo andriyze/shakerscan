@@ -1,0 +1,522 @@
+{
+  "schema_version": "2",
+  "target": "example.com",
+  "checked_at": "2026-09-25T20:30:12.000Z",
+  "observations": [
+    {
+      "id": "dns.addresses",
+      "name": "Address records",
+      "group": "dns",
+      "scope": "A and AAAA answers from the configured recursive DNS resolver",
+      "result": {
+        "a_count": 2,
+        "aaaa_count": 1
+      }
+    },
+    {
+      "id": "dns.nameservers",
+      "name": "Name servers",
+      "group": "dns",
+      "scope": "Enclosing zone NS answer, direct SOA queries including serials to up to two named servers, and parent delegation sampled from up to two parent servers; sampled and untested names are explicit",
+      "result": {
+        "zone": "example.com",
+        "checked_names": [
+          "example.com"
+        ],
+        "count": 2,
+        "names": [
+          "ns1.example.net",
+          "ns2.example.net"
+        ],
+        "sampled_names": [
+          "ns1.example.net",
+          "ns2.example.net"
+        ],
+        "untested_names": [],
+        "responding_names": [
+          "ns1.example.net",
+          "ns2.example.net"
+        ],
+        "unresponsive_names": [],
+        "soa_serials": [
+          "ns1.example.net 2026092501",
+          "ns2.example.net 2026092501"
+        ],
+        "parent_names": [
+          "a.gtld-servers.net",
+          "b.gtld-servers.net",
+          "c.gtld-servers.net"
+        ],
+        "parent_sampled_names": [
+          "a.gtld-servers.net"
+        ],
+        "parent_untested_names": [
+          "b.gtld-servers.net",
+          "c.gtld-servers.net"
+        ],
+        "delegation_names": [
+          "ns1.example.net",
+          "ns2.example.net"
+        ],
+        "delegation_matches": true
+      }
+    },
+    {
+      "id": "dns.dnssec",
+      "name": "DNSSEC",
+      "group": "dns",
+      "scope": "Local positive A RRset DNSSEC validation against bundled root trust anchors, resolver authentication flags, and recursive DS/DNSKEY answers at the enclosing zone",
+      "result": {
+        "validated_queries": [],
+        "local_validation": "secure",
+        "validation_queries": 7,
+        "parent_ds_count": 1,
+        "ds_algorithms": [
+          "13"
+        ],
+        "dnskey_count": 2,
+        "dnskey_algorithms": [
+          "13"
+        ]
+      }
+    },
+    {
+      "id": "dns.caa",
+      "name": "Certificate issuance policy",
+      "group": "dns",
+      "scope": "CAA answers from the requested name up the DNS name tree, bounded to eight names",
+      "result": {
+        "count": 3,
+        "policy_domain": "example.com",
+        "checked_names": [
+          "example.com"
+        ],
+        "records": [
+          "0 issue letsencrypt.org",
+          "0 issuewild ;",
+          "0 iodef [redacted]"
+        ]
+      }
+    },
+    {
+      "id": "mail.mx",
+      "name": "Mail routing",
+      "group": "mail",
+      "scope": "MX answer at the requested name, implicit address-record fallback when no MX exists, and A/AAAA resolution of up to three MX targets",
+      "result": {
+        "count": 2,
+        "null_mx": false,
+        "implicit_mx_fallback_applies": false,
+        "targets": [
+          "10 mx1.example.com",
+          "20 mx2.example.com"
+        ],
+        "sampled_targets": 2,
+        "resolved_targets": [
+          "mx1.example.com",
+          "mx2.example.com"
+        ],
+        "unresolved_targets": []
+      }
+    },
+    {
+      "id": "mail.spf",
+      "name": "SPF",
+      "group": "mail",
+      "scope": "SPF TXT record and include/redirect expansion for up to ten domains; no sender IP evaluated",
+      "result": {
+        "record_count": 1,
+        "lookup_terms_in_record": 2,
+        "all_qualifier": "~",
+        "recursive_evaluation": false,
+        "checked_domains": [
+          "example.com",
+          "_spf.mail.example.net"
+        ],
+        "expansion_complete": true,
+        "cycles": [],
+        "referenced_lookup_terms": 3,
+        "missing_or_multiple_records": 0
+      }
+    },
+    {
+      "id": "mail.dmarc",
+      "name": "DMARC",
+      "group": "mail",
+      "scope": "DMARC TXT policy discovery from the requested name up the DNS name tree, bounded to eight names",
+      "result": {
+        "record_count": 1,
+        "effective_policy_evaluated": true,
+        "checked_names": [
+          "example.com"
+        ],
+        "policy_domain": "example.com",
+        "inherited": false,
+        "declared_policy": "none",
+        "applied_policy": "none",
+        "policy_tag": "p",
+        "dkim_alignment": "r",
+        "spf_alignment": "r",
+        "test_mode": "n",
+        "rua_count": 1,
+        "ruf_count": 0
+      }
+    },
+    {
+      "id": "mail.dkim",
+      "name": "DKIM",
+      "group": "mail",
+      "scope": "TXT key at <selector>._domainkey.<target> when a selector was supplied",
+      "result": null
+    },
+    {
+      "id": "http.response",
+      "name": "HTTPS response",
+      "group": "http",
+      "scope": "HTTPS HEAD / on up to two validated IPv4 addresses",
+      "result": {
+        "status_code": 200,
+        "validated_address_count": 3,
+        "sampled_address_count": 2,
+        "sampled_families": [
+          "IPv4",
+          "IPv4"
+        ]
+      }
+    },
+    {
+      "id": "tls.handshake",
+      "name": "TLS handshake",
+      "group": "tls",
+      "scope": "Certificate and TLS data from the sampled HTTPS connections",
+      "result": {
+        "certificate_days_remaining": 20,
+        "verified_addresses": [
+          "192.0.2.10",
+          "198.51.100.24"
+        ],
+        "certificate_expiry_by_address": [
+          "192.0.2.10 20",
+          "198.51.100.24 20"
+        ],
+        "certificate_verified": true
+      }
+    },
+    {
+      "id": "tls.ciphers",
+      "name": "TLS protocol and cipher samples",
+      "group": "tls",
+      "scope": "Ciphers and protocol versions negotiated by bounded TLS 1.2, TLS 1.3 and default HTTPS handshakes on up to two IPv4 addresses; failed probes do not prove a version is unsupported",
+      "result": {
+        "negotiated_ciphers": [
+          "TLS_AES_128_GCM_SHA256",
+          "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+        ],
+        "address_ciphers": [
+          "192.0.2.10 TLSv1.3/TLS_AES_128_GCM_SHA256",
+          "192.0.2.10 TLSv1.2/TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "198.51.100.24 TLSv1.3/TLS_AES_128_GCM_SHA256",
+          "198.51.100.24 TLSv1.2/TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+        ],
+        "negotiated_protocols": [
+          "TLSv1.3",
+          "TLSv1.2"
+        ],
+        "address_protocol_probes": [
+          "192.0.2.10 TLSv1.2 negotiated",
+          "192.0.2.10 TLSv1.3 negotiated",
+          "198.51.100.24 TLSv1.2 negotiated",
+          "198.51.100.24 TLSv1.3 negotiated"
+        ]
+      }
+    },
+    {
+      "id": "http.headers",
+      "name": "HTTPS security headers",
+      "group": "http",
+      "scope": "Selected headers from HTTPS HEAD / on one validated IPv4 address",
+      "result": {
+        "hsts_max_age": 31536000,
+        "hsts_include_subdomains": true,
+        "hsts_preload": false,
+        "csp_script_source": "script-src",
+        "csp_directives": [
+          "default-src",
+          "script-src",
+          "object-src",
+          "base-uri",
+          "frame-ancestors"
+        ],
+        "csp_selected_sources": [
+          "default-src 'self'",
+          "frame-ancestors 'none'",
+          "object-src 'none'",
+          "base-uri 'self'"
+        ],
+        "csp_script_values": [
+          "'self'",
+          "[nonce-or-hash]"
+        ],
+        "x_content_type_options": "nosniff",
+        "referrer_policy": "strict-origin-when-cross-origin",
+        "x_frame_options": "deny",
+        "cross_origin_opener_policy": "same-origin",
+        "present_headers": [
+          "strict-transport-security",
+          "content-security-policy",
+          "x-content-type-options",
+          "referrer-policy"
+        ],
+        "absent_headers": [
+          "permissions-policy"
+        ]
+      }
+    },
+    {
+      "id": "http.cors",
+      "name": "CORS on HTTPS path",
+      "group": "http",
+      "scope": "HTTPS GET and OPTIONS on the result path with one fixed foreign Origin on one validated IPv4 address; absent, empty and returned origin values are distinguished",
+      "result": {
+        "path": "/",
+        "allow_origin": "none",
+        "allow_credentials": false,
+        "vary_origin": false,
+        "preflight_status_code": 204,
+        "preflight_allow_origin": "none",
+        "preflight_allow_credentials": false,
+        "preflight_methods": ""
+      }
+    },
+    {
+      "id": "http.redirect",
+      "name": "HTTP redirect",
+      "group": "http",
+      "scope": "HTTP HEAD / and up to three same-host redirect hops on one validated IPv4 address",
+      "result": {
+        "status_code": 301,
+        "redirect": "same_host_https",
+        "redirect_chain": [
+          "301 same_host_https",
+          "200 none"
+        ],
+        "final_status_code": 200,
+        "chain_complete": true
+      }
+    },
+    {
+      "id": "ip.network",
+      "name": "IP network",
+      "group": "ip",
+      "scope": "Validated public A/AAAA answers; IPinfo Lite ASN and country enrichment, up to eight addresses",
+      "result": {
+        "addresses": [
+          {
+            "ip": "192.0.2.10",
+            "family": "IPv4",
+            "sampled": true,
+            "dns_ttl": 300,
+            "asn": "AS64500",
+            "as_name": "Example Hosting",
+            "as_domain": "example.net",
+            "country_code": "NL",
+            "country": "Netherlands",
+            "continent_code": "EU",
+            "continent": "Europe",
+            "anycast": false
+          },
+          {
+            "ip": "198.51.100.24",
+            "family": "IPv4",
+            "sampled": true,
+            "dns_ttl": 300,
+            "asn": "AS64500",
+            "as_name": "Example Hosting",
+            "as_domain": "example.net",
+            "country_code": "DE",
+            "country": "Germany",
+            "continent_code": "EU",
+            "continent": "Europe",
+            "anycast": false
+          },
+          {
+            "ip": "2001:db8::10",
+            "family": "IPv6",
+            "sampled": false,
+            "dns_ttl": 300,
+            "asn": "AS64500",
+            "as_name": "Example Hosting",
+            "as_domain": "example.net",
+            "country_code": "NL",
+            "country": "Netherlands",
+            "continent_code": "EU",
+            "continent": "Europe",
+            "anycast": false
+          }
+        ],
+        "total_address_count": 3,
+        "cname_chain": [],
+        "enrichment": "available",
+        "provider": "ipinfo_lite"
+      }
+    },
+    {
+      "id": "mail.mta_sts",
+      "name": "MTA-STS",
+      "group": "mail",
+      "scope": "TXT at _mta-sts.<target> and, when advertised, one pinned HTTPS GET of the fixed MTA-STS policy path",
+      "result": {
+        "record_count": 1,
+        "policy_status_code": 200,
+        "mode": "enforce",
+        "max_age": 604800,
+        "mx_patterns": [
+          "mx1.example.com",
+          "mx2.example.com"
+        ]
+      }
+    },
+    {
+      "id": "mail.tls_rpt",
+      "name": "SMTP TLS Reporting",
+      "group": "mail",
+      "scope": "TXT at _smtp._tls.<target>; reporting destinations are counted, not contacted",
+      "result": {
+        "record_count": 1,
+        "rua_count": 1,
+        "destination_schemes": [
+          "mailto"
+        ]
+      }
+    },
+    {
+      "id": "http.security_txt",
+      "name": "Security contact",
+      "group": "http",
+      "scope": "One pinned HTTPS GET of /.well-known/security.txt on a validated IPv4 address; HTTP status, content type and required Contact/Expires fields observed; no redirects followed",
+      "result": {
+        "status_code": 200,
+        "content_type": "text/plain",
+        "charset": "utf-8",
+        "contact_count": 1,
+        "contact_schemes": [
+          "mailto"
+        ],
+        "canonical_count": 1,
+        "expires": "2027-06-30T00:00:00.000Z",
+        "format": "basic_valid"
+      }
+    },
+    {
+      "id": "dns.https",
+      "name": "HTTPS DNS records",
+      "group": "dns",
+      "scope": "HTTPS resource records from the configured recursive DNS resolver; advertised parameters only",
+      "result": {
+        "count": 1,
+        "records": [
+          {
+            "priority": 1,
+            "target": ".",
+            "ttl": 300,
+            "parameters": [
+              "alpn=h3,h2",
+              "key4=present",
+              "key6=present"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "http.connections",
+      "name": "Sampled HTTPS connections",
+      "group": "http",
+      "scope": "Status, leaf key and signature, certificate chain exposed by Node TLS (up to four entries), and negotiated ALPN from up to two pinned IPv4 HTTPS connections offering HTTP/1.1",
+      "result": {
+        "connections": [
+          {
+            "ip": "192.0.2.10",
+            "status_code": 200,
+            "tls_protocol": "TLSv1.3",
+            "cipher": "TLS_AES_128_GCM_SHA256",
+            "certificate": {
+              "valid_from": "Jul 17 00:00:00 2026 GMT",
+              "valid_to": "Oct 15 23:59:59 2026 GMT",
+              "issuer": "Example Trust Services",
+              "subject": "example.com",
+              "san_names": [
+                "example.com",
+                "www.example.com"
+              ],
+              "fingerprint256": "B1:47:30:AD:0A:98:0E:A8:8A:77:DF:4E:9D:DF:BE:0F:BA:1F:45:89:FF:19:E7:DA:34:73:44:81:34:72:7D:F4",
+              "alpn": "http/1.1",
+              "public_key_type": "ec",
+              "public_key_bits": 256,
+              "public_key_curve": "prime256v1",
+              "signature_algorithm": "ecdsa-with-SHA384",
+              "chain": [
+                {
+                  "subject": "example.com",
+                  "issuer": "Example Issuing CA E1",
+                  "valid_to": "Oct 15 23:59:59 2026 GMT",
+                  "fingerprint256": "B1:47:30:AD:0A:98:0E:A8:8A:77:DF:4E:9D:DF:BE:0F:BA:1F:45:89:FF:19:E7:DA:34:73:44:81:34:72:7D:F4"
+                },
+                {
+                  "subject": "Example Issuing CA E1",
+                  "issuer": "Example Root CA X2",
+                  "valid_to": "Mar 12 23:59:59 2029 GMT",
+                  "fingerprint256": "94:E6:F0:2A:5A:CA:51:E4:4A:2C:05:7E:9C:0F:3C:ED:80:81:4C:19:8D:E8:A8:4B:4F:5C:AB:7E:06:EA:20:94"
+                }
+              ]
+            }
+          },
+          {
+            "ip": "198.51.100.24",
+            "status_code": 200,
+            "tls_protocol": "TLSv1.3",
+            "cipher": "TLS_AES_128_GCM_SHA256",
+            "certificate": {
+              "valid_from": "Jul 17 00:00:00 2026 GMT",
+              "valid_to": "Oct 15 23:59:59 2026 GMT",
+              "issuer": "Example Trust Services",
+              "subject": "example.com",
+              "san_names": [
+                "example.com",
+                "www.example.com"
+              ],
+              "fingerprint256": "26:A8:51:31:F8:8F:B2:39:CB:13:6F:9A:FD:9C:C5:C9:25:10:5D:E0:E5:5B:DA:D4:6B:8F:79:57:C9:47:57:C0",
+              "alpn": "http/1.1",
+              "public_key_type": "ec",
+              "public_key_bits": 256,
+              "public_key_curve": "prime256v1",
+              "signature_algorithm": "ecdsa-with-SHA384",
+              "chain": [
+                {
+                  "subject": "example.com",
+                  "issuer": "Example Issuing CA E1",
+                  "valid_to": "Oct 15 23:59:59 2026 GMT",
+                  "fingerprint256": "26:A8:51:31:F8:8F:B2:39:CB:13:6F:9A:FD:9C:C5:C9:25:10:5D:E0:E5:5B:DA:D4:6B:8F:79:57:C9:47:57:C0"
+                },
+                {
+                  "subject": "Example Issuing CA E1",
+                  "issuer": "Example Root CA X2",
+                  "valid_to": "Mar 12 23:59:59 2029 GMT",
+                  "fingerprint256": "94:E6:F0:2A:5A:CA:51:E4:4A:2C:05:7E:9C:0F:3C:ED:80:81:4C:19:8D:E8:A8:4B:4F:5C:AB:7E:06:EA:20:94"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "Up to seven initial HEAD requests, one GET and one OPTIONS CORS probe, fixed-path security.txt and optional MTA-STS GETs, and up to three same-host redirect hops. IPv6 egress is unavailable; negotiated ciphers and protocol versions are samples.",
+    "DKIM requires a caller-supplied selector. SPF sender authorization was not evaluated. Name-server reachability and delegation are sampled."
+  ],
+  "cache": {
+    "hit": false
+  },
+  "request_id": "00000000-0000-4000-8000-000000000000"
+}
