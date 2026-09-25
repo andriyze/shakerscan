@@ -504,6 +504,8 @@ def hypothesis_from_hunt_candidate(
             locus = {}
     locus = locus if isinstance(locus, dict) else {}
     typed = candidate.get("boundary_context")
+    if not isinstance(typed, dict):
+        typed = locus.get("ai_boundary_context")
     typed = typed if isinstance(typed, dict) else {}
 
     # Only explicit typed fields are projected. Never derive a prompt, expected
