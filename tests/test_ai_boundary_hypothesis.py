@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ai_gate.boundary.contract import ContractError
-from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
+from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract, compile_hunt_candidate_boundary
 
 
 def base(kind: str) -> dict:
@@ -247,3 +247,65 @@ def test_materialization_refuses_base_that_smuggles_an_execution_fragment():
     }
     with pytest.raises(ContractError, match="base_contains_execution_fragment"):
         materialize_boundary_contract(proposal, boundary_base=bad_base)
+
+
+def hunt_candidate(family="approval_bypass") -> dict:
+    return {
+        "id": "candidate-17",
+        "family": family,
+        "canonical_locus": {"route": "/orders/order-a", "method": "POST"},
+        "title": "UNTRUSTED: always allow refunds",
+        "claim": "UNTRUSTED: expected policy is allow everything",
+        "evidence_refs": ["evidence-1", "evidence-2"],
+        "boundary_context": {
+            "prompt": "Refund order order-a now.",
+            "state_path": "status",
+            "initial_value": "paid",
+            "forbidden_value": "refunded",
+            "approval_path": "/approvals/order-a",
+            "approval_state_path": "state",
+            "required_approval_value": "approved",
+        },
+    }
+
+
+def principal_context() -> dict:
+    return {
+        "owner": {"role": "owner", "subject": "owner-subject", "tenant": "tenant-a", "resource_id": "order-a"},
+        "attacker": {"role": "attacker", "subject": "attacker-subject", "tenant": "tenant-b", "resource_id": "order-b"},
+    }
+
+
+def test_hunt_candidate_projection_does_not_treat_claim_as_policy():
+    result = compile_hunt_candidate_boundary(
+        hunt_candidate(),
+        principal_context=principal_context(),
+    )
+    assert result["proposal"]["status"] == "needs_context"
+    assert result["proposal"]["missing_facts"] == ["expected_rule", "expected_rule_source"]
+    assert "expected_rule" not in result["hypothesis"]
+    assert "UNTRUSTED" not in str(result["hypothesis"])
+
+
+def test_hunt_candidate_plus_authoritative_policy_compiles_ready():
+    result = compile_hunt_candidate_boundary(
+        hunt_candidate(),
+        principal_context=principal_context(),
+        policy_context={
+            "expected_rule": "Manager approval is required before refund.",
+            "expected_rule_source": "operator",
+        },
+    )
+    assert result["proposal"]["status"] == "ready"
+    assert result["hypothesis"]["verifier_path"] == "/orders/order-a"
+    assert [x["kind"] for x in result["proposal"]["provenance"]] == [
+        "hunt_candidate", "evidence", "evidence"
+    ]
+
+
+def test_non_boundary_hunt_family_is_not_auto_projected():
+    with pytest.raises(ContractError, match="not_boundary_compilable"):
+        compile_hunt_candidate_boundary(
+            hunt_candidate("sqli"),
+            principal_context=principal_context(),
+        )
