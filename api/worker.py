@@ -19055,7 +19055,11 @@ async def _execute_agent_scanner_process(
         stdout = stdout.replace(pinned_origin, original_origin)
         if overflow.is_set() and status not in {"cancelled", "timeout"}:
             status, error = "success", "output_truncated"
-        if status not in {"cancelled", "timeout"} and error != "output_truncated":
+        # The pinned proxy may stop a tool at its connection ceiling. The resulting
+        # SIGKILL is a consequence of that limit, not the primary failure reason.
+        if status not in {"cancelled", "timeout"} and error not in {
+            "output_truncated", "connection_limit_exceeded",
+        }:
             if returncode not in (0, None) and not stdout.strip():
                 status = "failed"
                 error = (

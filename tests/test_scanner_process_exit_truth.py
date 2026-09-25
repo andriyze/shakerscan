@@ -168,3 +168,50 @@ def test_crawler_stopped_by_its_memory_bound_is_named_as_such(monkeypatch):
     silent = _run_katana(monkeypatch, 2, b"", b"fatal error: runtime: out of memory\n")
     assert silent["status"] == "failed"
     assert silent["error"] == "crawler_memory_bound_exceeded"
+
+
+def test_proxy_connection_ceiling_keeps_its_failure_reason_after_killing_tool(monkeypatch):
+    class LimitedProxy(_PinnedProxy):
+        async def start(self):
+            self.connection_attempts = 401
+            self.connections_rejected = 1
+            asyncio.get_running_loop().call_soon(self.limit_exceeded.set)
+            return self
+
+    class RunningProcess(_Process):
+        def __init__(self):
+            super().__init__(0, b"")
+            self._done = asyncio.Event()
+
+        async def wait(self):
+            await self._done.wait()
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            self._done.set()
+
+    monkeypatch.setattr(worker, "PinnedSocksProxy", LimitedProxy)
+    monkeypatch.setattr(worker, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(worker, "_terminate_agent_tool_process_group", lambda proc: proc.kill())
+
+    async def _exec(*_cmd, **_kwargs):
+        return RunningProcess()
+
+    monkeypatch.setattr(worker.asyncio, "create_subprocess_exec", _exec)
+    result = asyncio.run(worker._execute_agent_scanner_process({
+        "job_id": "bounded-xss-job",
+        "tool_name": "dalfox",
+        "registered_target": "https://example.test",
+        "execution_target": "https://example.test/search?q=test",
+        "scanner_options": {"deep_domxss": True},
+        "pinned_address": "203.0.113.7",
+        "authorized_addresses": ["203.0.113.7"],
+        "_reserved_budget": {"http_requests": 400, "tool_wall_seconds": 120},
+    }))
+
+    assert result["status"] == "failed"
+    assert result["error"] == "connection_limit_exceeded"
+    assert result["returncode"] == -9
+    assert result["network_telemetry"]["connections_attempted"] == 401
+    assert result["network_telemetry"]["connections_rejected"] == 1
