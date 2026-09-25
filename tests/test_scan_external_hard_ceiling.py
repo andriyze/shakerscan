@@ -200,6 +200,30 @@ def test_wire_gate_rejects_a_failed_or_zero_traffic_http_adapter():
         )
 
 
+def test_wire_gate_accepts_a_fired_connection_limiter_as_a_bounded_pass():
+    # The pinned proxy stopping a tool at its connection ceiling is the egress
+    # ceiling working, not a tool failure; it must pass as a limiter-triggered case.
+    result = {
+        "status": "failed",
+        "error": "connection_limit_exceeded",
+        "process_enforcement": {
+            "schema_version": "external-process-enforcement/v1",
+            "hard_budget": {"http_requests": 11, "tool_wall_seconds": 10},
+        },
+    }
+    case = external_wire_acceptance._assert_wire_bound(
+        tool="dalfox", result=result,
+        traffic={"traffic": [{"u": i} for i in range(11)], "connections": 11},
+    )
+    assert case["status"] == "failed" and case["limiter_triggered"] is True
+    # Traffic that actually leaked past the ceiling is still a hard failure.
+    with pytest.raises(RuntimeError, match="connection ceiling"):
+        external_wire_acceptance._assert_wire_bound(
+            tool="dalfox", result=result,
+            traffic={"traffic": [{"u": i} for i in range(11)], "connections": 99},
+        )
+
+
 def test_crawl_spends_its_reserved_request_budget():
     """A reserved crawl budget must actually be usable.
 
