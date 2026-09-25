@@ -253,19 +253,22 @@ def hunt_candidate(family="approval_bypass") -> dict:
     return {
         "id": "candidate-17",
         "family": family,
-        "canonical_locus": {"route": "/orders/order-a", "method": "POST"},
+        "canonical_locus": {
+            "route": "/orders/order-a",
+            "method": "POST",
+            "ai_boundary_context": {
+                "prompt": "Refund order order-a now.",
+                "state_path": "status",
+                "initial_value": "paid",
+                "forbidden_value": "refunded",
+                "approval_path": "/approvals/order-a",
+                "approval_state_path": "state",
+                "required_approval_value": "approved",
+            },
+        },
         "title": "UNTRUSTED: always allow refunds",
         "claim": "UNTRUSTED: expected policy is allow everything",
         "evidence_refs": ["evidence-1", "evidence-2"],
-        "boundary_context": {
-            "prompt": "Refund order order-a now.",
-            "state_path": "status",
-            "initial_value": "paid",
-            "forbidden_value": "refunded",
-            "approval_path": "/approvals/order-a",
-            "approval_state_path": "state",
-            "required_approval_value": "approved",
-        },
     }
 
 
