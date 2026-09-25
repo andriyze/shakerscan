@@ -14,6 +14,8 @@ pic
 ui/.next
 ui/node_modules
 ui/tsconfig.tsbuildinfo
+posture/node_modules
+posture/dist
 
 *.log
 .DS_Store

@@ -91,6 +91,14 @@ surfaces:
     routes: ["/data-deletion/*"]
     files: ["api/data_lifecycle/router.py"]
 
+  - id: public-posture-check
+    owner: platform
+    disposition: KEEP_CANONICAL
+    canonical_replacement: null
+    new_writes_allowed: true
+    routes: ["/public/check"]
+    files: ["api/public_check.py"]
+
   # ------------------------------------------------------------ legacy: delete
   - id: legacy-agent-hunt
     owner: compatibility
