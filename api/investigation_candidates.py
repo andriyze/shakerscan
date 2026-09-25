@@ -85,6 +85,7 @@ def canonical_locus(value: Any) -> dict[str, Any]:
         "service_name", "operation_id", "capability_id", "scheme",
         "collection_id", "request_id", "advisory_id", "cpe", "version",
         "host_key_fingerprint",
+        "ai_boundary_context",
     )
     result: dict[str, Any] = {}
     for key in allowed:
