@@ -878,6 +878,8 @@ def skill_context_section(
                 # it chose from what it inherited.
                 "requested": spec.skill_id in chosen,
                 "methodology_url": f"/hunts/{{hunt_id}}/skills/{spec.skill_id}/read",
+                "read_method": "POST",
+                "usage_requires_read": True,
             }
             for spec in resolved_specs
         ],

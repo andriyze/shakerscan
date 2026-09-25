@@ -504,6 +504,15 @@ def public_hunt_run(
         "target_id": str(
             item.get("target_id") or item.get("device_target_id") or ""
         ) or None,
+        "candidate_review": {
+            "findings_url": f"/findings?hunt_id={item.get('id')}&include_candidates=true",
+            "investigation_candidates_url": (
+                f"/investigation/candidates?device_target_id={item.get('device_target_id')}"
+                if item.get("device_target_id") else
+                f"/investigation/candidates?target_id={item.get('target_id')}"
+            ),
+            "investigation_scope": "target; consult the Hunt record for action ownership",
+        },
         "objective": item.get("objective"),
         "status": item.get("status"),
         "budget_profile": item.get("budget_profile"),
@@ -532,6 +541,10 @@ def public_hunt_run(
         ),
     }
     if include_capabilities:
+        for capability in capabilities:
+            capability["call"]["url"] = (
+                f"/hunts/{item.get('id')}/capabilities/{capability['name']}"
+            )
         result["capabilities"] = capabilities
     context = _resolve_skill_url_templates(
         _decode_json(item.get("context_pack"), {}), str(item.get("id") or ""),
@@ -657,6 +670,7 @@ class HuntRunService:
             "suggestions": [
                 {
                     **item,
+                    "read_url": f"/hunts/{hunt_id}/skills/{item['skill_id']}/read",
                     "methodology_url": (
                         f"/hunts/{hunt_id}/skills/{item['skill_id']}/read"
                     ),
@@ -906,7 +920,13 @@ class HuntRunService:
                         hunt_uuid, spec.skill_id, spec.body_sha256,
                     )
                     if not was_read:
-                        raise HTTPException(status_code=409, detail="Read this methodology before reporting usage")
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Read this methodology before reporting usage: "
+                                f"POST /hunts/{hunt_id}/skills/{skill_id}/read"
+                            ),
+                        )
                 if action_uuid is not None:
                     action = await connection.fetchrow(
                         """SELECT capability_name, status FROM hunt_actions

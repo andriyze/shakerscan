@@ -22,6 +22,9 @@ import uuid
 from fastapi import HTTPException
 import pytest
 from hunt.device_traffic import reserve_device_traffic
+from runtime.credential_refs import (
+    CredentialReferenceError, select_hunt_immediate_principal_reference,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +153,8 @@ def admission(store):
         "_validate_approval_receipt_for_action": approval,
         "_uuid_or_400": lambda value, label: uuid.UUID(value),
         "agent_tools": SimpleNamespace(normalize_principal_slot=lambda _: "anonymous", IDENTITY_HEADERS=set()),
+        "CredentialReferenceError": CredentialReferenceError,
+        "select_hunt_immediate_principal_reference": select_hunt_immediate_principal_reference,
         "family_proof": SimpleNamespace(canonical_family=lambda family: family),
         "web_candidate_budget": lambda family: {}, "_AGENT_MUTATING_VERIFY_FAMILIES": frozenset(),
         "PostgresBudgetReservationStore": ReservationStore,
@@ -220,6 +225,32 @@ def test_non_verification_capability_is_not_charged_to_verifications():
     store = AdmissionStore(maximum=0)
     asyncio.run(call(store, name="http.request"))
     assert store.run["budget_used_json"]["verifications"] == 0 and len(store.actions) == 1
+
+
+def test_header_principals_require_two_admitted_authz_profiles_before_reservation():
+    store = AdmissionStore()
+    refs = [
+        {"source": "credential_profiles", "profile_id": str(uuid.UUID(int=index)),
+         "principal_slot": slot, "profile_version": 1,
+         "auth_kind": "authorization_header",
+         "allowed_capabilities": ["authz.verify"]}
+        for index, slot in ((11, "primary"), (12, "secondary"))
+    ]
+    store.run["context_pack"]["credential_refs"] = refs
+    values = {"routes": ["/api/orders"], "primary_principal": "primary",
+              "secondary_principal": "secondary"}
+    asyncio.run(call(store, values=values))
+    assert store.run["budget_used_json"]["verifications"] == 1
+    assert len(store.actions) == 1
+
+    blocked = AdmissionStore()
+    blocked.run["context_pack"]["credential_refs"] = deepcopy(refs)
+    blocked.run["context_pack"]["credential_refs"][1]["allowed_capabilities"] = ["http.request"]
+    with pytest.raises(HTTPException, match="usable managed profile") as error:
+        asyncio.run(call(blocked, values=values))
+    assert error.value.status_code == 403
+    assert blocked.run["budget_used_json"]["verifications"] == 0
+    assert not blocked.actions
 
 
 def test_changed_input_cannot_reuse_idempotency_or_consume_a_second_slot():

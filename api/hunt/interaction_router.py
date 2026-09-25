@@ -66,7 +66,12 @@ try:
     from runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
     from runtime.credential_refs import (
         CredentialReferenceError, select_hunt_principal_reference,
-        select_hunt_session_principal_reference,
+        select_hunt_session_principal_reference, select_hunt_immediate_principal_reference,
+    )
+    from runtime.capability_registry import (
+        HUNT_CAPABILITY_IDEMPOTENCY_MIN_LENGTH,
+        HUNT_CAPABILITY_IDEMPOTENCY_MAX_LENGTH,
+        HUNT_CAPABILITY_IDEMPOTENCY_PATTERN,
     )
     from runtime.models import ScanPolicy, TargetBinding
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
@@ -88,7 +93,12 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BudgetExceeded, reconcile_budget_snapshot, reserve_budget_snapshot
     from ..runtime.credential_refs import (
         CredentialReferenceError, select_hunt_principal_reference,
-        select_hunt_session_principal_reference,
+        select_hunt_session_principal_reference, select_hunt_immediate_principal_reference,
+    )
+    from ..runtime.capability_registry import (
+        HUNT_CAPABILITY_IDEMPOTENCY_MIN_LENGTH,
+        HUNT_CAPABILITY_IDEMPOTENCY_MAX_LENGTH,
+        HUNT_CAPABILITY_IDEMPOTENCY_PATTERN,
     )
     from ..runtime.models import ScanPolicy, TargetBinding
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection
@@ -1195,9 +1205,9 @@ async def _agent_tool_query_kb(target_uuid: uuid.UUID, kind: str, flt: dict[str,
 class HuntCapabilityRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idempotency_key: str = Field(
-        min_length=8,
-        max_length=200,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+        min_length=HUNT_CAPABILITY_IDEMPOTENCY_MIN_LENGTH,
+        max_length=HUNT_CAPABILITY_IDEMPOTENCY_MAX_LENGTH,
+        pattern=HUNT_CAPABILITY_IDEMPOTENCY_PATTERN,
     )
     input: dict[str, Any] = Field(default_factory=dict)
 
@@ -1502,6 +1512,16 @@ async def _execute_hunt_capability_lifecycle(
                     )
                 except CredentialReferenceError as exc:
                     raise HTTPException(status_code=403, detail=str(exc)) from exc
+            if name == "authz.verify" and request.input.get("primary_principal"):
+                try:
+                    primary = select_hunt_immediate_principal_reference(context, "primary")
+                    secondary = select_hunt_immediate_principal_reference(context, "secondary")
+                    if primary["profile_id"] == secondary["profile_id"]:
+                        raise CredentialReferenceError(
+                            "authorization proof requires distinct primary and secondary profiles"
+                        )
+                except CredentialReferenceError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             if name == "collections.replay_safe":
                 principal = _hunt_managed_principal_reference(
                     _hunt_json(run["context_pack"], {}), principal_slot,
@@ -1527,8 +1547,10 @@ async def _execute_hunt_capability_lifecycle(
                 )
                 or (
                     name == "authz.verify"
-                    and request.input.get("primary_session_ref")
-                    and request.input.get("secondary_session_ref")
+                    and (
+                        (request.input.get("primary_session_ref") and request.input.get("secondary_session_ref"))
+                        or (request.input.get("primary_principal") and request.input.get("secondary_principal"))
+                    )
                 )
             )
             # Forging a client address is a distinct authority the operator granted, so a

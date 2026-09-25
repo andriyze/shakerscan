@@ -70,6 +70,23 @@ The existing session resolution, frozen transport, approvals, cancellation and
 four-request budget remain authoritative. No new MCP tool is needed for the
 capability itself; proposal/review/resume remain REST operations.
 
+For a direct `authz.verify` call, selected header credentials can use
+`primary_principal: "primary"` and `secondary_principal: "secondary"` instead of
+session references. Both profiles must have been selected for this Hunt, allow
+`authz.verify`, and use an immediate HTTP header kind such as bearer or
+authorization-header. The worker revalidates target approval and profile versions
+before decrypting them. Session references remain the route for interactive
+logins; the two credential modes cannot be mixed. A listing comparison can
+produce deterministic proof, while a selected-object comparison remains
+inconclusive without an entitlement rule.
+
+Each capability manifest entry includes the full `call.request_schema`. For
+example, invoke `POST /hunts/{hunt_id}/capabilities/authz.verify` with an
+`idempotency_key` and an `input` object containing `routes` and either credential
+pair. Hunt responses also give the concrete call URL and link to findings and
+investigation-candidate review surfaces. The latter lists candidates for the
+target, so use the Hunt record to distinguish this run's actions.
+
 ## Propose and review
 
 `POST /hunts/{hunt_id}/authorization-investigations` accepts capture/session

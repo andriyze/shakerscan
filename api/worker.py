@@ -22267,14 +22267,15 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 urllib.parse.urlunsplit((*urllib.parse.urlsplit(route)[:2], "", "", ""))
                 for route in routes
             )
-            primary_ref = str(capability_input["primary_session_ref"])
-            secondary_ref = str(capability_input["secondary_session_ref"])
-            if primary_ref == secondary_ref:
+            primary_ref = str(capability_input.get("primary_session_ref") or "")
+            secondary_ref = str(capability_input.get("secondary_session_ref") or "")
+            uses_managed_principals = bool(capability_input.get("primary_principal"))
+            if not uses_managed_principals and primary_ref == secondary_ref:
                 raise AuthSessionStoreError(
                     "authorization proof requires two distinct session references"
                 )
             async with db_pool.acquire() as authority_conn:
-                await validate_worker_credential_authority(
+                authority = await validate_worker_credential_authority(
                     authority_conn,
                     owner_kind="hunt",
                     owner_id=str(hunt_id),
@@ -22283,35 +22284,50 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     scope_receipt_id=target.scope_receipt_id,
                     action_name="hunt.capability:authz.verify",
                 )
-                worker_session = await session_store.load_for_worker(
-                    authority_conn,
-                    session_ref=primary_ref,
-                    owner_kind="hunt",
-                    owner_id=hunt_id,
-                    target=target,
-                    capability="authz.verify",
-                    selected_origins=selected_route_origins,
-                )
-                secondary_worker_session = await session_store.load_for_worker(
-                    authority_conn,
-                    session_ref=secondary_ref,
-                    owner_kind="hunt",
-                    owner_id=hunt_id,
-                    target=target,
-                    capability="authz.verify",
-                    selected_origins=selected_route_origins,
-                )
-            if (
-                worker_session.metadata.principal_slot != "primary"
-                or secondary_worker_session.metadata.principal_slot != "secondary"
-                or worker_session.metadata.profile_id
-                == secondary_worker_session.metadata.profile_id
-            ):
+                if uses_managed_principals:
+                    from hunt.authz_credentials import resolve_hunt_authz_principals
+                    principals = await resolve_hunt_authz_principals(
+                        authority_conn, context=context, target=target,
+                        authority=authority, credential_stack=credential_stack,
+                    )
+                    primary_profile_id = principals.primary_profile_id
+                    secondary_profile_id = principals.secondary_profile_id
+                    primary_headers = principals.primary_headers
+                    secondary_headers = principals.secondary_headers
+                else:
+                    worker_session = await session_store.load_for_worker(
+                        authority_conn,
+                        session_ref=primary_ref,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        capability="authz.verify",
+                        selected_origins=selected_route_origins,
+                    )
+                    secondary_worker_session = await session_store.load_for_worker(
+                        authority_conn,
+                        session_ref=secondary_ref,
+                        owner_kind="hunt",
+                        owner_id=hunt_id,
+                        target=target,
+                        capability="authz.verify",
+                        selected_origins=selected_route_origins,
+                    )
+                    primary_profile_id = worker_session.metadata.profile_id
+                    secondary_profile_id = secondary_worker_session.metadata.profile_id
+                    if (
+                        worker_session.metadata.principal_slot != "primary"
+                        or secondary_worker_session.metadata.principal_slot != "secondary"
+                    ):
+                        raise AuthSessionStoreError(
+                            "authorization proof requires primary and secondary sessions"
+                        )
+                    primary_headers = worker_session.headers()
+                    secondary_headers = secondary_worker_session.headers()
+            if primary_profile_id == secondary_profile_id:
                 raise AuthSessionStoreError(
                     "authorization proof requires distinct primary and secondary profiles"
                 )
-            primary_headers = worker_session.headers()
-            secondary_headers = secondary_worker_session.headers()
             async def execute_authz() -> dict[str, Any]:
                 return await verify_target_bound_object_authorization(
                     authz_base,
@@ -22327,10 +22343,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             redacted_execution = {
                 "primary_session_ref": primary_ref,
                 "secondary_session_ref": secondary_ref,
-                "primary_profile_id": worker_session.metadata.profile_id,
-                "secondary_profile_id": (
-                    secondary_worker_session.metadata.profile_id
-                ),
+                "primary_profile_id": primary_profile_id,
+                "secondary_profile_id": secondary_profile_id,
+                "credential_source": "managed_principals" if uses_managed_principals else "sessions",
                 "routes": [redact_url(item) for item in routes],
                 "route_inventory_digest": authz_route_inventory_digest(routes),
                 "route_count": len(routes),
