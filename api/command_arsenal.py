@@ -428,6 +428,28 @@ def _workflow_step_schema() -> dict[str, Any]:
 
 COMMANDS: tuple[ArsenalCommand, ...] = (
     ArsenalCommand(
+        name="ai.boundary.verify",
+        family="ai_gate",
+        description="Queue a ready agent-authorization proposal through the canonical deterministic AI Boundary verifier.",
+        status="proof_backed",
+        risk_tier="credential",
+        method="POST",
+        path="/ai/targets/{target_id}/boundary/verify",
+        scope_fields=("target_id",),
+        parameters_schema={
+            "target_id": {"type": "string", "format": "uuid"},
+            "proposal": {"type": "object"},
+            "boundary_base": {"type": "object"},
+            "environment": {"type": "string", "enum": ["preview", "staging", "development"]},
+            "scan_profile": {"type": "string", "enum": ["smoke", "trace", "standard", "deep"]},
+            "approval_receipt_id": {"type": "string", "format": "uuid"},
+        },
+        required_capabilities=("ai_gate.scan",),
+        evidence_contract=("boundary_contract", "evidence_manifest", "proof_contract_v2"),
+        timeout_seconds=30,
+        request_cost=1,
+    ),
+    ArsenalCommand(
         name="ai.boundary.proposal.materialize",
         family="ai_gate",
         description="Validate a ready agent-authorization proposal against the executable AI Boundary contract without executing a target.",
