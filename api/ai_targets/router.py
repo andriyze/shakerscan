@@ -40,7 +40,7 @@ try:
     import asm_inventory
     from ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ai_demo_scenarios import get_ai_test_scenarios
-    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis
+    from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -71,7 +71,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import asm_inventory
     from ..ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ..ai_demo_scenarios import get_ai_test_scenarios
-    from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis
+    from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -362,6 +362,29 @@ async def compile_ai_boundary_hypothesis(request: AIBoundaryHypothesisCompileReq
         "proposal": proposal,
         "execution_enabled": False,
         "planning_authority": False,
+        "promotion_authority": False,
+    }
+
+
+@router.post("/ai/boundary/proposals/materialize")
+async def materialize_ai_boundary_proposal(request: AIBoundaryMaterializeRequest):
+    """Validate a ready proposal against the existing executable BoundaryContract.
+
+    Still dry-run: this creates no scan and touches no target. The returned contract
+    can be placed in an AI target's metadata only by the existing target-management
+    path, preserving credential custody and scan authorization.
+    """
+    try:
+        materialized = materialize_boundary_contract(
+            request.proposal,
+            boundary_base=request.boundary_base,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "materialization": materialized,
+        "probe_pack": "shaker-ai-boundary",
+        "execution_enabled": False,
         "promotion_authority": False,
     }
 
@@ -1992,6 +2015,12 @@ class AITargetScanRequest(BaseModel):
 class AIBoundaryHypothesisCompileRequest(BaseModel):
     """Secret-free discovered facts; compilation performs no target interaction."""
     hypothesis: dict[str, Any]
+
+
+class AIBoundaryMaterializeRequest(BaseModel):
+    """A ready proposal plus application-specific deterministic verifier bindings."""
+    proposal: dict[str, Any]
+    boundary_base: dict[str, Any]
 
 
 class AITargetConnectivityTestRequest(BaseModel):
