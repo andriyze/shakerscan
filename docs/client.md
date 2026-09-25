@@ -13,8 +13,8 @@ issues tokens, assigns roles and enables Hunt is documented at
 It is the same code the engine runtime already exposes as `scanner.sh mcp` and `scanner.sh hunt`:
 the package vendors `scripts/shakerscan_mcp.py` and `scripts/v2_cli.py` at build time
 (`client/hatch_build.py`), so a client and a runtime of the same release run identical code, and
-every tool the adapter offers comes from the instance's live contracts (`GET /arsenal/commands`,
-`GET /hunts/contract`), not from the client version.
+the Arsenal and Hunt tools come from the instance's live contracts (`GET /arsenal/commands`,
+`GET /hunts/contract`); the fixed posture-check tool calls that instance's `/public/check` route.
 
 ## One command, two install channels
 
@@ -83,8 +83,10 @@ DNS; DNS and email observations do not apply to it.
 
 The public MCP mode exposes only `shakerscan_public_check(target, path?, dkim_selector?)`. It
 uses the same credential-free `/v1/check` pipeline as `check`; no private-engine discovery,
-Hunt, Arsenal, shell or target management tools are available. A configured private instance
-retains its own tools.
+Hunt, Arsenal, shell or target management tools are available. When connected to an OSS or
+Enterprise instance, MCP also exposes that check alongside the instance's existing tools and
+sends it to the instance's `POST /public/check` using the saved connection. There is no public
+fallback or per-check approval prompt on a connected client.
 
 The hosted service accepts only public DNS names and global IP addresses, refuses government and
 military targets, and applies per-caller limits: 30 requests a minute, and 25 uncached checks an
@@ -99,6 +101,8 @@ restrictions: internal names, private addresses and any other target are the ope
 with no quota or cache. `SHAKERSCAN_POSTURE_RESOLVER=system` makes the engine use the instance's
 own DNS resolver (for internal names) instead of DNS over HTTPS, and
 `SHAKERSCAN_POSTURE_IPINFO_TOKEN` enables IP ownership facts.
+The OSS API is tokenless, so anyone who can reach it on the trusted LAN can invoke checks of
+addresses reachable from the API container; keep its network boundary intentional.
 
 ## Connect the client to a server
 
