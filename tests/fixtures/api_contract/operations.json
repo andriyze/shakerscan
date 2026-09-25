@@ -1475,6 +1475,11 @@
     "operation_id": "update_policy_profile_policy_profiles__profile_id__patch"
   },
   {
+    "path": "/public/check",
+    "method": "post",
+    "operation_id": "public_check_public_check_post"
+  },
+  {
     "path": "/queue/clear",
     "method": "delete",
     "operation_id": "clear_queue_queue_clear_delete"
