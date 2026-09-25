@@ -462,7 +462,9 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
     elif severity == "medium":
         severity_args = ["--only-poc", "r,v"]
     else:
-        severity_args = ["--only-poc", "v"]
+        # With headless disabled Dalfox cannot establish the verified browser
+        # tier. Preserve reflected candidates rather than filtering every PoC.
+        severity_args = ["--only-poc", "v" if opts.get("deep_domxss") is True else "r,v"]
     # --force-headless-verification alone drives the real browser and settles a
     # DOM-based finding in seconds. --deep-domxss additionally crawls the DOM
     # exhaustively and does not converge inside this capability's wall ceiling,
@@ -486,6 +488,22 @@ def _tmpl_dalfox(url: str, opts: dict[str, Any]) -> list[str]:
              # the exact entry count (see SCANNER_WIRE_LOG_FILES).
              "--har-file-path", "/tmp/shakerscan-dalfox/requests.har"]
             + headless_args + severity_args)
+    # A Hunt that named one query parameter already supplied the discovery result.
+    # Dalfox otherwise spends much of its fixed 400-request reservation probing
+    # parameters that this action did not ask it to verify.
+    query_pairs = urllib.parse.parse_qsl(
+        urllib.parse.urlsplit(url).query, keep_blank_values=True,
+    )
+    if len(query_pairs) == 1 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}", query_pairs[0][0]):
+        args.extend(["--skip-discovery", "-p", query_pairs[0][0]])
+        if not headless:
+            # This is a verifier of one known parameter, not an open-ended
+            # payload campaign. Dalfox expands each reviewed vector through four
+            # encodings, so four vectors fit comfortably under the wire ceiling.
+            args.extend([
+                "--custom-payload", "/app/payloads/xss/hunt-verify.txt",
+                "--only-custom-payload",
+            ])
     injection = _injection_body(opts)
     if injection is not None:
         method, body, fields = injection

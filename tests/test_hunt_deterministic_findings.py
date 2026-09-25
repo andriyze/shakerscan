@@ -75,7 +75,9 @@ def test_dom_xss_observations_keep_value_free_client_routes_distinct():
         "https://app.example.test:443/#/profile?name=",
     ]
     assert len({
-        _verified_xss_fingerprint(record, method="GET") for record in records
+        _verified_xss_fingerprint(
+            record, method="GET", target_url="https://app.example.test",
+        ) for record in records
     }) == 2
 
 
@@ -93,7 +95,9 @@ def test_reflected_xss_uses_the_canonical_scan_fingerprint():
     })
     expected = "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
-    assert _verified_xss_fingerprint(proof, method="GET") == expected
+    assert _verified_xss_fingerprint(
+        proof, method="GET", target_url="https://app.example.test",
+    ) == expected
 
 
 def test_materialized_xss_has_execution_evidence_not_an_invented_impact_score():

@@ -32,7 +32,9 @@ def _origin(value: urllib.parse.SplitResult) -> tuple[str, str | None, int | Non
     return scheme, value.hostname, value.port or default_port
 
 
-def _verified_xss_fingerprint(proof: Mapping[str, Any], *, method: str) -> str:
+def _verified_xss_fingerprint(
+    proof: Mapping[str, Any], *, method: str, target_url: str,
+) -> str:
     """Use Scan's canonical endpoint identity, extended for client-side routes."""
     normalized_method = str(method or "GET").strip().upper()
     if not normalized_method.isalpha() or not 3 <= len(normalized_method) <= 12:
@@ -67,18 +69,33 @@ def _verified_xss_fingerprint(proof: Mapping[str, Any], *, method: str) -> str:
         })
         if not identity:
             raise ValueError("verified XSS proof has no canonical endpoint identity")
+    # Existing target-service fingerprints stay stable. An authorized alternate
+    # service must not collapse into the same endpoint on another scheme/port.
+    service = _origin(urllib.parse.urlsplit(str(proof["url"])))
+    baseline = _origin(urllib.parse.urlsplit(target_url))
+    if service != baseline:
+        identity += f"|service={service[0]}://{service[1]}:{service[2]}"
     return "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 def verified_xss_observations(
     observations: Any, *, target_url: str,
+    allowed_origins: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    """Return bounded, content-free XSS proof records on the bound origin."""
+    """Return bounded, content-free XSS proof records on admitted service origins."""
     try:
         target = urllib.parse.urlsplit(target_url)
         target_origin = _origin(target)
     except ValueError:
         return []
+    admitted = {target_origin} if target_origin[0] in {"http", "https"} else set()
+    for value in allowed_origins:
+        try:
+            origin = _origin(urllib.parse.urlsplit(value))
+        except ValueError:
+            continue
+        if origin[0] in {"http", "https"} and origin[1]:
+            admitted.add(origin)
     accepted: list[dict[str, Any]] = []
     for raw in observations if isinstance(observations, (list, tuple)) else ():
         if not isinstance(raw, Mapping) or raw.get("proof_state") != "verified":
@@ -107,7 +124,7 @@ def verified_xss_observations(
             observed_origin = _origin(observed)
         except ValueError:
             continue
-        if observed_origin != target_origin:
+        if observed_origin not in admitted:
             continue
         # Store the vulnerable operation, never the proof payload.
         query = urllib.parse.urlencode([(parameter, "")]) if parameter else ""
@@ -141,13 +158,18 @@ def _xss_finding_records(
     hunt_id: uuid.UUID, action_id: uuid.UUID, target_url: str,
     capability_name: str, receipt_id: uuid.UUID,
     capability_input: Mapping[str, Any], observations: Any,
+    *, allowed_origins: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     method = str(capability_input.get("method") or "GET").strip().upper()
     if not method.isalpha() or not 3 <= len(method) <= 12:
         method = "GET"
-    for proof in verified_xss_observations(observations, target_url=target_url):
-        fingerprint = _verified_xss_fingerprint(proof, method=method)
+    for proof in verified_xss_observations(
+        observations, target_url=target_url, allowed_origins=allowed_origins,
+    ):
+        fingerprint = _verified_xss_fingerprint(
+            proof, method=method, target_url=target_url,
+        )
         browser_proof = proof.get("proof_producer") == "browser"
         proof_contract = (
             "xss_browser_proof/v1" if browser_proof
@@ -214,7 +236,8 @@ async def materialize_verified_hunt_findings(
     """
     if capability_name == "xss.verify":
         records = _xss_finding_records(hunt_id, action_id, target_url, capability_name,
-                                      receipt_id, capability_input, observations)
+                                      receipt_id, capability_input, observations,
+                                      allowed_origins=allowed_origins)
     elif capability_name == "authz.verify":
         from .authz_findings import authz_finding_records
         records = authz_finding_records(capability_receipt, hunt_id=hunt_id,
