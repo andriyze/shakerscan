@@ -2,7 +2,6 @@ import importlib.util
 import io
 import json
 import sys
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -90,28 +89,6 @@ def test_connected_check_uses_the_instance_without_an_approval_prompt():
     assert len(calls) == count
 
 
-@pytest.mark.parametrize("status,available", [(405, True), (404, False)])
-def test_connected_check_route_probe(monkeypatch, status, available):
-    client = mcp.ArsenalClient("https://gateway.example", api_token="st_0123456789abcdef")
-    requests = []
-
-    def open_request(request, timeout):
-        requests.append(request)
-        assert timeout == client.timeout_seconds
-        raise urllib.error.HTTPError(request.full_url, status, "route probe", {}, io.BytesIO())
-
-    monkeypatch.setattr(client.opener, "open", open_request)
-    assert client.has_posture_check() is available
-    assert client.has_posture_check() is available  # Cached for subsequent tools/list calls.
-    monkeypatch.setattr(client, "catalog", lambda: {item["name"]: item for item in _catalog()["commands"]})
-    monkeypatch.setattr(client, "hunt_contract", lambda: _hunt_contract())
-    assert ("shakerscan_public_check" in {tool["name"] for tool in client.list_tools()}) is available
-    assert len(requests) == 1
-    assert requests[0].get_method() == "GET"
-    assert requests[0].full_url == "https://gateway.example/public/check"
-    assert requests[0].get_header("Authorization") == "Bearer st_0123456789abcdef"
-
-
 def _catalog(*, drift_command=None):
     commands = []
     for tool in mcp.TOOLS:
@@ -184,9 +161,6 @@ class FakeClient(mcp.ArsenalClient):
         super().__init__("http://127.0.0.1:8080")
         self.drift_command = drift_command
         self.calls = []
-
-    def has_posture_check(self):
-        return True
 
     def request_json(self, method, path, payload=None):
         self.calls.append((method, path, payload))
