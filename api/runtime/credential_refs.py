@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from .credential_store import CredentialProfileMetadata
 from .models import target_kinds_share_asset
-from .credentials import HTTP_CREDENTIAL_KINDS, SSH_CREDENTIAL_KINDS
+from .credentials import HTTP_CREDENTIAL_KINDS, IMMEDIATE_HTTP_HEADER_KINDS, SSH_CREDENTIAL_KINDS
 
 
 GENERIC_CREDENTIAL_REF_KEYS = frozenset({
@@ -100,6 +100,28 @@ def select_hunt_session_principal_reference(
             "session establishment requires an interactive HTTP profile"
         )
     return selected
+
+
+def select_hunt_immediate_principal_reference(
+    context: Mapping[str, Any], slot: str,
+) -> dict[str, Any]:
+    """Select an admitted header credential for cross-principal Hunt proof."""
+    if slot not in {"primary", "secondary"}:
+        raise CredentialReferenceError("authorization proof requires primary and secondary principals")
+    selected = select_hunt_principal_reference(
+        context, slot, capability="authz.verify",
+    )
+    matches = [
+        item for item in context.get("credential_refs") or ()
+        if isinstance(item, Mapping)
+        and item.get("profile_id") == selected["profile_id"]
+        and item.get("principal_slot") == slot
+    ]
+    if len(matches) != 1 or matches[0].get("auth_kind") not in IMMEDIATE_HTTP_HEADER_KINDS:
+        raise CredentialReferenceError(
+            "authorization proof managed principal requires an immediate HTTP header profile"
+        )
+    return {**selected, "auth_kind": str(matches[0]["auth_kind"])}
 
 
 def _role_compatible(role: str, profile: CredentialProfileMetadata) -> bool:

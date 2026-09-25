@@ -54,11 +54,9 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
         "authz.verify"
     ).planner_contract()["input_schema"]
     assert set(authz["properties"]) == {
-        "primary_session_ref", "secondary_session_ref", "routes", "origin",
+        "primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal", "routes", "origin",
     }
-    assert authz["required"] == [
-        "primary_session_ref", "secondary_session_ref", "routes",
-    ]
+    assert authz["required"] == ["routes"]
 
 
 def test_control_plane_queue_contains_no_decrypted_session_or_profile_material():

@@ -40,6 +40,18 @@ def test_suggestion_advertises_the_read_before_bind_precondition_and_methods(lib
     assert "{hunt_id}" in suggestion["read_url"]
 
 
+def test_run_suggestion_urls_use_the_actual_hunt_id():
+    conn = _Connection()
+    hunt_id = str(conn.hunt_id)
+    result = asyncio.run(HuntRunService(lambda: _Pool(conn)).skill_suggestions(
+        hunt_id, signals=["jwt"],
+    ))
+    suggestion = result["suggestions"][0]
+    assert suggestion["read_url"] == f"/hunts/{hunt_id}/skills/{suggestion['skill_id']}/read"
+    assert suggestion["bind_url"] == f"/hunts/{hunt_id}/skills/{suggestion['skill_id']}/bind"
+    assert suggestion["methodology_url"] == suggestion["read_url"]
+
+
 @pytest.mark.parametrize("kind", ["web", "api", "device", "network"])
 def test_partial_methodology_preserves_the_existing_authority_and_budget(library, kind):
     allowed, budget = ("http.request",), object()

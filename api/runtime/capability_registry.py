@@ -35,6 +35,10 @@ HuntExecutor = Literal[
     "confirmation",
 ]
 
+HUNT_CAPABILITY_IDEMPOTENCY_MIN_LENGTH = 8
+HUNT_CAPABILITY_IDEMPOTENCY_MAX_LENGTH = 200
+HUNT_CAPABILITY_IDEMPOTENCY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+
 
 class CapabilityInputContractError(ValueError):
     """Planner input does not match the capability registry schema."""
@@ -144,6 +148,7 @@ class CapabilitySpec:
 
     def planner_contract(self) -> dict[str, Any]:
         """Return semantic planner authority without leaking adapter/tool selection."""
+        planner_input = dict(self.planner_input_schema or self.input_schema)
         placement_keys = {
             "network_reachability",
             "runtime_target_binding",
@@ -159,9 +164,25 @@ class CapabilitySpec:
             "description": self.description,
             "risk_tier": self.risk_tier,
             "target_kinds": sorted(self.target_kinds),
-            "input_schema": dict(
-                self.planner_input_schema or self.input_schema
-            ),
+            "input_schema": planner_input,
+            "call": {
+                "method": "POST",
+                "url_template": f"/hunts/{{hunt_id}}/capabilities/{self.name}",
+                "request_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["idempotency_key", "input"],
+                    "properties": {
+                        "idempotency_key": {
+                            "type": "string",
+                            "minLength": HUNT_CAPABILITY_IDEMPOTENCY_MIN_LENGTH,
+                            "maxLength": HUNT_CAPABILITY_IDEMPOTENCY_MAX_LENGTH,
+                            "pattern": HUNT_CAPABILITY_IDEMPOTENCY_PATTERN,
+                        },
+                        "input": planner_input,
+                    },
+                },
+            },
             "output_schema": self.output_schema,
             "budget_cost": dict(self.budget_cost),
             "required_approval": self.required_approval,
@@ -283,6 +304,17 @@ class CapabilityRegistry:
         _validate_schema_value(
             spec.planner_input_schema, value, path="input", depth=0,
         )
+        if name == "authz.verify":
+            session_keys = {"primary_session_ref", "secondary_session_ref"}
+            principal_keys = {"primary_principal", "secondary_principal"}
+            if not (session_keys <= value.keys()) and not (principal_keys <= value.keys()):
+                raise CapabilityInputContractError(
+                    "authz.verify requires both session refs or both managed principals"
+                )
+            if (session_keys & value.keys()) and (principal_keys & value.keys()):
+                raise CapabilityInputContractError(
+                    "authz.verify cannot mix sessions and managed principals"
+                )
         return dict(value)
 
 
@@ -1285,6 +1317,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_http",
             planner_input_schema=_schema({
                 "origin": _SERVICE_ORIGIN_PROPERTY,
+                "primary_principal": {"type": "string", "enum": ["primary"]},
+                "secondary_principal": {"type": "string", "enum": ["secondary"]},
                 "primary_session_ref": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1299,9 +1333,10 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                     "minItems": 1,
                     "maxItems": 50,
                 },
-            }, required=(
-                "primary_session_ref", "secondary_session_ref", "routes",
-            )),
+            }, required=("routes",)) | {"oneOf": [
+                {"required": ["primary_session_ref", "secondary_session_ref"]},
+                {"required": ["primary_principal", "secondary_principal"]},
+            ]},
         ),
         CapabilitySpec(
             "tls.inspect", "Inspect TLS configuration for a target-bound origin.",

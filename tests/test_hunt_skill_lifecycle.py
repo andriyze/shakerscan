@@ -234,6 +234,39 @@ def test_usage_cannot_be_claimed_from_arbitrary_evidence_labels():
     assert not connection.events
 
 
+def test_auto_bound_prerequisite_can_report_usage_after_hunt_scoped_read():
+    connection = _Connection()
+    service = HuntRunService(lambda: _Pool(connection))
+    hunt_id = str(connection.hunt_id)
+    asyncio.run(service.read_skill(hunt_id, SKILL_ID))
+    bound = asyncio.run(service.bind_skill(hunt_id, SKILL_ID))
+    prerequisite = next(
+        item for item in bound["skills"] if item["skill_id"] != SKILL_ID
+    )
+    assert prerequisite["requested"] is False
+    assert prerequisite["usage_requires_read"] is True
+    prereq_id = prerequisite["skill_id"]
+    action_id = str(uuid.uuid4())
+    with pytest.raises(HTTPException, match="Read this methodology") as exc:
+        asyncio.run(service.record_skill_usage(
+            hunt_id, prereq_id, state="used", action_id=action_id,
+        ))
+    assert f"/hunts/{hunt_id}/skills/{prereq_id}/read" in str(exc.value.detail)
+    asyncio.run(service.read_skill(hunt_id, prereq_id))
+    original = connection.fetchrow
+
+    async def fetchrow(query, *args):
+        if "SELECT capability_name, status FROM hunt_actions" in query:
+            return {"capability_name": "http.request", "status": "completed"}
+        return await original(query, *args)
+
+    connection.fetchrow = fetchrow
+    used = asyncio.run(service.record_skill_usage(
+        hunt_id, prereq_id, state="used", action_id=action_id,
+    ))
+    assert used["skill_activity"][-1]["event_type"] == "used"
+
+
 @pytest.mark.parametrize("status,state,accepted", [
     ("reserved", "used", False), ("failed", "completed", False),
     ("running", "used", True), ("partial", "completed", False),
