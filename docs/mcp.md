@@ -86,6 +86,13 @@ Before capability execution, the adapter reloads `GET /hunts/{id}`, requires an 
 awaiting-planner run, finds the capability in that Hunt's returned manifest, and validates input
 against its published schema. The client may provide an `idempotency_key`; if omitted, the adapter
 generates one and returns it as `mcp_idempotency_key` so a retry can reuse the exact action identity.
+A capability runs synchronously on the engine and can take minutes (a crawl, content discovery).
+When its answer is lost -- the adapter's own request timeout, or a gateway's 502/503/504 -- the
+adapter replays the same key and unchanged input, which the engine answers with the action's
+current state without starting it again, until the action is final or
+`SHAKERSCAN_MCP_ACTION_WAIT_SECONDS` (default 900, at most 3600) passes; only then does it report
+the unknown outcome and its recovery identity. `shakerscan hunt call` does the same, bounded by
+`SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS`. A definite refusal (4xx) is never replayed.
 The runtime still revalidates target binding, approval, budgets, evidence, and proof contracts.
 Catalog/contract drift, redirects, oversized responses, unavailable APIs, and unexpected dispatch
 results fail closed.
