@@ -86,6 +86,10 @@ proof. A caller can materialize a ready proposal with
 `POST /ai/targets/{target_id}/boundary/verify` flow with its normal target
 authorization and approval checks.
 
+The Hunt final debrief links its candidate IDs to **AI Gate → Agent boundary
+workflow**, which provides the same inspection, principal entry, compilation,
+fixture validation, explicit verification, and regression handoff.
+
 ## Validation
 
 `tests/test_hunt_boundary_context.py` exercises the production ownership SQL

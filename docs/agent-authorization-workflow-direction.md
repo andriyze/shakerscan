@@ -191,8 +191,10 @@ This direction is working when ShakerScan can take an authorized AI-enabled appl
 6. turn confirmed/approved invariants into repeatable regression checks;
 7. verify that allowed workflows still work.
 
-## First implementation slice in this PR
+## Implemented first slice
 
-The first code commits after this document will add the **typed boundary-hypothesis/compiler seam**. It is intentionally small: no new execution engine and no speculative autonomous policy inference.
-
-That seam gives Hunt a safe way to hand discovered facts to the existing AI Boundary verifier and makes missing information explicit. Follow-up commits will wire it into the existing API/capability surface and add tests before broader transport work.
+The typed boundary compiler, server-loaded Hunt candidate handoff, existing AI
+Boundary verification path, versioned regression export/evaluation, and operator
+screen now form the first implementation slice. A loopback fixture test covers
+the journey from a Hunt candidate through deterministic proof to a later
+regression result. Broader transports in Phase C remain separately scoped work.

@@ -1604,7 +1604,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 391 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 122 | `scanner/scanner_tools/` |
-| UI pages | 38 | `ui/src/app/` |
+| UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2759,6 +2759,7 @@ Only key names and declaring sources are documented; secret values are never rea
 
 | Route | Source |
 |---|---|
+| `/ai-gate/boundary` | `ui/src/app/ai-gate/boundary/page.tsx` |
 | `/ai-gate` | `ui/src/app/ai-gate/page.tsx` |
 | `/asm` | `ui/src/app/asm/page.tsx` |
 | `/campaigns/{id}` | `ui/src/app/campaigns/[id]/page.tsx` |
