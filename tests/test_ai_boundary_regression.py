@@ -100,7 +100,10 @@ def test_failed_source_requires_matching_deterministic_proof():
     (lambda s: s.update(ai_target_id=str(UUID(int=9))), "scan_target_mismatch"),
     (lambda s: s["result"]["ai_gate"]["boundary"].update(coverage_complete=False), "source_incomplete"),
     (lambda s: s["result"]["ai_gate"]["boundary"]["controls"].pop(), "legitimate_control_failed"),
+    (lambda s: s["result"]["ai_gate"]["boundary"]["controls"].append(
+        {"name": "permitted_chat_works:owner", "passed": False}), "legitimate_control_failed"),
     (lambda s: s["result"]["ai_gate"]["boundary"].update(contract_sha256="sha256:wrong"), "contract_mismatch"),
+    (lambda s: s["result"]["ai_gate"]["boundary"].update(violations=[{"path": "read"}]), "source_inconsistent"),
 ])
 def test_source_rejects_unsafe_or_unmatched_scan(change, code):
     source = _scan()

@@ -73,11 +73,15 @@ def _control_failures(boundary: dict[str, Any], required: list[str]) -> list[str
     controls = boundary.get("controls")
     if not isinstance(controls, list):
         return required
-    passed = {
-        item.get("name") for item in controls
-        if isinstance(item, dict) and item.get("passed") is True
-    }
-    return [name for name in required if name not in passed]
+    failures = []
+    for name in required:
+        matches = [
+            item for item in controls
+            if isinstance(item, dict) and item.get("name") == name
+        ]
+        if len(matches) != 1 or matches[0].get("passed") is not True:
+            failures.append(name)
+    return failures
 
 
 def _validate_proposal_artifact_shape(proposal: Any) -> None:
@@ -136,6 +140,8 @@ def build_boundary_regression_artifact(
     state = boundary.get("state")
     if state not in {"passed", "failed"}:
         raise ContractError("boundary_regression_source_inconclusive")
+    if state == "passed" and boundary.get("violations"):
+        raise ContractError("boundary_regression_source_inconsistent")
     if state == "failed":
         findings = result.get("findings")
         if not isinstance(findings, list) or not any(
