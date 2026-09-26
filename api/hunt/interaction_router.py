@@ -36,6 +36,7 @@ except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
 from .worker_accounting import worker_replay_settlement_matches
+from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -255,6 +256,16 @@ class HuntCandidateRequest(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"] = "info"
     evidence_refs: list[str] = Field(min_length=1, max_length=100)
     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_boundary_context(self):
+        if "ai_boundary_context" in self.locus:
+            if not isinstance(self.locus["ai_boundary_context"], dict):
+                raise ValueError("ai_boundary_context must be a JSON object")
+            # Use the storage normalizer's bounds; malformed new input receives
+            # a validation response rather than an internal error after mutation.
+            investigation_candidates.canonical_locus(self.locus)
+        return self
 
 
 class HuntCandidateUpdateRequest(BaseModel):
@@ -1034,6 +1045,23 @@ async def confirm_hunt_shell_plan(
     response["queued_scan"] = accepted_scan
     response["recovered_after_response_failure"] = bool(dispatch_error)
     return response
+
+
+@router.get("/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context")
+async def get_hunt_candidate_boundary_context(hunt_id: str, candidate_id: str):
+    """Inspect stored context/evidence by ID, without target traffic or proof claims."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                run = await _hunt_run_or_404(conn, str(hunt_uuid))
+                return await inspect_candidate_boundary_context(
+                    conn, run=dict(run), candidate_id=str(candidate_uuid),
+                )
+    except BoundaryContextError as exc:
+        status = 404 if exc.code == "candidate_not_found" else 422
+        raise HTTPException(status_code=status, detail=exc.code) from exc
 
 
 @router.post("/hunts/{hunt_id}/candidates")

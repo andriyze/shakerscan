@@ -27,6 +27,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Operator-complete Hunt implementation](hunt-operator-workflows.md)
 - [Hunt authorization proof completion](hunt-proof-completion.md)
 - [Hunt review integrity](hunt-review-integrity.md)
+- [Hunt boundary context](hunt-boundary-context.md) — read-only candidate/evidence inspection.
 - [Authenticated assurance](authenticated-assurance.md)
 - [Browser login QA](browser-login-qa.md)
 - [Browser session integrity](browser-session-integrity.md)
@@ -35,6 +36,7 @@ belong in Git history or immutable release notes rather than the active document
 
 - [Connected-device security](connected-device-security.md)
 - [AI test workflows](AI_TEST_WORKFLOWS.md)
+- [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction, not a completed release claim.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
 ## Operations
