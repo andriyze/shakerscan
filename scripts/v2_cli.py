@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
@@ -61,6 +62,62 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         return None
+
+
+# A Hunt capability runs synchronously inside its request and can take minutes; a proxy or the
+# client's own timeout may end the wait first. The engine answers a replay of the same key and
+# input with the action's current state and never starts it twice, so an unknown outcome is
+# settled by replaying until the action is no longer in flight, within a bounded wait.
+ACTION_WAIT_SECONDS = 900.0
+ACTION_POLL_SECONDS = 5.0
+IN_FLIGHT_ACTION_STATUSES = frozenset({"requested", "reserved", "queued", "running"})
+
+
+def _action_wait_seconds() -> float:
+    try:
+        value = float(os.environ.get("SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS", ACTION_WAIT_SECONDS))
+    except ValueError:
+        value = ACTION_WAIT_SECONDS
+    return max(0.0, min(value, 3600.0))
+
+
+def _unknown_outcome(exc: "CliError") -> bool:
+    return exc.error_type == "network_error" or exc.http_status in {502, 503, 504}
+
+
+def _in_flight(response: Any) -> bool:
+    action = response.get("action_result") if isinstance(response, Mapping) else None
+    return isinstance(action, Mapping) and str(action.get("status") or "") in IN_FLIGHT_ACTION_STATUSES
+
+
+def _settled_capability(client: "ApiClient", path: str, body: dict[str, Any], *,
+                        poll_seconds: float = ACTION_POLL_SECONDS) -> Any:
+    try:
+        response = client.post(path, body)
+    except CliError as exc:
+        if not _unknown_outcome(exc):
+            raise
+        response, last = None, exc
+    else:
+        if not _in_flight(response):
+            return response
+        last = None
+    deadline = time.monotonic() + _action_wait_seconds()
+    while time.monotonic() < deadline:
+        time.sleep(poll_seconds)
+        try:
+            response = client.post(path, body)
+        except CliError as exc:
+            if not _unknown_outcome(exc):
+                raise
+            last = exc
+            continue
+        if not _in_flight(response):
+            return response
+        last = None
+    if last is not None:
+        raise last
+    return response
 
 
 def _opener() -> urllib.request.OpenerDirector:
@@ -127,6 +184,11 @@ class ApiClient:
         except urllib.error.URLError as exc:
             raise CliError(
                 f"cannot reach ShakerScan API: {exc.reason}",
+                error_type="network_error",
+            ) from exc
+        except (TimeoutError, OSError) as exc:
+            raise CliError(
+                "the ShakerScan API did not answer in time",
                 error_type="network_error",
             ) from exc
         if len(raw) > MAX_JSON_BYTES:
@@ -488,14 +550,13 @@ def _run_hunt(args: argparse.Namespace, client: ApiClient) -> Any:
             args.hunt_id, args.capability_name, inputs,
             *([experiment_key] if experiment_key is not None else []),
         )
-        response = client.post(
-            "/hunts/{}/capabilities/{}".format(
-                urllib.parse.quote(args.hunt_id, safe=""),
-                urllib.parse.quote(args.capability_name, safe=""),
-            ),
-            {"idempotency_key": key, "input": inputs,
-             **({"experiment_key": experiment_key} if experiment_key is not None else {})},
+        path = "/hunts/{}/capabilities/{}".format(
+            urllib.parse.quote(args.hunt_id, safe=""),
+            urllib.parse.quote(args.capability_name, safe=""),
         )
+        body = {"idempotency_key": key, "input": inputs,
+                **({"experiment_key": experiment_key} if experiment_key is not None else {})}
+        response = _settled_capability(client, path, body)
         return {"idempotency_key": key, "response": response}
     if args.hunt_command == "candidate":
         if args.request:

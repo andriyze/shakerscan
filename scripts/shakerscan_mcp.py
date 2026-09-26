@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +43,13 @@ SERVER_VERSION = _server_version()
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_TIMEOUT_SECONDS = 20.0
+# A Hunt capability runs synchronously inside its request and can take minutes (a crawl, content
+# discovery); a proxy or this client's own timeout may end the wait first. The engine answers a
+# replay of the same key and input with the action's current state, so an unknown outcome is
+# settled by replaying until the action is no longer in flight, within this bound.
+DEFAULT_ACTION_WAIT_SECONDS = 900.0
+ACTION_POLL_SECONDS = 5.0
+IN_FLIGHT_ACTION_STATUSES = frozenset({"requested", "reserved", "queued", "running"})
 MAX_REQUEST_BYTES = 256_000
 MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TARGET_PAGE_SIZE = 20
@@ -579,6 +587,19 @@ def normalize_api_url(value: str, *, allow_remote: bool = False) -> str:
     return raw
 
 
+def _unknown_outcome(exc: MCPError) -> bool:
+    """A failure after which the POST may have been admitted: no answer, or a gateway's."""
+    if exc.code == -32001:
+        return True
+    return exc.code == -32002 and any(f"HTTP {code}" in str(exc) for code in (502, 503, 504))
+
+
+def _in_flight(result: Mapping[str, Any]) -> bool:
+    action = result.get("action_result")
+    status = str(action.get("status") or "") if isinstance(action, Mapping) else ""
+    return status in IN_FLIGHT_ACTION_STATUSES
+
+
 class ArsenalClient:
     def __init__(
         self,
@@ -587,8 +608,12 @@ class ArsenalClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         api_token: str | None = None,
+        action_wait_seconds: float = DEFAULT_ACTION_WAIT_SECONDS,
+        poll_seconds: float = ACTION_POLL_SECONDS,
     ) -> None:
         self.base_url = base_url
+        self.action_wait_seconds = max(0.0, min(float(action_wait_seconds), 3600.0))
+        self.poll_seconds = max(0.01, float(poll_seconds))
         if api_token and not base_url.startswith("https://"):
             raise ValueError("Authenticated remote APIs require HTTPS")
         self.api_token = api_token
@@ -627,6 +652,29 @@ class ArsenalClient:
         if not isinstance(decoded, dict):
             raise MCPError(-32004, "ShakerScan API response must be a JSON object")
         return decoded
+
+    def _settle_capability(self, path: str, payload: dict[str, Any], first: Any) -> dict[str, Any]:
+        """Replay the same key and input until the action is final or the wait ends.
+
+        `first` is either the in-flight result the engine returned or the unknown-outcome
+        error. A replay never starts new work: the engine returns the recorded action."""
+        deadline = time.monotonic() + self.action_wait_seconds
+        last = first
+        while time.monotonic() < deadline:
+            time.sleep(self.poll_seconds)
+            try:
+                result = self.request_json("POST", path, payload)
+            except MCPError as exc:
+                if not _unknown_outcome(exc):
+                    raise
+                last = exc
+                continue
+            if not _in_flight(result):
+                return result
+            last = result
+        if isinstance(last, MCPError):
+            raise last
+        raise MCPError(-32001, "Hunt capability is still running", {"outcome": "running"})
 
     def catalog(self) -> dict[str, dict[str, Any]]:
         payload = self.request_json("GET", "/arsenal/commands")
@@ -843,7 +891,14 @@ class ArsenalClient:
                     **({"experiment_key": payload["experiment_key"]} if "experiment_key" in payload else {}),
                 }
             try:
-                result = self.request_json(hunt_tool.method, path, payload or None)
+                try:
+                    result = self.request_json(hunt_tool.method, path, payload or None)
+                except MCPError as exc:
+                    if name != "shakerscan_hunt_capability" or not _unknown_outcome(exc):
+                        raise
+                    result = self._settle_capability(path, payload, exc)
+                if name == "shakerscan_hunt_capability" and _in_flight(result):
+                    result = self._settle_capability(path, payload, result)
             except MCPError as exc:
                 if name != "shakerscan_hunt_capability":
                     raise
@@ -1052,9 +1107,15 @@ def main() -> int:
     try:
         base_url = normalize_api_url(os.environ.get("SHAKERSCAN_API_URL", DEFAULT_API_URL), allow_remote=allow_remote)
         timeout = float(os.environ.get("SHAKERSCAN_MCP_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+        action_wait = float(os.environ.get("SHAKERSCAN_MCP_ACTION_WAIT_SECONDS", DEFAULT_ACTION_WAIT_SECONDS))
         parsed = urllib.parse.urlsplit(base_url)
         public = parsed.scheme == "https" and parsed.hostname == "pub.shakerscan.com" and parsed.port in {None, 443}
-        client = PublicClient(timeout_seconds=timeout) if public else ArsenalClient(base_url, timeout_seconds=timeout, api_token=api_token_from_env(os.environ))
+        client = PublicClient(timeout_seconds=timeout) if public else ArsenalClient(
+            base_url,
+            timeout_seconds=timeout,
+            api_token=api_token_from_env(os.environ),
+            action_wait_seconds=action_wait,
+        )
     except (TypeError, ValueError) as exc:
         print(f"shakerscan-mcp: {exc}", file=sys.stderr)
         return 2
