@@ -338,7 +338,7 @@ function ScansContent() {
       fetchScans(true)
     } catch (err) {
       console.error('Failed to start scan:', err)
-      toast.error('Failed to start scan')
+      toast.error(err instanceof Error ? err.message : 'Failed to start scan')
     }
   }
 

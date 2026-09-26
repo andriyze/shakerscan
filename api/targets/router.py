@@ -50,6 +50,7 @@ try:
     import check_registry
     import invariant_contracts
     import target_authorization
+    import target_resolution
     import invariant_proposals
     import parallel_scan
     from redaction import is_sensitive_key
@@ -93,6 +94,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from .. import asm_inventory, check_registry, invariant_contracts, invariant_proposals, parallel_scan
     from .. import target_authorization
+    from .. import target_resolution
     from ..runtime.credential_migration import (
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
@@ -666,6 +668,14 @@ async def create_target(request: TargetCreate):
         raise HTTPException(status_code=400, detail=str(e))
     if not normalized_target:
         raise HTTPException(status_code=400, detail="Invalid target URL")
+    # example.com that publishes no address record while www.example.com does (or the reverse)
+    # would otherwise become a target whose every Scan is refused. Register the name that
+    # resolves and say so; a resolver fault or a twin that does not resolve changes nothing.
+    dns_fallback = await target_resolution.prefer_resolving_twin(normalized_target)
+    requested_url = request.url
+    if dns_fallback:
+        normalized_target = dns_fallback["resolved_url"]
+        requested_url = target_resolution.replace_host(request.url, dns_fallback["resolved_host"])
     root_domain = extract_root_domain(normalized_target)
     is_root = is_root_domain(normalized_target)
     requested_cohort = getattr(request, "cohort", None)
@@ -717,11 +727,15 @@ async def create_target(request: TargetCreate):
                 # an id let a caller believe it had registered the origin it asked for: a scope receipt
                 # and a Hunt were then bound to one application while the work ran against another on
                 # the same host, and the result looked correct. Say so explicitly.
-                if not scope_origin_matches_target(request.url, row['url']):
+                if dns_fallback:
+                    response['dns_fallback'] = dns_fallback
+                    response['requested_url'] = request.url
+                    response['notice'] = dns_fallback['message']
+                if not scope_origin_matches_target(requested_url, row['url']):
                     response['origin_merged'] = True
                     response['requested_url'] = request.url
                     response['warning'] = (
-                        f"{request.url} resolves to the existing host-level target {row['url']}; "
+                        f"{requested_url} resolves to the existing host-level target {row['url']}; "
                         "web targets are identified by host, so scans, scope receipts and Hunts bound "
                         "to this id address that origin, not the one requested."
                     )

@@ -588,7 +588,12 @@ digest-pinned physical acceptance and fault matrix. Follow the [operator guide](
 ## 10. Attack-surface management: discovery, CT monitoring, schedules
 
 **Subdomain discovery** (`POST /discovery`, `process_discovery_job`): enumerates subdomains for a root
-domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets.
+domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. Each name is
+resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
+is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
+resolver could not judge is still added. Adding a target (`POST /targets`) whose bare or `www.` name
+has no address record while its twin does registers the twin and returns `dns_fallback`/`notice`;
+Scan admission names the non-resolving host and any working twin.
 
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains

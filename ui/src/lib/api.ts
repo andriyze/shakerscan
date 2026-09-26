@@ -4219,7 +4219,7 @@ export async function submitScan(target: string, options: Record<string, unknown
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target, options })
   })
-  if (!res.ok) throw new Error('Failed to submit scan')
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to submit scan'))
   return res.json()
 }
 
@@ -5709,12 +5709,34 @@ export async function getAsmActivity(
   return res.json()
 }
 
+// Set when the requested host publishes no address record and its www/apex twin does: the
+// target is registered under the twin, and `notice` says so.
+export interface TargetDnsFallback {
+  requested_host: string
+  resolved_host: string
+  resolved_url: string
+  reason: 'no_address_record'
+  message: string
+}
+
+export interface CreateTargetResponse {
+  id: string
+  url: string
+  root_domain: string
+  is_root: boolean
+  status: 'created' | 'already_exists'
+  warning?: string
+  notice?: string
+  dns_fallback?: TargetDnsFallback
+  [key: string]: unknown
+}
+
 export async function createTarget(
   url: string,
   name?: string,
   cohort?: Exclude<TargetCohort, 'unclassified'>,
   authorizedBy?: string,
-) {
+): Promise<CreateTargetResponse> {
   const res = await fetch(`${API_URL}/targets`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -5780,7 +5802,9 @@ export async function scanTarget(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request)
   })
-  if (!res.ok) throw new Error('Failed to start scan')
+  // Carry the server's reason: a name with no DNS address record, a missing authorization or a
+  // full queue each need a different action, and a fixed "Failed to start scan" hid all of them.
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to start scan'))
   return res.json()
 }
 
@@ -7191,7 +7215,34 @@ export async function deleteSchedule(id: string): Promise<{ id: string; status: 
 }
 
 // Discovery
-export async function discoverSubdomains(rootDomain: string): Promise<{ status: string; message: string }> {
+export interface DiscoveryResolution {
+  checked: number
+  scannable: number
+  added: number
+  unresolved_count: number
+  unresolved: string[]
+  unknown_count: number
+  insert_failed?: number
+}
+
+export interface DiscoveryRun {
+  id: string
+  root_domain: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  subdomains_found: number | null
+  new_subdomains: number | null
+  error_message?: string | null
+  // Names that publish no A/AAAA record are not added as targets; they are counted here.
+  resolution: DiscoveryResolution | null
+}
+
+export async function getDiscoveryRun(discoveryId: string): Promise<DiscoveryRun> {
+  const res = await fetch(`${API_URL}/discovery/${encodeURIComponent(discoveryId)}`)
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to read subdomain discovery'))
+  return res.json()
+}
+
+export async function discoverSubdomains(rootDomain: string): Promise<{ discovery_id?: string; job_id?: string; root_domain?: string; status: string; message?: string }> {
   const res = await fetch(`${API_URL}/discovery?root_domain=${encodeURIComponent(rootDomain)}`, {
     method: 'POST'
   })

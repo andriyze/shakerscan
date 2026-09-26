@@ -29,6 +29,7 @@ import {
 } from '@/components/RequestCollectionPicker'
 import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation'
 import { usableWebTargets } from '@/lib/targetChoices'
+import { targetWithResolvedHost } from '@/lib/targetDns'
 
 const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
   { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '30 min · 5,000 requests' },
@@ -401,11 +402,18 @@ export default function NewScanPage() {
     setLoading(true)
     try {
       let effectiveApprovalReceipt = approvalReceipt.trim()
+      let singleTarget = submittedTargets[0]
       if (approvalRequired && !effectiveApprovalReceipt) {
         let approvalTargetId = selectedRegisteredTarget?.id
         if (!approvalTargetId) {
           const registered = await createTarget(submittedTargets[0])
           approvalTargetId = String(registered?.id || '').trim() || undefined
+          // Registered under its www/apex twin because the typed name has no address record:
+          // scan the name that was registered and authorized, not the one that cannot resolve.
+          if (registered?.dns_fallback && !batchMode) {
+            singleTarget = targetWithResolvedHost(singleTarget, registered.dns_fallback)
+            if (registered.notice) toast.info(registered.notice)
+          }
         }
         if (!approvalTargetId) {
           throw new Error('The target could not be registered for active scanning.')
@@ -415,7 +423,7 @@ export default function NewScanPage() {
             // Credential use stays an explicit, bounded credential-tier receipt.
             const createdApproval = await createTargetPolicyApprovalReceipt({
               targetId: approvalTargetId,
-              targetUrl: submittedTargets[0],
+              targetUrl: singleTarget,
               ttlMinutes: approvalTtlMinutes,
               riskTier: 'credential',
               environment: scanScopeEnvironment(submittedTargets[0]),
@@ -468,7 +476,7 @@ export default function NewScanPage() {
         toast.success(`${result.queued_count} scan${result.queued_count === 1 ? '' : 's'} queued`)
         router.push('/scans')
       } else {
-        const result = await submitScanV2({ target: submittedTargets[0], ...common })
+        const result = await submitScanV2({ target: singleTarget, ...common })
         toast.success('Scan queued')
         router.push(`/scans/${result.scan_id}`)
       }

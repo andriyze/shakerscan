@@ -5,14 +5,17 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { useRouter } from 'next/navigation'
-import { getTargetsGrouped, restoreTarget, createTarget, scanTarget, discoverSubdomains, dedupeTargets, authorizeTarget, revokeTargetAuthorization, type Target, type GroupedDomain } from '@/lib/api'
+import { getTargetsGrouped, restoreTarget, createTarget, scanTarget, discoverSubdomains, getDiscoveryRun, dedupeTargets, authorizeTarget, revokeTargetAuthorization, type Target, type GroupedDomain } from '@/lib/api'
 import { DISCOVERY_SOURCES, GRADES, TARGET_SORT_OPTIONS, type SortOrder } from '@/lib/constants'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, gradeTextColor, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
+import { discoveryOutcomeMessage, scanStartFailureReasons } from '@/lib/targetDns'
 
 const SEARCH_DEBOUNCE_MS = 300
+const DISCOVERY_POLL_MS = 3000
+const DISCOVERY_POLL_LIMIT = 100
 
 type TargetIdentityKind = 'registrable_domain' | 'ip_address' | 'internal_service' | 'host'
 
@@ -276,7 +279,13 @@ function TargetsContent() {
       setNewTargetAuthorized(false)
       setUrlError('')
       setShowAddModal(false)
-      toast.success(created.status === 'already_exists' ? 'Target already present' : 'Target added')
+      const added = created.status === 'already_exists' ? 'Target already present' : 'Target added'
+      // The name typed had no address record and its www/apex twin did: say which one was kept.
+      if (created.notice) {
+        toast.info(`${added}: ${created.notice}`)
+      } else {
+        toast.success(added)
+      }
       fetchTargets()
     } catch (err) {
       console.error('Failed to add target:', err)
@@ -301,7 +310,8 @@ function TargetsContent() {
       router.push('/scans')
     } catch (err) {
       console.error('Failed to start scan:', err)
-      toast.error('Failed to start scan')
+      // The server says why -- a name with no DNS record, a missing authorization, a full queue.
+      toast.error(err instanceof Error ? err.message : 'Failed to start scan')
     }
   }
 
@@ -333,9 +343,10 @@ function TargetsContent() {
       const succeeded = results.filter((r): r is PromiseFulfilledResult<{ scan_id?: string }> => r.status === 'fulfilled')
       const failedCount = results.length - succeeded.length
 
+      const reasons = scanStartFailureReasons(results)
       if (succeeded.length === 0) {
         console.error('Failed to start domain set scan:', results.find(r => r.status === 'rejected'))
-        toast.error(`Failed to start scans for ${domain.root_domain}`)
+        toast.error(`Failed to start scans for ${domain.root_domain}: ${reasons.join('; ')}`)
         setScanningDomains(prev => {
           const next = new Set(prev)
           next.delete(domain.root_domain)
@@ -346,7 +357,7 @@ function TargetsContent() {
 
       const scanId = allTargets.length === 1 ? succeeded[0]?.value?.scan_id : undefined
       const message = failedCount > 0
-        ? `Started ${succeeded.length} of ${allTargets.length} scans for ${domain.root_domain}`
+        ? `Started ${succeeded.length} of ${allTargets.length} scans for ${domain.root_domain}. Not started: ${reasons.join('; ')}`
         : `Started ${allTargets.length} scan${allTargets.length !== 1 ? 's' : ''} for ${domain.root_domain}`
       if (failedCount > 0) {
         toast.info(message)
@@ -370,24 +381,55 @@ function TargetsContent() {
 
   async function handleDiscover(rootDomain: string) {
     setDiscoveringDomains(prev => new Set(prev).add(rootDomain))
-    try {
-      await discoverSubdomains(rootDomain)
-      toast.success(`Subdomain discovery started for ${rootDomain}`)
-      // Refresh targets after a short delay to allow discovery to start.
-      // Track the timer so it can be cleared if the component unmounts first.
+    const finish = () => {
+      fetchTargets()
+      setDiscoveringDomains(prev => {
+        const next = new Set(prev)
+        next.delete(rootDomain)
+        return next
+      })
+    }
+    // Follow the run to its end so the page can say what it added and which names it skipped
+    // for publishing no A/AAAA record. Timers are tracked so an unmount clears them.
+    const schedule = (step: () => void) => {
       const timeoutId = setTimeout(() => {
         discoverTimeouts.current.delete(timeoutId)
-        fetchTargets()
-        setDiscoveringDomains(prev => {
-          const next = new Set(prev)
-          next.delete(rootDomain)
-          return next
-        })
-      }, 2000)
+        step()
+      }, DISCOVERY_POLL_MS)
       discoverTimeouts.current.add(timeoutId)
+    }
+    try {
+      const started = await discoverSubdomains(rootDomain)
+      toast.success(`Subdomain discovery started for ${rootDomain}`)
+      const discoveryId = started?.discovery_id
+      if (!discoveryId) {
+        schedule(finish)
+        return
+      }
+      let polls = 0
+      const poll = async () => {
+        polls += 1
+        try {
+          const run = await getDiscoveryRun(discoveryId)
+          if (run.status === 'completed' || run.status === 'failed') {
+            const outcome = discoveryOutcomeMessage(rootDomain, run)
+            toast[outcome.kind](outcome.message)
+            finish()
+            return
+          }
+        } catch (err) {
+          console.error('Failed to read discovery run:', err)
+        }
+        if (polls >= DISCOVERY_POLL_LIMIT) {
+          finish()
+          return
+        }
+        schedule(poll)
+      }
+      schedule(poll)
     } catch (err) {
       console.error('Failed to start discovery:', err)
-      toast.error(`Failed to start discovery for ${rootDomain}`)
+      toast.error(err instanceof Error ? err.message : `Failed to start discovery for ${rootDomain}`)
       setDiscoveringDomains(prev => {
         const next = new Set(prev)
         next.delete(rootDomain)

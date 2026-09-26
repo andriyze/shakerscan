@@ -20576,6 +20576,100 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     assert "http://localhost:3001" in response["warning"]
 
 
+def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monkeypatch):
+    """example.com with no A/AAAA record while www.example.com resolves: register www and say so.
+
+    Otherwise the target is created, every Scan of it is refused for DNS, and the operator never
+    learns that the site answers on www. Lookups are fixtures; no network.
+    """
+    import socket
+    import target_resolution
+
+    inserted: list[tuple] = []
+
+    class Conn:
+        def transaction(self):
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
+        async def fetchrow(self, query, *args):
+            inserted.append(args)
+            return {
+                "id": uuid.uuid4(),
+                "url": args[0],
+                "name": None,
+                "discovery_source": "manual",
+                "metadata_json": {},
+                "root_domain": args[2],
+                "is_root": args[3],
+                "created": True,
+            }
+
+    async def lookup(hostname):
+        if hostname == "www.example.com":
+            return ["203.0.113.10"]
+        raise socket.gaierror(socket.EAI_NONAME, "not known")
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+
+    response = asyncio.run(api_module.create_target(
+        types.SimpleNamespace(url="example.com", name=None, scan_options={})
+    ))
+
+    assert inserted[0][0] == "https://www.example.com"
+    assert response["url"] == "https://www.example.com"
+    assert response["dns_fallback"]["requested_host"] == "example.com"
+    assert response["dns_fallback"]["resolved_host"] == "www.example.com"
+    assert response["notice"] == "example.com has no address record; using www.example.com."
+    assert response["requested_url"] == "example.com"
+
+
+def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fails(monkeypatch):
+    import socket
+    import target_resolution
+
+    class Conn:
+        def transaction(self):
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": uuid.uuid4(), "url": args[0], "name": None, "discovery_source": "manual",
+                "metadata_json": {}, "root_domain": args[2], "is_root": args[3], "created": True,
+            }
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    for answer in (["203.0.113.9"], socket.gaierror(socket.EAI_AGAIN, "resolver down")):
+        async def lookup(hostname, answer=answer):
+            if hostname == "www.example.com":
+                return ["203.0.113.10"]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+        response = asyncio.run(api_module.create_target(
+            types.SimpleNamespace(url="https://example.com", name=None, scan_options={})
+        ))
+        assert response["url"] == "https://example.com"
+        assert "dns_fallback" not in response
+        assert "notice" not in response
+
+
 def test_direct_query_value_unwraps_fastapi_parameter_without_private_import():
     query_type = type("Query", (), {"__module__": "fastapi.params"})
     query = query_type()
