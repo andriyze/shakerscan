@@ -154,6 +154,27 @@ Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques`
 metadata. A name in the library is not a guarantee that every technique below is executable;
 match the actual operation, request shape and evidence requirements to the live schema.
 
+## Agent authorization workflow
+
+For AI agents that can read private data or take actions, prefer the authorization workflow over
+generic prompt-only conclusions:
+
+1. Discover principals, tenants, owned resources, tools, actions, approvals and independent read-back paths.
+2. Record evidence-backed boundary hypotheses. Do not invent the expected business rule.
+3. Use the separate dry-run `POST /ai/boundary/hypotheses/compile` API to turn secret-free
+   discovered facts into a deterministic proposal. It is not a Hunt runtime capability.
+   A `needs_context` response names the exact authoritative facts still missing.
+4. Ask the operator only for an ambiguous business-policy fact that cannot be established from
+   authoritative application evidence. Do not ask them to re-authorize the Hunt.
+5. Execute supported proof through the server-owned AI Boundary verifier. A model claim is never
+   a substitute for canary disclosure, cross-principal differential, tool-principal telemetry or
+   an independently observed postcondition.
+6. Preserve the verified invariant and legitimate control as regression material.
+
+The compiler is dry-run and has no execution, scope-expansion, approval or finding-promotion
+authority. It is the bridge from Hunt discovery to the existing deterministic AI Boundary engine,
+not a second permission system.
+
 ## Core security hypotheses
 
 - Direct or indirect prompt injection overrides task/policy and causes unauthorized data disclosure or tool use.

@@ -85,11 +85,25 @@ def canonical_locus(value: Any) -> dict[str, Any]:
         "service_name", "operation_id", "capability_id", "scheme",
         "collection_id", "request_id", "advisory_id", "cpe", "version",
         "host_key_fingerprint",
+        "ai_boundary_context",
     )
     result: dict[str, Any] = {}
     for key in allowed:
         item = source.get(key)
         if item in (None, "", [], {}):
+            continue
+        if key == "ai_boundary_context" and isinstance(item, dict):
+            # Preserve JSON types and take an independent copy. str(dict) both
+            # corrupted the payload and truncated it through the scalar path.
+            # Legacy string rows are not guessed or migrated here; the read-only
+            # context inspector reports those as incomplete.
+            try:
+                encoded = json.dumps(item, allow_nan=False, separators=(",", ":"))
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ValueError("ai_boundary_context must contain finite JSON values") from exc
+            if len(encoded.encode("utf-8")) > 16384:
+                raise ValueError("ai_boundary_context exceeds 16384 bytes")
+            result[key] = json.loads(encoded)
             continue
         if key == "port":
             try:

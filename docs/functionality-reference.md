@@ -1591,10 +1591,10 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 430 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 359 | `api/**/*.py` |
+| Public REST operations | 434 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 363 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
-| Command Arsenal commands | 82 | `api/command_arsenal.py` |
+| Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
 | Local-agent adapters | 4 | `api/command_arsenal.py` |
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
@@ -1626,6 +1626,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
 | `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |
 | `POST` | `/agents/local/test` | `local_agent_test` |
+| `POST` | `/ai/boundary/hypotheses/compile` | `compile_ai_boundary_hypothesis` |
+| `POST` | `/ai/boundary/proposals/materialize` | `materialize_ai_boundary_proposal` |
 | `POST` | `/ai/demo/run` | `run_ai_honey_demo` |
 | `POST` | `/ai/findings/{finding_id:path}/retest` | `retest_ai_finding` |
 | `GET` | `/ai/inventory` | `get_ai_inventory` |
@@ -1642,6 +1644,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/ai/targets` | `create_ai_target` |
 | `DELETE` | `/ai/targets/{target_id}` | `delete_ai_target` |
 | `PATCH` | `/ai/targets/{target_id}` | `update_ai_target` |
+| `POST` | `/ai/targets/{target_id}/boundary/verify` | `verify_ai_boundary_proposal` |
 | `GET` | `/ai/targets/{target_id}/campaign-history` | `get_ai_target_campaign_history` |
 | `GET` | `/ai/targets/{target_id}/campaign-history/export` | `get_ai_target_campaign_history_export` |
 | `POST` | `/ai/targets/{target_id}/mcp/live-readiness` | `test_ai_target_mcp_live_readiness` |
@@ -1836,6 +1839,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/candidates` | `create_hunt_candidate` |
 | `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
 | `PATCH` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `update_hunt_candidate` |
+| `GET` | `/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context` | `get_hunt_candidate_boundary_context` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |
@@ -2078,6 +2082,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `agent_context_pack.record` | governance | dry_run | read_only | POST | `/arsenal/context-packs` | Validate and persist a bounded redacted AgentContextPack without executing work. |
 | `agent_decision_trace.list` | governance | read_only | read_only | GET | `/arsenal/decision-traces` | Read recent AgentDecisionTrace audit records. |
 | `agent_decision_trace.record` | governance | dry_run | read_only | POST | `/arsenal/decision-traces` | Validate and persist a dry-run AgentDecisionTrace without executing actions. |
+| `ai.boundary.hypothesis.compile` | ai_gate | dry_run | read_only | POST | `/ai/boundary/hypotheses/compile` | Compile discovered agent-authorization facts into a deterministic boundary proposal without executing a target. |
+| `ai.boundary.proposal.materialize` | ai_gate | dry_run | read_only | POST | `/ai/boundary/proposals/materialize` | Validate a ready agent-authorization proposal against the executable AI Boundary contract without executing a target. |
+| `ai.boundary.verify` | ai_gate | proof_backed | credential | POST | `/ai/targets/{target_id}/boundary/verify` | Queue a ready agent-authorization proposal through the canonical deterministic AI Boundary verifier. |
 | `ai_gate.replay_probe` | ai_gate | gated | active | POST | `/ai/scans/{scan_id}/replay` | Queue focused AI Gate replay using original target/profile/probe context. |
 | `ai_gate.scan` | ai_gate | gated | active | POST | `/ai/targets/{target_id}/scan` | Queue an AI Gate scan for a saved AI target through the existing production and approval gates. |
 | `ai_gate.target_history_export` | ai_gate | read_only | read_only | GET | `/ai/targets/{target_id}/campaign-history/export` | Read a content-free AI Gate target campaign-history export with readiness trends, trend series, and report links. |
