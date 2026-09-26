@@ -1,0 +1,1174 @@
+diff --git a/.github/workflows/ai-boundary-alpha.yml b/.github/workflows/ai-boundary-alpha.yml
+index 4424a77..a2ffd4d 100644
+--- a/.github/workflows/ai-boundary-alpha.yml
++++ b/.github/workflows/ai-boundary-alpha.yml
+@@ -7,6 +7,10 @@ on:
+       - 'api/ai_gate_scan.py'
+       - 'api/worker_handlers/ai_gate.py'
+       - 'api/ai_targets/**'
++      - 'api/hunt/boundary_candidate.py'
++      - 'api/hunt/interaction_router.py'
++      - 'api/investigation_candidates.py'
++      - 'api/runtime/capability_registry.py'
+       - 'examples/ai-boundary/**'
+       - 'tests/*ai_boundary*'
+       - 'scripts/ai_boundary_alpha.py'
+@@ -48,7 +52,7 @@ jobs:
+       - name: Install locked Python dependencies
+         run: python -m pip install --require-hashes -r scanner/requirements.lock
+       - name: Boundary fixtures and worker integration
+-        run: python -m pytest -q tests/test_ai_boundary.py tests/test_ai_boundary_integration.py tests/test_ai_boundary_admission.py --junitxml=artifacts/boundary-tests.xml
++        run: python -m pytest -q tests/test_ai_boundary.py tests/test_ai_boundary_integration.py tests/test_ai_boundary_admission.py tests/test_ai_boundary_hypothesis.py tests/test_ai_boundary_hypothesis_route.py tests/test_ai_boundary_candidate_lookup.py --junitxml=artifacts/boundary-tests.xml
+       - name: Existing AI Gate and worker regressions
+         run: python -m pytest -q tests/test_ai_gate_judging.py tests/test_ai_redteam_artifacts.py tests/test_worker_handler_decomposition.py tests/test_v2_module_boundaries.py
+       - name: Synthetic alpha CLI smoke test
+ diff --git a/api/ai_gate/boundary/candidate_context.py b/api/ai_gate/boundary/candidate_context.py
+new file mode 100644
+index 0000000..da5ac6c
+--- /dev/null
++++ b/api/ai_gate/boundary/candidate_context.py
+@@ -0,0 +1,57 @@
++"""Bounded typed context on an unverified candidate, never execution authority."""
++from __future__ import annotations
++
++import copy
++import json
++import math
++import re
++from typing import Any
++from uuid import UUID
++
++TEXT_FIELDS = frozenset({
++    "verifier_path", "state_path", "approval_path", "approval_state_path",
++    "tool_name", "expected_principal", "prompt", "tool_calls_path",
++    "tool_name_field", "executed_field", "principal_field",
++})
++VALUE_FIELDS = frozenset({"initial_value", "forbidden_value", "required_approval_value"})
++IDENTITY_FIELDS = frozenset({"role", "subject", "tenant", "resource_id"})
++ALLOWED_FIELDS = TEXT_FIELDS | VALUE_FIELDS | {"owner", "attacker", "invariant_contract_id"}
++MAX_CONTEXT_BYTES = 16384
++
++
++def normalize_candidate_context(value: Any) -> dict[str, Any]:
++    """Preserve JSON types without accepting credentials, policy prose or extra keys.
++
++    Older PR builds stored Python repr strings. Do not evaluate or guess through
++    those strings: read-side callers report an unavailable context instead.
++    """
++    if not isinstance(value, dict) or set(value) - ALLOWED_FIELDS:
++        raise ValueError("invalid_ai_boundary_context_fields")
++    result: dict[str, Any] = {}
++    for key, item in value.items():
++        if key in {"owner", "attacker"}:
++            if not isinstance(item, dict) or set(item) - IDENTITY_FIELDS:
++                raise ValueError("invalid_ai_boundary_context_identity")
++            if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", v)
++                   for v in item.values()):
++                raise ValueError("invalid_ai_boundary_context_identity")
++        elif key == "invariant_contract_id":
++            try:
++                item = str(UUID(str(item)))
++            except (TypeError, ValueError, AttributeError) as exc:
++                raise ValueError("invalid_ai_boundary_context_invariant") from exc
++        elif key in TEXT_FIELDS:
++            if not isinstance(item, str) or not item.strip() or len(item) > 2000:
++                raise ValueError("invalid_ai_boundary_context_text")
++        elif item is not None and type(item) not in {str, int, float, bool}:
++            raise ValueError("ai_boundary_context_requires_scalar_state_values")
++        if isinstance(item, float) and not math.isfinite(item):
++            raise ValueError("invalid_ai_boundary_context_number")
++        result[key] = copy.deepcopy(item)
++    try:
++        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
++    except (ValueError, TypeError, UnicodeError) as exc:
++        raise ValueError("invalid_ai_boundary_context_json") from exc
++    if len(encoded) > MAX_CONTEXT_BYTES:
++        raise ValueError("ai_boundary_context_too_large")
++    return result
+ diff --git a/api/ai_targets/router.py b/api/ai_targets/router.py
+index 9f0e7ce..462f810 100644
+--- a/api/ai_targets/router.py
++++ b/api/ai_targets/router.py
+@@ -2086,11 +2086,13 @@ class AITargetScanRequest(BaseModel):
+ 
+ class AIBoundaryHypothesisCompileRequest(BaseModel):
+     """Secret-free discovered facts; compilation performs no target interaction."""
++    model_config = ConfigDict(extra="forbid")
+     hypothesis: dict[str, Any]
+ 
+ 
+ class AIBoundaryMaterializeRequest(BaseModel):
+     """A ready proposal plus application-specific deterministic verifier bindings."""
++    model_config = ConfigDict(extra="forbid")
+     proposal: dict[str, Any]
+     boundary_base: dict[str, Any]
+ 
+ diff --git a/api/command_arsenal.py b/api/command_arsenal.py
+index f2f7c61..d6b9e5d 100644
+--- a/api/command_arsenal.py
++++ b/api/command_arsenal.py
+@@ -427,60 +427,6 @@ def _workflow_step_schema() -> dict[str, Any]:
+ 
+ 
+ COMMANDS: tuple[ArsenalCommand, ...] = (
+-    ArsenalCommand(
+-        name="ai.boundary.verify",
+-        family="ai_gate",
+-        description="Queue a ready agent-authorization proposal through the canonical deterministic AI Boundary verifier.",
+-        status="proof_backed",
+-        risk_tier="credential",
+-        method="POST",
+-        path="/ai/targets/{target_id}/boundary/verify",
+-        scope_fields=("target_id",),
+-        parameters_schema={
+-            "target_id": {"type": "string", "format": "uuid"},
+-            "proposal": {"type": "object"},
+-            "boundary_base": {"type": "object"},
+-            "environment": {"type": "string", "enum": ["preview", "staging", "development"]},
+-            "scan_profile": {"type": "string", "enum": ["smoke", "trace", "standard", "deep"]},
+-            "approval_receipt_id": {"type": "string", "format": "uuid"},
+-        },
+-        required_capabilities=("ai_gate.scan",),
+-        evidence_contract=("boundary_contract", "evidence_manifest", "proof_contract_v2"),
+-        timeout_seconds=30,
+-        request_cost=1,
+-    ),
+-    ArsenalCommand(
+-        name="ai.boundary.proposal.materialize",
+-        family="ai_gate",
+-        description="Validate a ready agent-authorization proposal against the executable AI Boundary contract without executing a target.",
+-        status="dry_run",
+-        risk_tier="read_only",
+-        method="POST",
+-        path="/ai/boundary/proposals/materialize",
+-        parameters_schema={
+-            "proposal": {"type": "object"},
+-            "boundary_base": {"type": "object"},
+-        },
+-        evidence_contract=("boundary_contract", "proposal_sha256", "provenance"),
+-        timeout_seconds=15,
+-    ),
+-    ArsenalCommand(
+-        name="ai.boundary.hypothesis.compile",
+-        family="ai_gate",
+-        description="Compile discovered agent-authorization facts into a deterministic boundary proposal without executing a target.",
+-        status="dry_run",
+-        risk_tier="read_only",
+-        method="POST",
+-        path="/ai/boundary/hypotheses/compile",
+-        parameters_schema={
+-            "hypothesis": {
+-                "type": "object",
+-                "description": "Secret-free boundary hypothesis with controlled principals, provenance, and optional authoritative business rule.",
+-            },
+-        },
+-        evidence_contract=("boundary_proposal", "missing_facts", "provenance"),
+-        timeout_seconds=15,
+-    ),
+     ArsenalCommand(
+         name="target.list",
+         family="inventory",
+ diff --git a/api/hunt/boundary_candidate.py b/api/hunt/boundary_candidate.py
+new file mode 100644
+index 0000000..8c26b54
+--- /dev/null
++++ b/api/hunt/boundary_candidate.py
+@@ -0,0 +1,236 @@
++"""Read-only review of one Hunt-owned AI-boundary candidate.
++
++Only IDs cross this interface. Stored context is an unverified observation, not
++policy or proof. No target requests, credential resolution, dispatch or findings
++are performed here; a review-ready result is deliberately not materializable.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++from typing import Any
++from uuid import UUID
++
++try:
++    from ai_gate.boundary.candidate_context import normalize_candidate_context
++    from invariant_contracts import approval_errors, canonical_contract
++except ModuleNotFoundError:
++    from ..ai_gate.boundary.candidate_context import normalize_candidate_context
++    from ..invariant_contracts import approval_errors, canonical_contract
++
++KINDS = {
++    "cross_tenant_retrieval": "cross_tenant_read", "bola": "cross_tenant_read",
++    "forbidden_agent_action": "cross_tenant_action", "agent_action": "cross_tenant_action",
++    "approval_bypass": "approval_bypass",
++    "tool_principal_boundary": "tool_principal", "tool_boundary": "tool_principal",
++}
++ACTION_FIELDS = ("prompt", "verifier_path", "state_path", "initial_value", "forbidden_value")
++REQUIRED_FIELDS = {
++    "cross_tenant_read": (),
++    "cross_tenant_action": ACTION_FIELDS,
++    "approval_bypass": (*ACTION_FIELDS, "approval_path", "approval_state_path", "required_approval_value"),
++    "tool_principal": ("prompt", "tool_name", "expected_principal", "tool_calls_path",
++                       "tool_name_field", "executed_field", "principal_field"),
++}
++MAX_EVIDENCE_REFS = 100
++
++CANDIDATE_SQL = """
++SELECT c.id, c.family, c.status, c.plane, c.target_id, c.device_target_id,
++       o.id AS observation_id, o.hunt_run_id AS observation_hunt_id,
++       o.evidence_refs, o.observation_context
++FROM investigation_candidates c
++JOIN investigation_candidate_observations o
++    ON o.candidate_id=c.id AND o.hunt_run_id=$2
++WHERE c.id=$1 AND (
++    (c.plane='web' AND c.target_id=$3 AND c.device_target_id IS NULL) OR
++    (c.plane='device' AND c.device_target_id=$4 AND c.target_id IS NULL)
++)
++ORDER BY o.observed_at DESC, o.id DESC LIMIT 1
++"""
++EVIDENCE_SQL = """
++SELECT id AS reference_id, 'action' AS kind, status, NULL::integer AS status_code,
++       false AS truncated
++FROM hunt_actions WHERE hunt_run_id=$1 AND id=ANY($2::uuid[])
++UNION ALL
++SELECT receipt_id AS reference_id, 'receipt_link' AS kind, status,
++       NULL::integer AS status_code, false AS truncated
++FROM hunt_actions WHERE hunt_run_id=$1 AND receipt_id=ANY($2::uuid[])
++UNION ALL
++SELECT id AS reference_id, 'http_transaction' AS kind,
++       CASE WHEN error IS NULL THEN 'recorded' ELSE 'error' END AS status,
++       status_code, truncated
++FROM http_transactions WHERE hunt_run_id=$1 AND id=ANY($2::uuid[]) AND (
++    (target_id=$3 AND device_target_id IS NULL) OR
++    (device_target_id=$4 AND target_id IS NULL)
++)
++"""
++
++
++class BoundaryCandidateError(ValueError):
++    def __init__(self, code: str, status_code: int = 422) -> None:
++        super().__init__(code)
++        self.status_code = status_code
++
++
++def _uuid(value: Any) -> UUID:
++    try:
++        return UUID(str(value))
++    except (ValueError, TypeError, AttributeError) as exc:
++        raise BoundaryCandidateError("invalid_candidate_review_reference") from exc
++
++
++def _json(value: Any, expected: type) -> Any:
++    if isinstance(value, str):
++        try:
++            value = json.loads(value)
++        except (ValueError, TypeError):
++            return expected()
++    return value if isinstance(value, expected) else expected()
++
++
++def _digest(value: Any) -> str:
++    return "sha256:" + hashlib.sha256(json.dumps(
++        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
++        allow_nan=False,
++    ).encode()).hexdigest()
++
++
++async def inspect_boundary_candidate(pool: Any, *, hunt_id: str, candidate_id: str) -> dict[str, Any]:
++    """Resolve current-Hunt evidence metadata in one read-only consistent snapshot."""
++    hunt_uuid, candidate_uuid = _uuid(hunt_id), _uuid(candidate_id)
++    async with pool.acquire() as conn:
++        async with conn.transaction(isolation="repeatable_read", readonly=True):
++            run_row = await conn.fetchrow(
++                "SELECT id,target_id,device_target_id FROM hunt_runs WHERE id=$1", hunt_uuid,
++            )
++            if not run_row:
++                raise BoundaryCandidateError("hunt_not_found", 404)
++            run = dict(run_row)
++            if bool(run.get("target_id")) == bool(run.get("device_target_id")):
++                raise BoundaryCandidateError("hunt_asset_binding_unavailable", 409)
++            row = await conn.fetchrow(CANDIDATE_SQL, candidate_uuid, hunt_uuid,
++                                      run.get("target_id"), run.get("device_target_id"))
++            if not row:
++                # Do not reveal whether the candidate exists on another Hunt/asset.
++                raise BoundaryCandidateError("candidate_not_found_for_hunt", 404)
++            candidate = dict(row)
++            if (str(candidate["id"]) != str(candidate_uuid)
++                    or str(candidate["observation_hunt_id"]) != str(hunt_uuid)
++                    or candidate.get("target_id") != run.get("target_id")
++                    or candidate.get("device_target_id") != run.get("device_target_id")):
++                raise BoundaryCandidateError("candidate_not_found_for_hunt", 404)
++            refs = _json(candidate.get("evidence_refs"), list)
++            if len(refs) > MAX_EVIDENCE_REFS:
++                raise BoundaryCandidateError("candidate_evidence_reference_limit", 409)
++            reference_ids: list[UUID] = []
++            unsupported_count = 0
++            for ref in refs:
++                try:
++                    ref_uuid = _uuid(ref)
++                except BoundaryCandidateError:
++                    unsupported_count += 1
++                    continue
++                if ref_uuid not in reference_ids:
++                    reference_ids.append(ref_uuid)
++            records = await conn.fetch(EVIDENCE_SQL, hunt_uuid, reference_ids,
++                                       run.get("target_id"), run.get("device_target_id")) if reference_ids else []
++            evidence = [dict(record) for record in records]
++            observation = _json(candidate.get("observation_context"), dict)
++            raw_context = observation.get("ai_boundary_context")
++            try:
++                context = normalize_candidate_context(raw_context)
++                context_valid = True
++            except ValueError:
++                # No fallback to the shared row or evaluation of legacy repr strings.
++                context, context_valid = {}, False
++            policy = None
++            if context.get("invariant_contract_id") and run.get("target_id"):
++                policy_row = await conn.fetchrow(
++                    "SELECT id,target_id,status,approved_at,contract_kind,subject_role,action,resource,"
++                    "method,path,field_name,operator,expected_value,expected_access,conditions,title "
++                    "FROM target_invariant_contracts WHERE id=$1 AND target_id=$2",
++                    _uuid(context["invariant_contract_id"]), run["target_id"],
++                )
++                policy = dict(policy_row) if policy_row else None
++    return _review(hunt_uuid, candidate, context, context_valid, reference_ids,
++                   unsupported_count, evidence, policy)
++
++
++def _review(hunt_id: UUID, candidate: dict[str, Any], context: dict[str, Any],
++            context_valid: bool, reference_ids: list[UUID], unsupported_count: int,
++            evidence: list[dict[str, Any]], policy: dict[str, Any] | None) -> dict[str, Any]:
++    missing: list[str] = []
++    kind = KINDS.get(str(candidate.get("family") or ""))
++    if not kind:
++        missing.append("supported_boundary_family")
++    if not context_valid:
++        missing.append("stored_typed_boundary_context")
++    for slot in ("owner", "attacker"):
++        identity = context.get(slot) or {}
++        missing.extend(f"{slot}.{field}" for field in ("role", "subject", "tenant", "resource_id")
++                       if not identity.get(field))
++    if all(context.get(slot) for slot in ("owner", "attacker")):
++        if any(context["owner"].get(field) == context["attacker"].get(field)
++               for field in ("role", "subject", "tenant", "resource_id")):
++            missing.append("distinct_control_principals_for_current_verifier")
++    missing.extend(field for field in REQUIRED_FIELDS.get(kind, ()) if field not in context)
++    if kind == "tool_principal" and "verifier_path" in context:
++        missing.extend(field for field in ("state_path", "initial_value", "forbidden_value")
++                       if field not in context)
++    if "initial_value" in context and "forbidden_value" in context:
++        if context["initial_value"] == context["forbidden_value"]:
++            missing.append("distinct_initial_and_forbidden_values")
++    found = {str(record["reference_id"]) for record in evidence}
++    unresolved = [str(ref) for ref in reference_ids if str(ref) not in found]
++    if not reference_ids:
++        missing.append("stored_resolvable_evidence")
++    if unresolved or unsupported_count:
++        missing.append("evidence_reference_resolution")
++    if any(record["status"] not in {"completed", "recorded"} or record.get("truncated")
++           for record in evidence):
++        missing.append("complete_evidence_observation")
++    policy_summary = None
++    if policy:
++        try:
++            policy["conditions"] = _json(policy.get("conditions"), dict)
++            valid = not approval_errors(policy)
++            canonical = canonical_contract(policy)
++            canonical.pop("source_text", None)
++            canonical.pop("title", None)
++        except (ValueError, TypeError):
++            valid, canonical = False, {}
++        if policy.get("status") == "approved" and policy.get("approved_at") and valid:
++            policy_summary = {"id": str(policy["id"]), "status": "approved",
++                              "contract_sha256": _digest(canonical), "binding_review_required": True}
++    if not policy_summary:
++        missing.append("approved_target_invariant_reference")
++    if candidate.get("status") == "expired":
++        missing.append("nonexpired_candidate")
++    return {
++        "schema_version": "hunt-boundary-candidate-review/v1",
++        "hunt_id": str(hunt_id), "candidate_id": str(candidate["id"]),
++        "candidate_status": candidate["status"],
++        "proposal": {
++            "schema_version": "boundary-review-proposal/v1", "kind": kind,
++            "status": "needs_context" if missing else "ready_for_review",
++            "missing_facts": list(dict.fromkeys(missing)),
++            "known_fields": sorted(context), "context_sha256": _digest(context) if context_valid else None,
++            "policy": policy_summary, "contract_fragment": None,
++        },
++        "provenance": {
++            "observation_id": str(candidate["observation_id"]),
++            "evidence": [{**record, "reference_id": str(record["reference_id"]),
++                          "content_verified": False} for record in evidence],
++            "unresolved_reference_ids": unresolved, "unsupported_reference_count": unsupported_count,
++            "truncated": False,
++        },
++        "execution_enabled": False, "planning_authority": False,
++        "promotion_authority": False, "verified": False,
++        "limitations": [
++            "Stored facts and evidence linkage are not authorization or vulnerability proof.",
++            "Review readiness does not establish policy applicability or live fixture ownership.",
++            "Receipt references are resolved as links; receipt content is not revalidated here.",
++            "Only UUID references to this Hunt's actions, receipt links and HTTP records are resolved.",
++            "No credentials, raw evidence bodies, prompts or executable contracts are returned.",
++        ],
++    }
+ diff --git a/api/hunt/interaction_router.py b/api/hunt/interaction_router.py
+index 97811dd..93c77e2 100644
+--- a/api/hunt/interaction_router.py
++++ b/api/hunt/interaction_router.py
+@@ -28,7 +28,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence
+ import uuid
+ 
+ from fastapi import APIRouter, HTTPException, Query, Request
+-from pydantic import BaseModel, ConfigDict, Field, model_validator
++from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
+ 
+ try:
+     from capabilities.browser_login_worker import prepare_hunt_browser_action
+@@ -257,6 +257,15 @@ class HuntCandidateRequest(BaseModel):
+     verifier_contract_id: Optional[str] = Field(default=None, max_length=160)
+ 
+ 
++    @field_validator("locus")
++    @classmethod
++    def validate_boundary_context(cls, value: dict[str, Any]) -> dict[str, Any]:
++        # Return a validation error before entering the candidate transaction.
++        if "ai_boundary_context" in value:
++            investigation_candidates.normalize_candidate_context(value["ai_boundary_context"])
++        return value
++
++
+ class HuntCandidateUpdateRequest(BaseModel):
+     """Editable candidate metadata; identity and proof-owned fields are absent by design."""
+ 
+@@ -2179,6 +2188,33 @@ async def _execute_hunt_capability_lifecycle(
+             result = candidate_adapter.result
+             if candidate_adapter.blocked_exception is not None:
+                 raise candidate_adapter.blocked_exception
++        elif name == "ai.boundary.candidate.inspect":
++            from .boundary_candidate import BoundaryCandidateError, inspect_boundary_candidate
++
++            async def inspect_candidate_operation() -> dict[str, Any]:
++                try:
++                    review = await inspect_boundary_candidate(
++                        _pool(), hunt_id=str(run["id"]),
++                        candidate_id=str(request.input["candidate_id"]),
++                    )
++                except BoundaryCandidateError as exc:
++                    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
++                return {"ok": True, "status": "success", "review": review,
++                        "observation": {"kind": "boundary_candidate_review", **review}}
++
++            review_adapter = ControlPlaneExecutionAdapter(
++                specification=spec, operation=inspect_candidate_operation,
++                requested_budget=durable_reservation.record.requested,
++                redacted_execution={"candidate_id": str(request.input["candidate_id"])},
++                blocked_exceptions=(HTTPException,),
++            )
++            capability_execution = await dispatch_registered_adapter(
++                review_adapter, target=inline_hunt_target_binding(),
++                requested_budget=durable_reservation.record.requested,
++            )
++            result = review_adapter.result
++            if review_adapter.blocked_exception is not None:
++                raise review_adapter.blocked_exception
+         elif name == "collections.inspect":
+             collection_adapter = ControlPlaneExecutionAdapter(
+                 specification=spec,
+ diff --git a/api/investigation_candidates.py b/api/investigation_candidates.py
+index 827e87d..7e337b4 100644
+--- a/api/investigation_candidates.py
++++ b/api/investigation_candidates.py
+@@ -8,6 +8,11 @@ from __future__ import annotations
+ 
+ import hashlib
+ import json
++
++try:
++    from ai_gate.boundary.candidate_context import normalize_candidate_context
++except ModuleNotFoundError:
++    from .ai_gate.boundary.candidate_context import normalize_candidate_context
+ from typing import Any
+ 
+ 
+@@ -92,6 +97,9 @@ def canonical_locus(value: Any) -> dict[str, Any]:
+         item = source.get(key)
+         if item in (None, "", [], {}):
+             continue
++        if key == "ai_boundary_context":
++            result[key] = normalize_candidate_context(item)
++            continue
+         if key == "port":
+             try:
+                 port = int(item)
+@@ -117,7 +125,9 @@ def candidate_fingerprint(
+         "plane": normalized_plane,
+         "target_ref": str(target_ref),
+         "family": canonical_family(family),
+-        "locus": canonical_locus(locus),
++        # Review metadata does not change the identity of the observed surface.
++        "locus": {k: v for k, v in canonical_locus(locus).items()
++                  if k != "ai_boundary_context"},
+     }
+     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+ 
+@@ -249,7 +259,11 @@ async def upsert_candidate(
+         row["id"], candidate.get("research_episode_id"), candidate.get("agent_hunt_run_id"),
+         candidate.get("device_agent_run_id"), candidate.get("hunt_run_id"), candidate.get("source_kind"), candidate["title"],
+         candidate["claim"], candidate["claimed_severity"], json.dumps(candidate["evidence_refs"]),
+-        candidate.get("verifier_contract_id"), json.dumps(observation_context or {}),
++        candidate.get("verifier_contract_id"), json.dumps({
++            **(observation_context or {}),
++            # Snapshot this Hunt's context, not the latest shared candidate's data.
++            "ai_boundary_context": candidate["canonical_locus"].get("ai_boundary_context"),
++        }),
+         str(created_by or "hunt")[:120],
+     )
+     return {
+@@ -308,6 +322,13 @@ async def _append_hunt_lifecycle_observation(
+     changed_fields: list[str],
+ ) -> None:
+     """Preserve an immutable before/after audit point for Hunt metadata edits."""
++    previous = await conn.fetchrow(
++        "SELECT observation_context FROM investigation_candidate_observations "
++        "WHERE candidate_id=$1 AND hunt_run_id=$2::uuid "
++        "ORDER BY observed_at DESC,id DESC LIMIT 1",
++        row["id"], hunt_run_id,
++    )
++    prior_context = _json_object(previous["observation_context"]) if previous else {}
+     await conn.execute(
+         """INSERT INTO investigation_candidate_observations (
+                candidate_id, hunt_run_id, source_kind, title, claim,
+@@ -324,6 +345,7 @@ async def _append_hunt_lifecycle_observation(
+         row.get("verifier_contract_id"),
+         json.dumps({
+             "event": event,
++            "ai_boundary_context": prior_context.get("ai_boundary_context"),
+             "changed_fields": sorted(set(changed_fields)),
+             "authoritative": False,
+             "verification_state_mutated": False,
+ diff --git a/api/runtime/capability_registry.py b/api/runtime/capability_registry.py
+index b52d46b..9c33b9f 100644
+--- a/api/runtime/capability_registry.py
++++ b/api/runtime/capability_registry.py
+@@ -1510,6 +1510,17 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
+             ("device_capability_observation",),
+             hunt_executor="device_control",
+         ),
++        CapabilitySpec(
++            "ai.boundary.candidate.inspect",
++            "Read one Hunt-owned candidate's boundary context and evidence links; no target traffic or proof.",
++            "internal", "read_only", frozenset({"web", "api", "network", "device"}),
++            "ai.boundary.candidate.inspect", "1", None, {"tool_wall_seconds": 5},
++            {"control_plane": True, "runtime_target_binding": True, "durable_reservation": True},
++            _schema({"candidate_id": {"type": "string", "format": "uuid"}}, required=("candidate_id",)),
++            "hunt-boundary-candidate-review/v1", ("boundary_candidate_review",),
++            hunt_executor="inline", credential_transport="not_used",
++            credential_interruption="not_needed",
++        ),
+         CapabilitySpec(
+             "collections.inspect", "Inspect redacted request collections bound to this Hunt.",
+             "internal", "read_only", frozenset({"web", "api", "device"}),
+ diff --git a/docs/README.md b/docs/README.md
+index a272f3d..00f3730 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -34,6 +34,8 @@ belong in Git history or immutable release notes rather than the active document
+ ## Devices, AI, and model security
+ 
+ - [Connected-device security](connected-device-security.md)
++- [Agent authorization direction](agent-authorization-workflow-direction.md)
++- [AI boundary candidate review](ai-boundary-candidate-review.md)
+ - [AI test workflows](AI_TEST_WORKFLOWS.md)
+ - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
+ 
+ diff --git a/docs/ai-boundary-candidate-review.md b/docs/ai-boundary-candidate-review.md
+new file mode 100644
+index 0000000..e3a2dd8
+--- /dev/null
++++ b/docs/ai-boundary-candidate-review.md
+@@ -0,0 +1,82 @@
++# AI boundary candidate review
++
++**Status:** implemented read-only review capability in the PR #227 branch. This is
++not an autonomous verification or release-readiness claim.
++
++## Candidate-ID interface
++
++Call the native Hunt capability using the running Hunt's advertised schema:
++
++```text
++POST /hunts/{hunt_id}/capabilities/ai.boundary.candidate.inspect
++```
++
++The request contains `idempotency_key` and `input.candidate_id` only. The server,
++not the caller, loads the candidate and evidence references. This uses the normal
++Hunt action lifecycle, durable accounting and receipts. It makes no target
++requests and consumes no verification slot or credential authority. A changed
++observation needs a new idempotency key; replaying an old key returns the old action.
++
++The result contains a `boundary-review-proposal/v1` with `needs_context` or
++`ready_for_review`, exact missing facts, available field names, context/policy
++digests, the observation ID and evidence-reference resolution. Review readiness
++is not proof, execution readiness, or a grant of authority. The output has no
++executable fragment and cannot be submitted as a materializable proposal.
++
++## Ownership and evidence
++
++The lookup requires both the Hunt's asset and a candidate observation belonging
++to that Hunt. A candidate's existence elsewhere is not disclosed. The latest
++observation is selected within that Hunt, not globally; a later sighting by a
++different Hunt cannot replace its context or evidence. All reads use a single
++read-only repeatable-read transaction.
++
++UUID references are resolved against this Hunt's action records, receipt links
++and asset-bound HTTP transaction metadata. Unknown, deleted, cross-Hunt and
++legacy textual references remain explicit gaps. Receipt linkage does not validate
++receipt contents or cryptographic proof. No raw request/response bodies, prompts,
++credentials or policy prose are returned. The lookup handles at most 100 references
++and reports overflow instead of silently truncating it.
++
++## Typed context persistence
++
++`locus.ai_boundary_context` preserves a bounded JSON object through candidate
++normalization and storage. Its explicit fields are optional owner/attacker identity
++bindings, existing boundary verifier/state/tool fields and an
++`invariant_contract_id`. Identity bindings are stored observations, not verified
++identities. State values are JSON scalars. Unknown fields and credential-shaped
++objects are rejected at request validation.
++
++The context is copied into each immutable candidate observation; it is excluded
++from the candidate fingerprint so changing review metadata does not change the
++identity of the observed surface. Ordinary metadata edits preserve the last
++snapshot belonging to the same Hunt, not the shared row's context.
++
++Earlier PR builds stringified this object. The reader does not evaluate or guess
++through legacy Python representations: those observations return a context gap.
++A fresh candidate observation supplies corrected typed context.
++
++## Policy and missing facts
++
++A policy reference must resolve to a structurally valid, approved invariant on the
++same target. A field merely claiming `expected_rule_source=operator` is not
++approval. Even a valid stored invariant requires human review of its applicability
++to the selected facts. Cross-tenant access is not automatically assumed forbidden.
++
++The lookup does not invent verifier endpoints from action routes, fill telemetry
++paths with defaults, synthesize prompts, decrypt credentials, provision fixtures,
++queue scans or promote findings. Missing principal bindings, independent verifiers,
++policy references and evidence are reported as specific gaps.
++
++## Integration boundary
++
++`ai.boundary.candidate.inspect` is registered in the native capability registry and
++implemented by the existing inline Hunt dispatcher. The draft compiler,
++materializer and verification REST routes elsewhere in PR #227 are separate. An
++Arsenal entry alone never made those routes callable as Hunt capabilities; the
++unwired PR-only entries have been removed rather than advertised as working tools.
++
++Tests cover typed persistence, per-Hunt observation ownership, target/plane
++separation, evidence resolution, policy references, legacy records, bounded input,
++no raw-data output, and the actual registered inline adapter branch. They do not
++claim live agent verification or production-agent coverage.
+ diff --git a/docs/functionality-reference.md b/docs/functionality-reference.md
+index b26426c..781c681 100644
+--- a/docs/functionality-reference.md
++++ b/docs/functionality-reference.md
+@@ -1591,8 +1591,8 @@ for the profile contract, invocation, limits and acceptance gates.
+ 
+ | Surface | Count | Source |
+ |---|---|---|
+-| Public REST operations | 430 | `api/**/*.py` FastAPI decorators |
+-| Unique REST paths | 359 | `api/**/*.py` |
++| Public REST operations | 433 | `api/**/*.py` FastAPI decorators |
++| Unique REST paths | 362 | `api/**/*.py` |
+ | Check families | 18 | `api/check_registry.py` |
+ | Command Arsenal commands | 82 | `api/command_arsenal.py` |
+ | Tool adapters | 0 | `api/command_arsenal.py` |
+@@ -1626,6 +1626,8 @@ for the profile contract, invocation, limits and acceptance gates.
+ | `POST` | `/agents/local/plan` | `local_agent_dry_run_plan` |
+ | `POST` | `/agents/local/plan/parse` | `local_agent_parse_candidate_plan` |
+ | `POST` | `/agents/local/test` | `local_agent_test` |
++| `POST` | `/ai/boundary/hypotheses/compile` | `compile_ai_boundary_hypothesis` |
++| `POST` | `/ai/boundary/proposals/materialize` | `materialize_ai_boundary_proposal` |
+ | `POST` | `/ai/demo/run` | `run_ai_honey_demo` |
+ | `POST` | `/ai/findings/{finding_id:path}/retest` | `retest_ai_finding` |
+ | `GET` | `/ai/inventory` | `get_ai_inventory` |
+@@ -1642,6 +1644,7 @@ for the profile contract, invocation, limits and acceptance gates.
+ | `POST` | `/ai/targets` | `create_ai_target` |
+ | `DELETE` | `/ai/targets/{target_id}` | `delete_ai_target` |
+ | `PATCH` | `/ai/targets/{target_id}` | `update_ai_target` |
++| `POST` | `/ai/targets/{target_id}/boundary/verify` | `verify_ai_boundary_proposal` |
+ | `GET` | `/ai/targets/{target_id}/campaign-history` | `get_ai_target_campaign_history` |
+ | `GET` | `/ai/targets/{target_id}/campaign-history/export` | `get_ai_target_campaign_history_export` |
+ | `POST` | `/ai/targets/{target_id}/mcp/live-readiness` | `test_ai_target_mcp_live_readiness` |
+ diff --git a/install/MANIFEST.sha256 b/install/MANIFEST.sha256
+index 12c83ea..cce7331 100644
+--- a/install/MANIFEST.sha256
++++ b/install/MANIFEST.sha256
+@@ -49,7 +49,7 @@ f1dc5fdd82e17975971192415fbb927d38ce9e6437840a90b0492ddebafaae44  api/runtime/__
+ 2db584dbf8d9f354f2766f0239bf857f1bafcf44df0b8e1763adeba436ecb2b7  api/runtime/browser_login_contract.py
+ 7fa1268a4dae716e39eb3aa341f81d23c78db5aa28ae8f6f3dc93d8957940c5f  api/runtime/budget_reservations.py
+ aafb73c9b97e15635b4c9dea3f49225834d45b6b5a8594ee8d452644f36c36dd  api/runtime/budgets.py
+-90ee33cfc07f9a9fe63a165be0604c5c89d2786701b78b62392c4e1ffc9fdffe  api/runtime/capability_registry.py
++d62012de8de46aacc8f78dae22355d9b23faff39ed7d0eb3a0b577451865dd7d  api/runtime/capability_registry.py
+ 52a945abc67420754af7b6e5c03cf4063c4453e28c0fd85b30c4d99b61e918cd  api/runtime/credential_resolver.py
+ 9edb93b817d14d7d368a785ecbd90f61c87e1aef59bbe4c1653776a2b21da8f4  api/runtime/credential_store.py
+ f4d89d903e85895463106b8a45965e9cd55e0a53db60cf1164a3e2cd1dbb3018  api/runtime/credentials.py
+@@ -182,7 +182,7 @@ d431a72c39c09ce95ed0f9a168e82a6e0fb0b37bff0eaa7dff9629aab481198c  skills/web/20-
+ 009c0dae21ce0304c3e80f7e88255f2466aa9ac79e6041173482115eccbc3aab  skills/web/26-cryptography-tls-secrets-and-sensitive-data-testing.md
+ 90d2bcf7d89c8217525bc8af71c06d923a24b64e16874a9e90d4b49739022d11  skills/web/27-software-supply-chain-and-integrity-testing.md
+ 84344b8e12cae788d8815d9ba644ff57fc6051946ec66fe5c479866fcb1314a3  skills/web/28-security-misconfiguration-error-handling-and-logging-testing.md
+-7e1e48fa053ed0cbf98454b56bbd2637003d770ca50f79b052e405d819bbb0bc  skills/web/29-web-llm-and-ai-feature-security-testing.md
++c0e05ac56b94904f525b9a3427a6288a0f5afadc44607d12b282953743743834  skills/web/29-web-llm-and-ai-feature-security-testing.md
+ e2c87d9d64930061bcb2b7e8f4d41869c362205d282e1f15742b6c652921a43a  skills/web/30-scanner-orchestration-evidence-chaining-and-regression.md
+ 85a4709a1cf359949389b7ee7ea5e92b4fcc99479bccfb9e21f0606bfaa293cb  skills/web/31-edge-waf-and-origin-exposure-validation.md
+ 02d5c9d5907513e6579f2f41639515a7edaf5512b1bf6f395a2e60e44d1b14de  skills/web/32-service-protocol-and-device-investigation.md
+ diff --git a/skills/web/29-web-llm-and-ai-feature-security-testing.md b/skills/web/29-web-llm-and-ai-feature-security-testing.md
+index 61e17c3..f3fac3a 100644
+--- a/skills/web/29-web-llm-and-ai-feature-security-testing.md
++++ b/skills/web/29-web-llm-and-ai-feature-security-testing.md
+@@ -5,7 +5,7 @@ title: 29. Web LLM and AI Feature Security Testing
+ description: Test web-integrated LLM, RAG, agent, tool, connector, memory, and AI-output features for
+   prompt injection, excessive agency, data leakage, cross-tenant retrieval, unsafe tool calls, poisoning,
+   and insecure rendering.
+-version: 2.2.0
++version: 2.2.1
+ kind: specialist
+ phase: active_testing
+ risk: high
+@@ -17,7 +17,7 @@ capabilities:
+ - http.request
+ - browser.navigate
+ - candidate.verify
+-- ai.boundary.hypothesis.compile
++- ai.boundary.candidate.inspect
+ optional_capabilities: []
+ missing_capabilities:
+ - ai.invoke
+@@ -146,7 +146,7 @@ methodology contributes hypotheses and controls, not another execution engine or
+ Start from retained evidence and the operator's current objective; do not rebuild scope policy,
+ request copied approval receipts, or impose the example budgets as additional run limits.
+ 
+-Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`, `ai.boundary.hypothesis.compile`.
++Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`, `ai.boundary.candidate.inspect`.
+ 
+ Declared implementation gaps: `ai.invoke`, `ai.tool_observe`. These are not callable
+ operations. Continue the compatible techniques and report the specific untested portion.
+@@ -155,25 +155,25 @@ Check `withheld_capabilities`, `missing_capabilities`, and `deferred_techniques`
+ metadata. A name in the library is not a guarantee that every technique below is executable;
+ match the actual operation, request shape and evidence requirements to the live schema.
+ 
+-## Agent authorization workflow
+-
+-For AI agents that can read private data or take actions, prefer the authorization workflow over
+-generic prompt-only conclusions:
+-
+-1. Discover principals, tenants, owned resources, tools, actions, approvals and independent read-back paths.
+-2. Record evidence-backed boundary hypotheses. Do not invent the expected business rule.
+-3. Use `ai.boundary.hypothesis.compile` to turn secret-free discovered facts into a deterministic
+-   proposal. A `needs_context` response names the exact authoritative facts still missing.
+-4. Ask the operator only for an ambiguous business-policy fact that cannot be established from
+-   authoritative application evidence. Do not ask them to re-authorize the Hunt.
+-5. Execute supported proof through the server-owned AI Boundary verifier. A model claim is never
+-   a substitute for canary disclosure, cross-principal differential, tool-principal telemetry or
+-   an independently observed postcondition.
+-6. Preserve the verified invariant and legitimate control as regression material.
+-
+-The compiler is dry-run and has no execution, scope-expansion, approval or finding-promotion
+-authority. It is the bridge from Hunt discovery to the existing deterministic AI Boundary engine,
+-not a second permission system.
++## Agent authorization candidate review
++
++Use `ai.boundary.candidate.inspect` with only `candidate_id` to review a retained candidate.
++The server loads this Hunt's latest observation, resolves its stored evidence references and
++returns a non-executable `boundary-review-proposal/v1` with exact `missing_facts`.
++
++`ready_for_review` means the retained metadata is complete enough for review, not that ownership,
++policy applicability, tool behavior or a vulnerability has been proved. `needs_context` names
++missing facts without ending unrelated authorized work. Neither status authorizes execution.
++
++The capability performs no target traffic, reads no credentials or raw response bodies, and
++returns no prompts or executable contracts. It does not mutate a candidate, queue a scan,
++consume a verification slot, or change the Hunt's authorization. Normal Hunt action/time
++accounting and idempotency still apply. Stored business-policy references are checked against
++approved invariants on the same target; caller prose and source labels are not approval.
++
++The draft `/ai/boundary/hypotheses/compile` and `/ai/boundary/proposals/materialize` REST endpoints
++are not native Hunt capabilities. Do not infer that a Command Arsenal entry is callable through
++`/hunts/{hunt_id}/capabilities`. Match each operation to the actual live schema.
+ 
+ ## Core security hypotheses
+ 
+ diff --git a/tests/test_ai_boundary_candidate_lookup.py b/tests/test_ai_boundary_candidate_lookup.py
+new file mode 100644
+index 0000000..44f8421
+--- /dev/null
++++ b/tests/test_ai_boundary_candidate_lookup.py
+@@ -0,0 +1,303 @@
++"""Candidate-ID reads against real SQL rows; no targets or credentials are used."""
++from __future__ import annotations
++
++from contextlib import asynccontextmanager
++import copy
++import json
++import re
++import sqlite3
++from uuid import UUID
++
++import pytest
++
++from api import investigation_candidates as candidates
++from api.ai_gate.boundary.candidate_context import normalize_candidate_context
++from api.hunt.boundary_candidate import BoundaryCandidateError, inspect_boundary_candidate
++from api.runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityInputContractError
++
++
++def uid(n):
++    return str(UUID(int=n))
++
++
++HUNT, OTHER_HUNT, TARGET, OTHER_TARGET, CANDIDATE, OBSERVATION, ACTION, RECEIPT, HTTP, POLICY = map(uid, range(1, 11))
++
++
++def context():
++    return {
++        "owner": {"role": "victim", "subject": "owner", "tenant": "tenant-a", "resource_id": "record-a"},
++        "attacker": {"role": "attacker", "subject": "viewer", "tenant": "tenant-b", "resource_id": "record-b"},
++        "invariant_contract_id": POLICY,
++    }
++
++
++class Store:
++    """Translate only PostgreSQL placeholders/array casts; run the actual predicates."""
++    def __init__(self):
++        self.db = sqlite3.connect(":memory:")
++        self.db.row_factory = sqlite3.Row
++        self.queries = []
++        self.db.executescript('''
++            CREATE TABLE hunt_runs(id TEXT PRIMARY KEY,target_id TEXT,device_target_id TEXT);
++            CREATE TABLE investigation_candidates(id TEXT,family TEXT,status TEXT,plane TEXT,target_id TEXT,device_target_id TEXT);
++            CREATE TABLE investigation_candidate_observations(id TEXT,candidate_id TEXT,hunt_run_id TEXT,evidence_refs TEXT,observation_context TEXT,observed_at TEXT);
++            CREATE TABLE hunt_actions(id TEXT,hunt_run_id TEXT,receipt_id TEXT,status TEXT);
++            CREATE TABLE http_transactions(id TEXT,hunt_run_id TEXT,target_id TEXT,device_target_id TEXT,error TEXT,status_code INTEGER,truncated BOOLEAN);
++            CREATE TABLE target_invariant_contracts(id TEXT,target_id TEXT,status TEXT,approved_at TEXT,contract_kind TEXT,subject_role TEXT,action TEXT,resource TEXT,method TEXT,path TEXT,field_name TEXT,operator TEXT,expected_value TEXT,expected_access TEXT,conditions TEXT,title TEXT);
++        ''')
++        self.db.executemany("INSERT INTO hunt_runs VALUES (?,?,NULL)", [(HUNT, TARGET), (OTHER_HUNT, OTHER_TARGET)])
++        self.db.execute("INSERT INTO investigation_candidates VALUES (?,?,?,'web',?,NULL)", (CANDIDATE, "cross_tenant_retrieval", "new", TARGET))
++        self.db.execute("INSERT INTO hunt_actions VALUES (?,?,?,'completed')", (ACTION, HUNT, RECEIPT))
++        self.db.execute("INSERT INTO http_transactions VALUES (?,?,?,NULL,NULL,200,0)", (HTTP, HUNT, TARGET))
++        self.db.execute("INSERT INTO target_invariant_contracts VALUES (?,?,?,?,'ownership','viewer','read','records','GET','/records',NULL,NULL,NULL,'deny',?,?)",
++                        (POLICY, TARGET, "approved", "2026-09-25", json.dumps({"tenant_relation": "cross"}), "Private records remain private"))
++        self.observe(context(), [ACTION, RECEIPT, HTTP])
++
++    def observe(self, typed, refs, *, hunt=HUNT, observation=OBSERVATION, stamp="1"):
++        self.db.execute("INSERT INTO investigation_candidate_observations VALUES (?,?,?,?,?,?)",
++                        (observation, CANDIDATE, hunt, json.dumps(refs), json.dumps({"ai_boundary_context": typed}), stamp))
++        self.db.commit()
++
++    @asynccontextmanager
++    async def acquire(self):
++        yield self
++
++    @asynccontextmanager
++    async def transaction(self, *, isolation, readonly):
++        assert isolation == "repeatable_read" and readonly is True
++        self.db.execute("BEGIN")
++        try:
++            yield
++        finally:
++            self.db.rollback()
++
++    def select(self, sql, args):
++        assert sql.lstrip().startswith("SELECT")
++        assert "FOR UPDATE" not in sql
++        self.queries.append(sql)
++        values = {f"p{i}": str(v) if isinstance(v, UUID) else v for i,v in enumerate(args, 1)}
++        def array(match):
++            index = match.group(1)
++            items = args[int(index)-1]
++            values.pop(f"p{index}", None)
++            keys = []
++            for j,item in enumerate(items):
++                key = f"a{index}_{j}"
++                values[key] = str(item)
++                keys.append(":" + key)
++            return " IN (" + (",".join(keys) or "NULL") + ")"
++        sql = re.sub(r"=ANY\(\$(\d+)::uuid\[\]\)", array, sql)
++        sql = re.sub(r"\$(\d+)", lambda m: ":p"+m[1], sql)
++        sql = sql.replace("::integer", "")
++        return self.db.execute(sql, values)
++
++    async def fetchrow(self, sql, *args):
++        row = self.select(sql, args).fetchone()
++        return dict(row) if row else None
++
++    async def fetch(self, sql, *args):
++        return [dict(row) for row in self.select(sql, args).fetchall()]
++
++
++async def inspect(store):
++    return await inspect_boundary_candidate(store, hunt_id=HUNT, candidate_id=CANDIDATE)
++
++
++@pytest.mark.asyncio
++async def test_candidate_id_resolves_hunt_owned_evidence_without_executable_output():
++    store = Store()
++    result = await inspect(store)
++    assert result["proposal"]["status"] == "ready_for_review"
++    assert result["proposal"]["contract_fragment"] is None
++    assert result["proposal"]["missing_facts"] == []
++    assert len(result["provenance"]["evidence"]) == 3
++    assert result["provenance"]["observation_id"] == OBSERVATION
++    for flag in ("execution_enabled", "promotion_authority", "planning_authority", "verified"):
++        assert result[flag] is False
++    assert all(not r["content_verified"] for r in result["provenance"]["evidence"])
++    assert all("secret_value" not in q and "response_body" not in q for q in store.queries)
++
++
++@pytest.mark.asyncio
++async def test_other_hunt_observation_cannot_replace_current_hunt_context():
++    store = Store()
++    store.observe({"prompt": "UNTRUSTED"}, [], hunt=OTHER_HUNT, observation=uid(20), stamp="9")
++    result = await inspect(store)
++    assert result["proposal"]["status"] == "ready_for_review"
++    assert result["provenance"]["observation_id"] == OBSERVATION
++    assert "UNTRUSTED" not in json.dumps(result)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("change", ["target", "observation", "plane"])
++async def test_candidate_exists_but_is_not_visible_in_this_hunt(change):
++    store = Store()
++    if change == "target":
++        store.db.execute("UPDATE investigation_candidates SET target_id=?", (OTHER_TARGET,))
++    elif change == "observation":
++        store.db.execute("DELETE FROM investigation_candidate_observations")
++    else:
++        store.db.execute("UPDATE investigation_candidates SET plane='device'")
++    store.db.commit()
++    with pytest.raises(BoundaryCandidateError) as exc:
++        await inspect(store)
++    assert exc.value.status_code == 404
++
++
++@pytest.mark.asyncio
++async def test_other_hunt_evidence_and_unknown_refs_are_gaps_not_proof():
++    store = Store()
++    store.db.execute("UPDATE hunt_actions SET hunt_run_id=?", (OTHER_HUNT,))
++    store.observe(context(), [ACTION, RECEIPT, HTTP, "resp_legacy", uid(30)], observation=uid(22), stamp="2")
++    result = await inspect(store)
++    assert result["proposal"]["status"] == "needs_context"
++    assert result["provenance"]["unsupported_reference_count"] == 1
++    assert set(result["provenance"]["unresolved_reference_ids"]) == {ACTION, RECEIPT, uid(30)}
++    assert len(result["provenance"]["evidence"]) == 1
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("raw", [None, "{'prompt': 'do not evaluate me'}", {"expected_rule_source": "operator"}])
++async def test_legacy_or_forged_context_cannot_appear_ready(raw):
++    store = Store()
++    store.observe(raw, [ACTION], observation=uid(23), stamp="3")
++    result = await inspect(store)
++    assert result["proposal"]["status"] == "needs_context"
++    assert "stored_typed_boundary_context" in result["proposal"]["missing_facts"]
++    assert "owner.subject" in result["proposal"]["missing_facts"]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("change", ["draft", "retired", "other_target", "invalid_shape"])
++async def test_approval_label_or_unrelated_policy_never_satisfies_context(change):
++    store = Store()
++    if change == "other_target":
++        store.db.execute("UPDATE target_invariant_contracts SET target_id=?", (OTHER_TARGET,))
++    elif change == "invalid_shape":
++        store.db.execute("UPDATE target_invariant_contracts SET expected_access='allow'")
++    else:
++        store.db.execute("UPDATE target_invariant_contracts SET status=?", (change,))
++    store.db.commit()
++    result = await inspect(store)
++    assert "approved_target_invariant_reference" in result["proposal"]["missing_facts"]
++
++
++@pytest.mark.asyncio
++async def test_action_route_is_not_invented_as_an_independent_verifier():
++    store = Store()
++    store.db.execute("UPDATE investigation_candidates SET family='approval_bypass'")
++    typed = context()
++    typed["prompt"] = "PRIVATE PROMPT NOT FOR OUTPUT"
++    store.observe(typed, [ACTION], observation=uid(24), stamp="2")
++    result = await inspect(store)
++    assert "verifier_path" in result["proposal"]["missing_facts"]
++    assert "PRIVATE PROMPT" not in json.dumps(result)
++
++
++@pytest.mark.asyncio
++async def test_evidence_limit_is_explicit_and_invalid_id_uses_no_database():
++    store = Store()
++    store.observe(context(), [uid(n) for n in range(200, 301)], observation=uid(25), stamp="2")
++    with pytest.raises(BoundaryCandidateError, match="reference_limit"):
++        await inspect(store)
++    with pytest.raises(BoundaryCandidateError, match="invalid_candidate_review_reference"):
++        await inspect_boundary_candidate(None, hunt_id="bad", candidate_id=CANDIDATE)
++
++
++def test_typed_context_survives_normalization_json_roundtrip_and_detaches():
++    typed = {**context(), "initial_value": None, "forbidden_value": False}
++    locus = candidates.canonical_locus({"route": "/records", "ai_boundary_context": typed})
++    reloaded = json.loads(json.dumps(locus))
++    assert reloaded["ai_boundary_context"] == typed
++    typed["owner"]["subject"] = "changed"
++    assert reloaded["ai_boundary_context"]["owner"]["subject"] == "owner"
++    assert locus["ai_boundary_context"]["owner"]["subject"] == "owner"
++
++
++@pytest.mark.parametrize("raw", ["{}", {"credential": "secret"}, {"initial_value": float('nan')}, {"initial_value": {}}, {"prompt": "x"*2001}])
++def test_context_rejects_unbounded_ambiguous_or_credential_shaped_values(raw):
++    with pytest.raises(ValueError):
++        normalize_candidate_context(raw)
++
++
++def test_context_does_not_change_candidate_fingerprint():
++    common = dict(plane="web", target_ref=TARGET, family="bola")
++    assert candidates.candidate_fingerprint(**common, locus={"route": "/records"}) == candidates.candidate_fingerprint(
++        **common, locus={"route": "/records", "ai_boundary_context": context()})
++
++
++@pytest.mark.asyncio
++async def test_upsert_records_this_hunts_typed_context_in_immutable_observation():
++    class Conn:
++        args = None
++        async def fetchrow(self, *_):
++            return {"id": CANDIDATE, "status": "new", "fingerprint": "f", "inserted": True}
++        async def execute(self, _query, *args):
++            self.args = args
++    candidate = candidates.normalize_candidate(
++        plane="web", target_id=TARGET, hunt_run_id=HUNT, family="bola", title="lead", claim="unverified",
++        locus={"route": "/records", "ai_boundary_context": context()}, evidence_refs=[ACTION],
++    )
++    conn = Conn()
++    await candidates.upsert_candidate(conn, candidate, created_by="test", observation_context={"ai_boundary_context": {"prompt": "wrong"}})
++    assert json.loads(conn.args[11])["ai_boundary_context"] == context()
++
++
++def test_capability_is_real_readonly_credential_free_and_candidate_id_only():
++    spec = CAPABILITY_REGISTRY.require("ai.boundary.candidate.inspect")
++    assert spec.hunt_executor == "inline" and spec.risk_tier == "read_only"
++    assert not spec.requires_active_approval
++    assert spec.credential_transport == "not_used"
++    assert "http_requests" not in spec.budget_cost
++    assert set(spec.input_schema["properties"]) == {"candidate_id"}
++    assert spec.input_schema["required"] == ["candidate_id"]
++    assert spec.input_schema["additionalProperties"] is False
++
++
++@pytest.mark.asyncio
++async def test_actual_hunt_inline_branch_uses_the_registered_adapter_and_receipt():
++    # Exercise the real branch body without importing optional API/DB drivers on
++    # lightweight hosts. Full FastAPI composition remains covered in normal CI.
++    import ast
++    import asyncio
++    from pathlib import Path
++    from types import SimpleNamespace
++    from fastapi import HTTPException
++    from capabilities.inline import ControlPlaneExecutionAdapter
++    from hunt.action_dispatcher import HUNT_ACTION_DISPATCHER, HuntActionRequest, RegisteredHuntAdapterFactory
++    from runtime.capability_registry import CAPABILITY_REGISTRY as runtime_registry
++    from runtime.models import TargetBinding
++
++    source = Path(__file__).parents[1] / 'api/hunt/interaction_router.py'
++    tree = ast.parse(source.read_text())
++    branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
++                  and ast.unparse(n.test) == "name == 'ai.boundary.candidate.inspect'")
++    fn = ast.AsyncFunctionDef(
++        name='dispatch_branch', args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
++        body=[*copy.deepcopy(branch.body), ast.Return(value=ast.Tuple(
++            elts=[ast.Name(id='result', ctx=ast.Load()), ast.Name(id='capability_execution', ctx=ast.Load())], ctx=ast.Load()))],
++        decorator_list=[],
++    )
++    store = Store()
++    spec = runtime_registry.require('ai.boundary.candidate.inspect')
++    target = TargetBinding(target_id=TARGET, target_kind='web', canonical_host='example.test')
++    async def dispatch(adapter, *, target, requested_budget):
++        action = HuntActionRequest(hunt_id=HUNT, action_id=uid(50), capability_name=spec.name,
++                                   target=target, capability_input={'candidate_id': CANDIDATE}, requested_budget=requested_budget)
++        result = await HUNT_ACTION_DISPATCHER.execute(action, RegisteredHuntAdapterFactory(
++            {spec.adapter: lambda _spec, _request: adapter}), heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False)
++        return result
++    namespace = {
++        '__package__': 'api.hunt', 'Any': object, 'HTTPException': HTTPException,
++        'run': {'id': HUNT}, 'request': SimpleNamespace(input={'candidate_id': CANDIDATE}),
++        'spec': spec, '_pool': lambda: store, 'ControlPlaneExecutionAdapter': ControlPlaneExecutionAdapter,
++        'durable_reservation': SimpleNamespace(record=SimpleNamespace(requested={'tool_wall_seconds': 5})),
++        'inline_hunt_target_binding': lambda: target, 'dispatch_registered_adapter': dispatch,
++    }
++    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), str(source), 'exec'), namespace)
++    result, execution = await namespace['dispatch_branch']()
++    assert result['review']['proposal']['status'] == 'ready_for_review'
++    assert execution.status == 'success'
++    assert execution.observations[0]['kind'] == 'boundary_candidate_review'
++    assert execution.observations[0]['verified'] is False
++    assert execution.actual_budget.get('http_requests', 0) == 0
+ diff --git a/tests/test_command_arsenal.py b/tests/test_command_arsenal.py
+index f0d7e6b..3a15c89 100644
+--- a/tests/test_command_arsenal.py
++++ b/tests/test_command_arsenal.py
+@@ -27,9 +27,6 @@ def test_command_catalog_contains_required_initial_commands():
+     for name in (
+         "target.list",
+         "target.get",
+-        "ai.boundary.verify",
+-        "ai.boundary.proposal.materialize",
+-        "ai.boundary.hypothesis.compile",
+         "target.principals",
+         "target.principal_matrix",
+         "target.invariants",
+@@ -951,3 +948,8 @@ def test_local_agent_test_rejects_unknown_agent():
+         assert "Unknown local agent" in str(exc)
+     else:
+         raise AssertionError("expected ValueError")
++
++
++def test_draft_boundary_rest_routes_are_not_phantom_arsenal_commands():
++    commands = {item["name"] for item in arsenal.describe_commands()["commands"]}
++    assert not {"ai.boundary.verify", "ai.boundary.proposal.materialize", "ai.boundary.hypothesis.compile"} & commands
+ diff --git a/tests/test_investigation_candidates.py b/tests/test_investigation_candidates.py
+index f9c9326..a37072b 100644
+--- a/tests/test_investigation_candidates.py
++++ b/tests/test_investigation_candidates.py
+@@ -165,6 +165,8 @@ class _CandidateLifecycleConnection:
+ 
+     async def fetchrow(self, query, *args):
+         self.queries.append((query, args))
++        if query.lstrip().startswith("SELECT observation_context"):
++            return {"observation_context": getattr(self, "previous_context", {})}
+         if query.lstrip().startswith("SELECT c.*"):
+             return dict(self.row) if self.row is not None else None
+         if "SET title=$2" in query:
+@@ -313,3 +315,16 @@ def test_deep_hunt_claim_persistence_is_candidate_only_and_legacy_rows_are_migra
+     ).read()
+     assert 'LEGACY_AUTONOMOUS_CANDIDATE_MIGRATION = "legacy_autonomous_candidates_v1"' in migration_source
+     assert "Migrated to Investigation Candidates; this unverified claim is not a finding." in migration_source
++
++
++def test_candidate_metadata_edit_preserves_only_its_hunts_context_snapshot():
++    conn = _CandidateLifecycleConnection(_candidate_row())
++    conn.previous_context = {"ai_boundary_context": {"state_path": "status"}}
++    hunt_id = str(uuid.uuid4())
++    asyncio.run(candidates.update_candidate_for_hunt(
++        conn, hunt_run_id=hunt_id, candidate_id=str(conn.row["id"]),
++        changes={"title": "Updated"}, created_by="test"))
++    import json
++    assert json.loads(conn.observations[0][8])["ai_boundary_context"] == {"state_path": "status"}
++    query, args = next((q, a) for q, a in conn.queries if q.startswith("SELECT observation_context"))
++    assert "hunt_run_id=$2" in query and args[1] == hunt_id
+ diff --git a/tests/test_runtime_capabilities.py b/tests/test_runtime_capabilities.py
+index 49b6323..35356ec 100644
+--- a/tests/test_runtime_capabilities.py
++++ b/tests/test_runtime_capabilities.py
+@@ -54,6 +54,7 @@ def test_registry_filters_target_kind_and_active_permission():
+     }
+ 
+     assert safe_web == {
++        "ai.boundary.candidate.inspect",
+         "scan.finalize", "scan.execute",
+         "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
+         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
