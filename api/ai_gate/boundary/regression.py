@@ -88,7 +88,7 @@ def _validate_proposal_artifact_shape(proposal: Any) -> None:
     """Reject ignored fields before copying an operator proposal into an export."""
     fields = {
         "schema_version", "status", "hypothesis_id", "hypothesis_sha256",
-        "kind", "missing_facts", "contract_fragment", "provenance",
+        "kind", "missing_facts", "contract_fragment", "provenance", "principal_bindings",
     }
     if not isinstance(proposal, dict) or set(proposal) != fields:
         raise ContractError("boundary_regression_proposal_extra_or_missing_fields")

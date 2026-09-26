@@ -16,6 +16,7 @@ export interface BoundaryProposal {
   missing_facts: string[]
   contract_fragment: Record<string, unknown> | null
   provenance: Array<Record<string, string>>
+  principal_bindings: { owner: BoundaryPrincipal; attacker: BoundaryPrincipal }
 }
 
 export interface BoundaryContext {

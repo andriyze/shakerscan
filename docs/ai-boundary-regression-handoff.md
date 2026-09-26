@@ -11,7 +11,9 @@ select the AI target that represents the same application. The page displays
 both the Hunt asset and the AI endpoint for review. Enter the two controlled
 principals and any operator-confirmed business rule. Candidate inspection and
 proposal compilation use the existing read-only routes; a ready proposal is
-still unverified.
+still unverified. The proposal binds each principal's role, subject, tenant,
+and resource ID. Materialization requires the saved fixture to match both
+bindings exactly for every Boundary hypothesis kind.
 
 Use the AI target's saved Boundary fixture, or enter its base contract without
 credentials. Validate the fixture, select the environment and scan profile, and

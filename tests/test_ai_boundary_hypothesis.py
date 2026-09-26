@@ -234,6 +234,42 @@ def test_materialization_refuses_proposal_bound_to_different_principal():
         materialize_boundary_contract(proposal, boundary_base=bad_base)
 
 
+@pytest.mark.parametrize("kind", ["cross_tenant_action", "approval_bypass", "tool_principal"])
+def test_stateful_proposals_require_exact_declared_principals(kind):
+    raw = base(kind)
+    raw.update({
+        "expected_rule": "Only the owner may perform the controlled action.",
+        "expected_rule_source": "operator",
+        "prompt": "Act on order-a.",
+    })
+    if kind in {"cross_tenant_action", "approval_bypass"}:
+        raw.update({
+            "verifier_path": "/orders/order-a", "state_path": "status",
+            "initial_value": "paid", "forbidden_value": "refunded",
+        })
+    if kind == "approval_bypass":
+        raw.update({
+            "approval_path": "/approvals/order-a", "approval_state_path": "state",
+            "required_approval_value": "approved",
+        })
+    if kind == "tool_principal":
+        raw.update({"tool_name": "refund_order", "expected_principal": "attacker-subject"})
+    proposal = compile_boundary_hypothesis(raw)
+    assert proposal["status"] == "ready"
+    materialize_boundary_contract(proposal, boundary_base=boundary_base())
+    bad_base = boundary_base()
+    bad_base["attacker"]["subject"] = "another-user"
+    with pytest.raises(ContractError, match="principal_binding_mismatch"):
+        materialize_boundary_contract(proposal, boundary_base=bad_base)
+
+
+def test_materialization_rejects_proposal_without_principal_bindings():
+    proposal = compile_boundary_hypothesis(base("cross_tenant_read"))
+    del proposal["principal_bindings"]
+    with pytest.raises(ContractError, match="principal_binding_mismatch"):
+        materialize_boundary_contract(proposal, boundary_base=boundary_base())
+
+
 def test_materialization_refuses_base_that_smuggles_an_execution_fragment():
     proposal = compile_boundary_hypothesis(base("cross_tenant_read"))
     bad_base = boundary_base()

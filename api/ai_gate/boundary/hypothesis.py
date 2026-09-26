@@ -214,6 +214,7 @@ class BoundaryProposal:
     missing_facts: tuple[str, ...]
     contract_fragment: dict[str, Any] | None
     provenance: tuple[dict[str, str], ...]
+    principal_bindings: dict[str, dict[str, str]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -225,6 +226,7 @@ class BoundaryProposal:
             "missing_facts": list(self.missing_facts),
             "contract_fragment": copy.deepcopy(self.contract_fragment),
             "provenance": [dict(item) for item in self.provenance],
+            "principal_bindings": copy.deepcopy(self.principal_bindings),
         }
 
 
@@ -355,6 +357,16 @@ def compile_boundary_hypothesis(raw: Any) -> dict[str, Any]:
         missing_facts=tuple(dict.fromkeys(missing)),
         contract_fragment=fragment,
         provenance=h.provenance,
+        principal_bindings={
+            "owner": {
+                "role": h.owner_role, "subject": h.owner_subject,
+                "tenant": h.owner_tenant, "resource_id": h.owner_resource_id,
+            },
+            "attacker": {
+                "role": h.attacker_role, "subject": h.attacker_subject,
+                "tenant": h.attacker_tenant, "resource_id": h.attacker_resource_id,
+            },
+        },
     ).to_dict()
 
 
@@ -391,6 +403,15 @@ def materialize_boundary_contract(
         raise ContractError("boundary_materialization_base_incomplete")
 
     materialized = copy.deepcopy(boundary_base)
+    bindings = proposal.get("principal_bindings")
+    if not isinstance(bindings, dict) or set(bindings) != {"owner", "attacker"}:
+        raise ContractError("boundary_materialization_principal_binding_mismatch")
+    for slot in ("owner", "attacker"):
+        expected_binding = bindings[slot]
+        if (not isinstance(expected_binding, dict)
+                or set(expected_binding) != {"role", "subject", "tenant", "resource_id"}
+                or materialized.get(slot) != expected_binding):
+            raise ContractError("boundary_materialization_principal_binding_mismatch")
     kind = proposal.get("kind")
     if kind == "cross_tenant_read":
         expected = {
