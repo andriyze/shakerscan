@@ -203,6 +203,20 @@
     "name": "update_ai_target"
   },
   {
+    "path": "/ai/targets/{target_id}/boundary/regressions/evaluate",
+    "methods": [
+      "POST"
+    ],
+    "name": "evaluate_ai_boundary_regression"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/regressions/export",
+    "methods": [
+      "POST"
+    ],
+    "name": "export_ai_boundary_regression"
+  },
+  {
     "path": "/ai/targets/{target_id}/boundary/verify",
     "methods": [
       "POST"
@@ -1568,6 +1582,13 @@
       "GET"
     ],
     "name": "get_hunt_candidate_boundary_context"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal",
+    "methods": [
+      "POST"
+    ],
+    "name": "compile_hunt_candidate_boundary_proposal"
   },
   {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",

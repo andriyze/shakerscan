@@ -1591,8 +1591,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 434 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 363 | `api/**/*.py` |
+| Public REST operations | 437 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 366 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1644,6 +1644,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/ai/targets` | `create_ai_target` |
 | `DELETE` | `/ai/targets/{target_id}` | `delete_ai_target` |
 | `PATCH` | `/ai/targets/{target_id}` | `update_ai_target` |
+| `POST` | `/ai/targets/{target_id}/boundary/regressions/evaluate` | `evaluate_ai_boundary_regression` |
+| `POST` | `/ai/targets/{target_id}/boundary/regressions/export` | `export_ai_boundary_regression` |
 | `POST` | `/ai/targets/{target_id}/boundary/verify` | `verify_ai_boundary_proposal` |
 | `GET` | `/ai/targets/{target_id}/campaign-history` | `get_ai_target_campaign_history` |
 | `GET` | `/ai/targets/{target_id}/campaign-history/export` | `get_ai_target_campaign_history_export` |
@@ -1840,6 +1842,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `delete_hunt_candidate` |
 | `PATCH` | `/hunts/{hunt_id}/candidates/{candidate_id}` | `update_hunt_candidate` |
 | `GET` | `/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context` | `get_hunt_candidate_boundary_context` |
+| `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` | `compile_hunt_candidate_boundary_proposal` |
 | `POST` | `/hunts/{hunt_id}/candidates/{candidate_id}/verify` | `verify_hunt_candidate` |
 | `POST` | `/hunts/{hunt_id}/capabilities/{capability_name:path}` | `execute_hunt_capability` |
 | `POST` | `/hunts/{hunt_id}/finish` | `finish_hunt` |

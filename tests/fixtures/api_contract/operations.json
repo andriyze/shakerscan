@@ -145,6 +145,16 @@
     "operation_id": "update_ai_target_ai_targets__target_id__patch"
   },
   {
+    "path": "/ai/targets/{target_id}/boundary/regressions/evaluate",
+    "method": "post",
+    "operation_id": "evaluate_ai_boundary_regression_ai_targets__target_id__boundary_regressions_evaluate_post"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/regressions/export",
+    "method": "post",
+    "operation_id": "export_ai_boundary_regression_ai_targets__target_id__boundary_regressions_export_post"
+  },
+  {
     "path": "/ai/targets/{target_id}/boundary/verify",
     "method": "post",
     "operation_id": "verify_ai_boundary_proposal_ai_targets__target_id__boundary_verify_post"
@@ -1103,6 +1113,11 @@
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
     "method": "get",
     "operation_id": "get_hunt_candidate_boundary_context_hunts__hunt_id__candidates__candidate_id__boundary_context_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal",
+    "method": "post",
+    "operation_id": "compile_hunt_candidate_boundary_proposal_hunts__hunt_id__candidates__candidate_id__boundary_proposal_post"
   },
   {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",

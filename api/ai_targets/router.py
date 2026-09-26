@@ -41,6 +41,7 @@ try:
     from ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ai_demo_scenarios import get_ai_test_scenarios
     from ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
+    from ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
     from ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -72,6 +73,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from ..ai_assurance import build_agent_blast_radius, build_ai_inventory, run_mcp_live_readiness_probe
     from ..ai_demo_scenarios import get_ai_test_scenarios
     from ..ai_gate.boundary.hypothesis import compile_boundary_hypothesis, materialize_boundary_contract
+    from ..ai_gate.boundary.regression import build_boundary_regression_artifact, evaluate_boundary_regression_artifact
     from ..ai_gate.targets.rest_json import (
         append_query_params as ai_append_query_params,
         build_headers as ai_build_headers,
@@ -459,6 +461,61 @@ async def verify_ai_boundary_proposal(target_id: str, request: AIBoundaryVerifyR
         resolved_credential_profile_ref=credential_profile_ref,
         resolved_principal_refs=principal_refs,
     )
+
+
+async def _boundary_regression_scan(conn, target_uuid: uuid.UUID, scan_id: str) -> dict[str, Any]:
+    scan_uuid = _uuid_or_400(scan_id, "AI scan id")
+    row = await conn.fetchrow(
+        """SELECT id, ai_target_id, status, run_kind, options, result, created_at
+           FROM scans WHERE id=$1 AND ai_target_id=$2""",
+        scan_uuid, target_uuid,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="AI Boundary scan not found")
+    return dict(row)
+
+
+@router.post("/ai/targets/{target_id}/boundary/regressions/export")
+async def export_ai_boundary_regression(target_id: str, request: AIBoundaryRegressionExportRequest):
+    """Export a versioned, non-executing handoff anchored to a completed scan."""
+    target_uuid = _uuid_or_400(target_id, "AI target id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                source = await _boundary_regression_scan(conn, target_uuid, request.source_scan_id)
+                return build_boundary_regression_artifact(
+                    proposal=request.proposal, boundary_base=request.boundary_base,
+                    target_id=str(target_uuid), source_scan=source,
+                )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/ai/targets/{target_id}/boundary/regressions/evaluate")
+async def evaluate_ai_boundary_regression(target_id: str, request: AIBoundaryRegressionEvaluateRequest):
+    """Compare a later scan with the exact source-anchored artifact and controls."""
+    target_uuid = _uuid_or_400(target_id, "AI target id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                artifact = request.artifact
+                source = await _boundary_regression_scan(
+                    conn, target_uuid, str(artifact.get("source_scan_id") or ""),
+                )
+                later = await _boundary_regression_scan(conn, target_uuid, request.scan_id)
+                verify_request = artifact.get("verify_request")
+                if not isinstance(verify_request, dict):
+                    raise ValueError("boundary_regression_artifact_request_invalid")
+                expected = build_boundary_regression_artifact(
+                    proposal=verify_request.get("proposal"),
+                    boundary_base=verify_request.get("boundary_base"),
+                    target_id=str(target_uuid), source_scan=source,
+                )
+                if expected["artifact_sha256"] != artifact.get("artifact_sha256"):
+                    raise ValueError("boundary_regression_artifact_source_mismatch")
+                return evaluate_boundary_regression_artifact(artifact, scan=later)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/ai/inventory")
@@ -2100,6 +2157,17 @@ class AIBoundaryVerifyRequest(AIBoundaryMaterializeRequest):
     environment: str = "preview"
     scan_profile: str = "standard"
     approval_receipt_id: Optional[str] = None
+
+
+class AIBoundaryRegressionExportRequest(AIBoundaryMaterializeRequest):
+    model_config = ConfigDict(extra="forbid")
+    source_scan_id: str
+
+
+class AIBoundaryRegressionEvaluateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    artifact: dict[str, Any]
+    scan_id: str
 
 
 class AITargetConnectivityTestRequest(BaseModel):

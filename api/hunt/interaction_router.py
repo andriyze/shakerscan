@@ -37,6 +37,7 @@ except ModuleNotFoundError:
 from .run_service import agent_tools
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
+from .boundary_handoff import compile_candidate_boundary_handoff
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
@@ -266,6 +267,21 @@ class HuntCandidateRequest(BaseModel):
             # a validation response rather than an internal error after mutation.
             investigation_candidates.canonical_locus(self.locus)
         return self
+
+
+class HuntBoundaryPrincipal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(min_length=1, max_length=160)
+    subject: str = Field(min_length=1, max_length=160)
+    tenant: str = Field(min_length=1, max_length=160)
+    resource_id: str = Field(min_length=1, max_length=160)
+
+
+class HuntBoundaryHandoffRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    owner: HuntBoundaryPrincipal
+    attacker: HuntBoundaryPrincipal
+    expected_rule: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class HuntCandidateUpdateRequest(BaseModel):
@@ -1062,6 +1078,32 @@ async def get_hunt_candidate_boundary_context(hunt_id: str, candidate_id: str):
     except BoundaryContextError as exc:
         status = 404 if exc.code == "candidate_not_found" else 422
         raise HTTPException(status_code=status, detail=exc.code) from exc
+
+
+@router.post("/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal")
+async def compile_hunt_candidate_boundary_proposal(
+    hunt_id: str, candidate_id: str, request: HuntBoundaryHandoffRequest,
+):
+    """Compile a Hunt-local lead without traffic, approval, or proof promotion."""
+    hunt_uuid = _uuid_or_400(hunt_id, "hunt id")
+    candidate_uuid = _uuid_or_400(candidate_id, "candidate id")
+    try:
+        async with _pool().acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                run = await _hunt_run_or_404(conn, str(hunt_uuid))
+                return await compile_candidate_boundary_handoff(
+                    conn, run=dict(run), candidate_id=str(candidate_uuid),
+                    principal_context={
+                        "owner": request.owner.model_dump(),
+                        "attacker": request.attacker.model_dump(),
+                    },
+                    expected_rule=request.expected_rule,
+                )
+    except BoundaryContextError as exc:
+        status = 404 if exc.code == "candidate_not_found" else 422
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/hunts/{hunt_id}/candidates")

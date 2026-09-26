@@ -37,6 +37,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Connected-device security](connected-device-security.md)
 - [AI test workflows](AI_TEST_WORKFLOWS.md)
 - [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction, not a completed release claim.
+- [AI Boundary regression handoff](ai-boundary-regression-handoff.md) — versioned artifact and offline legitimate-control comparison.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
 ## Operations

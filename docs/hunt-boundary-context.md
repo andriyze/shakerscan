@@ -1,7 +1,7 @@
 # Hunt candidate boundary-context inspection
 
-**Status:** read-only candidate/evidence inspection. This is not an executable
-Hunt capability, a verified vulnerability, or an automatic AI-boundary proposal.
+**Status:** read-only candidate/evidence inspection and explicit proposal handoff.
+Neither route is an executable Hunt capability or a verified vulnerability.
 
 ## Read by candidate ID
 
@@ -65,6 +65,26 @@ promote a finding. It does not add a permission or consent gate to other Hunt
 operations. Command Arsenal entries do not by themselves register native Hunt
 runtime capabilities; this endpoint is not advertised under a fictitious native
 capability name.
+
+## Compile an explicit proposal
+
+`POST /hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal` loads the
+candidate and its associated evidence from the same Hunt and target under a
+read-only snapshot. The body supplies distinct `owner` and `attacker` objects,
+each with `role`, `subject`, `tenant`, and `resource_id`. An optional
+`expected_rule` must come from the operator; the server records that source in
+the proposal. It is required for state-changing and approval hypotheses.
+
+Only supported AI boundary families and structured candidate context compile.
+Missing or unresolved Hunt-local evidence associations, legacy stringified
+context, and generic BOLA leave the proposal in `needs_context`. The response
+reports missing facts without echoing unavailable reference IDs. A `ready`
+proposal is structurally compilable; supplied principal bindings and business
+policy are still unverified. The route neither executes traffic nor promotes
+proof. A caller can materialize a ready proposal with
+`POST /ai/boundary/proposals/materialize` and submit it through the existing
+`POST /ai/targets/{target_id}/boundary/verify` flow with its normal target
+authorization and approval checks.
 
 ## Validation
 
