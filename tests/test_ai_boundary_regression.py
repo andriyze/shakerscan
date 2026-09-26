@@ -19,13 +19,16 @@ SOURCE = str(UUID(int=2))
 LATER = str(UUID(int=3))
 
 
-def _proposal_and_base():
+def _proposal_and_base(*, with_digest=True):
     owner = {"role": "owner", "subject": "owner-subject", "tenant": "tenant-a", "resource_id": "order-a"}
     attacker = {"role": "attacker", "subject": "attacker-subject", "tenant": "tenant-b", "resource_id": "order-b"}
     proposal = compile_boundary_hypothesis({
         "version": 1, "hypothesis_id": "hunt-boundary-read", "kind": "cross_tenant_read",
         "owner": owner, "attacker": attacker,
-        "provenance": [{"kind": "hunt_candidate", "id": "candidate-1", "evidence_sha256": "a" * 64}],
+        "provenance": [{
+            "kind": "hunt_candidate", "id": "candidate-1",
+            **({"evidence_sha256": "a" * 64} if with_digest else {}),
+        }],
     })
     base = {
         "version": 1, "name": "regression-boundary", "owner": owner, "attacker": attacker,
@@ -137,6 +140,19 @@ def test_artifact_digest_and_required_control_policy_cannot_be_weakened():
     artifact["artifact_sha256"] = canonical_hash({k: v for k, v in artifact.items() if k != "artifact_sha256"})
     with pytest.raises(ContractError, match="artifact_controls_invalid"):
         evaluate_boundary_regression_artifact(artifact, scan=_later())
+
+
+def test_export_rejects_ignored_payload_fields_and_allows_hunt_provenance_without_digest():
+    proposal, base = _proposal_and_base()
+    proposal["approval_receipt_id"] = "receipt-that-must-not-be-exported"
+    with pytest.raises(ContractError, match="proposal_extra_or_missing_fields"):
+        build_boundary_regression_artifact(
+            proposal=proposal, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+        )
+    proposal, base = _proposal_and_base(with_digest=False)
+    assert build_boundary_regression_artifact(
+        proposal=proposal, boundary_base=base, target_id=TARGET, source_scan=_scan(),
+    )["approval_receipt_included"] is False
 
 
 @pytest.mark.asyncio

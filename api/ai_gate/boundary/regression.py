@@ -80,12 +80,41 @@ def _control_failures(boundary: dict[str, Any], required: list[str]) -> list[str
     return [name for name in required if name not in passed]
 
 
+def _validate_proposal_artifact_shape(proposal: Any) -> None:
+    """Reject ignored fields before copying an operator proposal into an export."""
+    fields = {
+        "schema_version", "status", "hypothesis_id", "hypothesis_sha256",
+        "kind", "missing_facts", "contract_fragment", "provenance",
+    }
+    if not isinstance(proposal, dict) or set(proposal) != fields:
+        raise ContractError("boundary_regression_proposal_extra_or_missing_fields")
+    fragment = proposal.get("contract_fragment")
+    kind = proposal.get("kind")
+    if kind == "cross_tenant_read":
+        expected = {
+            "kind", "owner_role", "attacker_role",
+            "owner_resource_id", "attacker_resource_id",
+        }
+        if not isinstance(fragment, dict) or set(fragment) != expected:
+            raise ContractError("boundary_regression_proposal_fragment_invalid")
+    elif kind not in {"cross_tenant_action", "approval_bypass", "tool_principal"}:
+        raise ContractError("boundary_regression_proposal_fragment_invalid")
+    provenance = proposal.get("provenance")
+    if not isinstance(provenance, list) or not provenance or any(
+        not isinstance(item, dict)
+        or not {"kind", "id"} <= set(item) <= {"kind", "id", "evidence_sha256"}
+        for item in provenance
+    ):
+        raise ContractError("boundary_regression_proposal_provenance_invalid")
+
+
 def build_boundary_regression_artifact(
     *, proposal: dict[str, Any], boundary_base: dict[str, Any],
     target_id: str, source_scan: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Export a reusable request only after a matching completed assessment."""
     target_id = _uuid(target_id)
+    _validate_proposal_artifact_shape(proposal)
     materialized = materialize_boundary_contract(proposal, boundary_base=boundary_base)
     contract = BoundaryContract.parse(materialized["boundary_contract"])
     options, result, boundary = _scan_boundary(
