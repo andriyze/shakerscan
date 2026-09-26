@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 from fastapi import HTTPException
 
-
-arsenal = importlib.import_module("api.arsenal_routes.router")
+import api.arsenal_routes.router as arsenal
 
 
 @pytest.mark.asyncio
