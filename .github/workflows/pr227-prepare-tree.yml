@@ -37,23 +37,39 @@ jobs:
           python scripts/generate_install_manifest.py
       - name: Test candidate review and adjacent API contracts
         run: |
-          python -m pytest -q \
-            tests/test_ai_boundary_candidate_lookup.py \
-            tests/test_ai_boundary_hypothesis.py \
-            tests/test_ai_boundary_hypothesis_route.py \
-            tests/test_ai_boundary_admission.py \
-            tests/test_investigation_candidates.py \
-            tests/test_hunt_action_dispatcher.py \
-            tests/test_runtime_capabilities.py \
-            tests/test_command_arsenal.py \
-            tests/test_hunt_skills.py \
-            tests/test_hunt_methodology_integration.py \
-            tests/test_functionality_inventory.py \
-            tests/test_install_manifest.py \
-            tests/test_public_api_contract_generation.py \
-            tests/test_api_characterization.py \
-            tests/test_api_helpers.py \
-            --junitxml=artifacts/candidate-review-tests.xml
+          python - <<'PY'
+          from pathlib import Path
+          from scripts.run_complete_python_suite import partition_test_files, _run_group, merge_junit_reports
+          root = Path.cwd()
+          selected = {
+              root / "tests/test_ai_boundary_candidate_lookup.py",
+              root / "tests/test_ai_boundary_hypothesis.py",
+              root / "tests/test_ai_boundary_hypothesis_route.py",
+              root / "tests/test_ai_boundary_admission.py",
+              root / "tests/test_investigation_candidates.py",
+              root / "tests/test_hunt_action_dispatcher.py",
+              root / "tests/test_runtime_capabilities.py",
+              root / "tests/test_command_arsenal.py",
+              root / "tests/test_hunt_skills.py",
+              root / "tests/test_hunt_methodology_integration.py",
+              root / "tests/test_functionality_inventory.py",
+              root / "tests/test_install_manifest.py",
+              root / "tests/test_public_api_contract_generation.py",
+              root / "tests/test_api_characterization.py",
+              root / "tests/test_api_helpers.py",
+          }
+          package, compatibility = partition_test_files(root)
+          assert selected <= set(package) | set(compatibility)
+          reports, results = [], []
+          for name, group, native in (("package", package, True), ("compatibility", compatibility, False)):
+              report = root / f"artifacts/candidate-review-{name}.xml"
+              reports.append(report)
+              results.append(_run_group(root, name=name, paths=tuple(p for p in group if p in selected),
+                  package_native=native, collect_only=False, coverage=False,
+                  coverage_file=root / "artifacts/.coverage", junit_path=report))
+          merge_junit_reports(tuple(reports), root / "artifacts/candidate-review-tests.xml")
+          raise SystemExit(1 if any(results) else 0)
+          PY
       - name: Check generated contracts and documentation
         run: |
           python scripts/generate_public_api_contract.py --check
