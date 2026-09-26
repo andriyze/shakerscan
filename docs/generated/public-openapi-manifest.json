@@ -3,8 +3,11 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 179,
+  "component_schema_count": 182,
   "component_schema_sha256": {
+    "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
+    "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
+    "AIBoundaryVerifyRequest": "fa9512467be27724046b95fc28201e24a20627dab81017cd73a27f38504a212d",
     "AIDemoRunRequest": "3566f28d369a94b95dfd7d5f3f1c48101b265b1ca0c9c1a5235257ad9c46f32b",
     "AIFindingRetestRequest": "b68464be60bb38aed641745eda472a0150fd57be082594b097fa8dc5220d8d0c",
     "AIMCPLiveReadinessRequest": "4df45de9f6dda3eddef614ebf9c476d528748396dbe44185a4028e471bb8661e",
@@ -185,9 +188,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "98fe8060745aee595911de7ac1591b2948402f7bbbf9cc1a4c1242a98cc27f3e",
+  "contract_sha256": "79b3bc9afa992caa6b5d7a45b7916018670fb1c13446659e8b957aa511292410",
   "openapi": "3.1.0",
-  "operation_count": 420,
+  "operation_count": 424,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -1828,6 +1831,19 @@
         "Hunt"
       ]
     },
+    "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context": {
+      "deprecated": false,
+      "operation_id": "get_hunt_candidate_boundary_context_hunts__hunt_id__candidates__candidate_id__boundary_context_get",
+      "parameters_sha256": "af9f159fcb342a063758e97c00c6e1f3da1e69c089ca89dfbb92f51f4a9bfcb7",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": []
+    },
     "GET /hunts/{hunt_id}/http-transactions": {
       "deprecated": false,
       "operation_id": "export_hunt_transactions_hunts__hunt_id__http_transactions_get",
@@ -3279,6 +3295,32 @@
       "surface": null,
       "tags": []
     },
+    "POST /ai/boundary/hypotheses/compile": {
+      "deprecated": false,
+      "operation_id": "compile_ai_boundary_hypothesis_ai_boundary_hypotheses_compile_post",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": "09a22176d3759f5b6bb3c9b5555c738023a2478ba9f560aa11dfe8ad526be411",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "POST /ai/boundary/proposals/materialize": {
+      "deprecated": false,
+      "operation_id": "materialize_ai_boundary_proposal_ai_boundary_proposals_materialize_post",
+      "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "request_schema_sha256": "10b43030eae75e23b1b1da9fbe24450a5cd9f0a4b590784dedad3525274c8034",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
     "POST /ai/demo/run": {
       "deprecated": false,
       "operation_id": "run_ai_honey_demo_ai_demo_run_post",
@@ -3348,6 +3390,19 @@
       "operation_id": "create_ai_target_ai_targets_post",
       "parameters_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "request_schema_sha256": "93bd8548418fdfc6baebc7ecb6025d7068ad36be1816c50cafffdfa89d231c0a",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": []
+    },
+    "POST /ai/targets/{target_id}/boundary/verify": {
+      "deprecated": false,
+      "operation_id": "verify_ai_boundary_proposal_ai_targets__target_id__boundary_verify_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "42307e6b91b7f2a6bd9717dd00673820786bdb11dd4f8c97f1650fe1fe274db1",
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
         "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
@@ -5760,6 +5815,7 @@
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}",
       "GET /hunts/{hunt_id}/authorization-investigations/{proposal_id}/reproduction",
       "GET /hunts/{hunt_id}/budget-amendments",
+      "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",

@@ -27,9 +27,6 @@ def test_command_catalog_contains_required_initial_commands():
     for name in (
         "target.list",
         "target.get",
-        "ai.boundary.verify",
-        "ai.boundary.proposal.materialize",
-        "ai.boundary.hypothesis.compile",
         "target.principals",
         "target.principal_matrix",
         "target.invariants",
@@ -62,6 +59,12 @@ def test_command_catalog_contains_required_initial_commands():
         assert name in commands
         assert commands[name]["status"] == "read_only"
         assert commands[name]["risk_tier"] == "read_only"
+
+    for name in ("ai.boundary.proposal.materialize", "ai.boundary.hypothesis.compile"):
+        assert commands[name]["status"] == "dry_run"
+        assert commands[name]["risk_tier"] == "read_only"
+    assert commands["ai.boundary.verify"]["status"] == "proof_backed"
+    assert commands["ai.boundary.verify"]["risk_tier"] == "credential"
 
 
 def test_invariant_commands_separate_draft_approval_and_promotion_authority():

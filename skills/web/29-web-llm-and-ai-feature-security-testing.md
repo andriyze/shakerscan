@@ -17,7 +17,6 @@ capabilities:
 - http.request
 - browser.navigate
 - candidate.verify
-- ai.boundary.hypothesis.compile
 optional_capabilities: []
 missing_capabilities:
 - ai.invoke
@@ -146,7 +145,7 @@ methodology contributes hypotheses and controls, not another execution engine or
 Start from retained evidence and the operator's current objective; do not rebuild scope policy,
 request copied approval receipts, or impose the example budgets as additional run limits.
 
-Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`, `ai.boundary.hypothesis.compile`.
+Declared capability names: `http.request`, `browser.navigate`, `candidate.verify`.
 
 Declared implementation gaps: `ai.invoke`, `ai.tool_observe`. These are not callable
 operations. Continue the compatible techniques and report the specific untested portion.
@@ -162,8 +161,9 @@ generic prompt-only conclusions:
 
 1. Discover principals, tenants, owned resources, tools, actions, approvals and independent read-back paths.
 2. Record evidence-backed boundary hypotheses. Do not invent the expected business rule.
-3. Use `ai.boundary.hypothesis.compile` to turn secret-free discovered facts into a deterministic
-   proposal. A `needs_context` response names the exact authoritative facts still missing.
+3. Use the separate dry-run `POST /ai/boundary/hypotheses/compile` API to turn secret-free
+   discovered facts into a deterministic proposal. It is not a Hunt runtime capability.
+   A `needs_context` response names the exact authoritative facts still missing.
 4. Ask the operator only for an ambiguous business-policy fact that cannot be established from
    authoritative application evidence. Do not ask them to re-authorize the Hunt.
 5. Execute supported proof through the server-owned AI Boundary verifier. A model claim is never

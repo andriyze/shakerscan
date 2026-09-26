@@ -55,6 +55,16 @@
     "operation_id": "local_agent_test_agents_local_test_post"
   },
   {
+    "path": "/ai/boundary/hypotheses/compile",
+    "method": "post",
+    "operation_id": "compile_ai_boundary_hypothesis_ai_boundary_hypotheses_compile_post"
+  },
+  {
+    "path": "/ai/boundary/proposals/materialize",
+    "method": "post",
+    "operation_id": "materialize_ai_boundary_proposal_ai_boundary_proposals_materialize_post"
+  },
+  {
     "path": "/ai/demo/run",
     "method": "post",
     "operation_id": "run_ai_honey_demo_ai_demo_run_post"
@@ -133,6 +143,11 @@
     "path": "/ai/targets/{target_id}",
     "method": "patch",
     "operation_id": "update_ai_target_ai_targets__target_id__patch"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/verify",
+    "method": "post",
+    "operation_id": "verify_ai_boundary_proposal_ai_targets__target_id__boundary_verify_post"
   },
   {
     "path": "/ai/targets/{target_id}/campaign-history",
@@ -1083,6 +1098,11 @@
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}",
     "method": "patch",
     "operation_id": "update_hunt_candidate_hunts__hunt_id__candidates__candidate_id__patch"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
+    "method": "get",
+    "operation_id": "get_hunt_candidate_boundary_context_hunts__hunt_id__candidates__candidate_id__boundary_context_get"
   },
   {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",
