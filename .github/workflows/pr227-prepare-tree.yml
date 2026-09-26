@@ -3,6 +3,9 @@ on:
   push:
     branches: ['chore/pr227-candidate-review-preparation']
     paths: ['.github/pr227/**', '.github/workflows/pr227-prepare-tree.yml']
+concurrency:
+  group: pr227-candidate-review-preparation
+  cancel-in-progress: true
 permissions:
   contents: write
 jobs:
@@ -16,7 +19,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Apply exact reviewed plaintext patch
         run: python .github/pr227/prepare-tree.py apply
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1

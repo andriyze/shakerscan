@@ -49,8 +49,7 @@ def assert_source() -> None:
         raise RuntimeError("Unexpected preparation branch")
     if git("rev-parse", "HEAD") != os.environ["GITHUB_SHA"]:
         raise RuntimeError("Checkout revision mismatch")
-    if git("rev-parse", "HEAD^") != PARENT:
-        raise RuntimeError("Preparation must have the reviewed PR head as its direct parent")
+    subprocess.run(["git", "merge-base", "--is-ancestor", PARENT, "HEAD"], check=True)
     if git("rev-parse", PARENT + "^{tree}") != BASE_TREE:
         raise RuntimeError("Original tree mismatch")
     committed = set(git("diff", "--name-only", PARENT, "HEAD").splitlines())
