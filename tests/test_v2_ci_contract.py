@@ -1,4 +1,4 @@
-"""Each test runs once per change: the suite pre-merge, the stack acceptance on final images.
+"""Required pre-merge checks retain full gates for backend and focus UI-only work.
 
 `v2-contracts.yml` used to re-run hand-picked slices of the Python suite and the UI checks on every
 pull request, the candidate `validate` job ran the complete suite a third time inside the image,
@@ -25,7 +25,7 @@ def _yaml(name: str) -> dict:
     return yaml.safe_load(_text(name))
 
 
-def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
+def test_required_python_check_runs_full_or_focused_suite_by_change():
     suite = _yaml("python-suite.yml")
     triggers = suite.get("on", suite.get(True))
     assert "pull_request" in triggers
@@ -33,6 +33,9 @@ def test_the_complete_python_suite_is_a_required_pre_merge_check_only():
     assert triggers["push"]["branches"] == ["main"]
     text = _text("python-suite.yml")
     assert "scripts/run_complete_python_suite.py --artifacts-dir artifacts" in text
+    assert "scripts/ci_smoke_scope.py" in text
+    assert "steps.changes.outputs.python_mode == 'full'" in text
+    assert "Run UI-facing Python contracts" in text
     assert "--require-hashes" in text
     assert "python -m playwright install --with-deps chromium" in text
     for static_gate in (
@@ -72,7 +75,7 @@ def test_v2_contracts_workflow_is_manual_stack_acceptance_only():
     assert image_checkout["with"]["fetch-depth"] == 0
 
 
-def test_pr_smoke_runs_every_area_and_browser_once_and_skips_unrelated_changes():
+def test_pr_smoke_keeps_full_backend_acceptance_and_scopes_ui_only_changes():
     """The pull request runs the gates that used to kill candidates an hour after merge.
 
     Between 2.0.0 and 2.2.0, 56 of 60 release candidates failed, and the checks that failed them
@@ -81,8 +84,7 @@ def test_pr_smoke_runs_every_area_and_browser_once_and_skips_unrelated_changes()
     Juice Shop target certification uses, with only the declared-debt rows tolerated.
     """
     smoke = _text("e2e-pr.yml")
-    assert 'echo "ui=true" >> "$GITHUB_OUTPUT"' in smoke
-    assert 'echo "backend=true" >> "$GITHUB_OUTPUT"' in smoke
+    assert "python3 scripts/ci_smoke_scope.py" in smoke
     assert "steps.changes.outputs.stack == 'true'" in smoke
     areas_step = smoke[smoke.index("Run every E2E area on the built stack"):]
     assert "if: steps.changes.outputs.backend == 'true'" in areas_step[:200]
@@ -95,6 +97,8 @@ def test_pr_smoke_runs_every_area_and_browser_once_and_skips_unrelated_changes()
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run build" in smoke
     assert "npm --prefix ui run test:browser" in smoke
+    assert "Run UI-only mocked browser contracts" in smoke
+    assert "steps.changes.outputs.ui == 'true' && steps.changes.outputs.stack != 'true'" in smoke
     assert "scripts/run_complete_python_suite.py" not in smoke
     assert "node-version: 26" in smoke
 
@@ -157,7 +161,7 @@ def test_candidate_validate_reuses_the_main_suite_report_instead_of_rerunning():
     assert "Reuse the exact-source contract report from the required main check" in release
     assert 'gh run list --workflow=python-suite.yml --branch main --commit "$CANDIDATE_SHA"' in release
     assert 'gh run download "$run_id" -n "python-suite-${CANDIDATE_SHA}"' in release
-    # The in-image run survives only as the fallback for a metadata-only merge.
+    # UI-only and metadata-only merges have no complete main report.
     assert release.count("scripts/run_complete_python_suite.py") == 1
     assert "scripts/release_gates.py" not in release
     assert "npm --prefix ui run test:unit" not in release

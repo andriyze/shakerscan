@@ -388,10 +388,9 @@ jobs:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
         run: |
-          # The complete Python suite is a required pre-merge check and runs again on every push
-          # to main from the same locked dependency set. Certification reuses that report for the
-          # exact candidate SHA instead of running the suite a third time inside the image. The
-          # in-image run remains only as the fallback for a metadata-only merge that skipped it.
+          # Reuse a complete main-commit suite report for the exact candidate SHA. UI source-only
+          # and metadata-only merges have no full-suite report, so run the complete suite inside
+          # the candidate image rather than treating a focused UI check as full certification.
           mkdir -p artifacts
           run_id="$(gh run list --workflow=python-suite.yml --branch main --commit "$CANDIDATE_SHA" \
             --status success --json databaseId --jq '.[0].databaseId // empty')"
