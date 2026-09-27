@@ -18,6 +18,14 @@
       "smokePath": "/ai-gate"
     },
     {
+      "route": "/ai-gate/boundary",
+      "source": "src/app/ai-gate/boundary/page.tsx",
+      "owner": "ai-security",
+      "caseId": "AIG-002",
+      "stateAssertion": "Hunt candidate, controlled principals, AI target, and regression controls remain visible before the operator queues verification.",
+      "smokePath": "/ai-gate/boundary"
+    },
+    {
       "route": "/asm",
       "source": "src/app/asm/page.tsx",
       "owner": "asm",

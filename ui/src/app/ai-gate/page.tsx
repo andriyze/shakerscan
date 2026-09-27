@@ -867,6 +867,9 @@ export default function AIGateSettingsPage() {
           <p className="mt-1 text-gray-400">Manage AI chat, RAG, agent trace, and MCP targets.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Link href="/ai-gate/boundary" className="inline-flex items-center rounded-lg border border-blue-500/40 px-3 py-2 text-sm text-blue-200 hover:bg-blue-500/10">
+            Agent boundary workflow
+          </Link>
           <Button onClick={() => setShowAddTarget((value) => !value)}>
             <Plus className="h-4 w-4" aria-hidden="true" />
             {showAddTarget ? 'Close' : 'Add Target'}

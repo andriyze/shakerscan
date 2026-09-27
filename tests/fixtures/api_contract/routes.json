@@ -77,6 +77,20 @@
     "name": "local_agent_test"
   },
   {
+    "path": "/ai/boundary/hypotheses/compile",
+    "methods": [
+      "POST"
+    ],
+    "name": "compile_ai_boundary_hypothesis"
+  },
+  {
+    "path": "/ai/boundary/proposals/materialize",
+    "methods": [
+      "POST"
+    ],
+    "name": "materialize_ai_boundary_proposal"
+  },
+  {
     "path": "/ai/demo/run",
     "methods": [
       "POST"
@@ -187,6 +201,27 @@
       "PATCH"
     ],
     "name": "update_ai_target"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/regressions/evaluate",
+    "methods": [
+      "POST"
+    ],
+    "name": "evaluate_ai_boundary_regression"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/regressions/export",
+    "methods": [
+      "POST"
+    ],
+    "name": "export_ai_boundary_regression"
+  },
+  {
+    "path": "/ai/targets/{target_id}/boundary/verify",
+    "methods": [
+      "POST"
+    ],
+    "name": "verify_ai_boundary_proposal"
   },
   {
     "path": "/ai/targets/{target_id}/campaign-history",
@@ -1540,6 +1575,20 @@
       "PATCH"
     ],
     "name": "update_hunt_candidate"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_candidate_boundary_context"
+  },
+  {
+    "path": "/hunts/{hunt_id}/candidates/{candidate_id}/boundary-proposal",
+    "methods": [
+      "POST"
+    ],
+    "name": "compile_hunt_candidate_boundary_proposal"
   },
   {
     "path": "/hunts/{hunt_id}/candidates/{candidate_id}/verify",

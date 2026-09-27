@@ -881,6 +881,16 @@ function HuntContent() {
                       {hunt.final_debrief.next_actions.map((action) => <li key={action}>{action}</li>)}
                     </ul>
                   )}
+                  {hunt.outcome_summary.candidate_ids.length > 0 && (
+                    <div className="mt-3 space-y-1 border-t border-gray-800 pt-3 text-xs">
+                      <p className="text-gray-500">Investigate candidate boundaries in AI Gate</p>
+                      {hunt.outcome_summary.candidate_ids.map((id) => (
+                        <Link key={id} href={`/ai-gate/boundary?hunt=${encodeURIComponent(hunt.hunt_id)}&candidate=${encodeURIComponent(id)}`} className="block break-all text-blue-300 hover:text-blue-200">
+                          Open candidate {id}
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">

@@ -6101,6 +6101,8 @@ def _hypothesis_verification_ids(value: Any, *, depth: int = 4) -> set[uuid.UUID
 
 def _arsenal_readonly_adapters() -> dict[str, Any]:
     return {
+        "ai.boundary.hypothesis.compile": _arsenal_dispatch_ai_boundary_compile,
+        "ai.boundary.proposal.materialize": _arsenal_dispatch_ai_boundary_materialize,
         "campaign.list": _arsenal_dispatch_campaign_list,
         "command_result.list": _arsenal_dispatch_command_result_list,
         "mission.timeline": _arsenal_dispatch_mission_timeline,
@@ -6166,6 +6168,7 @@ def _arsenal_readonly_adapters() -> dict[str, Any]:
 
 def _arsenal_gated_adapters() -> dict[str, Any]:
     return {
+        "ai.boundary.verify": _arsenal_dispatch_ai_boundary_verify,
         "asm.improve": _arsenal_dispatch_asm_improve,
         "asm.test": _arsenal_dispatch_asm_test,
         "asm.recon": _arsenal_dispatch_asm_recon,
@@ -7717,6 +7720,40 @@ async def _arsenal_dispatch_ai_gate_scan(p: dict[str, Any], approval_receipt_id:
     return await _ai_targets.scan_ai_target(target_id, body)
 
 
+async def _arsenal_dispatch_ai_boundary_compile(p: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(p.get("hypothesis"), dict):
+        raise HTTPException(status_code=422, detail="hypothesis must be an object")
+    return await _ai_targets.compile_ai_boundary_hypothesis(
+        _ai_targets.AIBoundaryHypothesisCompileRequest(hypothesis=p["hypothesis"])
+    )
+
+
+async def _arsenal_dispatch_ai_boundary_materialize(p: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(p.get("proposal"), dict) or not isinstance(p.get("boundary_base"), dict):
+        raise HTTPException(status_code=422, detail="proposal and boundary_base must be objects")
+    return await _ai_targets.materialize_ai_boundary_proposal(
+        _ai_targets.AIBoundaryMaterializeRequest(
+            proposal=p["proposal"], boundary_base=p["boundary_base"],
+        )
+    )
+
+
+async def _arsenal_dispatch_ai_boundary_verify(
+    p: dict[str, Any], approval_receipt_id: str | None,
+) -> dict[str, Any]:
+    if not p.get("target_id") or not isinstance(p.get("proposal"), dict) or not isinstance(p.get("boundary_base"), dict):
+        raise HTTPException(status_code=422, detail="target_id, proposal and boundary_base are required")
+    return await _ai_targets.verify_ai_boundary_proposal(
+        str(p["target_id"]),
+        _ai_targets.AIBoundaryVerifyRequest(
+            proposal=p["proposal"], boundary_base=p["boundary_base"],
+            environment=p.get("environment") or "preview",
+            scan_profile=p.get("scan_profile") or "standard",
+            approval_receipt_id=approval_receipt_id or p.get("approval_receipt_id"),
+        ),
+    )
+
+
 async def _arsenal_dispatch_scan_focused_family(p: dict[str, Any], approval_receipt_id: str | None) -> dict[str, Any]:
     target = str(p.get("target") or "").strip()
     if not target:
@@ -9188,5 +9225,3 @@ def _refuter_finding_automation_plan(finding: dict[str, Any], review_metadata: d
         trigger_type="finding",
         reasons=[str(finding.get("trigger_reason") or "manual_refuter_execution")],
     )
-
-
