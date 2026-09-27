@@ -526,9 +526,24 @@ def test_worker_reconstructs_scheme_inferred_target_without_expanding_dns():
     )
     assert materialized["target"] == "api.example.test"
 
+    # A different execution-time answer that the binding's destination policy admits (a CDN
+    # rotating its edges) no longer fails the Scan, but it never expands the authority either:
+    # the binding every connection is pinned to is still exactly the frozen one.
+    drifted = materialize_canonical_scan_job(
+        job.payload(), row, resolved_addresses=("192.0.2.99",),
+    )
+    assert drifted["target"] == "api.example.test"
+    assert drifted["options"]["_canonical_target_binding"] == job.target.canonical_dict()
+    assert drifted["options"]["_canonical_target_binding"]["allowed_addresses"] == ["192.0.2.10"]
+    evidence = drifted["options"]["_runtime_dns_revalidation"]
+    assert evidence["effective_addresses"] == ["192.0.2.10"]
+    assert evidence["observed_addresses"] == ["192.0.2.99"]
+
+    # An answer the destination policy refuses (metadata, even in a lab environment) is DNS
+    # rebinding and still fails closed.
     with pytest.raises(CanonicalScanJobMaterializationError, match="DNS"):
         materialize_canonical_scan_job(
-            job.payload(), row, resolved_addresses=("192.0.2.99",),
+            job.payload(), row, resolved_addresses=("169.254.169.254",),
         )
 
 

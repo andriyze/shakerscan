@@ -322,6 +322,7 @@ from scan.job_runtime import (
     CanonicalScanJobMaterializationError,
     materialize_canonical_scan_job,
 )
+from scan.runtime_dns import record_runtime_dns_revalidation
 from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
 from runtime.observation_store import PostgresObservationManifestStore
 from runtime.request_replay_executor import (
@@ -8018,6 +8019,7 @@ def _apply_runtime_scope_guard_to_result(result: dict[str, Any], options: dict[s
     check = _evaluate_runtime_destination_records(_runtime_destination_records(result, options), options)
     metadata = result.get("scan_metadata") if isinstance(result.get("scan_metadata"), dict) else {}
     metadata["runtime_scope_check"] = check
+    record_runtime_dns_revalidation(metadata, options)
     result["scan_metadata"] = metadata
     if check.get("status") == "allowed":
         return result

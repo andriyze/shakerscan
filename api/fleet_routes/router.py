@@ -2455,13 +2455,17 @@ async def _materialize_control_plane_scan_job_v2(
     if not row:
         raise HTTPException(status_code=409, detail="scan-job/v2 has no durable Scan row")
     try:
+        # Revalidated under the binding's destination policy, not compared with the frozen
+        # set: a CDN answers each lookup with a different subset of its edges. Execution stays
+        # pinned to the frozen addresses (scan.runtime_dns). Without revalidation (re-projecting
+        # a finished lease for ingest) no lookup is made and no DNS evidence is recorded.
         addresses = (
             await _resolve_runtime_target_addresses(
                 str(row["target_url"] or ""), subject="broker Scan target",
                 environment=_binding_environment_from_options(row["options"]),
             )
             if revalidate_dns
-            else list(CanonicalScanJob.from_queue_payload(queue_payload).target.allowed_addresses)
+            else None
         )
         return materialize_canonical_scan_job(
             queue_payload, row, resolved_addresses=addresses,
