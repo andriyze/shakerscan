@@ -477,7 +477,8 @@ export default function NewScanPage() {
         router.push('/scans')
       } else {
         const result = await submitScanV2({ target: singleTarget, ...common })
-        toast.success('Scan queued')
+        if (result?.notice) toast.info(`Scan queued. ${result.notice}`)
+        else toast.success('Scan queued')
         router.push(`/scans/${result.scan_id}`)
       }
     } catch (cause) {

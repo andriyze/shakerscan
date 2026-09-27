@@ -29,6 +29,9 @@ sys.path.insert(1, str(ROOT / "scanner"))
 
 import target_resolution
 
+# The real resolver entry point, captured before the suite's hermetic fixture replaces it; the
+# admission tests below drive it through a fixture event-loop getaddrinfo.
+REAL_SYSTEM_LOOKUP = target_resolution.system_lookup
 NXDOMAIN = socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided, or not known")
 RESOLVER_DOWN = socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
 
@@ -263,6 +266,7 @@ def _patch_system_resolver(monkeypatch, table):
         ]
 
     monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(target_resolution, "system_lookup", REAL_SYSTEM_LOOKUP)
 
 
 def _admission_detail(url, *, subject="Scan target", environment="production"):
@@ -380,3 +384,43 @@ def test_the_discovery_job_inserts_only_resolving_names_and_records_the_rest(mon
     assert sources["subfinder"] == 2
     assert sources["dns_resolution"]["unresolved"] == ["www.tidyhelpers.com"]
     assert sources["dns_resolution"]["added"] == 1
+
+
+# ------------------------------------------------------------------ the twin must be admitted
+
+
+def test_a_twin_the_policy_refuses_is_not_chosen():
+    lookup = _lookup({"www.example.com": ["169.254.169.254"]})
+
+    async def production():
+        return "production"
+
+    assert asyncio.run(target_resolution.prefer_resolving_twin(
+        "https://example.com", environment_of=production, lookup=lookup,
+    )) is None
+
+
+def test_the_environment_is_consulted_only_when_a_swap_is_in_question():
+    asked: list[bool] = []
+
+    async def environment_of():
+        asked.append(True)
+        return "production"
+
+    lookup = _lookup({"example.com": ["93.184.215.14"], "www.example.com": ["93.184.215.14"]})
+    assert asyncio.run(target_resolution.prefer_resolving_twin(
+        "https://example.com", environment_of=environment_of, lookup=lookup,
+    )) is None
+    assert asked == [], "a name that resolves costs one lookup and no database read"
+
+
+def test_scan_fallback_without_a_database_judges_under_production(monkeypatch):
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    monkeypatch.setattr(target_resolution, "system_lookup", _lookup({"www.example.com": ["10.0.0.5"]}))
+    assert asyncio.run(target_resolution.scan_target_dns_fallback("https://example.com", None)) == (
+        "https://example.com", None,
+    )
+    monkeypatch.setattr(target_resolution, "system_lookup", _lookup({"www.example.com": ["93.184.215.14"]}))
+    url, fallback = asyncio.run(target_resolution.scan_target_dns_fallback("https://example.com", None))
+    assert url == "https://www.example.com"
+    assert fallback["message"] == "example.com has no address record; using www.example.com."

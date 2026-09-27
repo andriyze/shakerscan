@@ -591,9 +591,11 @@ digest-pinned physical acceptance and fault matrix. Follow the [operator guide](
 domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targets. Each name is
 resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
 is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
-resolver could not judge is still added. Adding a target (`POST /targets`) whose bare or `www.` name
-has no address record while its twin does registers the twin and returns `dns_fallback`/`notice`;
-Scan admission names the non-resolving host and any working twin.
+resolver could not judge is still added. Adding a target (`POST /targets`) or submitting a Scan
+(`POST /scans`, `/scans/batch`, `/targets/{id}/scan`, `shakerscan scan`) for a bare or `www.` name
+with no address record uses its www/apex twin when that twin resolves to an address the destination
+policy admits in the requested target's environment; the response carries `dns_fallback`/`notice`,
+and authorization and scope bind to the twin. Otherwise Scan admission names the non-resolving host.
 
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains

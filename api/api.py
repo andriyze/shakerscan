@@ -519,6 +519,7 @@ import agent_provenance
 import agent_text_toolcalls
 import agent_tools
 import target_authorization
+import target_resolution
 import deployment_policy
 import agent_budget
 try:
@@ -10988,6 +10989,7 @@ async def _submit_scan(
         raise HTTPException(status_code=400, detail=str(e))
     if not normalized_target:
         raise HTTPException(status_code=400, detail="Invalid target URL")
+    normalized_target, dns_fallback = await target_resolution.scan_target_dns_fallback(normalized_target, db_pool)
 
     # If scheme was inferred (not provided), pass scheme-less target to scanner for auto-detect
     scan_target = normalized_target
@@ -11571,6 +11573,7 @@ async def _submit_scan(
     if target_note:
         response['warning'] = target_note
         response['original_target'] = request.target
+    response.update(target_resolution.fallback_response_fields(dns_fallback, request.target))
     return response
 
 

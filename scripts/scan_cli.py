@@ -407,9 +407,20 @@ def main(argv: list[str] | None = None) -> int:
                 if args.idempotency_key else {}
             ),
         }
+        # The name submitted had no address record and the engine scanned its www/apex twin.
+        # Say so: the scan is running against a different name than the one typed.
+        notice = str(response.get("notice") or "").strip()
+        if notice:
+            result["notice"] = notice
+            result["target"] = str(response.get("target") or "")
+            if isinstance(response.get("dns_fallback"), dict):
+                result["dns_fallback"] = response["dns_fallback"]
         if args.json:
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         else:
+            if notice:
+                print(f"Notice: {notice}")
+                print(f"Target: {result['target']}")
             print(f"Scan ID: {scan_id}")
             print(f"Status: {status}")
             print(f"Plan: deterministic Scan · {args.budget_profile} budget · active testing {'on' if args.active_testing else 'off'}")

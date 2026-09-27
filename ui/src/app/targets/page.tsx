@@ -303,8 +303,9 @@ function TargetsContent() {
     try {
       const res = await scanTarget(targetId, { budget_profile: 'balanced' })
       const scanId = res?.scan_id
-      toast.success(
-        'Scan started',
+      // The target's name has no address record and its www/apex twin was scanned instead.
+      toast[res?.notice ? 'info' : 'success'](
+        res?.notice ? `Scan started. ${res.notice}` : 'Scan started',
         scanId ? { link: { href: `/scans/${scanId}`, label: 'View scan' } } : undefined
       )
       router.push('/scans')

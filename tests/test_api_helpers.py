@@ -20613,7 +20613,7 @@ def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monke
 
     async def lookup(hostname):
         if hostname == "www.example.com":
-            return ["203.0.113.10"]
+            return ["93.184.215.14"]
         raise socket.gaierror(socket.EAI_NONAME, "not known")
 
     monkeypatch.setattr(target_resolution, "system_lookup", lookup)
@@ -20653,10 +20653,10 @@ def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fai
             }
 
     monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
-    for answer in (["203.0.113.9"], socket.gaierror(socket.EAI_AGAIN, "resolver down")):
+    for answer in (["93.184.215.15"], socket.gaierror(socket.EAI_AGAIN, "resolver down")):
         async def lookup(hostname, answer=answer):
             if hostname == "www.example.com":
-                return ["203.0.113.10"]
+                return ["93.184.215.14"]
             if isinstance(answer, BaseException):
                 raise answer
             return answer
@@ -20668,6 +20668,105 @@ def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fai
         assert response["url"] == "https://example.com"
         assert "dns_fallback" not in response
         assert "notice" not in response
+
+
+class _StopAtAuthorization(Exception):
+    pass
+
+
+def _scan_submission_target(monkeypatch, table, *, stored_metadata=None, target="example.com"):
+    """Submit an active Scan and return the URL its standing authorization is looked up for.
+
+    Admission stops there (the rest of submission needs a live stack); the authorization lookup
+    is the first step that binds the Scan to a target, so it shows which name is being scanned.
+    Every DNS answer comes from ``table``; nothing touches the network.
+    """
+    import socket
+    import target_resolution
+
+    async def lookup(hostname):
+        answer = table.get(hostname, socket.gaierror(socket.EAI_NONAME, "not known"))
+        if isinstance(answer, BaseException):
+            raise answer
+        return list(answer)
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert query == "SELECT metadata_json FROM targets WHERE url = $1"
+            return {"metadata_json": stored_metadata} if stored_metadata is not None else None
+
+    bound: list[str] = []
+
+    async def standing(url):
+        bound.append(url)
+        raise _StopAtAuthorization
+
+    # A deployment that refuses private ranges outside Lab (the Enterprise gateway's setting).
+    # Public answers use a global address: documentation ranges are not a global destination.
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module, "_standing_authorization_for_target_url", standing)
+    with pytest.raises(_StopAtAuthorization):
+        asyncio.run(api_module._submit_scan(api_module.ScanRequest(
+            target=target, policy={"active_testing": True},
+        )))
+    return bound[0]
+
+
+def test_scan_submission_uses_the_www_twin_when_the_apex_has_no_address(monkeypatch):
+    assert _scan_submission_target(
+        monkeypatch, {"www.example.com": ["93.184.215.14"]},
+    ) == "https://www.example.com"
+
+
+def test_scan_submission_uses_the_apex_when_www_has_no_address(monkeypatch):
+    assert _scan_submission_target(
+        monkeypatch, {"example.com": ["93.184.215.14"]}, target="https://www.example.com/app",
+    ) == "https://example.com"
+
+
+def test_scan_submission_never_swaps_to_a_twin_the_destination_policy_refuses(monkeypatch):
+    # The metadata address is refused in every environment; a private one outside Lab.
+    for answer in (["169.254.169.254"], ["10.0.0.5"]):
+        assert _scan_submission_target(
+            monkeypatch, {"www.example.com": answer},
+        ) == "https://example.com"
+
+
+def test_scan_submission_judges_the_twin_under_the_requested_targets_environment(monkeypatch):
+    """A Lab target's twin on a private address is admitted, as Lab admission would admit it."""
+    assert _scan_submission_target(
+        monkeypatch, {"www.example.com": ["10.0.0.5"]}, stored_metadata={"cohort": "lab"},
+    ) == "https://www.example.com"
+
+
+def test_scan_submission_keeps_the_name_on_a_resolver_fault_or_when_it_resolves(monkeypatch):
+    import socket
+
+    for table in (
+        {"example.com": socket.gaierror(socket.EAI_AGAIN, "resolver down"), "www.example.com": ["93.184.215.14"]},
+        {"example.com": ["93.184.215.15"], "www.example.com": ["93.184.215.14"]},
+    ):
+        assert _scan_submission_target(monkeypatch, table) == "https://example.com"
+
+
+def test_scan_submission_announces_the_swap_in_its_response():
+    import target_resolution
+
+    fallback = {
+        "requested_host": "example.com", "resolved_host": "www.example.com",
+        "resolved_url": "https://www.example.com", "reason": "no_address_record",
+        "message": "example.com has no address record; using www.example.com.",
+    }
+    assert target_resolution.fallback_response_fields(None, "example.com") == {}
+    fields = target_resolution.fallback_response_fields(fallback, "example.com")
+    assert fields["notice"] == "example.com has no address record; using www.example.com."
+    assert fields["dns_fallback"] == fallback
+    assert fields["requested_target"] == "example.com"
+    source = inspect.getsource(api_module._submit_scan)
+    assert "response.update(target_resolution.fallback_response_fields(dns_fallback, request.target))" in source
 
 
 def test_direct_query_value_unwraps_fastapi_parameter_without_private_import():

@@ -31,6 +31,12 @@ import urllib.parse
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
+try:
+    import action_scope
+    import target_authorization
+except ModuleNotFoundError:  # package-native import layout
+    from api import action_scope, target_authorization
+
 RESOLVES = "resolves"
 NO_ADDRESS = "no_address"
 UNKNOWN = "unknown"
@@ -171,9 +177,15 @@ def replace_host(value: str, hostname: str) -> str:
     return rebuilt[2:] if scheme_less and rebuilt.startswith("//") else rebuilt
 
 
+def policy_admits(environment: str) -> Callable[[str], bool]:
+    """The destination policy Scan admission applies, as a predicate over one address."""
+    return lambda address: action_scope._ip_scope_block_reason(address, environment) is None
+
+
 async def prefer_resolving_twin(
     url: str,
     *,
+    environment_of: Callable[[], Awaitable[str]] | None = None,
     lookup: Lookup | None = None,
     timeout: float = LOOKUP_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
@@ -181,14 +193,19 @@ async def prefer_resolving_twin(
 
     Returns None when the host resolves, when the resolver could not say (a fault never rewrites
     what the operator typed), when there is no twin, or when the twin does not resolve either.
+    With ``environment_of``, the twin must also resolve to an address the destination policy
+    admits in that environment, so a twin pointing at a refused class (the cloud metadata
+    address, a private range outside Lab) is never chosen. It is awaited only when a swap is in
+    question, so the common case costs one lookup and nothing else.
     """
     host = _clean_host(urllib.parse.urlsplit(str(url or "")).hostname)
-    if not host or _is_address_literal(host):
+    if not host or _is_address_literal(host) or www_twin(host) is None:
         return None
     status, _addresses = await lookup_host(host, lookup=lookup, timeout=timeout)
     if status != NO_ADDRESS:
         return None
-    twin = await resolving_twin(host, lookup=lookup, timeout=timeout)
+    admit = policy_admits(await environment_of()) if environment_of is not None else None
+    twin = await resolving_twin(host, lookup=lookup, admit=admit, timeout=timeout)
     if twin is None:
         return None
     return {
@@ -198,6 +215,42 @@ async def prefer_resolving_twin(
         "reason": "no_address_record",
         "message": f"{host} has no address record; using {twin}.",
     }
+
+
+async def scan_target_dns_fallback(url: str, pool: Any) -> tuple[str, dict[str, Any] | None]:
+    """The URL a Scan should be submitted for, and the swap made, if any.
+
+    The twin is judged under the environment of the requested target when it is registered
+    (production otherwise), the same classification its admission applies. Authorization and
+    scope then bind to the twin: the Scan's standing authorization, receipt and target row are
+    all resolved from the returned URL.
+    """
+
+    async def environment_of() -> str:
+        if pool is None:
+            return "production"
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT metadata_json FROM targets WHERE url = $1", url)
+        except Exception:  # noqa: BLE001 -- unknown environment means the strict one
+            return "production"
+        metadata = (row or {}).get("metadata_json") if row else None
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                metadata = None
+        return target_authorization.effective_target_environment(metadata)
+
+    fallback = await prefer_resolving_twin(url, environment_of=environment_of)
+    return (fallback["resolved_url"], fallback) if fallback else (url, None)
+
+
+def fallback_response_fields(fallback: Mapping[str, Any] | None, requested: Any) -> dict[str, Any]:
+    """Response fields announcing a www/apex swap; empty when none was made."""
+    if not fallback:
+        return {}
+    return {"dns_fallback": dict(fallback), "notice": fallback["message"], "requested_target": requested}
 
 
 async def classify_hosts(

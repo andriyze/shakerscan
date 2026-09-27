@@ -204,3 +204,47 @@ def test_scan_cli_sends_the_bearer_token_from_a_file_over_https_only(tmp_path, m
     assert seen["auth"] == "Bearer sse_secret"
     with pytest.raises(scan_cli.ScanCliError, match="https"):
         scan_cli._request_json("http://127.0.0.1:8080/scan/contracts")
+
+
+def _run_with_response(monkeypatch, argv, response):
+    def request(url, *, payload=None, idempotency_key=None):
+        return _contract() if payload is None else dict(response)
+
+    monkeypatch.setattr(scan_cli, "_request_json", request)
+    return scan_cli.main(["--api-url", "http://api.test:8080", "--ui-url", "http://ui.test:3000", *argv])
+
+
+_FALLBACK_RESPONSE = {
+    "scan_id": "00000000-0000-0000-0000-000000000002",
+    "status": "queued",
+    "target": "https://www.example.com",
+    "notice": "example.com has no address record; using www.example.com.",
+    "dns_fallback": {
+        "requested_host": "example.com",
+        "resolved_host": "www.example.com",
+        "resolved_url": "https://www.example.com",
+        "reason": "no_address_record",
+        "message": "example.com has no address record; using www.example.com.",
+    },
+}
+
+
+def test_scan_cli_tells_the_user_when_the_www_twin_was_scanned(monkeypatch, capsys):
+    assert _run_with_response(monkeypatch, ["example.com"], _FALLBACK_RESPONSE) == 0
+    out = capsys.readouterr().out
+    assert "Notice: example.com has no address record; using www.example.com." in out
+    assert "Target: https://www.example.com" in out
+
+
+def test_scan_cli_json_carries_the_fallback_notice(monkeypatch, capsys):
+    assert _run_with_response(monkeypatch, ["example.com", "--json"], _FALLBACK_RESPONSE) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["notice"] == "example.com has no address record; using www.example.com."
+    assert output["target"] == "https://www.example.com"
+    assert output["dns_fallback"]["resolved_host"] == "www.example.com"
+
+
+def test_scan_cli_prints_no_notice_without_a_fallback(monkeypatch, capsys):
+    response = {"scan_id": "00000000-0000-0000-0000-000000000003", "status": "queued"}
+    assert _run_with_response(monkeypatch, ["example.com"], response) == 0
+    assert "Notice:" not in capsys.readouterr().out

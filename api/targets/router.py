@@ -671,14 +671,20 @@ async def create_target(request: TargetCreate):
     # example.com that publishes no address record while www.example.com does (or the reverse)
     # would otherwise become a target whose every Scan is refused. Register the name that
     # resolves and say so; a resolver fault or a twin that does not resolve changes nothing.
-    dns_fallback = await target_resolution.prefer_resolving_twin(normalized_target)
+    requested_cohort = getattr(request, "cohort", None)
+
+    async def _creation_environment() -> str:
+        return target_authorization.effective_target_environment({}, requested=requested_cohort)
+
+    dns_fallback = await target_resolution.prefer_resolving_twin(
+        normalized_target, environment_of=_creation_environment,
+    )
     requested_url = request.url
     if dns_fallback:
         normalized_target = dns_fallback["resolved_url"]
         requested_url = target_resolution.replace_host(request.url, dns_fallback["resolved_host"])
     root_domain = extract_root_domain(normalized_target)
     is_root = is_root_domain(normalized_target)
-    requested_cohort = getattr(request, "cohort", None)
 
     async with _pool().acquire() as conn:
         try:
