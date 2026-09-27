@@ -996,6 +996,13 @@ class DatabaseNeutralScanActionDispatcher:
         return await self._execute_adapter(action, adapter, heartbeat)
 
     async def _tls(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        # A scheme-inferred target already proved that its HTTPS candidate did not
+        # answer before selecting HTTP. Repeating TLS on that same service would
+        # turn an examined HTTP application into a failed Scan for a transport it
+        # does not serve. The selector's refused attempt remains in the report.
+        if (self.target.inferred_origins and self._origin_selected
+                and urllib.parse.urlsplit(self.target_url).scheme == "http"):
+            return self._skip(action, "not_applicable")
         https_origins = [
             str(item) for item in self.target.allowed_origins
             if str(item).lower().startswith("https://")

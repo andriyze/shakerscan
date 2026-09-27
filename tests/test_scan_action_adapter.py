@@ -1732,6 +1732,40 @@ def test_database_neutral_tls_action_inspects_the_complete_frozen_matrix(monkeyp
     }
 
 
+def test_selected_http_origin_skips_tls_on_the_refused_https_candidate(monkeypatch):
+    target = TargetBinding(
+        target_id=TARGET.target_id, target_kind="web",
+        canonical_host=TARGET.canonical_host,
+        allowed_origins=("https://app.example.test:8080", "http://app.example.test:8080"),
+        inferred_origins=("https://app.example.test:8080", "http://app.example.test:8080"),
+        allowed_addresses=TARGET.allowed_addresses,
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    action = _action(
+        "baseline.tls", "tls.inspect", 0, target=target,
+        capability_args={
+            "origins_ref": "frozen_https_origins", "origin_count": 1,
+            "addresses_ref": "frozen_addresses", "address_count": 1,
+        },
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+    dispatcher = _dispatcher(plan, Backend(), target=target)
+    dispatcher.target_url = "http://app.example.test:8080/"
+    dispatcher._origin_selected = True
+
+    async def unexpected_tls(**_kwargs):
+        raise AssertionError("refused HTTPS candidate must not be retried")
+
+    monkeypatch.setattr(action_adapter_module, "inspect_tls_binding", unexpected_tls)
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert receipt.status == "skipped"
+    assert receipt.errors == ("not_applicable",)
+    assert all(amount == 0 for amount in receipt.budget_consumed.values())
+
+
 def test_database_neutral_active_action_executes_exact_manifest_candidate(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(
