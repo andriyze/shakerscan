@@ -376,7 +376,10 @@ def test_passive_scan_compiles_bounded_read_only_surface_discovery():
     assert by_id["passive.templates"].capability_name == (
         "templates.passive_batch"
     )
-    assert by_id["passive.templates"].dependencies == ()
+    # The fixture binding froze HTTP and HTTPS (a target entered without a scheme), so every
+    # root action waits for transport.resolve to choose the origin it will run against.
+    assert by_id["passive.templates"].dependencies == ("transport.resolve",)
+    assert by_id["transport.resolve"].dependencies == ()
     assert by_id["passive.templates"].capability_args["target_ref"] == (
         "canonical_origin"
     )
@@ -601,7 +604,10 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     } == {
         "auth.session.establish", "xss.verify_batch",
         "xss.browser_prove_batch", "scan.finalize",
+        # transport.resolve: the shard's binding froze both schemes, so it chooses its origin.
+        "http.request",
     }
+    assert endpoint_by_id["transport.resolve"].capability_name == "http.request"
     assert {"inputs.auth_primary", "prove.xss", "finalize.report"} <= set(endpoint_by_id)
     xss_actions = [
         action for action in endpoint.actions
