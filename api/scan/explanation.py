@@ -59,6 +59,10 @@ _REASON_LABELS = {
     "adapter_failed": "The capability adapter failed",
     "parser_failed": "The capability output could not be parsed safely",
     "output_truncated": "The bounded output limit was reached",
+    "crawler_memory_bound_exceeded": (
+        "The crawler reached its memory ceiling (SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB) and was "
+        "stopped; what it found before that is kept"
+    ),
     "manifest_unavailable": "Required immutable work was unavailable",
     "unsupported_output_schema": "The worker returned an unsupported result format",
     "not_applicable": "The capability did not apply to this target",

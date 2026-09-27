@@ -253,6 +253,23 @@ _BROWSER_MAX_REQUESTS_PER_SECOND = 10
 # Both crawl tools are the same binary with the same compact output, so every
 # branch that parses, meters, or pins katana must cover the headless variant.
 KATANA_TOOLS = frozenset({"katana", "katana_headless"})
+# The crawler's own memory-relevant limits, stated explicitly rather than inherited from
+# katana defaults (unlimited pages per domain, ten parallel inputs). A crawl has one
+# input. A page is at least one request, so these page ceilings equal the most the
+# reviewed rate can fetch in the longest time box: they never cut a crawl the reservation
+# funds (katana ends a capped crawl with exit 0, indistinguishable from a complete one)
+# and bind only if the rate limiter does not. The response ceiling is katana's current
+# default, pinned. The hard memory bound is the process-tree ceiling the worker enforces.
+_KATANA_MAX_DOMAIN_PAGES = _KATANA_MAX_RATE_PER_SECOND * _KATANA_MAX_CRAWL_SECONDS
+_BROWSER_MAX_DOMAIN_PAGES = _BROWSER_MAX_REQUESTS_PER_SECOND * _BROWSER_MAX_CRAWL_SECONDS
+_KATANA_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# Chromium's own per-renderer bound: one tab whose script heap runs away is ended by V8
+# (the tab crashes and katana moves on) long before it can take the browser with it, and
+# the browser runs no more renderer processes than the crawl has tabs.
+_BROWSER_V8_HEAP_MB = 512
+_BROWSER_HEADLESS_OPTIONS = (
+    f"--js-flags=--max-old-space-size={_BROWSER_V8_HEAP_MB},--renderer-process-limit=4"
+)
 
 # One retained crawl record (URL, method, status, source) is a few hundred bytes
 # of JSONL even with raw request and body omitted. A flat 80 KB cap therefore
@@ -381,7 +398,9 @@ def _tmpl_katana(url: str, opts: dict[str, Any]) -> list[str]:
     # application's own served code -- the same epistemic standing as -js-crawl output --
     # never invented by the scanner.
     return ["-u", url, "-js-crawl", "-jsluice", "-kb-endpoints",
-            "-depth", "2", "-concurrency", "5",
+            "-depth", "2", "-concurrency", "5", "-parallelism", "1",
+            "-max-domain-pages", str(_KATANA_MAX_DOMAIN_PAGES),
+            "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
             "-rate-limit", "5", "-crawl-duration", "30s", "-field-scope", "fqdn",
             "-timeout", "8", "-retry", "0", "-disable-redirects",
             "-jsonl", "-omit-raw", "-omit-body",
@@ -405,8 +424,11 @@ def _tmpl_katana_headless(url: str, opts: dict[str, Any]) -> list[str]:
     # fetches, and egress stays pinned by the proxy build_scanner_argv attaches.
     return ["-u", url, "-headless", "-no-sandbox",
             "-system-chrome-path", _SYSTEM_CHROME_PATH,
+            "-headless-options", _BROWSER_HEADLESS_OPTIONS,
             "-xhr-extraction", "-js-crawl", "-jsluice", "-kb-endpoints",
-            "-depth", "2", "-concurrency", "4",
+            "-depth", "2", "-concurrency", "4", "-parallelism", "1",
+            "-max-domain-pages", str(_BROWSER_MAX_DOMAIN_PAGES),
+            "-max-response-size", str(_KATANA_MAX_RESPONSE_BYTES),
             "-rate-limit", "5", "-crawl-duration", "45s", "-field-scope", "fqdn",
             "-timeout", "10", "-retry", "0", "-disable-redirects",
             "-jsonl", "-omit-raw", "-omit-body",

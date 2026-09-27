@@ -291,6 +291,7 @@ from runtime import http_archive
 from scan import scoring as scan_scoring
 from scanner_tools import http_archive_capture as scanner_http_capture
 from scanner_tools.browser_profile import seed_browser_profile
+from scanner_tools.process_memory import ProcessTreeMemoryCeiling, kill_process_tree
 from scan.finalizer import finalize_scan_report
 from scan.orchestrator import ScanOrchestrator
 from scan.worker_action_executor import ReceiptScanActionExecutor
@@ -18707,11 +18708,8 @@ def _agent_scanner_network_binding(name: str | None) -> str:
 
 
 def _terminate_agent_tool_process_group(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (AttributeError, ProcessLookupError, PermissionError, OSError):
+    # The tool's whole tree: a headless crawler's browser runs in process groups of its own.
+    if proc.returncode is None and not kill_process_tree(proc.pid):
         proc.kill()
 
 
@@ -18828,6 +18826,7 @@ async def _execute_agent_scanner_process(
     process_enforcement: dict[str, Any] = {}
     browser_profile_receipt: dict[str, Any] = {}
     wire_log_counter: dict[str, Any] | None = None
+    memory_ceiling: ProcessTreeMemoryCeiling | None = None
     name = str(job_data.get("tool_name") or "").strip().lower()
     execution_target = str(job_data.get("execution_target") or "")
     registered_target = str(job_data.get("registered_target") or "")
@@ -18981,10 +18980,13 @@ async def _execute_agent_scanner_process(
         # External tools must reach the target through the pinned transport
         # channel (argv/plan env), never an ambient worker proxy variable.
         process_environment.update(dict(process_plan.env))
-        # The static crawler runs under a data-segment bound (prlimit, Linux only) so a
-        # runaway parser ends with Go's own out-of-memory error at the bound instead of
-        # taking the whole worker container to its cgroup limit.
-        launch = deployment_policy.crawler_memory_bound_argv(name) + [binary, *argv]
+        # A crawler's whole process tree, browser included, runs under a memory ceiling the
+        # supervisor enforces below, so a runaway crawl is stopped and reported partial
+        # instead of taking the worker container to its cgroup limit. The static crawler
+        # also gets a data-segment bound; both get a Go soft limit (deployment_policy).
+        memory_limit, memory_source = deployment_policy.crawler_memory_ceiling(name)
+        process_environment.update(deployment_policy.crawler_memory_environment(name, memory_limit))
+        launch = deployment_policy.crawler_memory_bound_argv(name, limit_bytes=memory_limit) + [binary, *argv]
         proc = await asyncio.create_subprocess_exec(
             *launch,
             env=process_environment,
@@ -18995,6 +18997,7 @@ async def _execute_agent_scanner_process(
             pass_fds=(httpx_configuration.descriptor,) if httpx_configuration is not None else (),
         )
         process_started = True
+        memory_ceiling = ProcessTreeMemoryCeiling(proc.pid, memory_limit, source=memory_source)
         overflow = asyncio.Event()
         read_streams = asyncio.create_task(
             _read_agent_tool_streams(
@@ -19029,6 +19032,9 @@ async def _execute_agent_scanner_process(
                 status, error = "timeout", "timeout"
                 _terminate_agent_tool_process_group(proc)
                 break
+            if memory_ceiling.over_ceiling():  # exit classification below names the reason
+                _terminate_agent_tool_process_group(proc)
+                break
             if heartbeat is not None and loop.time() >= next_heartbeat:
                 await heartbeat()
                 next_heartbeat = loop.time() + 15.0
@@ -19055,26 +19061,20 @@ async def _execute_agent_scanner_process(
         if status not in {"cancelled", "timeout"} and error not in {
             "output_truncated", "connection_limit_exceeded",
         }:
-            if returncode not in (0, None) and not stdout.strip():
-                status = "failed"
+            if returncode not in (0, None):
+                # The tool died (a signal such as the kernel's OOM kill or the memory
+                # ceiling's SIGKILL arrives as a negative code, the data-segment bound as
+                # Go's exit 2) or reported an error. Output it wrote before that is
+                # trustworthy, but it is not the whole run: partial, never complete.
+                abnormal_exit = bool(stdout.strip())
+                status = "success" if abnormal_exit else "failed"
                 error = (
                     "crawler_memory_bound_exceeded"
-                    if deployment_policy.crawler_memory_bound_exceeded(err or b"")
+                    if deployment_policy.crawler_memory_bound_exceeded(
+                        err or b"", ceiling_reached=memory_ceiling.exceeded)
+                    else f"exit_{returncode}" if abnormal_exit
                     else redact_text((err or b"").decode("utf-8", "replace")[:300])
                     or f"exit_{returncode}"
-                )
-            elif returncode not in (0, None):
-                # The tool emitted output and then died (a signal such as the
-                # kernel's OOM kill arrives as a negative code, the crawler's
-                # memory bound as Go's exit 2) or reported an error. What it
-                # wrote before that is trustworthy, but it is not the whole run:
-                # the receipt must say partial, never complete.
-                status = "success"
-                abnormal_exit = True
-                error = (
-                    "crawler_memory_bound_exceeded"
-                    if deployment_policy.crawler_memory_bound_exceeded(err or b"")
-                    else f"exit_{returncode}"
                 )
             else:
                 status = "success"
@@ -19207,6 +19207,7 @@ async def _execute_agent_scanner_process(
         "typed_output": typed_output,
         "settlement": settlement,
         "process_enforcement": process_enforcement,
+        "memory_ceiling": memory_ceiling.receipt() if memory_ceiling is not None else None,
         "network_telemetry": network_telemetry,
         "browser_profile": browser_profile_receipt,
         "execution_uncertain": execution_uncertain,

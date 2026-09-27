@@ -1416,6 +1416,22 @@ async def discover_endpoint_parameters(
     return accepted_params
 
 
+# One input, and katana's response-size ceiling pinned rather than inherited. No page
+# or duration cap here: katana ends those with exit 0, which would report a truncated
+# crawl as complete; the soft deadline below reports it. The process-tree memory ceiling
+# is the hard memory bound.
+_LEGACY_KATANA_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def _crawler_memory_ceiling_bytes() -> int:
+    """The deployment's crawler memory ceiling (``SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB``)."""
+    try:
+        import deployment_policy
+    except ImportError:  # scanner modules outside the worker image have no API policy
+        return 0
+    return deployment_policy.crawler_memory_ceiling("katana")[0]
+
+
 async def run_katana_stream(
     katana_binary: str, url: str, depth: int, on_stdout_line: Any,
 ) -> Any:
@@ -1427,8 +1443,10 @@ async def run_katana_stream(
         "-ef", "jpg,png,svg,gif,ico,css,woff,woff2,ttf,eot",
         "-H", "User-Agent: Mozilla/5.0 (compatible; SecurityScanner/1.0)",
         "-timeout", "30", "-concurrency", "10", "-delay", "200", "-form-extraction",
+        "-parallelism", "1", "-max-response-size", str(_LEGACY_KATANA_MAX_RESPONSE_BYTES),
     ], soft_timeout=deadlines.soft_seconds, flush_grace=deadlines.flush_grace_seconds,
        hard_timeout=deadlines.hard_seconds, on_stdout_line=on_stdout_line,
+       memory_limit_bytes=_crawler_memory_ceiling_bytes(),
        cancel_check=lambda: bool(
            os.environ.get("SHAKERSCAN_CANCEL_FILE")
            and os.path.exists(str(os.environ["SHAKERSCAN_CANCEL_FILE"]))
@@ -1706,6 +1724,11 @@ async def enhanced_url_discovery(
             raise asyncio.CancelledError
         if streamed is None:
             pass
+        elif getattr(streamed, "memory_limit_exceeded", False):
+            endpoint_manifest.finish_producer(
+                "katana", status="partial" if streamed.stdout else "failed",
+                reason="crawler_memory_bound_exceeded",
+            )
         elif streamed.timed_out:
             endpoint_manifest.finish_producer("katana", status="timed_out", reason="soft_deadline")
         elif streamed.returncode != 0:
