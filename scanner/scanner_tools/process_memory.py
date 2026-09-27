@@ -96,13 +96,16 @@ def kill_process_tree(
     members: Iterable[int] | None = None,
 ) -> int:
     """SIGKILL the tool's process group and every process in its tree; returns the count."""
+    # Killing the root group can immediately reparent a Chromium child that left
+    # that group. Snapshot descendants first so the later PID walk still finds it.
+    targets = tuple(members) if members is not None else tuple(process_tree(root_pid, proc_root=proc_root))
     killed = 0
     try:
         os.killpg(root_pid, signal.SIGKILL)
         killed += 1
     except (AttributeError, ProcessLookupError, PermissionError, OSError):
         pass
-    for pid in members if members is not None else process_tree(root_pid, proc_root=proc_root):
+    for pid in targets:
         try:
             os.kill(pid, signal.SIGKILL)
             killed += 1

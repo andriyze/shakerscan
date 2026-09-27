@@ -666,7 +666,7 @@ async def run_streaming(
                     requested = await requested
                 if requested:
                     cancelled = True
-                    await _signal(signal.SIGKILL)
+                    memory_ceiling.kill()
                     return
                 await asyncio.sleep(0.1)
 
@@ -696,12 +696,12 @@ async def run_streaming(
                         await asyncio.wait_for(proc.wait(), timeout=remaining)
                     except TimeoutError:
                         timed_out = True
-                        await _signal(signal.SIGKILL)
+                        memory_ceiling.kill()
                         await proc.wait()
                 if not cancelled:
                     timed_out = True
         except asyncio.CancelledError:
-            await _signal(signal.SIGKILL)
+            memory_ceiling.kill()
             await proc.wait()
             raise
         finally:

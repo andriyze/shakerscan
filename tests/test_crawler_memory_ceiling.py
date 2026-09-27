@@ -178,6 +178,22 @@ def test_the_tree_is_the_tools_session_plus_anything_that_left_it(tmp_path):
     assert process_memory.process_tree_memory_bytes(100, proc_root=tmp_path) == expected
 
 
+def test_kill_snapshots_descendants_before_root_group_can_reparent_them(monkeypatch, tmp_path):
+    _fake_proc(tmp_path, 100, ppid=1, session=100)
+    _fake_proc(tmp_path, 101, ppid=100, session=101)  # browser left the tool's group
+    killed = []
+
+    def kill_group(_pid, _signal):
+        # Linux reparents the browser as soon as its parent dies.
+        (tmp_path / "101" / "stat").write_text("101 (browser) S 1 101 101 0 0 0\n")
+
+    monkeypatch.setattr(process_memory.os, "killpg", kill_group)
+    monkeypatch.setattr(process_memory.os, "kill", lambda pid, _signal: killed.append(pid))
+
+    process_memory.kill_process_tree(100, proc_root=tmp_path)
+    assert 101 in killed
+
+
 def test_the_ceiling_samples_at_its_interval_and_stays_crossed():
     samples = iter([10 * MiB, 50 * MiB, 200 * MiB, 1])
     now = [0.0]
@@ -398,6 +414,25 @@ def test_run_streaming_kills_a_tree_that_crosses_the_ceiling():
     while _alive(grandchild) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _alive(grandchild), "the grandchild in its own process group must be killed"
+
+
+@needs_linux_proc
+def test_run_streaming_cancellation_kills_a_browser_in_its_own_group():
+    started = time.monotonic()
+    result = asyncio.run(run_streaming(
+        [sys.executable, "-c", _HOG_TREE], soft_timeout=5, flush_grace=1, hard_timeout=8,
+        cancel_check=lambda: time.monotonic() - started > 0.2,
+    ))
+    grandchild = int(result.stderr.split()[0])
+    try:
+        assert result.cancelled is True and result.status == "cancelled"
+        deadline = time.monotonic() + 5
+        while _alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(grandchild)
+    finally:
+        if _alive(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
 
 
 @needs_linux_proc
