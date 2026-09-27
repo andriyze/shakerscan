@@ -328,6 +328,14 @@ def scan_sqli_verification_capability_allocation(
 # is tried first, as the normalizer does when it infers ``https://``.
 _INFERRED_SCHEME_PREFERENCE = ("https", "http")
 
+# Actions that consume the Scan's selected base origin. Request manifests and
+# selected credential services carry their own exact origins and remain usable.
+SCAN_BASE_ORIGIN_CAPABILITIES = frozenset({
+    "http.request", "web.probe", "web.crawl", "web.browser_crawl",
+    "web.content_discover", "templates.scan", "templates.passive_scan",
+    "xss.verify", "sqli.verify", "authz.verify",
+})
+
 
 def _inferred_scheme_target(target_url: str, *, target: TargetBinding) -> str | None:
     """The exact frozen origin for a bare ``host[:port]`` runtime target, or None.
@@ -366,6 +374,10 @@ def scan_external_execution_target(
 ) -> str:
     """Bind an external web tool to one exact frozen Scan origin."""
     raw = str(target_url or "").strip()
+    if target.inferred_origins and raw and "://" not in raw:
+        raise ScanCapabilityContractError(
+            "scheme-inferred Scan target requires its measured origin selection"
+        )
     inferred = _inferred_scheme_target(raw, target=target)
     if inferred is None and raw and "://" not in raw:
         raise ScanCapabilityContractError(

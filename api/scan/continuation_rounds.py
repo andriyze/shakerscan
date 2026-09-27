@@ -53,7 +53,7 @@ from .work_manifests import (
 
 # One graph slot is always retained for the finalizer, including during work-only rounds.
 _PLAN_ACTION_BOUND = 511
-_INPUT_ACTION_PREFIXES = ("inputs.auth_", "inputs.collection_")
+_INPUT_ACTION_PREFIXES = ("inputs.auth_", "inputs.collection_", "origin.select")
 _CANCELLED_MESSAGE = "Cancelled by user"
 
 
@@ -292,6 +292,8 @@ def compile_continuation_round(
         f"inputs.collection_{index:02d}": {}
         for index, _item in enumerate(collection_refs)
     })
+    if target.inferred_origins:
+        zero_cost_existing_inputs["origin.select"] = {}
     continuation_raw = ScanActionPlanCompiler().compile(
         scan_id=parent_plan.scan_id,
         execution_plan=execution_plan,

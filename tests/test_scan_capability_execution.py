@@ -322,6 +322,20 @@ def test_bare_runtime_target_takes_its_origin_from_the_frozen_binding():
     )
 
 
+def test_new_scheme_inferred_binding_requires_measured_origin_before_external_tool():
+    binding = TargetBinding(
+        target_id="target-inferred", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    with pytest.raises(ScanCapabilityContractError, match="measured origin selection"):
+        scan_external_execution_target("app.example.test", target=binding)
+    assert scan_external_execution_target("http://app.example.test", target=binding) == (
+        "http://app.example.test/"
+    )
+
+
 @pytest.mark.parametrize(
     "bare",
     [

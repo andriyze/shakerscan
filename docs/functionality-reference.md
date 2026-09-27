@@ -188,6 +188,13 @@ capability, dependencies, target/input digests, requested budget, placement requ
 schema, and required/supporting classification. Capability arguments cannot carry secret fields,
 shell commands, or planner-supplied argv.
 
+When the operator omitted the scheme, admission freezes HTTP and HTTPS for the execution host
+selected by the bounded apex/`www` DNS fallback. The registered target ID and authorization stay
+attached to that asset. A required `scan.origin_select` action then probes only those frozen
+origins, meters both attempts, and records the reachable origin before base-URL actions run.
+An explicit scheme remains exact; if neither inferred origin responds, application examination
+is incomplete and the failed attempts remain evidence.
+
 The root plan closes deterministic prerequisites in this order:
 
 1. restore or establish any selected authenticated session;

@@ -201,6 +201,31 @@ class DnsInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize one fixed-plan, target-name-bound DNS inspection."""
 
 
+class ScanOriginSelectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
+    """Normalize the measured scheme selection within a Scan binding."""
+
+    manages_cancellation = True
+
+    async def execute(
+        self, *, heartbeat: Heartbeat, cancelled: Cancelled,
+    ) -> CapabilityAdapterResult:
+        operation = asyncio.create_task(super().execute(heartbeat=heartbeat, cancelled=cancelled))
+        while not operation.done():
+            await asyncio.wait({operation}, timeout=0.1)
+            if not operation.done() and cancelled():
+                operation.cancel()
+                try:
+                    await operation
+                except asyncio.CancelledError:
+                    pass
+                return CapabilityAdapterResult(
+                    status="cancelled", errors=("cancelled",), execution_started=True,
+                    actual_budget=dict(self._requested_budget),
+                    redacted_execution={**self._redacted_execution, "usage_uncertain": True},
+                )
+        return await operation
+
+
 class InfrastructureInspectionExecutionAdapter(_MeasuredObservationExecutionAdapter):
     """Normalize bounded registration and network context observations."""
 

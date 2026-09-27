@@ -33,7 +33,7 @@ try:
     from runtime.browser_login_contract import browser_login_action_arguments
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
-from .capability_execution import scan_discovery_reservation
+from .capability_execution import SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
 from .work_manifests import (
@@ -998,6 +998,7 @@ class ScanActionPlanCompiler:
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
         blueprints: list[_ActionBlueprint] = []
+        origin_resolution_required = bool(target_binding.inferred_origins)
 
         def add(
             action_id: str,
@@ -1009,10 +1010,13 @@ class ScanActionPlanCompiler:
             required: bool = False,
             supporting: bool = False,
         ) -> None:
+            if origin_resolution_required and capability_name in SCAN_BASE_ORIGIN_CAPABILITIES:
+                dependencies = (*dependencies, "origin.select")
             def round_id(value: str) -> str:
                 if (
                     continuation_round < 1
                     or value == "finalize.report"
+                    or value == "origin.select"
                     or value.startswith(("inputs.auth_", "inputs.collection_"))
                 ):
                     return value
@@ -1028,6 +1032,12 @@ class ScanActionPlanCompiler:
                 required=required,
                 supporting=supporting,
             ))
+
+        if origin_resolution_required:
+            add(
+                "origin.select", "resolve_inputs", "scan.origin_select",
+                {"origins": list(target_binding.inferred_origins)}, required=True,
+            )
 
         try:
             browser_actions = browser_login_action_arguments(

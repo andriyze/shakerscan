@@ -3960,15 +3960,20 @@ def test_generic_collection_ref_carries_body_field_names_for_a_confirmed_active_
             ["http://api.example.test", "https://api.example.test"],
             "https://api.example.test/",
         ),
-        # POST /targets/{id}/scan for a target added without a scheme: the stored URL carries
-        # https://, so only that origin is frozen, while the stored options still say the scheme
-        # was inferred and the worker receives the bare host.
-        ("https://api.example.test", False, ["https://api.example.test"], "https://api.example.test/"),
+        # POST /targets/{id}/scan carries the stored inferred-scheme provenance.
+        ("https://api.example.test", True,
+         ["http://api.example.test", "https://api.example.test"], "https://api.example.test/"),
         # A port survives the round trip.
         (
             "https://api.example.test:8443", True,
             ["http://api.example.test:8443", "https://api.example.test:8443"],
             "https://api.example.test:8443/",
+        ),
+        # PR #232 may select the www twin while retaining the original target ID.
+        (
+            "https://www.api.example.test", True,
+            ["http://www.api.example.test", "https://www.api.example.test"],
+            "https://www.api.example.test/",
         ),
     ],
 )
@@ -4013,6 +4018,7 @@ def test_scheme_inferred_scan_reaches_external_tools_through_its_frozen_origin(
         allowed_root_domains=tuple(guard["allowed_root_domains"]),
         environment=str(guard.get("environment") or "unknown"),
         scope_receipt_id="scope-1",
+        inferred_origins=tuple(guard["inferred_origins"]),
     )
     contract = bind_scan_scope_receipt(
         resolve_scan_contract(budget_profile="balanced", policy={"active_testing": False}),
@@ -4039,10 +4045,45 @@ def test_scheme_inferred_scan_reaches_external_tools_through_its_frozen_origin(
         job.payload(), row, resolved_addresses=("192.0.2.10",),
     )
     assert "://" not in materialized["target"], "scheme-agnostic stages still see the bare host"
-
-    assert scan_external_execution_target(materialized["target"], target=binding) == expected_target
+    assert binding.inferred_origins == tuple(reversed(expected_origins))
+    assert expected_target.startswith(binding.inferred_origins[0])
 
     # The frozen binding still decides: another host, or a port admission never froze, is refused.
     for foreign in ("other.example.test", "api.example.test:9999"):
         with pytest.raises(ScanCapabilityContractError):
             scan_external_execution_target(foreign, target=binding)
+
+
+def test_saved_target_scan_passes_only_stored_scheme_provenance(monkeypatch):
+    class Conn:
+        async def fetchrow(self, *_args):
+            return {
+                "url": "https://app.example.test",
+                "scan_options": {"target_scheme_inferred": True},
+            }
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    seen = {}
+
+    async def submit(request, *, stored_scheme_inferred=False):
+        seen["target"] = request.target
+        seen["inferred"] = stored_scheme_inferred
+        return {"ok": True}
+
+    monkeypatch.setattr(targets_router_module, "_pool", lambda: Pool())
+    monkeypatch.setattr(targets_router_module, "_submit_scan", submit)
+    result = asyncio.run(targets_router_module.scan_target(
+        "00000000-0000-4000-8000-000000000001",
+    ))
+    assert result == {"ok": True}
+    assert seen == {"target": "https://app.example.test", "inferred": True}

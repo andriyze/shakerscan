@@ -538,6 +538,7 @@ def _broker_target_binding(options: Mapping[str, Any]) -> TargetBinding:
             allowed_root_domains=tuple(raw.get("allowed_root_domains") or ()),
             environment=str(raw.get("environment") or "unknown"),
             scope_receipt_id=str(raw.get("scope_receipt_id") or "") or None,
+            inferred_origins=tuple(raw.get("inferred_origins") or ()),
         )
     except (TypeError, ValueError) as exc:
         raise BrokerWorkerError("canonical broker target binding is invalid") from exc

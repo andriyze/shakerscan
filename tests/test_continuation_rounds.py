@@ -153,6 +153,36 @@ def test_selection_keeps_admitted_work_and_reports_an_empty_round():
     ) is None
 
 
+def test_inferred_origin_selection_is_reused_across_continuation():
+    from api.runtime.models import TargetBinding
+    from api.scan.capability_result import CapabilityResultStatus
+    from api.scan.continuation_rounds import compile_continuation_round
+    from tests.test_scan_orchestrator import _result
+
+    target = TargetBinding(
+        target_id="target-continuation", target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.30",), allowed_root_domains=("example.test",),
+    )
+    fixture = _shared_round_fixture()
+    parent, _, allocation = _plans(target)
+    fixture.update(parent_plan=parent, allocation=allocation, target=target)
+    fixture["parent_results"] = {
+        action.action_id: _result(action, status=CapabilityResultStatus.SUCCESS)
+        for action in parent.actions
+    }
+    prepared = compile_continuation_round(
+        **fixture, revision_number=1, include_finalizer=False, finalize_only=False,
+    )
+
+    assert prepared is not None
+    assert [action.action_id for action in prepared.plan.actions].count("origin.select") == 1
+    appended = prepared.plan.actions[len(parent.actions):]
+    assert appended and all(action.action_id != "origin.select" for action in appended)
+
+
 def _shared_round_fixture(endpoint_count=16):
     from api.scan.contracts import resolve_scan_contract
     from api.scan.work_manifests import build_canonical_scan_nuclei_template_manifest
