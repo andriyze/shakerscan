@@ -520,6 +520,7 @@ import agent_text_toolcalls
 import agent_tools
 import target_authorization
 import target_resolution
+import target_dns_alias
 import deployment_policy
 import agent_budget
 try:
@@ -10989,7 +10990,16 @@ async def _submit_scan(
         raise HTTPException(status_code=400, detail=str(e))
     if not normalized_target:
         raise HTTPException(status_code=400, detail="Invalid target URL")
-    normalized_target, dns_fallback = await target_resolution.scan_target_dns_fallback(normalized_target, db_pool)
+    approval_receipt_id = (
+        request.approval_receipt_id or execution_options.approval_receipt_id
+    )
+    normalized_target, dns_fallback, alias_target_id, approval_receipt_id = (
+        await target_dns_alias.prepare_scan_dns_alias(
+            db_pool, normalized_target,
+            active=_policy_requests_active_testing(request.policy),
+            supplied_receipt_id=approval_receipt_id,
+        )
+    )
 
     # If scheme was inferred (not provided), pass scheme-less target to scanner for auto-detect
     scan_target = normalized_target
@@ -11000,14 +11010,11 @@ async def _submit_scan(
     job_id = str(uuid.uuid4())
     scan_id = str(uuid.uuid4())
 
-    approval_receipt_id = (
-        request.approval_receipt_id or execution_options.approval_receipt_id
-    )
     if not approval_receipt_id and _policy_requests_active_testing(request.policy):
         # Authorize once per target: a standing authorization recorded for this target's scope
         # is reused instead of asking for a new receipt on every active scan. Credential use
         # keeps its explicit credential-tier receipt.
-        approval_receipt_id = await _standing_authorization_for_target_url(normalized_target)
+        approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
     try:
         scan_contract = resolve_scan_contract(
             budget_profile=request.budget_profile or execution_options.budget_profile,
@@ -11145,10 +11152,12 @@ async def _submit_scan(
         )
         await _require_reachable_fleet_placement(conn, options_payload.get("placement") or {})
         # Check if target exists
-        target = await conn.fetchrow(
+        target = None if alias_target_id else await conn.fetchrow(
             "SELECT id FROM targets WHERE url = $1", normalized_target
         )
-        if target:
+        if alias_target_id:
+            target_id = alias_target_id
+        elif target:
             target_id = target['id']
         else:
             # Create new target
@@ -15115,21 +15124,6 @@ async def _standing_authorization_for_target_id(target_id: Any) -> dict[str, Any
             return await target_authorization.current_target_authorization(conn, target_id)
     except Exception:  # resolution is a convenience; the contract gate still decides
         return None
-
-
-async def _standing_authorization_for_target_url(target_url: str) -> str | None:
-    """The approval receipt id of the target's standing authorization, if the target exists."""
-    if db_pool is None:
-        return None
-    try:
-        async with db_pool.acquire() as conn:
-            target = await conn.fetchrow("SELECT id FROM targets WHERE url = $1", target_url)
-            if not target:
-                return None
-            standing = await target_authorization.current_target_authorization(conn, target["id"])
-    except Exception:  # resolution is a convenience; the gate below still decides
-        return None
-    return str(standing["approval_receipt_id"]) if standing else None
 
 
 async def _validate_approval_receipt_for_action(

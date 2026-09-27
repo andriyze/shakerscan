@@ -46,6 +46,22 @@ export function targetWithResolvedHost(target: string, fallback: DnsFallbackLike
   }
 }
 
+// Historical targets may retain their original hostname and ID. Submit that stored name so
+// admission can keep its standing authorization; only a newly registered twin is submitted
+// under the live hostname directly.
+export function targetForRegisteredDnsFallback(
+  submitted: string, registeredUrl: string, fallback: DnsFallbackLike,
+): string {
+  try {
+    const registeredHost = new URL(registeredUrl).hostname.toLowerCase()
+    if (registeredHost === fallback.requested_host.toLowerCase()) return submitted
+    if (registeredHost === fallback.resolved_host.toLowerCase()) {
+      return targetWithResolvedHost(submitted, fallback)
+    }
+  } catch { /* Leave the submitted name for server validation. */ }
+  return submitted
+}
+
 // One sentence for a finished discovery run, naming names skipped for having no address record.
 export function discoveryOutcomeMessage(rootDomain: string, run: DiscoveryOutcomeLike): { kind: 'success' | 'info' | 'error'; message: string } {
   if (run.status === 'failed') {

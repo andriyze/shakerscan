@@ -140,8 +140,10 @@ def test_scan_submission_resolves_the_targets_standing_authorization(monkeypatch
 
     monkeypatch.setattr(api_module, "db_pool", _Pool())
     monkeypatch.setattr(api_module.target_authorization, "current_target_authorization", current)
-    assert asyncio.run(api_module._standing_authorization_for_target_url("https://app.example.test")) == "standing-1"
-    assert asyncio.run(api_module._standing_authorization_for_target_url("https://unknown.example.test")) is None
+    assert asyncio.run(api_module.target_dns_alias.standing_authorization_for_target_url(
+        api_module.db_pool, "https://app.example.test")) == "standing-1"
+    assert asyncio.run(api_module.target_dns_alias.standing_authorization_for_target_url(
+        api_module.db_pool, "https://unknown.example.test")) is None
     assert api_module._policy_requests_active_testing({"active_testing": True}) is True
     assert api_module._policy_requests_active_testing({"active_testing": False}) is False
     assert api_module._policy_requests_active_testing(None) is False
@@ -382,6 +384,16 @@ def test_arsenal_approval_revocation_is_irreversible_and_public(monkeypatch):
     approval_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):
+            class Transaction:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Transaction()
+
         async def fetchrow(self, query, *args):
             assert "UPDATE approval_receipts" in query
             assert args == (approval_id, "release-e2e", "authority no longer valid")
@@ -20586,6 +20598,7 @@ def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monke
     import target_resolution
 
     inserted: list[tuple] = []
+    authorized: list[tuple] = []
 
     class Conn:
         def transaction(self):
@@ -20599,6 +20612,8 @@ def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monke
             return _Tx()
 
         async def fetchrow(self, query, *args):
+            if "FROM targets WHERE canonical_key=$1" in query:
+                return None
             inserted.append(args)
             return {
                 "id": uuid.uuid4(),
@@ -20619,8 +20634,14 @@ def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monke
     monkeypatch.setattr(target_resolution, "system_lookup", lookup)
     monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
 
+    async def authorize(_conn, target_id, *, approved_by, environment):
+        authorized.append((target_id, approved_by, environment))
+        return {"approval_receipt_id": "standing-for-www"}
+
+    monkeypatch.setattr(api_module.target_authorization, "authorize_target", authorize)
+
     response = asyncio.run(api_module.create_target(
-        types.SimpleNamespace(url="example.com", name=None, scan_options={})
+        types.SimpleNamespace(url="example.com", name=None, scan_options={}, authorized_by="operator")
     ))
 
     assert inserted[0][0] == "https://www.example.com"
@@ -20629,6 +20650,51 @@ def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monke
     assert response["dns_fallback"]["resolved_host"] == "www.example.com"
     assert response["notice"] == "example.com has no address record; using www.example.com."
     assert response["requested_url"] == "example.com"
+    assert response["authorization"]["approval_receipt_id"] == "standing-for-www"
+    assert authorized == [(uuid.UUID(response["id"]), "operator", "production")]
+
+
+def test_create_target_reuses_an_existing_dead_host_identity_for_its_www_twin(monkeypatch):
+    import socket
+    import target_resolution
+
+    existing_id = uuid.uuid4()
+
+    class Conn:
+        def transaction(self):
+            class Transaction:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            assert "FROM targets WHERE canonical_key=$1" in query, "the live twin must not create a second row"
+            assert args == ("web:example.com",)
+            return {
+                "id": existing_id, "url": "https://example.com", "name": None,
+                "discovery_source": "manual", "metadata_json": {},
+                "root_domain": "example.com", "is_root": True, "created": False,
+            }
+
+    async def lookup(hostname):
+        if hostname == "www.example.com":
+            return ["93.184.215.14"]
+        raise socket.gaierror(socket.EAI_NONAME, "no address")
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    response = asyncio.run(api_module.create_target(
+        types.SimpleNamespace(url="example.com", name=None, scan_options={})
+    ))
+    assert response["id"] == str(existing_id)
+    assert response["url"] == "https://example.com"
+    assert response["status"] == "already_exists"
+    assert response["dns_fallback"]["resolved_host"] == "www.example.com"
+    assert response.get("origin_merged") is None
 
 
 def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fails(monkeypatch):
@@ -20692,12 +20758,14 @@ def _scan_submission_target(monkeypatch, table, *, stored_metadata=None, target=
 
     class Conn:
         async def fetchrow(self, query, *args):
-            assert query == "SELECT metadata_json FROM targets WHERE url = $1"
+            if query == "SELECT id FROM targets WHERE canonical_key = $1":
+                return None
+            assert query == "SELECT metadata_json FROM targets WHERE canonical_key = $1"
             return {"metadata_json": stored_metadata} if stored_metadata is not None else None
 
     bound: list[str] = []
 
-    async def standing(url):
+    async def standing(_pool, url):
         bound.append(url)
         raise _StopAtAuthorization
 
@@ -20707,7 +20775,7 @@ def _scan_submission_target(monkeypatch, table, *, stored_metadata=None, target=
     monkeypatch.setattr(target_resolution, "system_lookup", lookup)
     monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
     monkeypatch.setattr(api_module, "get_redis", lambda: object())
-    monkeypatch.setattr(api_module, "_standing_authorization_for_target_url", standing)
+    monkeypatch.setattr(api_module.target_dns_alias, "standing_authorization_for_target_url", standing)
     with pytest.raises(_StopAtAuthorization):
         asyncio.run(api_module._submit_scan(api_module.ScanRequest(
             target=target, policy={"active_testing": True},

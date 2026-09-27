@@ -51,6 +51,7 @@ try:
     import invariant_contracts
     import target_authorization
     import target_resolution
+    import target_dns_alias
     import invariant_proposals
     import parallel_scan
     from redaction import is_sensitive_key
@@ -95,6 +96,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import asm_inventory, check_registry, invariant_contracts, invariant_proposals, parallel_scan
     from .. import target_authorization
     from .. import target_resolution
+    from .. import target_dns_alias
     from ..runtime.credential_migration import (
         LegacyCredentialMigrationError, sync_legacy_web_credential,
         sync_legacy_web_credential_by_name,
@@ -668,6 +670,7 @@ async def create_target(request: TargetCreate):
         raise HTTPException(status_code=400, detail=str(e))
     if not normalized_target:
         raise HTTPException(status_code=400, detail="Invalid target URL")
+    original_target = normalized_target
     # example.com that publishes no address record while www.example.com does (or the reverse)
     # would otherwise become a target whose every Scan is refused. Register the name that
     # resolves and say so; a resolver fault or a twin that does not resolve changes nothing.
@@ -679,10 +682,10 @@ async def create_target(request: TargetCreate):
     dns_fallback = await target_resolution.prefer_resolving_twin(
         normalized_target, environment_of=_creation_environment,
     )
-    requested_url = request.url
+    requested_url = normalized_target
     if dns_fallback:
         normalized_target = dns_fallback["resolved_url"]
-        requested_url = target_resolution.replace_host(request.url, dns_fallback["resolved_host"])
+        requested_url = normalized_target
     root_domain = extract_root_domain(normalized_target)
     is_root = is_root_domain(normalized_target)
 
@@ -696,17 +699,21 @@ async def create_target(request: TargetCreate):
                 # Canonical find-or-create: a scheme/trailing-slash variant of an existing
                 # origin reuses that target instead of creating a duplicate. xmax = 0 is
                 # true only for a freshly INSERTed row, so we can report created vs reused.
-                row = await conn.fetchrow("""
+                row = await target_dns_alias.existing_registration_for_dns_alias(
+                    conn, original_target, normalized_target,
+                ) if dns_fallback else None
+                if row is None:
+                    row = await conn.fetchrow("""
                     INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
                     RETURNING id, url, name, discovery_source, metadata_json,
                               root_domain, is_root, (xmax = 0) AS created
-                """, normalized_target, request.name, root_domain, is_root,
-                     json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
-                     json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
-                     _default_asm_enabled_for_new_web_target("manual"),
-                     json.dumps(_default_asm_config_for_new_web_target("manual")))
+                    """, normalized_target, request.name, root_domain, is_root,
+                         json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                         json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
+                         _default_asm_enabled_for_new_web_target("manual"),
+                         json.dumps(_default_asm_config_for_new_web_target("manual")))
 
                 response = {
                     'id': str(row['id']),
@@ -737,6 +744,8 @@ async def create_target(request: TargetCreate):
                     response['dns_fallback'] = dns_fallback
                     response['requested_url'] = request.url
                     response['notice'] = dns_fallback['message']
+                    if row['url'] == original_target:
+                        requested_url = original_target
                 if not scope_origin_matches_target(requested_url, row['url']):
                     response['origin_merged'] = True
                     response['requested_url'] = request.url

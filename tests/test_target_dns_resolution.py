@@ -99,7 +99,8 @@ def test_address_literals_never_reach_the_resolver():
         ("www.example.com", "example.com"),
         ("WWW.Example.com.", "example.com"),
         ("www.example.co.uk", "example.co.uk"),
-        ("api.example.com", None),
+        ("example.co.uk", "www.example.co.uk"),
+        ("api.example.com", "www.api.example.com"),
         ("juice-shop", None),
         ("www.com", None),
         ("203.0.113.9", None),
@@ -108,6 +109,12 @@ def test_address_literals_never_reach_the_resolver():
 )
 def test_www_twin(host, twin):
     assert target_resolution.www_twin(host) == twin
+
+
+def test_dns_alias_lookup_uses_the_targets_table_host_and_port_identity():
+    assert target_resolution.canonical_web_key("https://example.com") == "web:example.com"
+    assert target_resolution.canonical_web_key("http://example.com:80") == "web:example.com"
+    assert target_resolution.canonical_web_key("https://example.com:8443") == "web:example.com:8443"
 
 
 def test_the_message_names_the_host_and_the_twin_that_works():

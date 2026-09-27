@@ -592,10 +592,16 @@ domain via Gungnir, Subfinder, and crt.sh, then upserts discovered hosts as targ
 resolved first (bounded concurrency, short timeout); a name the resolver says has no A/AAAA record
 is not added and is reported in the run's `resolution` (`GET /discovery/{id}`), while a name the
 resolver could not judge is still added. Adding a target (`POST /targets`) or submitting a Scan
-(`POST /scans`, `/scans/batch`, `/targets/{id}/scan`, `shakerscan scan`) for a bare or `www.` name
+(`POST /scans`, `/scans/batch`, `/targets/{id}/scan`, `shakerscan scan`) for a name
 with no address record uses its www/apex twin when that twin resolves to an address the destination
 policy admits in the requested target's environment; the response carries `dns_fallback`/`notice`,
-and authorization and scope bind to the twin. Otherwise Scan admission names the non-resolving host.
+and execution and scope bind to the twin. Re-adding an existing dead-host target reuses its row;
+Scan admission also keeps that target's ID and
+target-bound state; executable credentials and collections still pass their own origin and
+admission checks. Its current standing authorization yields an auditable
+scope receipt for the exact pair, without a second operator confirmation; bounded or unrelated
+receipts are not copied. This also works for multi-label suffixes such as `example.co.uk`. Otherwise
+Scan admission names the non-resolving host.
 
 **Certificate Transparency monitoring (Gungnir)** (`api/gungnir_worker.py`): a long-running worker
 that watches CT logs in real time, discovering new certificates for monitored domains. New subdomains

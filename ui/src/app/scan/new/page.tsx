@@ -29,7 +29,7 @@ import {
 } from '@/components/RequestCollectionPicker'
 import { scanScopeEnvironment, validateScanTarget } from '@/lib/targetValidation'
 import { usableWebTargets } from '@/lib/targetChoices'
-import { targetWithResolvedHost } from '@/lib/targetDns'
+import { targetForRegisteredDnsFallback } from '@/lib/targetDns'
 
 const BUDGETS: Array<{ value: ScanBudgetProfile; label: string; description: string; limits: string }> = [
   { value: 'fast', label: 'Fast', description: 'Quick feedback for routine checks.', limits: '30 min · 5,000 requests' },
@@ -411,7 +411,7 @@ export default function NewScanPage() {
           // Registered under its www/apex twin because the typed name has no address record:
           // scan the name that was registered and authorized, not the one that cannot resolve.
           if (registered?.dns_fallback && !batchMode) {
-            singleTarget = targetWithResolvedHost(singleTarget, registered.dns_fallback)
+            singleTarget = targetForRegisteredDnsFallback(singleTarget, registered.url, registered.dns_fallback)
             if (registered.notice) toast.info(registered.notice)
           }
         }

@@ -118,8 +118,9 @@ async def lookup_host(
 def www_twin(hostname: str) -> str | None:
     """``www.example.com`` for ``example.com`` and the reverse; None for anything else.
 
-    Only the apex (two labels, the engine's notion of a root domain) gains ``www.``; only a
-    ``www.`` name with at least two labels after it loses it. ``api.example.com`` has no twin.
+    The pair differs by exactly one leading ``www.`` label. This also handles registrable
+    names under multi-label public suffixes, such as ``example.co.uk``, without relying on a
+    guessed two-label root. No other sibling name is considered.
     """
     host = _clean_host(hostname)
     if not host or _is_address_literal(host):
@@ -129,7 +130,7 @@ def www_twin(hostname: str) -> str | None:
         return None
     if labels[0] == "www" and len(labels) >= 3:
         return ".".join(labels[1:])
-    if len(labels) == 2 and labels[0] != "www":
+    if len(labels) >= 2 and labels[0] != "www":
         return f"www.{host}"
     return None
 
@@ -175,6 +176,16 @@ def replace_host(value: str, hostname: str) -> str:
         (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
     )
     return rebuilt[2:] if scheme_less and rebuilt.startswith("//") else rebuilt
+
+
+def canonical_web_key(url: str) -> str:
+    """Match the targets table's host/port identity for a normalized HTTP(S) URL."""
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    port = parsed.port
+    if port in (None, 443 if parsed.scheme == "https" else 80):
+        return f"web:{host}"
+    return f"web:{host}:{port}"
 
 
 def policy_admits(environment: str) -> Callable[[str], bool]:
@@ -231,7 +242,9 @@ async def scan_target_dns_fallback(url: str, pool: Any) -> tuple[str, dict[str, 
             return "production"
         try:
             async with pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT metadata_json FROM targets WHERE url = $1", url)
+                row = await conn.fetchrow(
+                    "SELECT metadata_json FROM targets WHERE canonical_key = $1", canonical_web_key(url),
+                )
         except Exception:  # noqa: BLE001 -- unknown environment means the strict one
             return "production"
         metadata = (row or {}).get("metadata_json") if row else None

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { discoveryOutcomeMessage, scanStartFailureReasons, targetWithResolvedHost } from './targetDns.ts'
+import { discoveryOutcomeMessage, scanStartFailureReasons, targetForRegisteredDnsFallback, targetWithResolvedHost } from './targetDns.ts'
 import { getApiErrorMessage } from './apiConfig.ts'
 
 const DNS_REASON = 'www.tidyhelpers.com does not resolve in DNS (no A/AAAA record), so it cannot be scanned. tidyhelpers.com does resolve; use tidyhelpers.com instead.'
@@ -50,6 +50,13 @@ test('a target registered under its www twin is scanned under that name', () => 
   // Nothing to do without a fallback, or when the typed host is not the one that was replaced.
   assert.equal(targetWithResolvedHost('https://example.com', null), 'https://example.com')
   assert.equal(targetWithResolvedHost('https://other.example.org', fallback), 'https://other.example.org')
+})
+
+test('a historical target retains its URL so Scan admission reuses its ID and authorization', () => {
+  const fallback = { requested_host: 'example.com', resolved_host: 'www.example.com' }
+  assert.equal(targetForRegisteredDnsFallback('example.com', 'https://example.com', fallback), 'example.com')
+  assert.equal(targetForRegisteredDnsFallback('example.com', 'https://www.example.com', fallback), 'www.example.com')
+  assert.equal(targetForRegisteredDnsFallback('example.com', 'https://other.test', fallback), 'example.com')
 })
 
 test('a finished discovery says how many names were skipped for having no address record', () => {
