@@ -1466,6 +1466,17 @@ concurrency-limited with per-tool timeouts and a global deadline.
 - **Bounded automation**: passive recon and ASM new-surface tracking can be safe-on by default;
   active exploitation uses small safe batches and requires an explicit Lab/deep policy for deep
   exploit mode. Rate tokens are reserved before active work is queued.
+- **Destination classes**: cloud metadata/platform-service addresses (169.254.169.254 and
+  equivalents), link-local, multicast, unspecified and broadcast addresses are never scanned, under
+  any setting or environment. Loopback, private (RFC1918, unique-local) and reserved addresses are
+  admitted in Lab environments, and elsewhere only when the deployment admits private-network
+  targets with `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` (set on the API and the workers). It is a
+  switch, not a range list: `allow`, `allowed`, `true`, `1`, `yes` or `on` admit; unset admits (the
+  OSS default); any other value, including a CIDR, refuses. The Enterprise gateway passes `refuse`
+  unless its operator chooses `allow` (`prepare --private-network-targets allow`). The `internal`
+  cohort classifies a target; it does not by itself admit a private address. `/health` reports the setting, every admission it makes is
+  recorded on the scope receipt (`allowed_by_deployment_policy`), and a refusal names the class
+  and, where one exists, the setting that would admit it.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing

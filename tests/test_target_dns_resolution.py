@@ -323,7 +323,9 @@ def test_the_destination_policy_is_unchanged(monkeypatch):
     """A name resolving only to the metadata address is refused exactly as before."""
     _patch_system_resolver(monkeypatch, {"meta.example.com": ["169.254.169.254"]})
     assert _admission_detail("https://meta.example.com") == (
-        "Scan target resolves only to addresses this deployment does not allow"
+        "Scan target resolves only to addresses this deployment does not allow: "
+        "169.254.169.254 is a cloud metadata or platform-service address, which is never "
+        "scanned in any environment."
     )
 
 
