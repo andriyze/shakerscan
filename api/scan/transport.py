@@ -195,7 +195,10 @@ def selected_origin(observations: Sequence[Mapping[str, Any]]) -> str | None:
 def transport_summary(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Content-free record of the probe for the report: attempts and the selection."""
     attempts = [
-        {**dict(row["transport_probe"]), "origin": http_origin(str(row["transport_probe"].get("origin") or ""))}
+        {
+            **dict(row["transport_probe"]),
+            "origin": http_origin(str(row["transport_probe"].get("origin") or "")),
+        }
         for row in observations
         if isinstance(row, Mapping) and isinstance(row.get("transport_probe"), Mapping)
     ]

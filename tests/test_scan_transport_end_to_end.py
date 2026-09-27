@@ -232,7 +232,8 @@ class Backend:
                 owner_id=self.plan.scan_id, action_id=action.action_id,
                 capability_name=action.capability_name, output_schema=action.output_schema,
                 observation_count=count, content_sha256=hashlib.sha256(payload).hexdigest(),
-                size_bytes=len(payload) if count else 0, object_key=f"scans/{self.plan.scan_id}/{action.action_id}.jsonl",
+                size_bytes=len(payload) if count else 0,
+                object_key=f"scans/{self.plan.scan_id}/{action.action_id}.jsonl",
             ).reference()
         consumed = dict(receipt.budget_consumed) if receipt is not None else {}
         return CapabilityResultReference(
@@ -262,7 +263,9 @@ class Backend:
             "skipped": (CapabilityResultStatus.SKIPPED, CapabilityResultReason.NOT_APPLICABLE),
             "blocked": (CapabilityResultStatus.BLOCKED, CapabilityResultReason.ADAPTER_FAILED),
         }.get(raw, (CapabilityResultStatus.FAILED, CapabilityResultReason.ADAPTER_FAILED))
-        self.receipts[action.action_id] = {"observations": [dict(item) for item in receipt.observations]}
+        self.receipts[action.action_id] = {
+            "observations": [dict(item) for item in receipt.observations],
+        }
         result = self._reference(action, status=status, reason=reason, receipt=receipt)
         # As in PostgreSQL: only a manifest-bound (successful or partial) result exposes its
         # observations; a failed action's evidence stays on its receipt.
@@ -482,7 +485,7 @@ def test_an_explicit_http_origin_that_only_redirects_to_https_is_not_examined(mo
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_a_scheme_less_target_whose_http_redirects_to_https_is_examined_on_https(monkeypatch, route):
+def test_scheme_less_target_whose_http_redirects_is_examined_on_https(monkeypatch, route):
     site = Site(**{
         "http://honey.example.com": ("redirect", "https://honey.example.com/"),
         "https://honey.example.com": "app",
