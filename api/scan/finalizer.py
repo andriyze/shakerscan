@@ -1455,11 +1455,11 @@ def finalize_scan_report(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
     plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
-    transport_evidence: Sequence[Mapping[str, Any]] = (),
+    origin_evidence: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build the final report without network, process, filesystem, or clock access.
 
-    ``transport_evidence`` carries the probe attempts of a failed ``transport.resolve``:
+    ``origin_evidence`` carries the probe attempts of a failed ``origin.select``:
     a failed action has no observation manifest, yet its refused connections are exactly
     what the report must show when the application could not be examined.
     """
@@ -1857,9 +1857,22 @@ def finalize_scan_report(
     application_forwarded_off_origin = (
         bool(http_posture.get("application_origin_redirect")) and redirect_without_application
     )
+    inferred_origin_unreachable = (
+        not http_posture.get("posture_observed")
+        and not application_proof_observed
+        and any(
+            isinstance(row, Mapping)
+            and row.get("kind") == "origin_selection_observation"
+            and not row.get("selected_origin")
+            and bool(row.get("attempts"))
+            for action_id, rows in observations.items()
+            if action_id.startswith("origin.select")
+            for row in rows
+        )
+    )
     risk_assessment_state = (
         "not_examined"
-        if redirect_without_application
+        if redirect_without_application or inferred_origin_unreachable
         else "observed"
         if http_posture.get("posture_observed") is True or application_proof_observed
         else "not_examined"
@@ -2106,7 +2119,7 @@ def finalize_scan_report(
     from .reachability import apply_reachability_outcome
     apply_reachability_outcome(
         report, action_results=action_results, observations=observations,
-        transport_evidence=transport_evidence,
+        origin_evidence=origin_evidence,
     )
     withhold_unexamined_grade(report)
     mark_unexamined_coverage(report)

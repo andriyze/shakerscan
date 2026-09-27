@@ -33,9 +33,7 @@ def with_authentication_health(blueprints, credentials, registry):
     result, previous = [], ()
     for row in blueprints:
         spec = registry.require(row.capability_name)
-        # The transport probe is anonymous and chooses the origin every health sample then
-        # uses; it carries no identity, so it is neither sampled nor serialized behind one.
-        if spec.credential_transport == "not_used" or row.action_id == "transport.resolve":
+        if spec.credential_transport == "not_used":
             if row.capability_name == "scan.finalize":
                 row = replace(row, dependencies=tuple(item.action_id for item in result))
             result.append(row)

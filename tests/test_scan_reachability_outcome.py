@@ -96,3 +96,18 @@ def test_empty_completed_shards_do_not_hide_failed_backbone_reachability():
         report = {"result": {"score": 80}}
         assert fail_unreachable_parallel_report(report, children + [extra]) is False
         assert "error" not in report
+
+
+def test_failed_origin_selection_receipt_keeps_attempts_and_withholds_grade():
+    report = {"result": {"score": 100, "grade": "A"}, "findings": []}
+    result = SimpleNamespace(status=SimpleNamespace(value="failed"))
+    evidence = ({"kind": "origin_selection_observation", "selected_origin": None,
+                 "attempts": [{"origin": "https://app.example.test", "reachable": False},
+                              {"origin": "http://app.example.test", "reachable": False}]},)
+    apply_reachability_outcome(report, action_results={"origin.select": result},
+                               observations={}, origin_evidence=evidence)
+    assert report["reachability"]["status"] == "unavailable"
+    assert report["reachability"]["transport"]["attempts"] == evidence[0]["attempts"]
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["score"] is None
+    assert report["coverage"]["status"] == "failed"

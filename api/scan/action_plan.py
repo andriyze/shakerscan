@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import hashlib
 import json
 import re
@@ -33,15 +33,9 @@ try:
     from runtime.browser_login_contract import browser_login_action_arguments
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import browser_login_action_arguments
-from .capability_execution import scan_discovery_reservation
+from .capability_execution import SCAN_BASE_ORIGIN_CAPABILITIES, scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
-from .transport import (
-    TRANSPORT_ACTION_ID,
-    TRANSPORT_STAGE,
-    binding_admits_both_schemes,
-    transport_probe_budget,
-)
 from .work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
     ScanWorkManifestError,
@@ -1004,6 +998,7 @@ class ScanActionPlanCompiler:
         lane_refs = {str(item.get("lane") or ""): item for item in credentials}
 
         blueprints: list[_ActionBlueprint] = []
+        origin_resolution_required = bool(target_binding.inferred_origins)
 
         def add(
             action_id: str,
@@ -1015,10 +1010,13 @@ class ScanActionPlanCompiler:
             required: bool = False,
             supporting: bool = False,
         ) -> None:
+            if origin_resolution_required and capability_name in SCAN_BASE_ORIGIN_CAPABILITIES:
+                dependencies = (*dependencies, "origin.select")
             def round_id(value: str) -> str:
                 if (
                     continuation_round < 1
                     or value == "finalize.report"
+                    or value == "origin.select"
                     or value.startswith(("inputs.auth_", "inputs.collection_"))
                 ):
                     return value
@@ -1034,6 +1032,12 @@ class ScanActionPlanCompiler:
                 required=required,
                 supporting=supporting,
             ))
+
+        if origin_resolution_required:
+            add(
+                "origin.select", "resolve_inputs", "scan.origin_select",
+                {"origins": list(target_binding.inferred_origins)}, required=True,
+            )
 
         try:
             browser_actions = browser_login_action_arguments(
@@ -1281,8 +1285,6 @@ class ScanActionPlanCompiler:
             override = dict(action_budgets or {}).get(blueprint.action_id)
             if override is not None:
                 return override
-            if blueprint.action_id == TRANSPORT_ACTION_ID:
-                return transport_probe_budget()
             if blueprint.capability_name in _BATCH_CAPABILITIES:
                 shaped = slice_shapes.get(_ROUND_SUFFIX.sub("", blueprint.action_id))
                 if shaped is not None:
@@ -1913,23 +1915,6 @@ class ScanActionPlanCompiler:
                     *(() if endpoint_ref else discovery_dependencies),
                 ))),
                 required="bola" in explicitly_requested,
-            )
-
-        # A target entered without a scheme is frozen for HTTP and HTTPS. Which of them serves
-        # the application is decided once, during execution, by a bounded probe that every
-        # other root action waits for (scan/transport.py). Continuation rounds inherit the
-        # round-zero decision rather than probing again.
-        if continuation_round == 0 and blueprints and binding_admits_both_schemes(target_binding):
-            blueprints[:] = [
-                row if row.dependencies else replace(row, dependencies=(TRANSPORT_ACTION_ID,))
-                for row in blueprints
-            ]
-            add(
-                TRANSPORT_ACTION_ID,
-                TRANSPORT_STAGE,
-                "http.request",
-                {"method": "GET", "path": "/", "follow_redirects": False, "transport_probe": True},
-                required=True,
             )
 
         if include_finalizer:

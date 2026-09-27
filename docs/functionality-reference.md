@@ -166,11 +166,11 @@ afterward; unused profile capacity remains visibly unallocated.
 entered. A target entered without a scheme (`example.com`, `example.com:8080`) is admitted for both
 schemes on that authority, through `POST /scans` and `POST /targets/{id}/scan` alike (the target
 route resubmits the stored target in its scheme-less form). Its plan then starts with
-`transport.resolve`: one read-only `GET /` per frozen origin, HTTPS first, stopping at the first
-origin that serves the application, under its own budget reservation and receipt. Every other action
+`scan.origin_select`: one read-only `GET /` per frozen origin, HTTPS first, stopping at the first
+origin that responds, under its own budget reservation and receipt. Every other action
 waits for it and runs against the origin it selected; it never follows a redirect or changes host.
 When no frozen origin answers, nothing is selected: dependent actions are blocked and the report says
-the application was not examined, with the refused attempts under `reachability.transport`.
+the application was not examined, with the attempted origins in the reachability evidence.
 
 **Examined, or not.** A run whose application was not examined -- an explicit `http://` origin
 that only redirects to `https://` on the same host, an origin that answers only redirects or
@@ -204,6 +204,13 @@ Admission creates a content-addressed `scan-action-plan/v1` DAG. Every action re
 capability, dependencies, target/input digests, requested budget, placement requirements, output
 schema, and required/supporting classification. Capability arguments cannot carry secret fields,
 shell commands, or planner-supplied argv.
+
+When the operator omitted the scheme, admission freezes HTTP and HTTPS for the execution host
+selected by the bounded apex/`www` DNS fallback. The registered target ID and authorization stay
+attached to that asset. A required `scan.origin_select` action then probes only those frozen
+origins, meters both attempts, and records the reachable origin before base-URL actions run.
+An explicit scheme remains exact; if neither inferred origin responds, application examination
+is incomplete and the failed attempts remain evidence.
 
 The root plan closes deterministic prerequisites in this order:
 

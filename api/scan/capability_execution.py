@@ -323,12 +323,67 @@ def scan_sqli_verification_capability_allocation(
     }
 
 
+# Preference when a scheme-less target admits more than one frozen origin. A target
+# typed without a scheme is admitted for both (``_freeze_scan_target_binding``); HTTPS
+# is tried first, as the normalizer does when it infers ``https://``.
+_INFERRED_SCHEME_PREFERENCE = ("https", "http")
+
+# Actions that consume the Scan's selected base origin. Request manifests and
+# selected credential services carry their own exact origins and remain usable.
+SCAN_BASE_ORIGIN_CAPABILITIES = frozenset({
+    "http.request", "web.probe", "web.crawl", "web.browser_crawl",
+    "web.content_discover", "templates.scan", "templates.passive_scan",
+    "xss.verify", "sqli.verify", "authz.verify",
+})
+
+
+def _inferred_scheme_target(target_url: str, *, target: TargetBinding) -> str | None:
+    """The exact frozen origin for a bare ``host[:port]`` runtime target, or None.
+
+    A target entered without a scheme is materialized for the worker as its bare
+    authority (``scan.job_runtime._runtime_target``). External tools still need one
+    absolute origin, and the only authority for choosing it is the frozen binding: the
+    origin is taken from ``allowed_origins``, never invented, and the caller still
+    checks it against the binding's canonical host. A bare target can reach exactly the
+    origins admission froze and nothing else.
+    """
+    text = str(target_url or "").strip()
+    if not text or "://" in text:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(f"//{text}")
+        _ = parsed.port
+    except ValueError:
+        return None
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return None
+    if parsed.username or parsed.password or not parsed.hostname:
+        return None
+    authority = parsed.netloc.lower()
+    for scheme in _INFERRED_SCHEME_PREFERENCE:
+        origin = f"{scheme}://{authority}"
+        if origin in target.allowed_origins:
+            return origin
+    return None
+
+
 def scan_external_execution_target(
     target_url: str,
     *,
     target: TargetBinding,
 ) -> str:
     """Bind an external web tool to one exact frozen Scan origin."""
+    raw = str(target_url or "").strip()
+    if target.inferred_origins and raw and "://" not in raw:
+        raise ScanCapabilityContractError(
+            "scheme-inferred Scan target requires its measured origin selection"
+        )
+    inferred = _inferred_scheme_target(raw, target=target)
+    if inferred is None and raw and "://" not in raw:
+        raise ScanCapabilityContractError(
+            "external Scan target has no scheme and no frozen origin"
+        )
+    target_url = inferred or target_url
     try:
         parsed = urllib.parse.urlsplit(str(target_url or "").strip())
         _ = parsed.port

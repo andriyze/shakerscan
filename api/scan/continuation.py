@@ -617,7 +617,7 @@ def merge_scan_action_continuation(
             continue
         if action.action_id in parent_ids:
             if action.action_id.startswith((
-                "inputs.auth_", "inputs.collection_",
+                "inputs.auth_", "inputs.collection_", "origin.select",
             )):
                 parent_action = parent_by_id[action.action_id]
                 if (
@@ -627,14 +627,14 @@ def merge_scan_action_continuation(
                     != parent_action.target_binding_digest
                 ):
                     raise ScanContinuationError(
-                        "continuation changed credential or collection authority: "
+                        "continuation changed credential or collection or origin authority: "
                         f"{action.action_id}"
                     )
                 continue
             raise ScanContinuationError(
                 f"continuation action duplicates parent authority: {action.action_id}"
             )
-        if action.action_id.startswith(("inputs.auth_", "inputs.collection_")):
+        if action.action_id.startswith(("inputs.auth_", "inputs.collection_", "origin.select")):
             raise ScanContinuationError(
                 f"continuation introduced new private input authority: {action.action_id}"
             )

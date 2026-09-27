@@ -553,7 +553,7 @@ def target_binding_from_payload(value: Any) -> TargetBinding:
     if not isinstance(value, Mapping):
         raise CanonicalScanJobError("target must be an object")
     raw = dict(value)
-    _exact_keys(raw, _TARGET_KEYS, name="target")
+    _exact_keys(raw, _TARGET_KEYS | ({"inferred_origins"} if "inferred_origins" in raw else set()), name="target")
     for name in ("allowed_origins", "allowed_addresses", "allowed_root_domains"):
         if not isinstance(raw[name], list) or len(raw[name]) > 256:
             raise CanonicalScanJobError(f"target.{name} must be a bounded array")
@@ -569,6 +569,7 @@ def target_binding_from_payload(value: Any) -> TargetBinding:
             scope_receipt_id=_optional_receipt(
                 raw["scope_receipt_id"], name="target.scope_receipt_id"
             ),
+            inferred_origins=tuple(raw.get("inferred_origins") or ()),
         )
     except (TypeError, ValueError) as exc:
         raise CanonicalScanJobError(f"target binding is invalid: {exc}") from exc

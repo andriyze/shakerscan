@@ -106,6 +106,30 @@ def test_full_plan_does_not_schedule_unreviewed_external_intelligence():
     }
 
 
+def test_scheme_inferred_plan_reserves_selection_before_base_http_work():
+    target = TargetBinding(
+        target_id=_target().target_id,
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+        scope_receipt_id=_target().scope_receipt_id,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("recon",), active=False),
+        target_binding=target,
+    )
+    selection = next(action for action in plan.actions if action.action_id == "origin.select")
+    assert selection.capability_name == "scan.origin_select"
+    assert selection.requested_budget["http_requests"] == 2
+    for action_id in ("baseline.http", "discover.web_probe"):
+        action = next(action for action in plan.actions if action.action_id == action_id)
+        assert "origin.select" in action.dependencies
+
+
 def test_large_manifest_compiles_to_bounded_batch_graph():
     endpoint_ref = ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000083",
@@ -376,10 +400,7 @@ def test_passive_scan_compiles_bounded_read_only_surface_discovery():
     assert by_id["passive.templates"].capability_name == (
         "templates.passive_batch"
     )
-    # The fixture binding froze HTTP and HTTPS (a target entered without a scheme), so every
-    # root action waits for transport.resolve to choose the origin it will run against.
-    assert by_id["passive.templates"].dependencies == ("transport.resolve",)
-    assert by_id["transport.resolve"].dependencies == ()
+    assert by_id["passive.templates"].dependencies == ()
     assert by_id["passive.templates"].capability_args["target_ref"] == (
         "canonical_origin"
     )
@@ -604,10 +625,7 @@ def test_shard_action_scopes_assign_global_and_endpoint_work_without_duplicates(
     } == {
         "auth.session.establish", "xss.verify_batch",
         "xss.browser_prove_batch", "scan.finalize",
-        # transport.resolve: the shard's binding froze both schemes, so it chooses its origin.
-        "http.request",
     }
-    assert endpoint_by_id["transport.resolve"].capability_name == "http.request"
     assert {"inputs.auth_primary", "prove.xss", "finalize.report"} <= set(endpoint_by_id)
     xss_actions = [
         action for action in endpoint.actions

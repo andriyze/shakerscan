@@ -71,6 +71,7 @@ def _action(
     *,
     dependencies=(),
     capability_args=None,
+    target=TARGET,
 ) -> ScanAction:
     spec = CAPABILITY_REGISTRY.require(capability)
     return ScanAction(
@@ -83,7 +84,7 @@ def _action(
             if capability_args is not None
             else {"report_only": True} if action_id == "finalize.report" else {}
         ),
-        target_binding_digest=TARGET.digest,
+        target_binding_digest=target.digest,
         input_binding_digest=str(ordinal + 1) * 64,
         requested_budget=dict(spec.budget_cost),
         placement={
@@ -125,13 +126,13 @@ class Backend:
 
 def _dispatcher(
     plan, backend, *, target=TARGET, policy=None, private_inputs=None,
-    private_replay_plan_loader=None, options=None,
+    private_replay_plan_loader=None, options=None, target_url="https://app.example.test/",
 ):
     async def process_runner(*_args, **_kwargs):
         raise AssertionError("process runner must not be used")
 
     return DatabaseNeutralScanActionDispatcher(
-        target_url="https://app.example.test/",
+        target_url=target_url,
         options=dict(options or {}),
         target=target,
         policy=policy or ScanPolicy(),
@@ -212,6 +213,38 @@ def _lease(plan, action):
         lease_seconds=60,
         attempt=1,
     )
+
+
+def test_dispatcher_selects_http_after_https_connection_failure(monkeypatch):
+    from scan import origin_selection
+
+    target = TargetBinding(
+        target_id=TARGET.target_id, target_kind="web", canonical_host=TARGET.canonical_host,
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=TARGET.allowed_addresses,
+        allowed_root_domains=TARGET.allowed_root_domains,
+    )
+    action = _action(
+        "origin.select", "scan.origin_select", 0,
+        capability_args={"origins": list(target.inferred_origins)}, target=target,
+    )
+    plan = ScanActionPlan(
+        scan_id=str(uuid.uuid4()), execution_plan_digest="a" * 64,
+        target_binding_digest=target.digest, actions=(action,),
+    )
+
+    async def request(origin, _args, *, target, **_kwargs):
+        if origin.startswith("https://"):
+            return {"ok": False, "request": {"origin": origin}, "error": "request_error:ConnectError"}
+        return {"ok": True, "request": {"origin": origin}, "response": {"status": 200}}
+
+    monkeypatch.setattr(origin_selection, "execute_bound_http_request", request)
+    dispatcher = _dispatcher(plan, Backend(), target=target, target_url="app.example.test")
+    receipt = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+    assert receipt.status == "success"
+    assert receipt.budget_consumed["http_requests"] == 2
+    assert dispatcher.target_url == "http://app.example.test/", receipt.observations
 
 
 def test_receipt_records_only_server_exercised_principal_context(monkeypatch):

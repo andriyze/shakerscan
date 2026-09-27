@@ -73,8 +73,8 @@ def _surface():
     }
 
 
-def _plans():
-    target = _target()
+def _plans(target=None):
+    target = target or _target()
     contract = resolve_scan_contract(
         budget_profile="balanced",
         policy={"active_testing": True, "preset": "passive", "include_families": ["xss"]},
@@ -202,6 +202,36 @@ def test_continuation_append_preserves_parent_and_binds_one_finalizer():
         and action.capability_args["candidate_manifest_ref"]["manifest_digest"]
         for action in amended.actions
     )
+
+
+def test_continuation_reuses_only_identical_origin_selection_authority():
+    target = TargetBinding(
+        target_id="target-continuation", target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.30",), allowed_root_domains=("example.test",),
+    )
+    parent, continuation, allocation = _plans(target)
+    merged = merge_scan_action_continuation(
+        parent_plan=parent, continuation_plan=continuation, allocation=allocation,
+    )
+    assert sum(action.action_id == "origin.select" for action in merged.actions) == 1
+
+    changed = ScanActionPlan(
+        scan_id=continuation.scan_id,
+        execution_plan_digest=continuation.execution_plan_digest,
+        target_binding_digest=continuation.target_binding_digest,
+        actions=tuple(
+            replace(action, capability_args={"origins": ["http://evil.example.test"]}, action_digest=None)
+            if action.action_id == "origin.select" else action
+            for action in continuation.actions
+        ),
+    )
+    with pytest.raises(ScanContinuationError, match="changed credential or collection or origin"):
+        merge_scan_action_continuation(
+            parent_plan=parent, continuation_plan=changed, allocation=allocation,
+        )
 
 
 def test_plan_revision_chain_is_reproducible_and_binds_discovery_receipts():

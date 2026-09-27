@@ -3,10 +3,18 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .transport import TRANSPORT_ACTION_ID, transport_summary
-
-
 _SOURCE = "canonical_capability_receipts"
+_ORIGIN_ACTION_ID = "origin.select"
+
+
+def _origin_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    for row in rows:
+        if row.get("kind") == "origin_selection_observation":
+            return {
+                "effective_origin": row.get("selected_origin"),
+                "attempts": list(row.get("attempts") or ()),
+            }
+    return None
 
 
 def _positive_evidence(report, observations) -> bool:
@@ -53,7 +61,7 @@ def _fail_unassessable(report: dict[str, Any]) -> None:
 def apply_reachability_outcome(
     report: dict[str, Any], *, action_results: Mapping[str, Any],
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
-    transport_evidence: Sequence[Mapping[str, Any]] = (),
+    origin_evidence: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     """Do not grade a failed preflight with no positive HTTP/TLS evidence.
 
@@ -61,18 +69,18 @@ def apply_reachability_outcome(
     establish reachability. Policy skips and cancellation retain their meaning.
     The projection is deterministic and runs before the final report is hashed.
     """
-    transport = transport_summary(
-        observations.get(TRANSPORT_ACTION_ID, ()) or tuple(transport_evidence)
+    transport = _origin_summary(
+        observations.get(_ORIGIN_ACTION_ID, ()) or tuple(origin_evidence)
     )
-    transport_result = action_results.get(TRANSPORT_ACTION_ID)
-    transport_status = getattr(getattr(transport_result, "status", None), "value", None)
+    origin_result = action_results.get(_ORIGIN_ACTION_ID)
+    origin_status = getattr(getattr(origin_result, "status", None), "value", None)
     if _positive_evidence(report, observations):
         report["reachability"] = {"status": "reachable", "source": _SOURCE}
         if transport:
             report["reachability"]["transport"] = transport
         return
-    if transport_status == "failed":
-        # No frozen origin answered the transport probe. The application was not examined;
+    if origin_status == "failed":
+        # No frozen origin answered the selector. The application was not examined;
         # the refused attempts are the evidence, and no origin was picked on its behalf.
         _fail_unassessable(report)
         report["reachability"]["transport"] = transport or {"effective_origin": None, "attempts": []}
