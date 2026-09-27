@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, notExaminedExplanation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -310,4 +310,34 @@ test('the server summary from the decision wins over the client fallback', () =>
   assert.equal(carriedOverFromDecision({ carried_over: null }), null)
   assert.equal(carriedOverFromDecision({}), null)
   assert.equal(carriedOverFromDecision(null), null)
+})
+
+test('an unreachable scheme-less target names the origins that did not answer', () => {
+  const text = notExaminedExplanation({
+    reachability: {
+      status: 'unavailable',
+      transport: {
+        effective_origin: null,
+        attempts: [
+          { origin: 'https://dark.example.com/', outcome: 'unreachable', error: 'request_error:ConnectError' },
+          { origin: 'http://dark.example.com/', outcome: 'unreachable', error: 'request_error:ConnectError' },
+        ],
+      },
+    },
+    coverage: { reasons: ['target_unreachable'] },
+  })
+  assert.match(text, /No origin of this target answered/)
+  assert.match(text, /https:\/\/dark\.example\.com \(request_error:ConnectError\)/)
+  assert.match(text, /http:\/\/dark\.example\.com \(request_error:ConnectError\)/)
+})
+
+test('a redirect-only origin says where the application is', () => {
+  const text = notExaminedExplanation({
+    coverage: {
+      reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'],
+      not_examined_reason: "the target redirects to https://honey.example.com, outside this scan's origin",
+    },
+    http: { status: 301 },
+  })
+  assert.match(text, /redirects to https:\/\/honey\.example\.com, outside this scan's origin/)
 })

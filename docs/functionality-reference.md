@@ -162,6 +162,23 @@ profile. `max_state_changing_requests=0` is an explicit deny ceiling. Every acti
 multi-dimensional hold before execution and reconciles consumed, released, or uncertain authority
 afterward; unused profile capacity remains visibly unallocated.
 
+**Target transport.** A target entered with `http://` or `https://` is scanned exactly as
+entered. A target entered without a scheme (`example.com`, `example.com:8080`) is admitted for both
+schemes on that authority, through `POST /scans` and `POST /targets/{id}/scan` alike (the target
+route passes the stored scheme-inference flag with its canonical URL). Its plan then starts with
+`scan.origin_select`: one read-only `GET /` per frozen origin, HTTPS first, stopping at the first
+origin that responds, under its own budget reservation and receipt. Every other action
+waits for it and runs against the origin it selected; it never follows a redirect or changes host.
+When no frozen origin answers, nothing is selected: dependent actions are blocked and the report says
+the application was not examined, with the attempted origins in the reachability evidence.
+
+**Examined, or not.** A run whose application was not examined -- an explicit `http://` origin
+that only redirects to `https://` on the same host, an origin that answers only redirects or
+errors -- withholds its grade and cannot report `complete` coverage: coverage is `partial` (or
+`failed` when the target was unreachable), its reasons include `application_not_observed`, and
+`coverage.not_examined_reason` says why (for example "the target redirects to https://host,
+outside this scan's origin").
+
 The server-generated `GET /scan/contracts` manifest is the public vocabulary for the UI and CLI.
 The complete REST shape is frozen in `docs/generated/public-openapi-manifest.json`: every OpenAPI
 operation ID, request/response schema digest, and component-schema digest is checked on API changes.
@@ -1473,6 +1490,17 @@ concurrency-limited with per-tool timeouts and a global deadline.
 - **Bounded automation**: passive recon and ASM new-surface tracking can be safe-on by default;
   active exploitation uses small safe batches and requires an explicit Lab/deep policy for deep
   exploit mode. Rate tokens are reserved before active work is queued.
+- **Destination classes**: cloud metadata/platform-service addresses (169.254.169.254 and
+  equivalents), link-local, multicast, unspecified and broadcast addresses are never scanned, under
+  any setting or environment. Loopback, private (RFC1918, unique-local) and reserved addresses are
+  admitted in Lab environments, and elsewhere only when the deployment admits private-network
+  targets with `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` (set on the API and the workers). It is a
+  switch, not a range list: `allow`, `allowed`, `true`, `1`, `yes` or `on` admit; unset admits (the
+  OSS default); any other value, including a CIDR, refuses. The Enterprise gateway passes `refuse`
+  unless its operator chooses `allow` (`prepare --private-network-targets allow`). The `internal`
+  cohort classifies a target; it does not by itself admit a private address. `/health` reports the setting, every admission it makes is
+  recorded on the scope receipt (`allowed_by_deployment_policy`), and a refusal names the class
+  and, where one exists, the setting that would admit it.
 - **Coverage honesty**: an endpoint is only counted `tested` when scanner telemetry proves it was
   attempted/completed; timeouts/partials never inflate coverage.
 - **Local binding**: laptop mode binds to `127.0.0.1`; remote mode binds to a Tailscale IP. Exposing
@@ -1623,7 +1651,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 393 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 122 | `scanner/scanner_tools/` |
+| Internal compatibility scanner modules | 123 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
@@ -2864,7 +2892,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

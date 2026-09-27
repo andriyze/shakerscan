@@ -3160,12 +3160,22 @@ class DatabaseNeutralScanActionDispatcher:
                 raise ScanActionAdapterError("finalization dependency is not terminal")
             results[planned.action_id] = stored
             observations[planned.action_id] = await self._observations(planned.action_id)
+        origin_evidence = observations.get("origin.select", ())
+        if not origin_evidence and "origin.select" in results:
+            load_receipt = getattr(self.backend, "load_action_receipt", None)
+            if load_receipt is not None:
+                receipt = await load_receipt("origin.select")
+                origin_evidence = tuple(
+                    row for row in receipt.get("observations", ())
+                    if isinstance(row, Mapping)
+                )
         report = finalize_scan_report(
             plan=self.plan,
             plan_revision=self.plan_revision,
             target_url=self.target_url,
             action_results=results,
             observations=observations,
+            origin_evidence=origin_evidence,
             work_manifest_references=unique_work_manifest_reference_dicts(
                 planned.capability_args for planned in self.plan.actions
             ),

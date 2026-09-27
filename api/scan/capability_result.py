@@ -53,6 +53,9 @@ class CapabilityResultReason(str, Enum):
     ADAPTER_FAILED = "adapter_failed"
     PARSER_FAILED = "parser_failed"
     OUTPUT_TRUNCATED = "output_truncated"
+    # A crawler's process tree reached its memory ceiling and was stopped; what it
+    # emitted before that is kept, so the action is partial for this reason.
+    CRAWLER_MEMORY_BOUND_EXCEEDED = "crawler_memory_bound_exceeded"
     MANIFEST_UNAVAILABLE = "manifest_unavailable"
     UNSUPPORTED_OUTPUT_SCHEMA = "unsupported_output_schema"
     NOT_APPLICABLE = "not_applicable"

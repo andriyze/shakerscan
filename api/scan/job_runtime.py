@@ -7,7 +7,6 @@ plan, target binding, opaque input references, and DNS snapshot still agree.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 from typing import Any, Mapping, Sequence
 import urllib.parse
@@ -17,6 +16,11 @@ try:
 except ModuleNotFoundError:  # package import through api.scan
     from ..runtime.models import TargetBinding
 
+from .runtime_dns import (
+    RUNTIME_DNS_REVALIDATION_OPTION,
+    RuntimeDnsRevalidationError,
+    revalidate_runtime_target_addresses,
+)
 from .jobs import (
     CanonicalScanJob,
     CanonicalScanJobError,
@@ -70,9 +74,15 @@ def materialize_canonical_scan_job(
     queue_payload: Mapping[str, Any],
     persisted_row: Mapping[str, Any],
     *,
-    resolved_addresses: Sequence[str],
+    resolved_addresses: Sequence[str] | None,
 ) -> dict[str, Any]:
-    """Validate a queue envelope and return the existing worker's private input shape."""
+    """Validate a queue envelope and return the existing worker's private input shape.
+
+    ``resolved_addresses`` is a fresh execution-time lookup of the target name, revalidated
+    under the binding's destination policy (see ``scan.runtime_dns``). ``None`` means no lookup
+    was made -- re-projecting a job whose execution already finished -- so nothing is
+    revalidated and no DNS evidence is recorded.
+    """
     try:
         job = CanonicalScanJob.from_queue_payload(queue_payload)
         transport = scan_job_queue_transport(queue_payload)
@@ -168,20 +178,14 @@ def materialize_canonical_scan_job(
         raise CanonicalScanJobMaterializationError(
             "persisted Scan target origin exceeds the frozen scan-job/v2 target binding"
         )
-    try:
-        current_addresses = {
-            str(ipaddress.ip_address(str(item).strip()))
-            for item in resolved_addresses if str(item).strip()
-        }
-    except ValueError as exc:
-        raise CanonicalScanJobMaterializationError(
-            "runtime DNS returned an invalid address for scan-job/v2"
-        ) from exc
-    frozen_addresses = set(job.target.allowed_addresses)
-    if not current_addresses or not frozen_addresses or not current_addresses.issubset(frozen_addresses):
-        raise CanonicalScanJobMaterializationError(
-            "runtime DNS resolution exceeds the frozen scan-job/v2 target binding"
-        )
+    dns_revalidation = None
+    if resolved_addresses is not None:
+        try:
+            dns_revalidation = revalidate_runtime_target_addresses(
+                job.target, resolved_addresses,
+            )
+        except RuntimeDnsRevalidationError as exc:
+            raise CanonicalScanJobMaterializationError(str(exc)) from exc
 
     try:
         persisted_collections = admitted_request_collection_job_refs(
@@ -243,6 +247,10 @@ def materialize_canonical_scan_job(
     # Redis or PostgreSQL.
     options = dict(options)
     options["_canonical_target_binding"] = job.target.canonical_dict()
+    # Content-free evidence of the execution-time answer; the pinned set stays the binding's.
+    options.pop(RUNTIME_DNS_REVALIDATION_OPTION, None)
+    if dns_revalidation is not None:
+        options[RUNTIME_DNS_REVALIDATION_OPTION] = dns_revalidation
 
     materialized = {
         "job_id": job.job_id,

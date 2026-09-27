@@ -2034,6 +2034,7 @@ async def scan_target(
         merged_options.pop(key, None)
     merged_options.update(request.options.model_dump(exclude_unset=True))
 
+    # Preserve the stored scheme inference flag when submitting the canonical target URL.
     scan_request = ScanInternalCompatibilityRequest(
         target=target['url'],
         budget_profile=request.budget_profile,

@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover - flat-module fallback
     from request_meter import RequestBudgetExceeded, get_request_meter
 
 try:
+    from .process_memory import ProcessTreeMemoryCeiling
+except ImportError:  # pragma: no cover - flat-module fallback
+    from process_memory import ProcessTreeMemoryCeiling
+
+try:
     from . import http_archive_capture as _http_capture
 except ImportError:  # pragma: no cover - flat-module fallback
     import http_archive_capture as _http_capture
@@ -545,6 +550,8 @@ class StreamingRunResult:
     cancelled: bool = False
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    # The process tree reached ``memory_limit_bytes`` and was killed.
+    memory_limit_exceeded: bool = False
 
 
 async def run_streaming(
@@ -558,12 +565,16 @@ async def run_streaming(
     on_stdout_line: Any = None,
     max_stdout_bytes: int = 8 * 1024 * 1024,
     max_stderr_bytes: int = 2 * 1024 * 1024,
+    memory_limit_bytes: int = 0,
 ) -> StreamingRunResult:
     """Run a process without discarding valid output when a deadline is reached.
 
     At the soft deadline the process group receives SIGINT and may flush for ``flush_grace``.
     A still-running group then receives SIGTERM and may run until ``hard_timeout`` before SIGKILL.
     User cancellation always kills immediately and is returned distinctly from timeout.
+    A positive ``memory_limit_bytes`` bounds the memory of the whole process tree
+    (``process_memory``); crossing it kills the tree, and output written before that is
+    returned as ``partial`` with ``memory_limit_exceeded``, never as a success.
     """
     if not cmd:
         raise ValueError("cmd must not be empty")
@@ -655,11 +666,21 @@ async def run_streaming(
                     requested = await requested
                 if requested:
                     cancelled = True
-                    await _signal(signal.SIGKILL)
+                    memory_ceiling.kill()
                     return
                 await asyncio.sleep(0.1)
 
+        memory_ceiling = ProcessTreeMemoryCeiling(proc.pid, memory_limit_bytes)
+
+        async def _memory_watch() -> None:
+            while proc.returncode is None and memory_ceiling.enforced:
+                if memory_ceiling.over_ceiling():
+                    memory_ceiling.kill()
+                    return
+                await asyncio.sleep(memory_ceiling.interval)
+
         cancel_task = asyncio.create_task(_cancel_watch())
+        memory_task = asyncio.create_task(_memory_watch())
         try:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=soft_timeout)
@@ -675,32 +696,35 @@ async def run_streaming(
                         await asyncio.wait_for(proc.wait(), timeout=remaining)
                     except TimeoutError:
                         timed_out = True
-                        await _signal(signal.SIGKILL)
+                        memory_ceiling.kill()
                         await proc.wait()
                 if not cancelled:
                     timed_out = True
         except asyncio.CancelledError:
-            await _signal(signal.SIGKILL)
+            memory_ceiling.kill()
             await proc.wait()
             raise
         finally:
-            cancel_task.cancel()
-            try:
-                await cancel_task
-            except BaseException:
-                pass
+            for watcher in (cancel_task, memory_task):
+                watcher.cancel()
+                try:
+                    await watcher
+                except BaseException:
+                    pass
             stdout_truncated, stderr_truncated = await asyncio.gather(stdout_task, stderr_task)
 
         stdout_text = stdout.decode(errors="replace")
         stderr_text = stderr.decode(errors="replace")
         if cancelled:
             status, returncode = "cancelled", 130
+        elif memory_ceiling.exceeded:
+            status, returncode = "partial" if stdout_text else "failed", int(proc.returncode or 137)
         elif timed_out:
             status, returncode = "partial" if stdout_text else "timed_out", 124
         else:
             returncode = int(proc.returncode or 0)
             status = "succeeded" if returncode == 0 else "failed"
-        partial = bool(timed_out and stdout_text)
+        partial = bool((timed_out or memory_ceiling.exceeded) and stdout_text)
         _record_subprocess_receipt(
             cmd,
             timeout_seconds=max(1, int(hard_timeout)),
@@ -712,7 +736,7 @@ async def run_streaming(
         )
         return StreamingRunResult(
             stdout_text, stderr_text, returncode, status, partial, timed_out, soft_reached,
-            cancelled, stdout_truncated, stderr_truncated,
+            cancelled, stdout_truncated, stderr_truncated, memory_ceiling.exceeded,
         )
 
 

@@ -16,7 +16,18 @@ PRIVATE_NETWORK_TARGETS_ENV = "SHAKERSCAN_PRIVATE_NETWORK_TARGETS"
 FLEET_MEMORY_GB_ENV = "SHAKERSCAN_FLEET_MEMORY_GB"
 CRAWLER_MEMORY_LIMIT_MB_ENV = "SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB"
 CRAWLER_MEMORY_LIMIT_MB_DEFAULT = 2048
-CRAWLER_TOOLS_WITH_MEMORY_BOUND = frozenset({"katana"})
+# Every crawl runs under a memory ceiling on its whole process tree (the browser included).
+CRAWLER_TOOLS_WITH_MEMORY_BOUND = frozenset({"katana", "katana_headless"})
+# Only the static crawler also gets a per-process data-segment bound: Chromium would
+# inherit it, and a browser needs more address space per process than a Go parser.
+CRAWLER_TOOLS_WITH_DATA_SEGMENT_BOUND = frozenset({"katana"})
+# A ceiling above the container's own limit is no ceiling: the kernel kills the worker
+# first. The crawler may use at most this share of the worker container's memory.
+CRAWLER_CONTAINER_MEMORY_SHARE = 0.6
+_CGROUP_MEMORY_LIMIT_FILES = (
+    "/sys/fs/cgroup/memory.max",                      # cgroup v2
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",    # cgroup v1
+)
 
 
 def private_network_targets_policy(environ: dict[str, str] | None = None) -> str:
@@ -112,7 +123,7 @@ def fleet_memory_declaration_gb(environ: dict[str, str] | None = None) -> float 
 
 
 def crawler_memory_limit_bytes(environ: dict[str, str] | None = None) -> int:
-    """Data-segment limit for the crawler process; 0 disables the bound."""
+    """The configured crawler memory ceiling in bytes; 0 disables every crawler bound."""
     if environ is not None:
         raw = str(environ.get(CRAWLER_MEMORY_LIMIT_MB_ENV) or "").strip()
     else:
@@ -126,6 +137,69 @@ def crawler_memory_limit_bytes(environ: dict[str, str] | None = None) -> int:
     return max(0, megabytes) * 1024 * 1024
 
 
+def container_memory_limit_bytes(
+    read: Callable[[str], str] | None = None,
+) -> int | None:
+    """The worker container's own cgroup memory limit, or None when unlimited/unknown."""
+    def _read(path: str) -> str:
+        with open(path, encoding="ascii") as handle:
+            return handle.read()
+
+    reader = read or _read
+    for path in _CGROUP_MEMORY_LIMIT_FILES:
+        try:
+            raw = reader(path).strip()
+        except (OSError, ValueError):
+            continue
+        if not raw or raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # cgroup v1 reports "unlimited" as a page-rounded huge number.
+        return value if 0 < value < 1 << 60 else None
+    return None
+
+
+def crawler_memory_ceiling(
+    tool_name: str,
+    *,
+    environ: dict[str, str] | None = None,
+    container_limit: Callable[[], int | None] | None = None,
+) -> tuple[int, str]:
+    """``(bytes, source)`` of the memory ceiling for a crawler's whole process tree.
+
+    ``SHAKERSCAN_CRAWLER_MEMORY_LIMIT_MB`` (default 2048, 0 disables) sets it, lowered to
+    ``CRAWLER_CONTAINER_MEMORY_SHARE`` of the worker container's own memory limit when that
+    is smaller, so the tool is stopped and reported before the kernel kills the worker.
+    Non-crawler tools get ``(0, "not_a_crawler")``.
+    """
+    if tool_name not in CRAWLER_TOOLS_WITH_MEMORY_BOUND:
+        return 0, "not_a_crawler"
+    configured = crawler_memory_limit_bytes(environ)
+    if configured <= 0:
+        return 0, "disabled"
+    container = (container_limit or container_memory_limit_bytes)()
+    if container is not None and container > 0:
+        share = int(container * CRAWLER_CONTAINER_MEMORY_SHARE)
+        if share < configured:
+            return share, "container_limit_share"
+    return configured, "configured"
+
+
+def crawler_memory_environment(tool_name: str, limit_bytes: int) -> dict[str, str]:
+    """``GOMEMLIMIT`` for the crawler: Go collects harder well before the hard ceiling.
+
+    A soft limit, not a bound -- the process-tree ceiling is the bound. The static crawler
+    is all Go heap; in a headless crawl the browser holds most of the memory.
+    """
+    if tool_name not in CRAWLER_TOOLS_WITH_MEMORY_BOUND or limit_bytes <= 0:
+        return {}
+    share = 3 / 4 if tool_name in CRAWLER_TOOLS_WITH_DATA_SEGMENT_BOUND else 1 / 4
+    return {"GOMEMLIMIT": f"{max(64, int(limit_bytes * share) // (1024 * 1024))}MiB"}
+
+
 def crawler_memory_bound_argv(
     tool_name: str,
     *,
@@ -133,17 +207,19 @@ def crawler_memory_bound_argv(
     platform: str = sys.platform,
     which: Callable[[str], str | None] = shutil.which,
 ) -> list[str]:
-    """The ``prlimit`` prefix that bounds the crawler's memory, or nothing.
+    """The ``prlimit`` prefix that bounds the static crawler's data segment, or nothing.
 
     ``RLIMIT_DATA`` counts the Go heap on Linux 4.7+, so a runaway parser ends with Go's own
     ``fatal error: runtime: out of memory`` (exit 2) at the bound instead of taking the whole
     worker container to its cgroup limit. Measured with the 2.3.1 crawler on a synthetic
     Next.js page: killed at 1.7 GiB after 10 s under a 2 GiB bound, where the unbounded process
-    exceeded 6 GiB. Only the static crawler is bounded: the headless variant spawns Chromium,
-    which inherits the limit and must not be starved. Applied only on Linux, only when
-    ``prlimit`` (util-linux) exists, and never for other tools.
+    exceeded 6 GiB. It is per process, so it is only a first line: the supervisor's
+    process-tree ceiling (``scanner_tools.process_memory``) bounds every crawler, the headless
+    one and its browser included. The headless crawler gets no data-segment bound because
+    every Chromium process would inherit it. Applied only on Linux, only when ``prlimit``
+    (util-linux) exists, and never for other tools.
     """
-    if tool_name not in CRAWLER_TOOLS_WITH_MEMORY_BOUND or not platform.startswith("linux"):
+    if tool_name not in CRAWLER_TOOLS_WITH_DATA_SEGMENT_BOUND or not platform.startswith("linux"):
         return []
     limit = crawler_memory_limit_bytes() if limit_bytes is None else int(limit_bytes)
     if limit <= 0:
@@ -154,7 +230,9 @@ def crawler_memory_bound_argv(
     return [prlimit, f"--data={limit}", "--"]
 
 
-def crawler_memory_bound_exceeded(stderr: bytes | str) -> bool:
-    """Go reports a refused allocation as a fatal runtime error on stderr."""
+def crawler_memory_bound_exceeded(stderr: bytes | str, *, ceiling_reached: bool = False) -> bool:
+    """The supervisor's process-tree ceiling fired, or Go reported a refused allocation."""
+    if ceiling_reached:
+        return True
     text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
     return "runtime: out of memory" in text or "cannot allocate memory" in text

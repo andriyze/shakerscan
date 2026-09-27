@@ -170,8 +170,16 @@ export function notExaminedExplanation(report) {
   const reasons = new Set((Array.isArray(record(report.coverage).reasons) ? record(report.coverage).reasons : [])
     .concat(Array.isArray(record(record(report.coverage).grade_reliability).reasons) ? record(record(report.coverage).grade_reliability).reasons : [])
     .map((reason) => String(reason || '')))
+  const transport = record(record(report.reachability).transport)
+  const attempts = Array.isArray(transport.attempts) ? transport.attempts : []
+  if (record(report.reachability).status === 'unavailable' && attempts.length) {
+    const tried = attempts.map((item) => `${String(record(item).origin || '').replace(/\/$/, '')} (${String(record(item).error || 'no response')})`).join(', ')
+    return `No origin of this target answered, so the application was not examined. Tried: ${tried}.`
+  }
+  const specific = String(record(report.coverage).not_examined_reason || '')
   if (reasons.has('bound_origin_redirects_off_origin')) {
-    return 'The bound origin answered every request with a redirect to another origin, so no application response was observed here. Scan the origin that serves the application (for example its www host) to examine it.'
+    const where = specific ? ` (${specific})` : ''
+    return `The bound origin answered every request with a redirect to another origin${where}, so no application response was observed here. Scan the origin that serves the application (for example its https:// or www origin) to examine it.`
   }
   const status = Number(record(report.http).status)
   if ([401, 403, 407].includes(status)) {

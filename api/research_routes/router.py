@@ -87,6 +87,14 @@ except ModuleNotFoundError:  # package import in host-side tests
         validate_decision as _research_validate_decision,
     )
 
+from .planner_state import (
+    PlannerModeConflict as _PlannerModeConflict,
+    autopilot_runner_active as _research_autopilot_runner_active,
+    configured_planner_missing_settings as _configured_planner_missing_settings,
+    research_planner_state as _research_planner_state,
+    resolve_create_planner as _resolve_create_planner,
+)
+
 
 router = APIRouter()
 
@@ -269,6 +277,25 @@ async def create_research_episode(req: ResearchEpisodeRequest):
         planner = {}
     if _arsenal_routes._contains_forbidden_context_key(req.planner):
         raise HTTPException(status_code=400, detail="planner metadata contains a forbidden secret field")
+    # One driver per episode: the server autopilot only claims autopilot_enabled rows, so a
+    # configured_ai planner stored with autopilot off would wait at awaiting_planner forever.
+    try:
+        planner_mode, autopilot_enabled = _resolve_create_planner(
+            planner, autopilot=req.autopilot, autopilot_explicit="autopilot" in req.model_fields_set,
+        )
+    except _PlannerModeConflict as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if planner_mode:
+        planner["mode"] = planner_mode
+        planner["kind"] = _research_planner_kind(planner_mode)
+    if autopilot_enabled and not _research_configured_planner_ready():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Autonomous planner is not configured in AI settings: missing "
+                + ", ".join(_configured_planner_missing_settings(_load_effective_ai_settings()))
+            ),
+        )
 
     profile_commands = RESEARCH_MISSION_COMMANDS.get(req.mission_profile)
     expected_subject_types = {
@@ -376,7 +403,7 @@ async def create_research_episode(req: ResearchEpisodeRequest):
                 scope_receipt_id,
                 _optional_uuid(approval_receipt_id),
                 req.created_by,
-                req.autopilot,
+                autopilot_enabled,
             )
             await _record_research_event(
                 conn,
@@ -384,7 +411,7 @@ async def create_research_episode(req: ResearchEpisodeRequest):
                 event_type="episode_created",
                 status="created",
                 summary="Created bounded research episode",
-                details={"execution_mode": req.execution_mode, "max_risk_tier": req.max_risk_tier, "budget_limits": budget_limits, "autopilot": req.autopilot},
+                details={"execution_mode": req.execution_mode, "max_risk_tier": req.max_risk_tier, "budget_limits": budget_limits, "autopilot": autopilot_enabled},
             )
             await _build_research_observation(conn, row)
         return await _research_episode_detail(conn, str(row["id"]))
@@ -416,6 +443,8 @@ async def research_readiness():
                 "ready": configured_planner_ready,
                 "durable": True,
                 "label": "Stored AI provider",
+                "missing_settings": _configured_planner_missing_settings(settings),
+                "autopilot_runner_active": _research_autopilot_runner_active(),
             },
         },
         "configured_planner_ready": configured_planner_ready,
@@ -2005,7 +2034,10 @@ async def set_research_episode_autopilot(episode_id: str, req: ResearchAutopilot
             if req.enabled and not _research_configured_planner_ready():
                 raise HTTPException(
                     status_code=409,
-                    detail="Stored-provider planning cannot resume until AI settings are configured",
+                    detail=(
+                        "Stored-provider planning cannot resume until AI settings are configured: missing "
+                        + ", ".join(_configured_planner_missing_settings(_load_effective_ai_settings()))
+                    ),
                 )
             if req.enabled and str(row["status"]) not in {"awaiting_planner", "awaiting_observation"}:
                 raise HTTPException(status_code=409, detail="Only a planning/waiting episode can resume autopilot")
@@ -2209,11 +2241,7 @@ RESEARCH_MISSION_COMMANDS: dict[str, set[str] | None] = {
 
 
 def _research_configured_planner_ready() -> bool:
-    settings = _load_effective_ai_settings()
-    return all(
-        str(settings.get(key) or "").strip()
-        for key in ("ai_url", "ai_api_key", "ai_model")
-    )
+    return not _configured_planner_missing_settings(_load_effective_ai_settings())
 
 
 def _research_episode_planner_mode(episode: Any) -> str:
@@ -3967,6 +3995,13 @@ async def _research_episode_detail(conn, episode_id: str) -> dict[str, Any]:
         "decisions": [_public_research_decision_row(row) for row in decisions],
         "events": [_public_research_event_row(row) for row in events],
         "waiting_on": waiting_on,
+        "planner_state": _research_planner_state(
+            episode,
+            planner_mode=_research_episode_planner_mode(episode_row),
+            missing_settings=_configured_planner_missing_settings(_load_effective_ai_settings()),
+            runner_active=_research_autopilot_runner_active(),
+            active_work=waiting_on,
+        ),
     }
 
 

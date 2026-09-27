@@ -148,14 +148,22 @@ def test_scanner_image_lifts_katana_javascript_parser_dependency():
 
 
 def test_crawler_runs_under_the_memory_bound_when_the_platform_provides_it(monkeypatch):
+    bound: dict = {}
+
+    def _bound_argv(name, *, limit_bytes=None):
+        bound["limit_bytes"] = limit_bytes
+        return ["/usr/bin/prlimit", f"--data={limit_bytes}", "--"] if name == "katana" else []
+
+    monkeypatch.setattr(worker.deployment_policy, "crawler_memory_bound_argv", _bound_argv)
     monkeypatch.setattr(
-        worker.deployment_policy,
-        "crawler_memory_bound_argv",
-        lambda name: ["/usr/bin/prlimit", "--data=2147483648", "--"] if name == "katana" else [],
+        worker.deployment_policy, "container_memory_limit_bytes", lambda: None,
     )
+    monkeypatch.setenv(worker.deployment_policy.CRAWLER_MEMORY_LIMIT_MB_ENV, "2048")
     launched: dict = {}
     result = _run_katana(monkeypatch, 0, _CRAWL_LINE, launched=launched)
     assert result["status"] == "success"
+    # The data-segment bound is the same ceiling the supervisor enforces on the tree.
+    assert bound["limit_bytes"] == 2147483648
     assert launched["cmd"][:3] == ["/usr/bin/prlimit", "--data=2147483648", "--"]
     assert launched["cmd"][3].endswith("katana")
 

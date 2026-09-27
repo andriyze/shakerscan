@@ -9,7 +9,7 @@ from collections import Counter
 from typing import Any, Mapping, Sequence
 
 from . import scoring
-from .assessment import withhold_unexamined_grade
+from .assessment import mark_unexamined_coverage, withhold_unexamined_grade
 from .action_plan import ScanActionPlan
 from .capability_result import CapabilityResultReference, CapabilityResultStatus, CapabilityResultReason
 from .redirect_evidence import REDIRECT_STATUSES, http_origin, redirect_destination
@@ -1455,8 +1455,14 @@ def finalize_scan_report(
     observations: Mapping[str, Sequence[Mapping[str, Any]]],
     work_manifest_references: Sequence[Mapping[str, Any]] = (),
     plan_revision: ScanPlanRevision | Mapping[str, Any] | None = None,
+    origin_evidence: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Build the final report without network, process, filesystem, or clock access."""
+    """Build the final report without network, process, filesystem, or clock access.
+
+    ``origin_evidence`` carries the probe attempts of a failed ``origin.select``:
+    a failed action has no observation manifest, yet its refused connections are exactly
+    what the report must show when the application could not be examined.
+    """
     try:
         revision = (
             plan_revision
@@ -2111,8 +2117,12 @@ def finalize_scan_report(
         },
     }
     from .reachability import apply_reachability_outcome
-    apply_reachability_outcome(report, action_results=action_results, observations=observations)
+    apply_reachability_outcome(
+        report, action_results=action_results, observations=observations,
+        origin_evidence=origin_evidence,
+    )
     withhold_unexamined_grade(report)
+    mark_unexamined_coverage(report)
     report["report_digest"] = hashlib.sha256(json.dumps(
         report,
         sort_keys=True,

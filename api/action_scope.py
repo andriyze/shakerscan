@@ -23,6 +23,10 @@ ALLOWED_SCHEMES = {"http", "https"}
 CIDR_RE = re.compile(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}(?![\w:])")
 # These special cloud-service destinations are also denied by device_posture.
 # They are not all link-local: private-network permission must not admit them.
+PRIVATE_NETWORK_TARGETS_DOC = (
+    "https://github.com/andriyze/shakerscan/blob/main/docs/functionality-reference.md"
+    "#15-safety-model"
+)
 _CLOUD_SERVICE_ADDRESSES = frozenset({
     "169.254.169.254", "169.254.170.2", "100.100.100.200",
     "168.63.129.16", "fd00:ec2::254",
@@ -146,6 +150,50 @@ def _ip_scope_block_reason(
     if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_reserved:
         return None if deployment_allows else "loopback_or_private_range"
     return None
+
+
+def destination_refusal_explanation(host: str, environment: str) -> str:
+    """Why ``host`` is refused as a destination, in words an operator can act on.
+
+    Two different decisions produce the same ``loopback_or_private_range`` code and used to
+    produce the same message, so an operator could not tell a class no setting admits (the cloud
+    metadata address) from one their own deployment chose to refuse (a private intranet address
+    under ``SHAKERSCAN_PRIVATE_NETWORK_TARGETS=refuse``). This names which one it is and, for the
+    second, the supported setting that changes it.
+    """
+    lowered = str(host or "").lower().strip("[]")
+    try:
+        ip_obj = ipaddress.ip_address(lowered)
+    except ValueError:
+        ip_obj = None
+    mapped = getattr(ip_obj, "ipv4_mapped", None)
+    if mapped is not None:
+        ip_obj = mapped
+    if ip_obj is not None:
+        restricted = (
+            "a cloud metadata or platform-service" if str(ip_obj) in _CLOUD_SERVICE_ADDRESSES
+            else "a link-local" if ip_obj.is_link_local
+            else "a multicast" if ip_obj.is_multicast
+            else "an unspecified" if ip_obj.is_unspecified
+            else "the broadcast" if str(ip_obj) == "255.255.255.255"
+            else None
+        )
+        if restricted:
+            return f"{lowered} is {restricted} address, which is never scanned in any environment."
+        kind = (
+            "a loopback" if ip_obj.is_loopback
+            else "a private-network" if ip_obj.is_private
+            else "a reserved"
+        )
+    else:
+        kind = "a loopback"
+    setting = deployment_policy.PRIVATE_NETWORK_TARGETS_ENV
+    return (
+        f"{lowered} is {kind} address; this deployment does not allow private-network targets "
+        f"(judged as '{environment or 'production'}'). To scan your own network, set "
+        f"{setting}=allow for the API and workers ({PRIVATE_NETWORK_TARGETS_DOC}). Lab targets "
+        "are admitted without it."
+    )
 
 
 def _private_network_admitted_by_policy(host: str, environment: str) -> bool:
@@ -291,7 +339,7 @@ def evaluate_scope(
             ip_reason = _ip_scope_block_reason(host, env)
             if ip_reason:
                 blocked.append(ip_reason)
-                _add_check(checks, ip_reason, "blocked", "Loopback/private/reserved network targets require lab policy.")
+                _add_check(checks, ip_reason, "blocked", destination_refusal_explanation(host, env))
             elif _private_network_admitted_by_policy(host, env):
                 # Recorded on every receipt so a scan of an internal address always shows why
                 # it was admitted: the deployment's own policy, not a lab label.

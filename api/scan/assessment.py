@@ -51,6 +51,46 @@ def withhold_unexamined_grade(report: dict[str, Any]) -> bool:
     return True
 
 
+def unexamined_coverage_reason(report: Mapping[str, Any]) -> str:
+    """One sentence naming why the bound origin's application was not examined."""
+    http = report.get("http") if isinstance(report.get("http"), Mapping) else {}
+    moved = http.get("application_origin_redirect") or http.get("redirect_origin")
+    if moved and http_origin(moved) != http_origin(report.get("target")):
+        return f"the target redirects to {moved}, outside this scan's origin"
+    status = http.get("status")
+    if type(status) is int:
+        return f"the target answered HTTP {status} without an application response in scope"
+    return "no in-scope application response was observed"
+
+
+def mark_unexamined_coverage(report: dict[str, Any]) -> bool:
+    """An unexamined application cannot leave the scan claiming complete coverage.
+
+    The grade was already withheld, but coverage still read ``complete`` and the scan
+    ``completed`` with no findings -- indistinguishable from a clean result. A scan of
+    ``http://host`` that only redirects to ``https://host`` examined nothing past the
+    redirect: its coverage is incomplete, and the reason says where the application is.
+    """
+    summary = report.get("result")
+    if not isinstance(summary, Mapping) or not application_unexamined(summary):
+        return False
+    if (report.get("reachability") or {}).get("status") == "unavailable":
+        # Failed preflight already ended the coverage as failed with target_unreachable.
+        return True
+    coverage = report.setdefault("coverage", {})
+    reason = unexamined_coverage_reason(report)
+    coverage["not_examined_reason"] = reason
+    coverage["reasons"] = sorted(set(coverage.get("reasons") or ()) | {"application_not_observed"})
+    metadata = report.setdefault("scan_metadata", {})
+    metadata["not_examined_reason"] = reason
+    if coverage.get("status") == "complete":
+        coverage["status"] = "partial"
+        if metadata.get("status") == "complete":
+            metadata["status"] = "partial"
+        metadata["partial"] = True
+    return True
+
+
 def finalize_parallel_assessment(
     report: dict[str, Any], children: Sequence[Mapping[str, Any]],
 ) -> bool:
@@ -76,6 +116,7 @@ def finalize_parallel_assessment(
     elif any(application_unexamined(item) for item in summaries):
         summary.update({"application_observed": False, "risk_assessment_state": "not_examined"})
     withhold_unexamined_grade(report)
+    mark_unexamined_coverage(report)
     return failed
 
 

@@ -22143,3 +22143,267 @@ def test_data_exposure_baseline_is_included_when_a_principal_resolves_and_stays_
         "/api/secrets/fetch", include_owner_baseline=False)
     assert without["assertions"] == with_baseline["assertions"]
     assert without["proof_family"] == with_baseline["proof_family"] == "data_exposure"
+
+
+# --- Research autopilot: one driver per episode, and a named reason when nothing advances it ---
+
+_READY_AI_SETTINGS = {"ai_url": "https://models.invalid/v1", "ai_api_key": "k", "ai_model": "m"}
+
+
+class _EpisodeCreateConn:
+    """Captures the research_episodes INSERT; no database, no target traffic (unit fixture)."""
+
+    def __init__(self, target_id):
+        self.target_id = target_id
+        self.insert_args = None
+
+    def transaction(self):
+        class _Tx:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Tx()
+
+    async def fetchrow(self, query, *args):
+        if "FROM targets" in query:
+            return {"id": self.target_id, "url": "https://app.example.test", "discovery_source": "manual"}
+        if "INSERT INTO research_episodes" in query:
+            self.insert_args = args
+            return {"id": uuid.uuid4()}
+        raise AssertionError(query)
+
+
+def _patch_episode_create(monkeypatch, conn, settings):
+    async def fake_event(*args, **kwargs):
+        return None
+
+    async def fake_observation(*args, **kwargs):
+        return None
+
+    async def fake_detail(_conn, episode_id):
+        return {"episode": {"id": episode_id}}
+
+    monkeypatch.setattr(api_module, "db_pool", _FakePool(conn))
+    monkeypatch.setattr(research_router_module, "_load_effective_ai_settings", lambda: dict(settings))
+    monkeypatch.setattr(research_router_module, "_record_research_event", fake_event)
+    monkeypatch.setattr(research_router_module, "_build_research_observation", fake_observation)
+    monkeypatch.setattr(research_router_module, "_research_episode_detail", fake_detail)
+
+
+def test_configured_ai_episode_is_claimable_by_the_server_autopilot(monkeypatch):
+    """planner.mode=configured_ai without the autopilot flag used to persist autopilot_enabled=false,
+    which research_autopilot_runner never claims: the episode sat at awaiting_planner forever."""
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, _READY_AI_SETTINGS)
+
+    asyncio.run(research_router_module.create_research_episode(
+        research_router_module.ResearchEpisodeRequest(
+            target_id=str(target_id),
+            objective="Map the public surface",
+            planner={"mode": "configured_ai"},
+        )
+    ))
+
+    planner = json.loads(conn.insert_args[5])
+    autopilot_enabled = conn.insert_args[-1]
+    assert autopilot_enabled is True
+    assert planner["mode"] == "configured_ai" and planner["kind"] == "configured_ai"
+
+
+def test_autopilot_flag_alone_records_the_configured_ai_planner(monkeypatch):
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, _READY_AI_SETTINGS)
+
+    asyncio.run(research_router_module.create_research_episode(
+        research_router_module.ResearchEpisodeRequest(
+            target_id=str(target_id), objective="Map", autopilot=True,
+        )
+    ))
+
+    planner = json.loads(conn.insert_args[5])
+    assert conn.insert_args[-1] is True
+    assert planner["mode"] == "configured_ai" and planner["kind"] == "configured_ai"
+
+
+def test_default_episode_create_stays_agent_driven(monkeypatch):
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, {})
+
+    asyncio.run(research_router_module.create_research_episode(
+        research_router_module.ResearchEpisodeRequest(target_id=str(target_id), objective="Map")
+    ))
+
+    assert conn.insert_args[-1] is False
+    assert json.loads(conn.insert_args[5]).get("mode") is None
+
+
+def test_explicitly_paused_configured_ai_episode_is_not_started(monkeypatch):
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, {})
+
+    asyncio.run(research_router_module.create_research_episode(
+        research_router_module.ResearchEpisodeRequest(
+            target_id=str(target_id), objective="Map",
+            planner={"mode": "configured_ai"}, autopilot=False,
+        )
+    ))
+
+    assert conn.insert_args[-1] is False
+    assert json.loads(conn.insert_args[5])["mode"] == "configured_ai"
+
+
+def test_autopilot_episode_refused_up_front_naming_missing_model_settings(monkeypatch):
+    """Previously accepted, then the runner failed three times and silently paused it."""
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, {"ai_url": "https://models.invalid/v1", "ai_api_key": "k", "ai_model": ""})
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(research_router_module.create_research_episode(
+            research_router_module.ResearchEpisodeRequest(
+                target_id=str(target_id), objective="Map", autopilot=True,
+            )
+        ))
+
+    assert exc.value.status_code == 409
+    assert "ai_model" in str(exc.value.detail)
+    assert conn.insert_args is None
+
+
+def test_agent_planner_cannot_be_combined_with_server_autopilot(monkeypatch):
+    target_id = uuid.uuid4()
+    conn = _EpisodeCreateConn(target_id)
+    _patch_episode_create(monkeypatch, conn, _READY_AI_SETTINGS)
+
+    with pytest.raises(api_module.HTTPException) as exc:
+        asyncio.run(research_router_module.create_research_episode(
+            research_router_module.ResearchEpisodeRequest(
+                target_id=str(target_id), objective="Map",
+                planner={"mode": "agent"}, autopilot=True,
+            )
+        ))
+
+    assert exc.value.status_code == 400
+    assert conn.insert_args is None
+
+
+class _EpisodeDetailConn:
+    def __init__(self, row):
+        self.row = row
+
+    async def fetchrow(self, query, *args):
+        if "FROM research_episodes" in query:
+            return self.row
+        raise AssertionError(query)
+
+    async def fetch(self, query, *args):
+        return []
+
+
+def _episode_row(**overrides):
+    row = {
+        "id": uuid.uuid4(),
+        "target_id": uuid.uuid4(),
+        "status": "awaiting_planner",
+        "execution_mode": "read_only",
+        "planner": {"kind": "local_agent", "agent": "codex"},
+        "allowed_families": [],
+        "budget_limits": {},
+        "budget_used": {},
+        "autopilot_enabled": False,
+        "autopilot_error": None,
+        "autopilot_consecutive_failures": 0,
+        "current_observation_id": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _planner_state(monkeypatch, row, settings=_READY_AI_SETTINGS, environ=None):
+    monkeypatch.setattr(research_router_module, "_load_effective_ai_settings", lambda: dict(settings))
+    monkeypatch.setattr(research_router_module, "_ai_ops_execute_enabled", lambda: True)
+    if environ is not None:
+        for key, value in environ.items():
+            monkeypatch.setenv(key, value)
+    else:
+        monkeypatch.delenv("FLEET_EDGE_MODE", raising=False)
+    detail = asyncio.run(research_router_module._research_episode_detail(
+        _EpisodeDetailConn(row), str(row["id"])
+    ))
+    return detail["planner_state"]
+
+
+def test_agent_driven_episode_says_it_waits_for_an_external_planner(monkeypatch):
+    state = _planner_state(monkeypatch, _episode_row())
+
+    assert state["mode"] == "agent"
+    assert state["engine_will_advance"] is False
+    assert state["waiting_for"] == "external_planner_decision"
+    assert state["blocked_reason"] == "server_autopilot_not_enabled"
+    assert "/autopilot" in state["next_action"]
+
+
+def test_autopilot_episode_without_model_names_the_missing_settings(monkeypatch):
+    row = _episode_row(planner={"mode": "configured_ai", "kind": "configured_ai"}, autopilot_enabled=True)
+    state = _planner_state(monkeypatch, row, settings={"ai_url": "https://models.invalid/v1", "ai_api_key": "", "ai_model": ""})
+
+    assert state["engine_will_advance"] is False
+    assert state["blocked_reason"] == "configured_ai_provider_not_configured"
+    assert state["missing_settings"] == ["ai_api_key", "ai_model"]
+    assert state["missing_env"] == ["AI_API_KEY", "AI_MODEL"]
+
+
+def test_autopilot_paused_after_planner_failures_surfaces_the_error(monkeypatch):
+    row = _episode_row(
+        planner={"mode": "configured_ai", "kind": "configured_ai"},
+        autopilot_enabled=False,
+        autopilot_error="Shared AI provider client is unavailable",
+        autopilot_consecutive_failures=3,
+    )
+    state = _planner_state(monkeypatch, row)
+
+    assert state["blocked_reason"] == "autopilot_paused_after_planner_failures"
+    assert state["last_error"] == "Shared AI provider client is unavailable"
+    assert state["engine_will_advance"] is False
+
+
+def test_autopilot_episode_in_fleet_edge_api_says_no_runner(monkeypatch):
+    row = _episode_row(planner={"mode": "configured_ai", "kind": "configured_ai"}, autopilot_enabled=True)
+    state = _planner_state(monkeypatch, row, environ={"FLEET_EDGE_MODE": "true"})
+
+    assert state["blocked_reason"] == "autopilot_runner_not_running"
+    assert state["engine_will_advance"] is False
+
+
+def test_ready_autopilot_episode_reports_the_engine_will_advance_it(monkeypatch):
+    row = _episode_row(planner={"mode": "configured_ai", "kind": "configured_ai"}, autopilot_enabled=True)
+    state = _planner_state(monkeypatch, row)
+
+    assert state["waiting_for"] == "server_autopilot"
+    assert state["blocked_reason"] is None
+    assert state["engine_will_advance"] is True
+
+
+def test_research_readiness_names_missing_configured_planner_settings(monkeypatch):
+    monkeypatch.setattr(api_module, "_load_effective_ai_settings", lambda: {
+        "ai_url": "https://models.invalid/v1", "ai_api_key": "", "ai_model": "m",
+    })
+    monkeypatch.setattr(research_router_module, "_load_effective_ai_settings", lambda: {
+        "ai_url": "https://models.invalid/v1", "ai_api_key": "", "ai_model": "m",
+    })
+    monkeypatch.setattr(api_module, "_load_effective_automation_settings", lambda: {
+        "default_research_planner_mode": "agent",
+    })
+    monkeypatch.delenv("FLEET_EDGE_MODE", raising=False)
+
+    readiness = asyncio.run(research_router_module.research_readiness())
+
+    assert readiness["planner_modes"]["configured_ai"]["missing_settings"] == ["ai_api_key"]
+    assert readiness["planner_modes"]["configured_ai"]["autopilot_runner_active"] is True
