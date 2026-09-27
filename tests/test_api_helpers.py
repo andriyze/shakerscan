@@ -20740,6 +20740,68 @@ class _StopAtAuthorization(Exception):
     pass
 
 
+class _StopAtBinding(Exception):
+    pass
+
+
+def test_scan_submission_passes_frozen_inferred_origins_to_target_binding(monkeypatch):
+    """Drive submission through the binding construction, as the smoke Scan does."""
+    target_id = uuid.uuid4()
+
+    class Conn:
+        async def fetchrow(self, *_args):
+            return {"id": target_id}
+
+    async def dns_alias(_pool, target, **_kwargs):
+        return target, None, None, None
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def collections(*_args, **_kwargs):
+        return [], [], {}
+
+    async def profiles(*_args, **_kwargs):
+        return []
+
+    async def freeze(**kwargs):
+        assert kwargs["scheme_inferred"] is True
+        return {
+            "canonical_host": "example.com",
+            "allowed_origins": ["http://example.com", "https://example.com"],
+            "inferred_origins": ["https://example.com", "http://example.com"],
+            "allowed_addresses": ["93.184.215.14"],
+            "allowed_root_domains": ["example.com"],
+        }
+
+    captured = {}
+
+    def binding(**kwargs):
+        captured.update(kwargs)
+        raise _StopAtBinding
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module.target_dns_alias, "prepare_scan_dns_alias", dns_alias)
+    monkeypatch.setattr(api_module, "_worker_freshness_snapshot", lambda: {"available": False})
+    monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", no_op)
+    monkeypatch.setattr(api_module, "_require_reachable_fleet_placement", no_op)
+    monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
+    monkeypatch.setattr(api_module, "_admit_generic_scan_credential_profiles", profiles)
+    monkeypatch.setattr(api_module, "admit_scan_browser_login_profiles", profiles)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", no_op)
+    monkeypatch.setattr(api_module, "_freeze_scan_target_binding", freeze)
+    monkeypatch.setattr(api_module, "TargetBinding", binding)
+
+    with pytest.raises(_StopAtBinding):
+        asyncio.run(api_module._submit_scan(api_module.ScanRequest(
+            target="example.com", policy={"active_testing": False},
+        )))
+    assert captured["inferred_origins"] == (
+        "https://example.com", "http://example.com",
+    )
+
+
 def _scan_submission_target(monkeypatch, table, *, stored_metadata=None, target="example.com"):
     """Submit an active Scan and return the URL its standing authorization is looked up for.
 

@@ -11343,7 +11343,6 @@ async def _submit_scan(
             target_kind=request.target_kind,
             target_url=normalized_target,
             scope_receipt_id=scan_contract.policy.scope_receipt_id,
-            inferred_origins=tuple(target_guard.get("inferred_origins") or ()),
             scheme_inferred=scheme_inferred,
             existing_guard=options_payload.get("runtime_scope_guard"),
         )
@@ -11357,6 +11356,7 @@ async def _submit_scan(
             allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
             environment=str(target_guard.get("environment") or "unknown"),
             scope_receipt_id=scan_contract.policy.scope_receipt_id,
+            inferred_origins=tuple(target_guard.get("inferred_origins") or ()),
         )
         try:
             (
