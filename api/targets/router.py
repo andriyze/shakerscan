@@ -73,6 +73,7 @@ try:
     from action_scope import scope_origin_matches_target
     from asset_cohorts import target_cohort, target_exposure_class
     from scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
+    from scan.transport import scheme_less_target
     from scan.manifest_store import PostgresScanManifestStore
     from secret_store import decrypt_secret, encrypt_secret, encryption_enabled
     from serialization import _decode_json_value, _decode_jsonb_scalar, _json_object, _str_list, row_to_dict
@@ -111,6 +112,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..action_scope import scope_origin_matches_target
     from ..scan.jobs import CanonicalScanJob, admitted_credential_profile_ids
+    from ..scan.transport import scheme_less_target
     from ..scan.manifest_store import PostgresScanManifestStore
     from ..secret_store import decrypt_secret, encrypt_secret, encryption_enabled
     from ..serialization import _decode_json_value, _decode_jsonb_scalar, _json_object, _str_list, row_to_dict
@@ -2031,10 +2033,16 @@ async def scan_target(
         merged_options = stored_options or {}
     for key in LEGACY_SCAN_WRITE_FIELDS:
         merged_options.pop(key, None)
+    stored_scheme_inferred = bool(merged_options.get("target_scheme_inferred"))
     merged_options.update(request.options.model_dump(exclude_unset=True))
 
+    # A target added without a scheme keeps that fact in its stored options. Submitting the
+    # stored https:// URL instead froze only HTTPS, so an HTTP-only application could not be
+    # examined from the target page while the same name through POST /scans could. Resubmit
+    # the scheme-less form so admission freezes both origins exactly as it does there. Only
+    # the stored flag counts: a request cannot widen an explicit scheme.
     scan_request = ScanInternalCompatibilityRequest(
-        target=target['url'],
+        target=scheme_less_target(target['url']) if stored_scheme_inferred else target['url'],
         budget_profile=request.budget_profile,
         policy=dict(request.policy or {}),
         advanced=request.advanced,

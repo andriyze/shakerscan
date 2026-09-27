@@ -187,6 +187,14 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
+from .transport import (
+    PROBE_TIMEOUT_SECONDS,
+    TRANSPORT_ACTION_ID,
+    probe_transport,
+    selected_origin,
+    transport_candidates,
+)
+from .transport_probe import TransportProbeExecutionAdapter
 from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
     ScanWorkManifest,
@@ -491,7 +499,24 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError(
                 "private Scan inputs differ from dispatcher authority"
             )
-        self.target_url = scan_external_execution_target(target_url, target=target)
+        # A target entered without a scheme reaches the worker as its bare authority. Its
+        # origin is not guessed here: the plan's transport.resolve action probes the frozen
+        # origins and every other action runs against the one it selected. An explicit
+        # scheme stays exact and is only validated.
+        self.requested_target = str(target_url or "").strip()
+        self._transport_evidence: tuple[Mapping[str, Any], ...] = ()
+        self._transport_candidates = transport_candidates(self.requested_target, target)
+        if self._transport_candidates is not None and len(self._transport_candidates) == 1:
+            # Admission froze exactly one origin for this authority: there is nothing to
+            # choose, so it is used as frozen and nothing is probed.
+            target_url, self._transport_candidates = self._transport_candidates[0], None
+        self.target_url: str | None = (
+            scan_external_execution_target(target_url, target=target)
+            if self._transport_candidates is None else None
+        )
+        if self._transport_candidates == ():
+            # Validates and refuses: a bare target with no frozen origin for its authority.
+            scan_external_execution_target(target_url, target=target)
         self.options = dict(options)
         if private_inputs is not None:
             self.options.update(dict(private_inputs.options))
@@ -3101,6 +3126,74 @@ class DatabaseNeutralScanActionDispatcher:
         )
         return await self._execute_adapter(action, adapter, heartbeat)
 
+    async def _transport_resolve(
+        self, action: ScanAction, heartbeat: ActionHeartbeat,
+    ) -> CapabilityReceipt:
+        """Select the frozen origin that serves a scheme-less target (scan/transport.py)."""
+        candidates = self._transport_candidates
+        exact = candidates is None
+
+        async def request(origin: str) -> Mapping[str, Any]:
+            return await execute_bound_http_request(
+                origin,
+                {"method": "GET", "path": "/", "follow_redirects": False},
+                target=self.target,
+                allow_write=False,
+                timeout_seconds=PROBE_TIMEOUT_SECONDS,
+            )
+
+        async def operation() -> Mapping[str, Any]:
+            if exact:
+                return {"exact": True, "attempts": [], "raw": [], "candidates": []}
+            attempts, raw = await probe_transport(candidates or (), request)
+            return {"attempts": attempts, "raw": raw, "candidates": list(candidates or ())}
+
+        adapter = self._prepared_inline(
+            action, {"method": "GET", "path": "/", "follow_redirects": False},
+            operation, TransportProbeExecutionAdapter,
+        )
+        receipt = await self._execute_adapter(action, adapter, heartbeat)
+        chosen = selected_origin(receipt.observations)
+        if chosen:
+            self.target_url = scan_external_execution_target(chosen, target=self.target)
+        else:
+            self._transport_evidence = tuple(dict(item) for item in receipt.observations)
+        return receipt
+
+    async def _failed_transport_evidence(self) -> tuple[Mapping[str, Any], ...]:
+        """Probe attempts of a failed transport.resolve, for the report.
+
+        A failed action has no observation manifest. The attempts are kept on its durable
+        receipt, which a resumed finalizer reads back when this process did not probe.
+        """
+        if self._transport_evidence:
+            return self._transport_evidence
+        loader = getattr(self.backend, "load_action_receipt", None)
+        if loader is None or not any(
+            item.action_id == TRANSPORT_ACTION_ID for item in self.plan.actions
+        ):
+            return ()
+        try:
+            receipt = await loader(TRANSPORT_ACTION_ID)
+        except Exception:  # noqa: BLE001 -- diagnostics only; the verdict does not depend on it
+            return ()
+        rows = receipt.get("observations") if isinstance(receipt, Mapping) else None
+        return tuple(dict(item) for item in rows or () if isinstance(item, Mapping))
+
+    async def _load_transport_resolution(self, *, required: bool) -> None:
+        """Adopt the origin transport.resolve persisted; never choose one here."""
+        if not any(item.action_id == TRANSPORT_ACTION_ID for item in self.plan.actions):
+            raise ScanActionAdapterError(
+                "a target without a scheme needs transport.resolve in its plan"
+            )
+        chosen = selected_origin(await self._observations(TRANSPORT_ACTION_ID))
+        if chosen:
+            self.target_url = scan_external_execution_target(chosen, target=self.target)
+        elif required:
+            raise ScanActionAdapterError(
+                "transport.resolve selected no origin; the target was not reachable"
+            )
+
     async def _finalize(self, action: ScanAction) -> CapabilityReceipt:
         self._private_replay_plans.clear()
         self._private_requests.clear()
@@ -3117,7 +3210,10 @@ class DatabaseNeutralScanActionDispatcher:
         report = finalize_scan_report(
             plan=self.plan,
             plan_revision=self.plan_revision,
-            target_url=self.target_url,
+            target_url=self.target_url or self.requested_target,
+            transport_evidence=(
+                await self._failed_transport_evidence() if self.target_url is None else ()
+            ),
             action_results=results,
             observations=observations,
             work_manifest_references=unique_work_manifest_reference_dicts(
@@ -3146,6 +3242,10 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> CapabilityReceipt:
         if lease.worker_id != self.worker_id:
             raise ScanActionAdapterError("action lease belongs to another worker")
+        if action.action_id == TRANSPORT_ACTION_ID:
+            return await self._transport_resolve(action, heartbeat)
+        if self.target_url is None:
+            await self._load_transport_resolution(required=action.action_id != "finalize.report")
         if action.capability_name == "browser.login_check":
             if self._browser_login_adapter_factory is None:
                 raise ScanActionAdapterError("browser login requires the local credential-enabled worker")

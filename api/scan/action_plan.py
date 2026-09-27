@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import re
@@ -36,6 +36,12 @@ except ModuleNotFoundError:
 from .capability_execution import scan_discovery_reservation
 from .contracts import BUDGET_PROFILES, SCAN_V2_INTERACTIVE_AUTH_KINDS
 from .execution import ScanExecutionPlan
+from .transport import (
+    TRANSPORT_ACTION_ID,
+    TRANSPORT_STAGE,
+    binding_admits_both_schemes,
+    transport_probe_budget,
+)
 from .work_manifests import (
     CANONICAL_PASSIVE_NUCLEI_TEMPLATES,
     ScanWorkManifestError,
@@ -1275,6 +1281,8 @@ class ScanActionPlanCompiler:
             override = dict(action_budgets or {}).get(blueprint.action_id)
             if override is not None:
                 return override
+            if blueprint.action_id == TRANSPORT_ACTION_ID:
+                return transport_probe_budget()
             if blueprint.capability_name in _BATCH_CAPABILITIES:
                 shaped = slice_shapes.get(_ROUND_SUFFIX.sub("", blueprint.action_id))
                 if shaped is not None:
@@ -1905,6 +1913,23 @@ class ScanActionPlanCompiler:
                     *(() if endpoint_ref else discovery_dependencies),
                 ))),
                 required="bola" in explicitly_requested,
+            )
+
+        # A target entered without a scheme is frozen for HTTP and HTTPS. Which of them serves
+        # the application is decided once, during execution, by a bounded probe that every
+        # other root action waits for (scan/transport.py). Continuation rounds inherit the
+        # round-zero decision rather than probing again.
+        if continuation_round == 0 and blueprints and binding_admits_both_schemes(target_binding):
+            blueprints[:] = [
+                row if row.dependencies else replace(row, dependencies=(TRANSPORT_ACTION_ID,))
+                for row in blueprints
+            ]
+            add(
+                TRANSPORT_ACTION_ID,
+                TRANSPORT_STAGE,
+                "http.request",
+                {"method": "GET", "path": "/", "follow_redirects": False, "transport_probe": True},
+                required=True,
             )
 
         if include_finalizer:
