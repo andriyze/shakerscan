@@ -42,6 +42,7 @@ try:
     import hypothesis_lifecycle
     import hypothesis_scheduler
     import invariant_contracts
+    import target_dns_alias
     from command_arsenal import (
         describe_commands as describe_arsenal_commands,
         describe_contracts as describe_arsenal_contracts,
@@ -59,6 +60,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         hypothesis_lifecycle,
         hypothesis_scheduler,
         invariant_contracts,
+        target_dns_alias,
     )
     from ..command_arsenal import (
         describe_commands as describe_arsenal_commands,
@@ -530,32 +532,35 @@ async def arsenal_revoke_approval(
     revoked_by = req.revoked_by.strip()
     reason = req.reason.strip()
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE approval_receipts
-            SET status='revoked', revoked_at=NOW(), revoked_by=$2,
-                revocation_reason=$3
-            WHERE id=$1 AND status='active' AND approved_by IS NOT NULL
-            RETURNING *
-            """,
-            approval_uuid,
-            revoked_by,
-            reason,
-        )
-        if row is None:
+        async with conn.transaction():
             row = await conn.fetchrow(
-                "SELECT * FROM approval_receipts WHERE id=$1",
+                """
+                UPDATE approval_receipts
+                SET status='revoked', revoked_at=NOW(), revoked_by=$2,
+                    revocation_reason=$3
+                WHERE id=$1 AND status='active' AND approved_by IS NOT NULL
+                RETURNING *
+                """,
                 approval_uuid,
+                revoked_by,
+                reason,
             )
             if row is None:
-                raise HTTPException(status_code=404, detail="Approval receipt not found")
-            public = _public_approval_receipt_row(row)
-            if public.get("status") != "revoked":
-                raise HTTPException(
-                    status_code=409,
-                    detail="Only active approval receipts can be revoked",
+                row = await conn.fetchrow(
+                    "SELECT * FROM approval_receipts WHERE id=$1", approval_uuid,
                 )
-        public = _public_approval_receipt_row(row)
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Approval receipt not found")
+                public = _public_approval_receipt_row(row)
+                if public.get("status") != "revoked":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Only active approval receipts can be revoked",
+                    )
+            await target_dns_alias.revoke_dns_alias_lineage(
+                conn, row, revoked_by=revoked_by, reason=reason,
+            )
+            public = _public_approval_receipt_row(row)
     return {
         "approval_receipt": public,
         "revoked": True,

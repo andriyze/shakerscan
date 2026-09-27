@@ -329,8 +329,9 @@ function ScansContent() {
   async function handleScan(targetUrl: string) {
     try {
       const result = await submitScanV2({ target: targetUrl, budget_profile: 'balanced' })
-      toast.success(
-        result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started',
+      const started = result?.auto_sharded ? 'Auto-sharded scan started' : result?.parallel ? 'Parallel scan started' : 'Scan started'
+      toast[result?.notice ? 'info' : 'success'](
+        result?.notice ? `${started}. ${result.notice}` : started,
         result?.scan_id
           ? { link: { href: `/scans/${result.scan_id}`, label: 'View scan' } }
           : undefined
@@ -338,7 +339,7 @@ function ScansContent() {
       fetchScans(true)
     } catch (err) {
       console.error('Failed to start scan:', err)
-      toast.error('Failed to start scan')
+      toast.error(err instanceof Error ? err.message : 'Failed to start scan')
     }
   }
 

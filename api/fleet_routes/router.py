@@ -77,6 +77,7 @@ try:
     from scan.operational_metrics import record_operational_event
     from scan.private_inputs import BROKER_PRIVATE_SCAN_INPUT_SCHEMA, private_replay_plan_payload
     import action_scope
+    import target_resolution
     from scan.private_state import SCAN_PRIVATE_STATE_KEY_OPTION
     from scan.work_manifests import ScanWorkManifestError, ScanWorkManifestReference, build_request_candidate_manifest, unique_work_manifest_reference_dicts, work_manifest_references_in
     from scan.worker_dispatch import is_deterministic_dast, prepare_worker_dispatch
@@ -90,6 +91,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         _record_map, _row_value, _uuid_or_400, utc_now, utc_now_iso,
     )
     from .. import action_scope
+    from .. import target_resolution
     from ..operator_auth import _fleet_bearer_credential, _require_fleet_operator
     from .. import asm_inventory
     from .. import parallel_scan
@@ -3727,8 +3729,22 @@ async def _resolve_runtime_target_addresses(
             hostname, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
         )
     except OSError as exc:
+        if target_resolution.lookup_error_status(exc) != target_resolution.NO_ADDRESS:
+            raise HTTPException(
+                status_code=422, detail=f"{subject} DNS resolution failed"
+            ) from exc
+        # The name has no address record. Say so with the name, and name its www/apex twin when
+        # that one resolves to an address this deployment would admit -- the operator can act
+        # on that; "DNS resolution failed" alone they could not.
+        twin = await target_resolution.resolving_twin(
+            hostname,
+            admit=lambda address: action_scope._ip_scope_block_reason(address, environment) is None,
+        )
         raise HTTPException(
-            status_code=422, detail=f"{subject} DNS resolution failed"
+            status_code=422,
+            detail=target_resolution.unresolvable_message(
+                hostname, twin=twin, action="scanned" if "scan" in subject.lower() else "tested",
+            ),
         ) from exc
     addresses: list[str] = []
     for record in records:

@@ -39,6 +39,7 @@ try:
     )
     import asm_inventory
     import parallel_scan
+    import target_resolution
     from finding_routes import router as _finding_routes
     from fleet_routes.router import BROKER_INGEST_QUEUE_NAME
     from artifact_storage import storage_health as artifact_storage_health
@@ -52,7 +53,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         SEVERITY_ORDER, _clean_string_list, _direct_query_value, _int_or_none, _iso_or_none, _optional_uuid,
         _parse_iso_datetime, _row_value, _severity_sort_value, _uuid_or_400, utc_now, utc_now_iso,
     )
-    from .. import asm_inventory, parallel_scan
+    from .. import asm_inventory, parallel_scan, target_resolution
     from ..finding_routes import router as _finding_routes
     from ..fleet_routes.router import BROKER_INGEST_QUEUE_NAME
     from ..artifact_storage import storage_health as artifact_storage_health
@@ -404,7 +405,7 @@ async def list_discovery_runs(limit: int = Query(20, ge=1, le=200)):
             ORDER BY created_at DESC LIMIT $1
         """, limit)
 
-    return {'discovery_runs': [dict(r) for r in rows]}
+    return {'discovery_runs': [target_resolution.public_discovery_run(r) for r in rows]}
 
 
 @router.get("/discovery/{discovery_id}")
@@ -417,7 +418,7 @@ async def get_discovery(discovery_id: str):
         if not discovery:
             raise HTTPException(status_code=404, detail="Discovery run not found")
 
-    return dict(discovery)
+    return target_resolution.public_discovery_run(discovery)
 
 
 @router.get("/system/resources")

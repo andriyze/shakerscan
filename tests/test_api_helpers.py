@@ -140,8 +140,10 @@ def test_scan_submission_resolves_the_targets_standing_authorization(monkeypatch
 
     monkeypatch.setattr(api_module, "db_pool", _Pool())
     monkeypatch.setattr(api_module.target_authorization, "current_target_authorization", current)
-    assert asyncio.run(api_module._standing_authorization_for_target_url("https://app.example.test")) == "standing-1"
-    assert asyncio.run(api_module._standing_authorization_for_target_url("https://unknown.example.test")) is None
+    assert asyncio.run(api_module.target_dns_alias.standing_authorization_for_target_url(
+        api_module.db_pool, "https://app.example.test")) == "standing-1"
+    assert asyncio.run(api_module.target_dns_alias.standing_authorization_for_target_url(
+        api_module.db_pool, "https://unknown.example.test")) is None
     assert api_module._policy_requests_active_testing({"active_testing": True}) is True
     assert api_module._policy_requests_active_testing({"active_testing": False}) is False
     assert api_module._policy_requests_active_testing(None) is False
@@ -382,6 +384,16 @@ def test_arsenal_approval_revocation_is_irreversible_and_public(monkeypatch):
     approval_id = uuid.uuid4()
 
     class Conn:
+        def transaction(self):
+            class Transaction:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Transaction()
+
         async def fetchrow(self, query, *args):
             assert "UPDATE approval_receipts" in query
             assert args == (approval_id, "release-e2e", "authority no longer valid")
@@ -20574,6 +20586,255 @@ def test_create_target_reuse_reports_stored_host_metadata(monkeypatch):
     assert response["origin_merged"] is True
     assert response["requested_url"] == "https://localhost:9090"
     assert "http://localhost:3001" in response["warning"]
+
+
+def test_create_target_registers_the_www_twin_when_the_apex_has_no_address(monkeypatch):
+    """example.com with no A/AAAA record while www.example.com resolves: register www and say so.
+
+    Otherwise the target is created, every Scan of it is refused for DNS, and the operator never
+    learns that the site answers on www. Lookups are fixtures; no network.
+    """
+    import socket
+    import target_resolution
+
+    inserted: list[tuple] = []
+    authorized: list[tuple] = []
+
+    class Conn:
+        def transaction(self):
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
+        async def fetchrow(self, query, *args):
+            if "FROM targets WHERE canonical_key=$1" in query:
+                return None
+            inserted.append(args)
+            return {
+                "id": uuid.uuid4(),
+                "url": args[0],
+                "name": None,
+                "discovery_source": "manual",
+                "metadata_json": {},
+                "root_domain": args[2],
+                "is_root": args[3],
+                "created": True,
+            }
+
+    async def lookup(hostname):
+        if hostname == "www.example.com":
+            return ["93.184.215.14"]
+        raise socket.gaierror(socket.EAI_NONAME, "not known")
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+
+    async def authorize(_conn, target_id, *, approved_by, environment):
+        authorized.append((target_id, approved_by, environment))
+        return {"approval_receipt_id": "standing-for-www"}
+
+    monkeypatch.setattr(api_module.target_authorization, "authorize_target", authorize)
+
+    response = asyncio.run(api_module.create_target(
+        types.SimpleNamespace(url="example.com", name=None, scan_options={}, authorized_by="operator")
+    ))
+
+    assert inserted[0][0] == "https://www.example.com"
+    assert response["url"] == "https://www.example.com"
+    assert response["dns_fallback"]["requested_host"] == "example.com"
+    assert response["dns_fallback"]["resolved_host"] == "www.example.com"
+    assert response["notice"] == "example.com has no address record; using www.example.com."
+    assert response["requested_url"] == "example.com"
+    assert response["authorization"]["approval_receipt_id"] == "standing-for-www"
+    assert authorized == [(uuid.UUID(response["id"]), "operator", "production")]
+
+
+def test_create_target_reuses_an_existing_dead_host_identity_for_its_www_twin(monkeypatch):
+    import socket
+    import target_resolution
+
+    existing_id = uuid.uuid4()
+
+    class Conn:
+        def transaction(self):
+            class Transaction:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return False
+
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            assert "FROM targets WHERE canonical_key=$1" in query, "the live twin must not create a second row"
+            assert args == ("web:example.com",)
+            return {
+                "id": existing_id, "url": "https://example.com", "name": None,
+                "discovery_source": "manual", "metadata_json": {},
+                "root_domain": "example.com", "is_root": True, "created": False,
+            }
+
+    async def lookup(hostname):
+        if hostname == "www.example.com":
+            return ["93.184.215.14"]
+        raise socket.gaierror(socket.EAI_NONAME, "no address")
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    response = asyncio.run(api_module.create_target(
+        types.SimpleNamespace(url="example.com", name=None, scan_options={})
+    ))
+    assert response["id"] == str(existing_id)
+    assert response["url"] == "https://example.com"
+    assert response["status"] == "already_exists"
+    assert response["dns_fallback"]["resolved_host"] == "www.example.com"
+    assert response.get("origin_merged") is None
+
+
+def test_create_target_keeps_the_typed_name_when_it_resolves_or_the_resolver_fails(monkeypatch):
+    import socket
+    import target_resolution
+
+    class Conn:
+        def transaction(self):
+            class _Tx:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Tx()
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": uuid.uuid4(), "url": args[0], "name": None, "discovery_source": "manual",
+                "metadata_json": {}, "root_domain": args[2], "is_root": args[3], "created": True,
+            }
+
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    for answer in (["93.184.215.15"], socket.gaierror(socket.EAI_AGAIN, "resolver down")):
+        async def lookup(hostname, answer=answer):
+            if hostname == "www.example.com":
+                return ["93.184.215.14"]
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+        response = asyncio.run(api_module.create_target(
+            types.SimpleNamespace(url="https://example.com", name=None, scan_options={})
+        ))
+        assert response["url"] == "https://example.com"
+        assert "dns_fallback" not in response
+        assert "notice" not in response
+
+
+class _StopAtAuthorization(Exception):
+    pass
+
+
+def _scan_submission_target(monkeypatch, table, *, stored_metadata=None, target="example.com"):
+    """Submit an active Scan and return the URL its standing authorization is looked up for.
+
+    Admission stops there (the rest of submission needs a live stack); the authorization lookup
+    is the first step that binds the Scan to a target, so it shows which name is being scanned.
+    Every DNS answer comes from ``table``; nothing touches the network.
+    """
+    import socket
+    import target_resolution
+
+    async def lookup(hostname):
+        answer = table.get(hostname, socket.gaierror(socket.EAI_NONAME, "not known"))
+        if isinstance(answer, BaseException):
+            raise answer
+        return list(answer)
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if query == "SELECT id FROM targets WHERE canonical_key = $1":
+                return None
+            assert query == "SELECT metadata_json FROM targets WHERE canonical_key = $1"
+            return {"metadata_json": stored_metadata} if stored_metadata is not None else None
+
+    bound: list[str] = []
+
+    async def standing(_pool, url):
+        bound.append(url)
+        raise _StopAtAuthorization
+
+    # A deployment that refuses private ranges outside Lab (the Enterprise gateway's setting).
+    # Public answers use a global address: documentation ranges are not a global destination.
+    monkeypatch.setenv("SHAKERSCAN_PRIVATE_NETWORK_TARGETS", "refuse")
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module.target_dns_alias, "standing_authorization_for_target_url", standing)
+    with pytest.raises(_StopAtAuthorization):
+        asyncio.run(api_module._submit_scan(api_module.ScanRequest(
+            target=target, policy={"active_testing": True},
+        )))
+    return bound[0]
+
+
+def test_scan_submission_uses_the_www_twin_when_the_apex_has_no_address(monkeypatch):
+    assert _scan_submission_target(
+        monkeypatch, {"www.example.com": ["93.184.215.14"]},
+    ) == "https://www.example.com"
+
+
+def test_scan_submission_uses_the_apex_when_www_has_no_address(monkeypatch):
+    assert _scan_submission_target(
+        monkeypatch, {"example.com": ["93.184.215.14"]}, target="https://www.example.com/app",
+    ) == "https://example.com"
+
+
+def test_scan_submission_never_swaps_to_a_twin_the_destination_policy_refuses(monkeypatch):
+    # The metadata address is refused in every environment; a private one outside Lab.
+    for answer in (["169.254.169.254"], ["10.0.0.5"]):
+        assert _scan_submission_target(
+            monkeypatch, {"www.example.com": answer},
+        ) == "https://example.com"
+
+
+def test_scan_submission_judges_the_twin_under_the_requested_targets_environment(monkeypatch):
+    """A Lab target's twin on a private address is admitted, as Lab admission would admit it."""
+    assert _scan_submission_target(
+        monkeypatch, {"www.example.com": ["10.0.0.5"]}, stored_metadata={"cohort": "lab"},
+    ) == "https://www.example.com"
+
+
+def test_scan_submission_keeps_the_name_on_a_resolver_fault_or_when_it_resolves(monkeypatch):
+    import socket
+
+    for table in (
+        {"example.com": socket.gaierror(socket.EAI_AGAIN, "resolver down"), "www.example.com": ["93.184.215.14"]},
+        {"example.com": ["93.184.215.15"], "www.example.com": ["93.184.215.14"]},
+    ):
+        assert _scan_submission_target(monkeypatch, table) == "https://example.com"
+
+
+def test_scan_submission_announces_the_swap_in_its_response():
+    import target_resolution
+
+    fallback = {
+        "requested_host": "example.com", "resolved_host": "www.example.com",
+        "resolved_url": "https://www.example.com", "reason": "no_address_record",
+        "message": "example.com has no address record; using www.example.com.",
+    }
+    assert target_resolution.fallback_response_fields(None, "example.com") == {}
+    fields = target_resolution.fallback_response_fields(fallback, "example.com")
+    assert fields["notice"] == "example.com has no address record; using www.example.com."
+    assert fields["dns_fallback"] == fallback
+    assert fields["requested_target"] == "example.com"
+    source = inspect.getsource(api_module._submit_scan)
+    assert "response.update(target_resolution.fallback_response_fields(dns_fallback, request.target))" in source
 
 
 def test_direct_query_value_unwraps_fastapi_parameter_without_private_import():

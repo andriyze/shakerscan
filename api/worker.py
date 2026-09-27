@@ -71,6 +71,7 @@ from runtime.worker_projection import (
 )
 import parallel_scan
 import asm_inventory
+import target_resolution
 import family_proof
 import agent_tools
 import worker_queue_policy as worker_queue_policy_module
@@ -14212,6 +14213,7 @@ async def process_discovery_job(job_data: dict):
 
     completed_at = utc_now()
     error = result.get('error')
+    dns_plan = None if error else await target_resolution.plan_discovered_targets(result.get('subdomains', []))
 
     # Update database
     async with db_pool.acquire() as conn:
@@ -14224,27 +14226,20 @@ async def process_discovery_job(job_data: dict):
                 WHERE id = $3
             """, error, completed_at, uuid.UUID(discovery_id))
         else:
+            # Only names that publish an address record become scannable targets; the rest are
+            # counted in the run so the operator sees they were found and why they were skipped.
+            resolution = await target_resolution.store_discovered_targets(conn, dns_plan, root_domain)
             await conn.execute("""
                 UPDATE discovery_runs SET
                     status = 'completed',
                     subdomains_found = $1,
-                    result = $2,
-                    sources_used = $3,
-                    completed_at = $4
-                WHERE id = $5
-            """, result.get('total', 0), json.dumps(result.get('subdomains', [])),
-                 json.dumps(result.get('by_source', {})), completed_at, uuid.UUID(discovery_id))
-
-            # Auto-create targets for discovered subdomains
-            for subdomain in result.get('subdomains', [])[:100]:  # Limit to 100
-                try:
-                    await conn.execute("""
-                        INSERT INTO targets (url, root_domain, is_root, discovery_source)
-                        VALUES ($1, $2, false, 'subfinder')
-                        ON CONFLICT (canonical_key) DO NOTHING
-                    """, f"https://{subdomain}", root_domain)
-                except Exception:
-                    pass
+                    new_subdomains = $2,
+                    result = $3,
+                    sources_used = $4,
+                    completed_at = $5
+                WHERE id = $6
+            """, result.get('total', 0), resolution['added'], json.dumps(result.get('subdomains', [])),
+                 json.dumps({**(result.get('by_source') if isinstance(result.get('by_source'), dict) else {}), 'dns_resolution': resolution}), completed_at, uuid.UUID(discovery_id))
 
     job_key = f"job:{job_id}"
     r.hset(job_key, mapping={
