@@ -3949,3 +3949,100 @@ def test_generic_collection_ref_carries_body_field_names_for_a_confirmed_active_
     assert frozen["body_field_names"] == ["id"]
     assert frozen["safe_method"] is False
     assert "1" not in json.dumps(frozen["body_field_names"])
+
+
+@pytest.mark.parametrize(
+    ("submitted", "scheme_inferred", "expected_origins", "expected_target"),
+    [
+        # POST /scans with "api.example.test": the binding admits both inferred origins.
+        (
+            "https://api.example.test", True,
+            ["http://api.example.test", "https://api.example.test"],
+            "https://api.example.test/",
+        ),
+        # POST /targets/{id}/scan for a target added without a scheme: the stored URL carries
+        # https://, so only that origin is frozen, while the stored options still say the scheme
+        # was inferred and the worker receives the bare host.
+        ("https://api.example.test", False, ["https://api.example.test"], "https://api.example.test/"),
+        # A port survives the round trip.
+        (
+            "https://api.example.test:8443", True,
+            ["http://api.example.test:8443", "https://api.example.test:8443"],
+            "https://api.example.test:8443/",
+        ),
+    ],
+)
+def test_scheme_inferred_scan_reaches_external_tools_through_its_frozen_origin(
+    monkeypatch, submitted, scheme_inferred, expected_origins, expected_target,
+):
+    """Submission -> binding -> persisted job -> worker materialization -> external-tool target.
+
+    Observed on 2.5.4: a target added as ``tidyhelpers.com`` failed every Scan 0.1 s after start
+    with "external Scan target must be an absolute HTTP(S) URL". Materialization hands the worker
+    the bare authority when the scheme was inferred, and the external-tool binding accepted only
+    absolute URLs. Each step was tested alone; nothing drove one target through all of them.
+    """
+    from scan.capability_execution import (
+        ScanCapabilityContractError,
+        scan_external_execution_target,
+    )
+    from scan.contracts import bind_scan_scope_receipt, resolve_scan_contract
+    from scan.job_runtime import materialize_canonical_scan_job
+    from scan.jobs import CanonicalScanJob
+
+    async def resolve(_url, *, subject, environment="production"):
+        return ["192.0.2.10"]
+
+    monkeypatch.setattr(api_module, "_resolve_runtime_target_addresses", resolve)
+    monkeypatch.setattr(fleet_router_module, "_resolve_runtime_target_addresses", resolve)
+    target_id = "00000000-0000-4000-8000-000000000001"
+    guard = asyncio.run(api_module._freeze_scan_target_binding(
+        target_id=target_id,
+        target_kind="web",
+        target_url=submitted,
+        scope_receipt_id="scope-1",
+        scheme_inferred=scheme_inferred,
+    ))
+    assert guard["allowed_origins"] == expected_origins
+    binding = api_module.TargetBinding(
+        target_id=target_id,
+        target_kind="web",
+        canonical_host=guard["canonical_host"],
+        allowed_origins=tuple(guard["allowed_origins"]),
+        allowed_addresses=tuple(guard["allowed_addresses"]),
+        allowed_root_domains=tuple(guard["allowed_root_domains"]),
+        environment=str(guard.get("environment") or "unknown"),
+        scope_receipt_id="scope-1",
+    )
+    contract = bind_scan_scope_receipt(
+        resolve_scan_contract(budget_profile="balanced", policy={"active_testing": False}),
+        "scope-1",
+    )
+    job = CanonicalScanJob.create(
+        job_id="job-1", scan_id="scan-1", target=binding,
+        execution_plan=contract.execution_plan, created_at="2026-09-26T12:00:00Z",
+    )
+    options = contract.execution_plan.option_metadata()
+    options.update({"target_scheme_inferred": True, "runtime_scope_guard": guard})
+    row = {
+        "target_id": target_id,
+        "target_url": submitted,
+        "job_id": job.job_id,
+        "options": options,
+        "scan_generation": "v2",
+        "policy_json": job.execution_plan.canonical_dict()["policy"],
+        "budget_json": job.execution_plan.canonical_dict()["budget"],
+        "scan_job_payload": job.payload(),
+        "scan_job_digest": job.payload_digest,
+    }
+    materialized = materialize_canonical_scan_job(
+        job.payload(), row, resolved_addresses=("192.0.2.10",),
+    )
+    assert "://" not in materialized["target"], "scheme-agnostic stages still see the bare host"
+
+    assert scan_external_execution_target(materialized["target"], target=binding) == expected_target
+
+    # The frozen binding still decides: another host, or a port admission never froze, is refused.
+    for foreign in ("other.example.test", "api.example.test:9999"):
+        with pytest.raises(ScanCapabilityContractError):
+            scan_external_execution_target(foreign, target=binding)
