@@ -272,7 +272,7 @@ function BoundaryWorkflow() {
   }
 
   return (
-    <main className="space-y-5 p-6 lg:p-8">
+    <div className="space-y-5 p-6 lg:p-8">
       <div>
         <Link href="/ai-gate" className="text-sm text-blue-300 hover:text-blue-200">← AI Gate</Link>
         <h1 className="mt-2 text-2xl font-bold text-white">Agent boundary verification</h1>
@@ -403,10 +403,10 @@ function BoundaryWorkflow() {
         </div>}
         <p className="text-xs text-gray-500">The artifact carries fixture and proposal data. Store it with the care appropriate for those values. It never includes an approval receipt or grants execution authority.</p>
       </Card>
-    </main>
+    </div>
   )
 }
 
 export default function BoundaryPage() {
-  return <Suspense fallback={<main className="p-6 text-sm text-gray-300">Loading boundary workflow…</main>}><BoundaryWorkflow /></Suspense>
+  return <Suspense fallback={<div className="p-6 text-sm text-gray-300">Loading boundary workflow…</div>}><BoundaryWorkflow /></Suspense>
 }
