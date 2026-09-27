@@ -80,3 +80,24 @@ for (const [status, message] of [['already_exists', 'Target already present'], [
     await expect(page.getByText(message, { exact: true })).toBeVisible()
   })
 }
+
+test('target creation accepts an authorized local service on a nonstandard HTTPS port', async ({ page }) => {
+  await pinMockApiOrigin(page)
+  const submissions: unknown[] = []
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/targets' && route.request().method() === 'POST') {
+      submissions.push(route.request().postDataJSON())
+      return route.fulfill({ json: { status: 'created', id, url: 'https://fixture-255:18443' } })
+    }
+    if (path === '/targets/grouped') return route.fulfill({ json: { domains: [], total_targets: 0, total_root_domains: 0 } })
+    return route.fulfill({ json: { status: 'healthy', workers: [], domains: [], targets: [], total: 0 } })
+  })
+  await page.goto('/targets')
+  await page.getByRole('button', { name: 'Add Target', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Add Target' })
+  await dialog.getByPlaceholder('https://example.com').fill('https://fixture-255:18443')
+  await dialog.getByRole('button', { name: 'Add Target', exact: true }).click()
+  await expect(page.getByText('Target added', { exact: true })).toBeVisible()
+  expect(submissions).toHaveLength(1)
+})

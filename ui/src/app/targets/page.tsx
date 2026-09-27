@@ -12,6 +12,7 @@ import { ArrowDown, ArrowUp, Plus, Search } from 'lucide-react'
 import { Button, Card, CardSkeleton, ConfirmDialog, EmptyState, ErrorState, Field, gradeTextColor, Input, Modal, PageHeader, Select, useToast } from '@/components/ui'
 import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { discoveryOutcomeMessage, scanStartFailureReasons } from '@/lib/targetDns'
+import { validateScanTarget } from '@/lib/targetValidation'
 
 const SEARCH_DEBOUNCE_MS = 300
 const DISCOVERY_POLL_MS = 3000
@@ -38,23 +39,6 @@ function classifyTargetGroupIdentity(value: string): { kind: TargetIdentityKind;
   const registrable = labels.length >= 2 && /^[a-z]{2,63}$/i.test(labels.at(-1) || '')
   if (registrable) return { kind: 'registrable_domain', label: 'Domain', canDiscoverSubdomains: true, internal: false }
   return { kind: 'host', label: 'Host', canDiscoverSubdomains: false, internal: false }
-}
-
-function isPlausibleTargetUrl(value: string): boolean {
-  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value) ? value : `https://${value}`
-  let url: URL
-  try {
-    url = new URL(candidate)
-  } catch {
-    return false
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
-  const host = url.hostname
-  if (!host) return false
-  if (host === 'localhost') return true
-  if (host.startsWith('[') && host.endsWith(']')) return true
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true
-  return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(host)
 }
 
 function configureScanHref(targets: string[], forceBatch = false): string {
@@ -260,8 +244,9 @@ function TargetsContent() {
     e.preventDefault()
     const url = newTargetUrl.trim()
     if (!url) return
-    if (!isPlausibleTargetUrl(url)) {
-      setUrlError('Enter a valid URL or hostname, e.g. https://example.com')
+    const validationError = validateScanTarget(url)
+    if (validationError) {
+      setUrlError(validationError)
       return
     }
 
