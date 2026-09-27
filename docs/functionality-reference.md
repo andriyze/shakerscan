@@ -165,7 +165,7 @@ afterward; unused profile capacity remains visibly unallocated.
 **Target transport.** A target entered with `http://` or `https://` is scanned exactly as
 entered. A target entered without a scheme (`example.com`, `example.com:8080`) is admitted for both
 schemes on that authority, through `POST /scans` and `POST /targets/{id}/scan` alike (the target
-route resubmits the stored target in its scheme-less form). Its plan then starts with
+route passes the stored scheme-inference flag with its canonical URL). Its plan then starts with
 `scan.origin_select`: one read-only `GET /` per frozen origin, HTTPS first, stopping at the first
 origin that responds, under its own budget reservation and receipt. Every other action
 waits for it and runs against the origin it selected; it never follows a redirect or changes host.
