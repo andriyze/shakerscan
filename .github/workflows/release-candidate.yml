@@ -170,6 +170,9 @@ jobs:
             done
           }
 
+          runs_json="$(gh run list --workflow=build-on-main.yml --branch main \
+            --commit "$CANDIDATE_SHA" --limit 20 \
+            --json databaseId,status,conclusion)"
           while read -r run_id; do
             [[ -n "$run_id" ]] || continue
             if validate_run "$run_id"; then
@@ -178,12 +181,27 @@ jobs:
               exit 0
             fi
             echo "::notice::build-on-main run $run_id has no reusable exact-SHA image receipt"
-          done < <(gh run list --workflow=build-on-main.yml --branch main \
-            --commit "$CANDIDATE_SHA" --status success --limit 20 \
-            --json databaseId --jq '.[].databaseId')
+          done < <(jq -r '.[] | select(.conclusion == "success") | .databaseId' <<< "$runs_json")
+
+          active_run_id="$(jq -r '[.[] | select(.status != "completed") | .databaseId][0] // empty' <<< "$runs_json")"
+          if [[ -n "$active_run_id" ]]; then
+            python3 scripts/wait_for_running_prebuild.py "$active_run_id"
+            if validate_run "$active_run_id"; then
+              echo "run_id=$active_run_id" >> "$GITHUB_OUTPUT"
+              echo "Reusing attested image manifests from build-on-main run $active_run_id"
+              exit 0
+            fi
+            echo "Exact-SHA build-on-main run $active_run_id succeeded without a reusable attested receipt; rerun the image build" >&2
+            exit 1
+          fi
+
+          if jq -e 'length > 0' <<< "$runs_json" >/dev/null; then
+            echo "No reusable exact-SHA build-on-main receipt exists; rerun the image build instead of rebuilding during certification" >&2
+            exit 1
+          fi
 
           echo "run_id=" >> "$GITHUB_OUTPUT"
-          echo "::notice::no reusable image set for $CANDIDATE_SHA; candidate jobs will build it"
+          echo "::notice::no build-on-main run exists for $CANDIDATE_SHA; candidate jobs will build it on demand"
 
   validate:
     name: Validate exact release candidate
@@ -388,10 +406,9 @@ jobs:
           CANDIDATE_SHA: ${{ needs.meta.outputs.candidate_sha }}
         shell: bash
         run: |
-          # The complete Python suite is a required pre-merge check and runs again on every push
-          # to main from the same locked dependency set. Certification reuses that report for the
-          # exact candidate SHA instead of running the suite a third time inside the image. The
-          # in-image run remains only as the fallback for a metadata-only merge that skipped it.
+          # Reuse a complete main-commit suite report for the exact candidate SHA. UI source-only
+          # and metadata-only merges have no full-suite report, so run the complete suite inside
+          # the candidate image rather than treating a focused UI check as full certification.
           mkdir -p artifacts
           run_id="$(gh run list --workflow=python-suite.yml --branch main --commit "$CANDIDATE_SHA" \
             --status success --json databaseId --jq '.[0].databaseId // empty')"

@@ -38,6 +38,8 @@ def test_e2e_runner_writes_machine_readable_scorecard(monkeypatch, tmp_path):
     assert payload["gate"] == "pass"
     assert payload["areas"][0]["area"] == "fixture"
     assert payload["areas"][0]["rows"][0]["name"] == "deterministic fixture"
+    assert payload["areas"][0]["duration_seconds"] >= 0
+    assert payload["total_duration_seconds"] == payload["areas"][0]["duration_seconds"]
     # The subject binding: a scorecard must say which deployment it exercised, or it can certify a
     # candidate it never tested.
     assert payload["subject"]["source_revision"] == "a" * 40
