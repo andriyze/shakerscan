@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 import urllib.parse
 
@@ -2318,14 +2319,20 @@ def main() -> int:
     selected_names = [name for name in selected_names if name not in set(args.exclude_area)]
     if not selected_names:
         ap.error("the E2E selection is empty after exclusions")
-    areas = [AREAS[name] for name in selected_names]
-    cards = [fn() for fn in areas]
+    cards = []
+    for name in selected_names:
+        started = time.monotonic()
+        card = AREAS[name]()
+        cards.append((card, round(time.monotonic() - started, 3)))
 
     print("\n== Scorecard ==", flush=True)
     failed = False
-    for c in cards:
+    summaries = []
+    for c, duration in cards:
         s = c.summary()
-        print(f"  {s['area']}: {s['passed']}/{s['total']} — gate {s['gate'].upper()}", flush=True)
+        s["duration_seconds"] = duration
+        summaries.append(s)
+        print(f"  {s['area']}: {s['passed']}/{s['total']} — gate {s['gate'].upper()} ({duration:.1f}s)", flush=True)
         failed = failed or not c.passed
     if args.scorecard:
         # A scorecard with no subject can certify any candidate: a run dispatched from one source
@@ -2345,7 +2352,8 @@ def main() -> int:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "gate": "fail" if failed else "pass",
             "subject": subject,
-            "areas": [card.summary() for card in cards],
+            "areas": summaries,
+            "total_duration_seconds": round(sum(duration for _, duration in cards), 3),
         }
         scorecard_path = os.path.abspath(args.scorecard)
         os.makedirs(os.path.dirname(scorecard_path), exist_ok=True)

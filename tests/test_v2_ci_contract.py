@@ -80,15 +80,15 @@ def test_pr_smoke_keeps_full_backend_acceptance_and_scopes_ui_only_changes():
 
     Between 2.0.0 and 2.2.0, 56 of 60 release candidates failed, and the checks that failed them
     (the final-image vulnerability gate, the installed-stack DAST and Model Intake E2E) ran only in
-    certification. The PR check now runs every E2E area on the PR-built stack, against the same
+    certification. The PR check runs the selected E2E area on the PR-built stack, against the same
     Juice Shop target certification uses, with only the declared-debt rows tolerated.
     """
     smoke = _text("e2e-pr.yml")
     assert "python3 scripts/ci_smoke_scope.py" in smoke
     assert "steps.changes.outputs.stack == 'true'" in smoke
-    areas_step = smoke[smoke.index("Run every E2E area on the built stack"):]
-    assert "if: steps.changes.outputs.backend == 'true'" in areas_step[:200]
-    assert "python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json" in smoke
+    areas_step = smoke[smoke.index("Run selected E2E areas on the built stack"):]
+    assert "github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true'" in areas_step[:200]
+    assert 'python3 tests/e2e/run_e2e.py --area "$E2E_AREA" --scorecard artifacts/e2e-scorecard.json' in smoke
     assert "docker compose --profile e2e up -d" in smoke
     assert "SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000" in smoke
     assert "SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000" in smoke
@@ -97,8 +97,8 @@ def test_pr_smoke_keeps_full_backend_acceptance_and_scopes_ui_only_changes():
     assert "npm --prefix ui run test:unit" in smoke
     assert "npm --prefix ui run build" in smoke
     assert "npm --prefix ui run test:browser" in smoke
-    assert "Run UI-only mocked browser contracts" in smoke
-    assert "steps.changes.outputs.ui == 'true' && steps.changes.outputs.stack != 'true'" in smoke
+    assert "Run mocked browser contracts" in smoke
+    assert "github.event_name == 'merge_group' || steps.changes.outputs.stack != 'true'" in smoke
     assert "scripts/run_complete_python_suite.py" not in smoke
     assert "node-version: 26" in smoke
 
@@ -139,7 +139,7 @@ def test_pr_smoke_applies_the_candidate_vulnerability_gate_to_the_built_images()
     assert len(scans) == len(matrix)
     for step in scans:
         assert step["uses"] == certify["uses"]
-        assert step["if"] == "steps.changes.outputs.stack == 'true'"
+        assert step["if"] == "github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'"
         assert {key: step["with"][key] for key in policy_keys} == certify_policy
         image = step["with"]["trivyignores"].removeprefix(".trivyignore-")
         assert image in matrix, image
@@ -198,13 +198,13 @@ def test_model_intake_trust_anchor_lifecycle_is_a_hard_release_gate():
         assert not gate.get("continue-on-error"), workflow
         assert not _yaml(workflow)["jobs"][job].get("continue-on-error"), workflow
         assert gate.get("if") in (None, "always()",
-                                 "${{ always() && steps.changes.outputs.backend == 'true' }}")
+                                  "${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}")
         assert "|| true" not in gate["run"] and "set +e" not in gate["run"]
         for check in expected:
             assert f"--require-pass 'model_intake:{check}'" in gate["run"]
             assert check in e2e  # These are real assertions, not imaginary scorecard labels.
         producers = [step for step in steps[:steps.index(gate)]
-                     if "tests/e2e/run_e2e.py --area all" in step.get("run", "")
+                     if "tests/e2e/run_e2e.py --area " in step.get("run", "")
                      or ("make installed-stack-smoke" in step.get("run", "")
                          and step.get("env", {}).get("INSTALLED_STACK_SMOKE_E2E") == "1")]
         assert producers and all(not step.get("continue-on-error") for step in producers)

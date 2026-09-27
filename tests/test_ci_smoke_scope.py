@@ -21,6 +21,7 @@ def test_ui_copy_change_uses_ui_only_gate():
         "backend": False, "ui": True, "stack": False,
     }
     assert scope.python_mode(["ui/src/lib/labels.ts"]) == "ui"
+    assert scope.e2e_area(["ui/src/lib/labels.ts"]) == "all"
 
 
 def test_image_or_contract_change_keeps_stack_gate():
@@ -43,6 +44,22 @@ def test_backend_and_mixed_changes_keep_every_gate():
             "backend": True, "ui": True, "stack": True,
         }
         assert scope.python_mode(paths) == "full"
+
+
+def test_isolated_backend_changes_select_one_e2e_area():
+    cases = {
+        "api/model_intake/runner.py": "model_intake",
+        "scanner/scanner_tools/model_intake_archives.py": "model_intake",
+        "api/ai_gate/boundary/runner.py": "ai_gate",
+        "api/hunt/authorization_evidence.py": "hunt",
+    }
+    for path, expected in cases.items():
+        assert scope.classify_paths([path])["backend"]
+        assert scope.e2e_area([path]) == expected
+        assert scope.e2e_area([path, "ui/src/lib/labels.ts"]) == expected
+    assert scope.e2e_area(["api/hunt/run_router.py", "api/scan/jobs.py"]) == "all"
+    assert scope.e2e_area(["api/hunt/run_router.py", "api/ai_gate/runner.py"]) == "all"
+    assert scope.e2e_area(["api/hunt/run_router.py", "ui/src/lib/publicApi.generated.ts"]) == "all"
 
 
 def test_unrelated_change_skips_smoke_work():
@@ -73,7 +90,7 @@ def test_cli_classifies_an_actual_commit_diff(tmp_path: Path):
         text=True,
     )
     assert output.splitlines() == [
-        "backend=false", "ui=true", "stack=false", "python_mode=ui",
+        "backend=false", "ui=true", "stack=false", "python_mode=ui", "e2e_area=all",
     ]
 
 
@@ -99,5 +116,5 @@ def test_cli_counts_the_old_path_when_runtime_code_is_moved(tmp_path: Path):
         text=True,
     )
     assert output.splitlines() == [
-        "backend=true", "ui=true", "stack=true", "python_mode=full",
+        "backend=true", "ui=true", "stack=true", "python_mode=full", "e2e_area=all",
     ]

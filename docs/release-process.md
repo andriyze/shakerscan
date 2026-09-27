@@ -16,9 +16,10 @@ report on every pull request:
 | --- | --- | --- |
 | `commit-policy` | `commit-policy.yml` | A `release:` commit carries only metadata (`VERSION`, notes, ledger, `install/STABLE_VERSION`). |
 | `python-suite` | `python-suite.yml` | Backend, release, and shared-contract changes run the complete partitioned Python suite and static gates from the locked dependency set. UI source-only changes run focused UI-facing Python contracts. |
-| `smoke` | `e2e-pr.yml` | Backend and shared-contract changes run every E2E area, real-stack browser acceptance, and the five-image vulnerability gate. UI source-only changes run UI unit/build and mocked browser contracts without building the scanner stack. UI image or dependency changes still run the stack and image gate. |
+| `smoke` | `e2e-pr.yml` | Backend pull requests run the relevant E2E area when its ownership is isolated, or all five for shared and mixed changes, plus real-stack browser acceptance and the five-image vulnerability gate. UI source-only pull requests run UI unit/build and mocked browser contracts without building the scanner stack. UI image or dependency changes keep the stack and image gate. The merge queue checks combined source with UI unit/build and mocked browser contracts. |
 
-The candidate reuses a complete `python-suite` report for its exact SHA. For a UI source-only
+Each E2E scorecard records per-area execution time. The candidate reuses a complete
+`python-suite` report for its exact SHA. For a UI source-only
 or metadata-only commit, it runs the complete suite inside the candidate image. Certification
 runs every E2E area and the vulnerability gate on the final
 multi-architecture manifests with attestation, and adds what only
