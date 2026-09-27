@@ -162,6 +162,23 @@ profile. `max_state_changing_requests=0` is an explicit deny ceiling. Every acti
 multi-dimensional hold before execution and reconciles consumed, released, or uncertain authority
 afterward; unused profile capacity remains visibly unallocated.
 
+**Target transport.** A target entered with `http://` or `https://` is scanned exactly as
+entered. A target entered without a scheme (`example.com`, `example.com:8080`) is admitted for both
+schemes on that authority, through `POST /scans` and `POST /targets/{id}/scan` alike (the target
+route resubmits the stored target in its scheme-less form). Its plan then starts with
+`transport.resolve`: one read-only `GET /` per frozen origin, HTTPS first, stopping at the first
+origin that serves the application, under its own budget reservation and receipt. Every other action
+waits for it and runs against the origin it selected; it never follows a redirect or changes host.
+When no frozen origin answers, nothing is selected: dependent actions are blocked and the report says
+the application was not examined, with the refused attempts under `reachability.transport`.
+
+**Examined, or not.** A run whose application was not examined -- an explicit `http://` origin
+that only redirects to `https://` on the same host, an origin that answers only redirects or
+errors -- withholds its grade and cannot report `complete` coverage: coverage is `partial` (or
+`failed` when the target was unreachable), its reasons include `application_not_observed`, and
+`coverage.not_examined_reason` says why (for example "the target redirects to https://host,
+outside this scan's origin").
+
 The server-generated `GET /scan/contracts` manifest is the public vocabulary for the UI and CLI.
 The complete REST shape is frozen in `docs/generated/public-openapi-manifest.json`: every OpenAPI
 operation ID, request/response schema digest, and component-schema digest is checked on API changes.
