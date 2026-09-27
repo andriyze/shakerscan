@@ -16,11 +16,12 @@ fi
 upgrade_ubuntu_sources() {
     for source in "$1/sources.list" "$1"/sources.list.d/*.list "$1"/sources.list.d/*.sources; do
         [ -f "$source" ] && [ ! -L "$source" ] || continue
-        sed -i -E \
+        sed -E -i.bak \
             -e 's@http://archive\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://archive.ubuntu.com/ubuntu\1@g' \
             -e 's@http://security\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://security.ubuntu.com/ubuntu\1@g' \
             -e 's@http://ports\.ubuntu\.com/ubuntu-ports([/[:space:]]|$)@https://ports.ubuntu.com/ubuntu-ports\1@g' \
             "$source"
+        rm -f -- "$source.bak"
     done
 }
 upgrade_ubuntu_sources /etc/apt
