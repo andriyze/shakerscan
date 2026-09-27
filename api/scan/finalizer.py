@@ -1851,9 +1851,22 @@ def finalize_scan_report(
     application_forwarded_off_origin = (
         bool(http_posture.get("application_origin_redirect")) and redirect_without_application
     )
+    inferred_origin_unreachable = (
+        not http_posture.get("posture_observed")
+        and not application_proof_observed
+        and any(
+            isinstance(row, Mapping)
+            and row.get("kind") == "origin_selection_observation"
+            and not row.get("selected_origin")
+            and bool(row.get("attempts"))
+            for action_id, rows in observations.items()
+            if action_id.startswith("origin.select")
+            for row in rows
+        )
+    )
     risk_assessment_state = (
         "not_examined"
-        if redirect_without_application
+        if redirect_without_application or inferred_origin_unreachable
         else "observed"
         if http_posture.get("posture_observed") is True or application_proof_observed
         else "not_examined"

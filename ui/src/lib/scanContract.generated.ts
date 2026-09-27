@@ -335,6 +335,7 @@ export const SCAN_PUBLIC_CONTRACT_SNAPSHOT = {
   "generation": "v2",
   "passive_coverage": {
     "baseline_capabilities": [
+      "scan.origin_select",
       "http.request",
       "dns.inspect",
       "infrastructure.inspect",

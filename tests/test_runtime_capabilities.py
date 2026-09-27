@@ -54,7 +54,7 @@ def test_registry_filters_target_kind_and_active_permission():
     }
 
     assert safe_web == {
-        "scan.finalize", "scan.execute",
+        "scan.finalize", "scan.execute", "scan.origin_select",
         "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",
         "browser.interact", "web.crawl", "web.browser_crawl",
@@ -77,6 +77,7 @@ def test_registry_filters_target_kind_and_active_permission():
         if spec.name.startswith("device.")
     }, "a web target never gains device capabilities"
     assert not CAPABILITY_REGISTRY.require("web.probe").requires_active_approval
+    assert CAPABILITY_REGISTRY.require("scan.origin_select").planner_visible is False
     assert CAPABILITY_REGISTRY.require("ports.discover").requires_active_approval
 
 

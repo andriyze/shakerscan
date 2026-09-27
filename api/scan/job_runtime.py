@@ -145,6 +145,7 @@ def materialize_canonical_scan_job(
             allowed_root_domains=tuple(guard.get("allowed_root_domains") or ()),
             environment=str(guard.get("environment") or "unknown"),
             scope_receipt_id=str(guard.get("scope_receipt_id") or "") or None,
+            inferred_origins=tuple(guard.get("inferred_origins") or ()),
         )
     except (TypeError, ValueError) as exc:
         raise CanonicalScanJobMaterializationError(

@@ -29,6 +29,7 @@ try:
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
         InfrastructureInspectionExecutionAdapter,
+        ScanOriginSelectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -91,6 +92,7 @@ except (ImportError, ModuleNotFoundError):
         DnsInspectionExecutionAdapter,
         HttpRequestExecutionAdapter,
         InfrastructureInspectionExecutionAdapter,
+        ScanOriginSelectionExecutionAdapter,
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
@@ -179,6 +181,7 @@ from .continuation import (
 )
 from .capability_execution import (
     CANONICAL_SCAN_NETWORK_PORTS,
+    SCAN_BASE_ORIGIN_CAPABILITIES,
     fit_prepared_scan_capability,
     prepare_scan_external_capability,
     prepare_scan_inline_capability,
@@ -491,7 +494,13 @@ class DatabaseNeutralScanActionDispatcher:
             raise ScanActionAdapterError(
                 "private Scan inputs differ from dispatcher authority"
             )
-        self.target_url = scan_external_execution_target(target_url, target=target)
+        # The first candidate is only a report fallback. No base-URL action may use it
+        # until origin.select has produced a measured, persisted choice.
+        self.target_url = scan_external_execution_target(
+            target.inferred_origins[0] if target.inferred_origins else target_url,
+            target=target,
+        )
+        self._origin_selected = not bool(target.inferred_origins)
         self.options = dict(options)
         if private_inputs is not None:
             self.options.update(dict(private_inputs.options))
@@ -620,6 +629,43 @@ class DatabaseNeutralScanActionDispatcher:
 
     async def _observations(self, action_id: str) -> tuple[Mapping[str, Any], ...]:
         return await self.backend.load_observations(action_id)
+
+    async def _restore_selected_origin(self) -> bool:
+        if self._origin_selected:
+            return True
+        from .origin_selection import selected_origin_from_observations
+        origin_action = next((item for item in self.plan.actions
+                              if item.capability_name == "scan.origin_select"), None)
+        if origin_action is None:
+            return False
+        selected = selected_origin_from_observations(
+            await self._observations(origin_action.action_id), self.target,
+        )
+        if selected:
+            self.target_url = scan_external_execution_target(selected, target=self.target)
+            self._origin_selected = True
+        return self._origin_selected
+
+    async def _origin_select(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
+        from .origin_selection import select_inferred_scan_origin, selected_origin_from_observations
+
+        async def operation() -> Mapping[str, Any]:
+            return await select_inferred_scan_origin(
+                target=self.target,
+                transaction_recorder=_scan_capture.record_scan_call,
+                timeout_seconds=int(action.requested_budget.get("tool_wall_seconds") or 20),
+            )
+
+        adapter = self._prepared_inline(
+            action, {"origins": list(self.target.inferred_origins)}, operation,
+            ScanOriginSelectionExecutionAdapter,
+        )
+        receipt = await self._execute_adapter(action, adapter, heartbeat, managed_cancellation=True)
+        selected = selected_origin_from_observations(receipt.observations, self.target)
+        if selected:
+            self.target_url = scan_external_execution_target(selected, target=self.target)
+            self._origin_selected = True
+        return receipt
 
     async def restore_terminal_state(
         self, action: ScanAction, _result: Any,
@@ -3146,12 +3192,18 @@ class DatabaseNeutralScanActionDispatcher:
     ) -> CapabilityReceipt:
         if lease.worker_id != self.worker_id:
             raise ScanActionAdapterError("action lease belongs to another worker")
+        if action.capability_name == "scan.origin_select":
+            return await self._origin_select(action, heartbeat)
+        if self.target.inferred_origins and action.capability_name in SCAN_BASE_ORIGIN_CAPABILITIES:
+            if not await self._restore_selected_origin():
+                return self._skip(action, "origin_unreachable")
         if action.capability_name == "browser.login_check":
             if self._browser_login_adapter_factory is None:
                 raise ScanActionAdapterError("browser login requires the local credential-enabled worker")
             adapter = self._browser_login_adapter_factory(action, self)
             return await self._execute_adapter(action, adapter, heartbeat, managed_cancellation=True)
         if action.action_id == "finalize.report":
+            await self._restore_selected_origin()
             return await self._finalize(action)
         if action.action_id in {"inputs.auth_primary", "inputs.auth_secondary"}:
             return await self._auth_session(action, heartbeat)

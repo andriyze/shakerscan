@@ -106,6 +106,30 @@ def test_full_plan_does_not_schedule_unreviewed_external_intelligence():
     }
 
 
+def test_scheme_inferred_plan_reserves_selection_before_base_http_work():
+    target = TargetBinding(
+        target_id=_target().target_id,
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+        scope_receipt_id=_target().scope_receipt_id,
+    )
+    plan = ScanActionPlanCompiler().compile(
+        scan_id=SCAN_ID,
+        execution_plan=_execution(include=("recon",), active=False),
+        target_binding=target,
+    )
+    selection = next(action for action in plan.actions if action.action_id == "origin.select")
+    assert selection.capability_name == "scan.origin_select"
+    assert selection.requested_budget["http_requests"] == 2
+    for action_id in ("baseline.http", "discover.web_probe"):
+        action = next(action for action in plan.actions if action.action_id == action_id)
+        assert "origin.select" in action.dependencies
+
+
 def test_large_manifest_compiles_to_bounded_batch_graph():
     endpoint_ref = ScanWorkManifestReference(
         manifest_id="10000000-0000-4000-8000-000000000083",

@@ -1130,6 +1130,15 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_network",
         ),
         CapabilitySpec(
+            "scan.origin_select", "Select a reachable frozen HTTP origin for a scheme-inferred Scan.",
+            "http", "passive", _HTTP_TARGETS, "scan.origin_select", "1",
+            None, {"http_requests": 2, "tool_wall_seconds": 20},
+            {"network_reachability": True, "target_binding_required": True},
+            _schema({"origins": {"type": "array", "maxItems": 2}}),
+            "scan-origin-selection/v1", ("origin_selection_observation",),
+            planner_visible=False,
+        ),
+        CapabilitySpec(
             "http.request", "Send one target-pinned read-only request, optionally as a managed principal.",
             "http", "passive", _HTTP_TARGETS, "agent.http_request", "1",
             None, {"http_requests": 1, "tool_wall_seconds": 15},

@@ -296,6 +296,63 @@ def test_external_target_must_match_the_exact_frozen_origin():
         )
 
 
+def _inferred_target(*origins):
+    return TargetBinding(
+        target_id="target-inferred",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=origins,
+        allowed_addresses=("192.0.2.10",),
+        allowed_root_domains=("example.test",),
+    )
+
+
+def test_bare_runtime_target_takes_its_origin_from_the_frozen_binding():
+    """A scheme-inferred Scan hands the worker ``host[:port]``; the binding names the origin."""
+    both = _inferred_target("http://app.example.test", "https://app.example.test")
+    assert scan_external_execution_target("app.example.test", target=both) == "https://app.example.test/"
+    assert scan_external_execution_target("APP.example.test", target=both) == "https://app.example.test/"
+
+    http_only = _inferred_target("http://app.example.test")
+    assert scan_external_execution_target("app.example.test", target=http_only) == "http://app.example.test/"
+
+    ported = _inferred_target("http://app.example.test:8080", "https://app.example.test:8080")
+    assert scan_external_execution_target("app.example.test:8080", target=ported) == (
+        "https://app.example.test:8080/"
+    )
+
+
+def test_new_scheme_inferred_binding_requires_measured_origin_before_external_tool():
+    binding = TargetBinding(
+        target_id="target-inferred", target_kind="web", canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test", "http://app.example.test"),
+        inferred_origins=("https://app.example.test", "http://app.example.test"),
+        allowed_addresses=("192.0.2.10",), allowed_root_domains=("example.test",),
+    )
+    with pytest.raises(ScanCapabilityContractError, match="measured origin selection"):
+        scan_external_execution_target("app.example.test", target=binding)
+    assert scan_external_execution_target("http://app.example.test", target=binding) == (
+        "http://app.example.test/"
+    )
+
+
+@pytest.mark.parametrize(
+    "bare",
+    [
+        "evil.example.test",          # another host
+        "app.example.test:9999",      # a port admission never froze
+        "user@app.example.test",      # user information
+        "app.example.test/admin",     # a path is not an authority
+        "app.example.test?x=1",
+        "",
+    ],
+)
+def test_bare_runtime_target_never_widens_the_frozen_binding(bare):
+    binding = _inferred_target("http://app.example.test", "https://app.example.test")
+    with pytest.raises(ScanCapabilityContractError):
+        scan_external_execution_target(bare, target=binding)
+
+
 def test_scan_process_reserves_only_remaining_report_wall_time():
     prepared, runtime = prepare_scan_process_capability(
         execution_plan_digest="a" * 64,

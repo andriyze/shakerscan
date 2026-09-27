@@ -34,18 +34,19 @@ CHILD_IDS = (
 )
 
 
-def _target():
+def _target(*, inferred=False):
     return TargetBinding(
         target_id="target-1",
         target_kind="web",
         canonical_host="example.test",
-        allowed_origins=("https://example.test",),
+        allowed_origins=("https://example.test", "http://example.test") if inferred else ("https://example.test",),
+        inferred_origins=("https://example.test", "http://example.test") if inferred else (),
         allowed_addresses=("192.0.2.10",),
         allowed_root_domains=("example.test",),
     )
 
 
-def _authority():
+def _authority(*, inferred=False):
     contract = resolve_scan_contract(
         budget_profile="balanced",
         policy={
@@ -56,7 +57,7 @@ def _authority():
     raw = ScanActionPlanCompiler().compile(
         scan_id=PARENT_ID,
         execution_plan=contract.execution_plan,
-        target_binding=_target(),
+        target_binding=_target(inferred=inferred),
     )
     parent = allocate_scan_action_plan(raw, contract.budget).plan
     return contract.execution_plan, parent
@@ -273,6 +274,38 @@ def test_canonical_parallel_partition_is_deterministic_and_budget_bounded():
     assert first.parent_owned_action_ids == ("finalize.report",)
     assert "finalize.report" not in first.globally_assigned_action_ids
     assert "secret=redacted-at-source" not in str(first.canonical_dict())
+
+
+def test_inferred_origin_selection_survives_parallel_partition():
+    execution, parent = _authority(inferred=True)
+    partition = ParallelActionPlanCompiler().compile(
+        parent_execution_plan=execution,
+        parent_action_plan=parent,
+        target_binding=_target(inferred=True),
+        child_specs=_children(), strategy="scope", available_worker_count=3,
+    )
+    assert any(action.capability_name == "scan.origin_select" for action in parent.actions)
+    assert partition.children
+    child_plans = {}
+    for child in partition.children:
+        raw = ScanActionPlanCompiler().compile(
+            scan_id=child.scan_id,
+            execution_plan=execution,
+            target_binding=_target(inferred=True),
+            action_scope=child.action_scope,
+            ledger_limits=child.budget.ledger_limits(),
+        )
+        child_plans[child.scan_id] = allocate_scan_action_plan(raw, child.budget).plan
+    assert all(
+        any(action.capability_name == "scan.origin_select" for action in plan.actions)
+        for plan in child_plans.values()
+    )
+    assignments = _assignments(_children())
+    partition.record(
+        child_plans,
+        child_work_assignments=assignments,
+        parent_work_assignment=_parent_assignment(assignments),
+    )
 
 
 def test_active_candidate_shard_can_fund_complete_production_verifiers():

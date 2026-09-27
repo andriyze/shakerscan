@@ -2029,6 +2029,7 @@ async def scan_target(
         merged_options = json.loads(stored_options) if stored_options else {}
     else:
         merged_options = stored_options or {}
+    stored_scheme_inferred = merged_options.get("target_scheme_inferred") is True
     for key in LEGACY_SCAN_WRITE_FIELDS:
         merged_options.pop(key, None)
     merged_options.update(request.options.model_dump(exclude_unset=True))
@@ -2041,7 +2042,7 @@ async def scan_target(
         approval_receipt_id=request.approval_receipt_id,
         options=ScanOptions(**merged_options),
     )
-    return await _submit_scan(scan_request)
+    return await _submit_scan(scan_request, stored_scheme_inferred=stored_scheme_inferred)
 
 
 @router.get("/targets/{target_id}/graph")

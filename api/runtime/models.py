@@ -76,6 +76,7 @@ class TargetBinding:
     allowed_root_domains: tuple[str, ...] = ()
     environment: str = "unknown"
     scope_receipt_id: str | None = None
+    inferred_origins: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         kind = str(self.target_kind or "").strip().lower()
@@ -101,6 +102,21 @@ class TargetBinding:
             if origin not in origins:
                 origins.append(origin)
         object.__setattr__(self, "allowed_origins", tuple(origins))
+        inferred = tuple(str(value).strip().lower() for value in self.inferred_origins)
+        inferred_parsed = tuple(urllib.parse.urlsplit(value) for value in inferred)
+        if (
+            len(inferred) not in {0, 2}
+            or any(origin not in origins for origin in inferred)
+            or (inferred and {item.scheme for item in inferred_parsed} != {"http", "https"})
+            or any(item.hostname != host for item in inferred_parsed)
+            or (
+                inferred_parsed
+                and any(item.port is not None for item in inferred_parsed)
+                and len({item.port or (443 if item.scheme == "https" else 80) for item in inferred_parsed}) != 1
+            )
+        ):
+            raise ValueError("inferred origins must be frozen target origins")
+        object.__setattr__(self, "inferred_origins", inferred)
         roots = tuple(dict.fromkeys(
             str(root).strip().lower().rstrip(".") for root in self.allowed_root_domains
             if str(root).strip()
@@ -110,7 +126,7 @@ class TargetBinding:
             raise ValueError("web, API, and device bindings require a canonical host")
 
     def canonical_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "target_id": self.target_id,
             "target_kind": self.target_kind,
             "canonical_host": self.canonical_host,
@@ -120,6 +136,9 @@ class TargetBinding:
             "environment": self.environment,
             "scope_receipt_id": self.scope_receipt_id,
         }
+        if self.inferred_origins:
+            result["inferred_origins"] = list(self.inferred_origins)
+        return result
 
     @property
     def digest(self) -> str:

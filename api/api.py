@@ -10570,6 +10570,7 @@ async def _freeze_scan_target_binding(
         origin = canonical_collection_origin(f"{scheme}://{parsed.netloc}")
         if origin not in allowed_origins:
             allowed_origins.append(origin)
+    inferred_origins = [canonical_collection_origin(f"{scheme}://{parsed.netloc}") for scheme in ("https", "http")] if scheme_inferred else []
     roots = [
         str(item).strip().lower().rstrip(".")
         for item in guard.get("allowed_root_domains") or ()
@@ -10586,6 +10587,7 @@ async def _freeze_scan_target_binding(
         "target_kind": str(target_kind or "web").strip().lower(),
         "canonical_host": canonical_host,
         "allowed_origins": allowed_origins,
+        "inferred_origins": inferred_origins,
         "allowed_addresses": allowed_addresses,
         "allowed_root_domains": roots,
         "environment": str(guard.get("environment") or "unknown"),
@@ -10980,10 +10982,12 @@ def _scan_requires_durable_approval(
 
 async def _submit_scan(
     request: _ScanRequestBase,
+    *,
+    stored_scheme_inferred: bool = False,
 ):
     """Canonical V2 admission; legacy identities and inline secrets are rejected."""
     execution_options = _scan_execution_options(request.options)
-    scheme_inferred = "://" not in (request.target or "")
+    scheme_inferred = stored_scheme_inferred or "://" not in (request.target or "")
     try:
         normalized_target, target_note = normalize_target_url(request.target)
     except TargetNormalizationError as e:
@@ -11049,6 +11053,9 @@ async def _submit_scan(
         scan_contract,
         defer_family_preconditions=True,
     )
+    # This is target provenance, not a caller-granted option. The stored-target
+    # route supplies its original input shape through stored_scheme_inferred.
+    options_payload.pop("target_scheme_inferred", None)
     inline_option_authentication = {
         key: options_payload.get(key)
         for key in SCAN_AUTHENTICATION_KEYS
@@ -11349,6 +11356,7 @@ async def _submit_scan(
             allowed_root_domains=tuple(target_guard.get("allowed_root_domains") or ()),
             environment=str(target_guard.get("environment") or "unknown"),
             scope_receipt_id=scan_contract.policy.scope_receipt_id,
+            inferred_origins=tuple(target_guard.get("inferred_origins") or ()),
         )
         try:
             (

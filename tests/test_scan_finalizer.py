@@ -83,6 +83,40 @@ def test_finalizer_is_a_pure_deterministic_projection_of_receipts():
     ).encode("utf-8")).hexdigest()
 
 
+def test_failed_scheme_selection_does_not_claim_application_examination():
+    selection = _action("origin.select", 0, capability_name="scan.origin_select")
+    baseline = _action("baseline.http", 1, dependencies=(selection.action_id,))
+    final = _action("finalize.report", 2, dependencies=(selection.action_id, baseline.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64, actions=(selection, baseline, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="https://app.example.test",
+        action_results={
+            selection.action_id: replace(
+                _result_with_observation_count(selection, 1),
+                status=CapabilityResultStatus.FAILED,
+                reason_code=CapabilityResultReason.ADAPTER_FAILED,
+                result_digest=None,
+            ),
+            baseline.action_id: _result(
+                baseline, status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.DEPENDENCY_FAILED,
+            ),
+        },
+        observations={selection.action_id: ({
+            "kind": "origin_selection_observation", "selected_origin": None,
+            "attempts": [
+                {"origin": "https://app.example.test", "reachable": False},
+                {"origin": "http://app.example.test", "reachable": False},
+            ],
+        },)},
+    )
+    assert report["result"]["risk_assessment_state"] == "not_examined"
+    assert report["result"]["application_observed"] is False
+
+
 def test_finalizer_digest_binds_complete_plan_revision_chain():
     plan = _plan()
     results = _results(plan)
