@@ -72,9 +72,10 @@ tag alone does not prove which commit produced an image.
 
 ## Release Workflow
 
-> **Dispatch the candidate only after "Build candidate on main" has succeeded for the exact SHA.**
-> The release-candidate workflow reuses that run's attested image set and skips its own 40-minute
-> rebuild; dispatched earlier it finds nothing and rebuilds. A tests-only or docs-only merge does not
+> **Dispatch the candidate after "Build candidate on main" has started for the exact SHA.**
+> The release-candidate workflow waits up to 60 minutes for a running exact-SHA build, then reuses
+> its attested image set instead of rebuilding concurrently. A failed or unverified build stops the
+> candidate with a clear error. A tests-only or docs-only merge does not
 > trigger the main build (its path filter excludes `tests/**`), so dispatch it by hand first:
 > `gh workflow run build-on-main.yml -f sha=<candidate_sha>`. On 2026-09-18 two candidates were
 > dispatched minutes after their pushes and rebuilt everything: 64 minutes each instead of about 20.

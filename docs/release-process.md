@@ -15,12 +15,14 @@ report on every pull request:
 | Check | Workflow | What it proves |
 | --- | --- | --- |
 | `commit-policy` | `commit-policy.yml` | A `release:` commit carries only metadata (`VERSION`, notes, ledger, `install/STABLE_VERSION`). |
-| `python-suite` | `python-suite.yml` | The complete partitioned Python suite plus every static gate (generated inventories and contracts, installer manifest, import closure, module size, documentation policy, surface dispositions, target transport) from the locked dependency set. |
-| `smoke` | `e2e-pr.yml` | Every E2E area (platform, AI Gate, Hunt, DAST against Juice Shop, Model Intake) and the real-stack browser acceptance on the stack built from the pull request, plus the same high/critical vulnerability gate certification applies, run against the five PR-built images. |
+| `python-suite` | `python-suite.yml` | Backend, release, and shared-contract changes run the complete partitioned Python suite and static gates from the locked dependency set. UI source-only changes run focused UI-facing Python contracts. |
+| `smoke` | `e2e-pr.yml` | Backend pull requests run the relevant E2E area when its ownership is isolated, or all five for shared and mixed changes, plus real-stack browser acceptance and the five-image vulnerability gate. UI source-only pull requests run UI unit/build and mocked browser contracts without building the scanner stack. UI image or dependency changes keep the stack and image gate. The merge queue checks combined source with UI unit/build and mocked browser contracts. |
 
-Each check runs once per change. The candidate reuses the `python-suite` report for its exact SHA
-instead of rerunning the suite inside the image. Certification repeats the E2E areas and the
-vulnerability gate on the final multi-architecture manifests with attestation, and adds what only
+Each E2E scorecard records per-area execution time. The candidate reuses a complete
+`python-suite` report for its exact SHA. For a UI source-only
+or metadata-only commit, it runs the complete suite inside the candidate image. Certification
+runs every E2E area and the vulnerability gate on the final
+multi-architecture manifests with attestation, and adds what only
 final images can prove: the recall benchmark, the fault receipts, and the upgrade rehearsal. The
 pull-request check exists so those repeats confirm rather than discover: between 2.0.0 and 2.2.0,
 fifty-six of sixty candidates failed on gates no pull request had run. The PR check tolerates only

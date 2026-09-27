@@ -1,15 +1,13 @@
 name: E2E smoke
 
-# Pre-merge integration coverage, run ONCE per change, on the stack built from the pull
-# request: every E2E area (platform, AI Gate, Hunt, DAST against Juice Shop, Model Intake),
-# the production-stack browser acceptance, and the same high/critical image vulnerability
-# gate certification applies to the final images. Between 2.0.0 and 2.2.0 fifty-six of sixty
-# release candidates failed, and the gates that killed them (final-image Trivy, the
-# installed-stack DAST and Model Intake E2E, the upgrade rehearsal) ran only in certification,
-# an hour after merge. This check runs the first two of those before merge so a candidate
-# confirms rather than discovers. Certification still repeats them on the final multi-arch
-# manifests with attestation; the recall benchmark, the fault receipts, and the upgrade
-# rehearsal remain certification-only. It is a required check and always reports.
+# Backend and shared-contract pull requests keep stack, E2E, image, and browser acceptance.
+# A change confined to one isolated backend area runs that area's E2E checks; shared or
+# mixed changes run all areas. The merge queue checks the combined source with Python,
+# UI build, and mocked browser contracts without repeating long active acceptance.
+# UI source-only changes use a production UI build and mocked browser contracts without
+# rebuilding the scanner fleet. UI image/dependency changes keep the stack and image gate.
+# The final release candidate still certifies every area against its exact image digests.
+# This required check always reports, including for unrelated changes.
 
 on:
   pull_request:
@@ -39,48 +37,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect relevant backend and UI changes
+      - name: Classify changed paths
         id: changes
         shell: bash
         run: |
-          if git diff --quiet \
-            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
-            "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
-            -- api scanner db tests/e2e docker-compose.yml Makefile scanner.sh \
-               scripts/generate_public_api_contract.py \
-               docs/generated/public-openapi-manifest.json \
-               ui/src/lib/publicApi.generated.ts \
-               tests/test_public_api_contract_generation.py \
-               .github/workflows/e2e-pr.yml .github/workflows/e2e.yml; then
-            echo "backend=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "backend=true" >> "$GITHUB_OUTPUT"
-          fi
-          if git diff --quiet \
-            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
-            "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
-            -- ui api/api.py api/scan/contracts.py \
-               api/public_api_contract.py \
-               scripts/generate_scan_contract.py scripts/generate_hunt_contract.py \
-               scripts/generate_public_api_contract.py \
-               docs/generated/public-openapi-manifest.json \
-               .github/workflows/e2e-pr.yml .github/workflows/v2-contracts.yml; then
-            echo "ui=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ui=true" >> "$GITHUB_OUTPUT"
-          fi
-          if [[ "$(cat "$GITHUB_OUTPUT" | grep -c '=true')" -gt 0 ]]; then
-            echo "stack=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "stack=false" >> "$GITHUB_OUTPUT"
-          fi
+          python3 scripts/ci_smoke_scope.py \
+            --base "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" \
+            --head "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Skip smoke tests for unrelated changes
-        if: steps.changes.outputs.stack != 'true'
+        if: steps.changes.outputs.ui != 'true'
         run: echo "No E2E-relevant backend or UI changes; smoke test is not required."
 
+      - name: Explain merge queue coverage
+        if: github.event_name == 'merge_group' && steps.changes.outputs.ui == 'true'
+        run: echo "Merge queue checks the combined source with UI contracts; PR E2E and final-image certification carry active integration coverage."
+
       - name: Start ShakerScan stack
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         run: |
           # The API image builds FROM shakerscan-worker:local, which compose will not
           # build for it -- see tests/test_ci_builds_before_composing.py.
@@ -99,9 +74,10 @@ jobs:
           done
           curl -sf http://127.0.0.1:3001/ >/dev/null
 
-      - name: Run every E2E area on the built stack
-        if: steps.changes.outputs.backend == 'true'
+      - name: Run selected E2E areas on the built stack
+        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true'
         env:
+          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
           # The PR gate mirrors the candidate certification, which is an authorized declared-debt
           # release: checks the release owner has recorded as debt run as loud, counted XFAIL rows
           # (an XPASS is printed when one unexpectedly passes). Every undeclared check stays hard.
@@ -113,7 +89,7 @@ jobs:
           SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN: ${{ env.MODEL_INTAKE_OPERATOR_TOKEN }}
         run: |
           mkdir -p artifacts
-          python3 tests/e2e/run_e2e.py --area all --scorecard artifacts/e2e-scorecard.json
+          python3 tests/e2e/run_e2e.py --area "$E2E_AREA" --scorecard artifacts/e2e-scorecard.json
           python3 - <<'PY'
           import json
           card = json.load(open("artifacts/e2e-scorecard.json"))
@@ -128,25 +104,38 @@ jobs:
           PY
 
       - name: Report actual assertions and validate E2E completeness
-        if: ${{ always() && steps.changes.outputs.backend == 'true' }}
+        if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
+        env:
+          E2E_AREA: ${{ steps.changes.outputs.e2e_area }}
         run: |
           mkdir -p artifacts
-          python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \
-            --require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt \
-            --require-check 'dast:D-2 retains request-based SQLi result' \
-            --require-check 'dast:D-3 retains request-based XSS result' \
-            --require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding' \
-            --require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding' \
-            --require-pass 'hunt:H-20 protected and shared objects remain unverified' \
-            --require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor' \
-            --require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify' \
-            --require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature' \
-            --require-pass 'model_intake:MI-6C deactivated durable anchor stops verification' \
+          requirements=()
+          if [[ "$E2E_AREA" == all ]]; then
+            requirements+=(--require-area platform --require-area ai_gate --require-area model_intake --require-area dast --require-area hunt)
+          else
+            requirements+=(--require-area "$E2E_AREA")
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == dast ]]; then
+            requirements+=(--require-check 'dast:D-2 retains request-based SQLi result')
+            requirements+=(--require-check 'dast:D-3 retains request-based XSS result')
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == hunt ]]; then
+            requirements+=(--require-check 'hunt:H-18 adaptive real-target methodology produces a verified finding')
+            requirements+=(--require-pass 'hunt:H-19 authorization proof materializes into a Hunt-attributed finding')
+            requirements+=(--require-pass 'hunt:H-20 protected and shared objects remain unverified')
+          fi
+          if [[ "$E2E_AREA" == all || "$E2E_AREA" == model_intake ]]; then
+            requirements+=(--require-pass 'model_intake:MI-6 caller cannot supply its own trust anchor')
+            requirements+=(--require-pass 'model_intake:MI-6A expired and wrong durable anchors do not verify')
+            requirements+=(--require-pass 'model_intake:MI-6B operator-created durable anchor verifies exact signature')
+            requirements+=(--require-pass 'model_intake:MI-6C deactivated durable anchor stops verification')
+          fi
+          python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json "${requirements[@]}" \
             > artifacts/e2e-actual-assertions.json
 
       - name: Resolve the built images and the active vulnerability waivers
         id: images
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         shell: bash
         run: |
           resolve() {
@@ -181,7 +170,7 @@ jobs:
           done
 
       - name: Reject high or critical vulnerabilities in the built scanner image
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.scanner }}
@@ -196,7 +185,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built API image
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.api }}
@@ -211,7 +200,7 @@ jobs:
           skip-files: /usr/local/bin/docker
 
       - name: Reject high or critical vulnerabilities in the built Model Intake image
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.model_intake }}
@@ -226,7 +215,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built UI image
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.ui }}
@@ -241,7 +230,7 @@ jobs:
           skip-files: ""
 
       - name: Reject high or critical vulnerabilities in the built signer image
-        if: steps.changes.outputs.stack == 'true'
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ${{ steps.images.outputs.signer }}
@@ -256,27 +245,51 @@ jobs:
           skip-files: ""
 
       - name: Set up supported Node runtime
-        if: steps.changes.outputs.stack == 'true'
+        if: steps.changes.outputs.ui == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 26
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - name: Run UI contracts, production build, and real-stack browser acceptance
-        if: steps.changes.outputs.stack == 'true'
-        env:
-          PLAYWRIGHT_REAL_STACK: "1"
-          SHAKERSCAN_API_URL: http://localhost:8080
+      - name: Run UI contracts and production build
+        if: steps.changes.outputs.ui == 'true'
         run: |
           npm --prefix ui ci
           npm --prefix ui run test:unit
           npm --prefix ui run build
           npx --prefix ui playwright install --with-deps chromium
+
+      - name: Run real-stack browser acceptance
+        if: github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
+        env:
+          PLAYWRIGHT_REAL_STACK: "1"
+          SHAKERSCAN_API_URL: http://localhost:8080
+        run: |
           PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser
 
+      - name: Run mocked browser contracts
+        if: steps.changes.outputs.ui == 'true' && (github.event_name == 'merge_group' || steps.changes.outputs.stack != 'true')
+        run: |
+          mkdir -p ui/.next/standalone/.next
+          cp -R ui/.next/static ui/.next/standalone/.next/static
+          cp -R ui/public ui/.next/standalone/public
+          (cd ui/.next/standalone && HOSTNAME=127.0.0.1 PORT=3000 node server.js) > /tmp/shakerscan-ui-smoke.log 2>&1 &
+          ui_pid=$!
+          trap 'kill "$ui_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/ >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3000/ >/dev/null || { cat /tmp/shakerscan-ui-smoke.log; exit 1; }
+          PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npm --prefix ui run test:browser -- \
+            acceptance-237.spec.ts authentication-scan-report.spec.ts \
+            data-lifecycle.spec.ts findings-triage.spec.ts \
+            hunt-budget-amendments.spec.ts hunt-review-refresh.spec.ts \
+            service-intelligence.spec.ts
+
       - name: Upload E2E scorecard and browser results
-        if: always() && steps.changes.outputs.stack == 'true'
+        if: always() && steps.changes.outputs.ui == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: e2e-smoke-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
@@ -289,9 +302,9 @@ jobs:
           retention-days: 14
 
       - name: Dump stack logs on failure
-        if: failure() && steps.changes.outputs.stack == 'true'
+        if: failure() && github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         run: docker compose --profile e2e logs --tail=300 api worker model-intake-worker ui juice-shop || true
 
       - name: Stop E2E stack
-        if: always() && steps.changes.outputs.stack == 'true'
+        if: always() && github.event_name == 'pull_request' && steps.changes.outputs.stack == 'true'
         run: docker compose --profile e2e down -v
