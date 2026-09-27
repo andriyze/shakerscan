@@ -150,7 +150,8 @@ def test_both_submission_paths_reach_the_same_admission(monkeypatch):
 
             return _A()
 
-    async def submit(request):
+    async def submit(request, *, stored_scheme_inferred=False):
+        assert stored_scheme_inferred is False
         submitted.append(request.target)
         return {"scan_id": "s"}
 
