@@ -117,6 +117,47 @@ def test_failed_scheme_selection_does_not_claim_application_examination():
     assert report["result"]["application_observed"] is False
 
 
+def test_http_selection_with_inapplicable_tls_keeps_examined_coverage():
+    selection = _action("origin.select", 0, capability_name="scan.origin_select")
+    baseline = _action("baseline.http", 1, dependencies=(selection.action_id,))
+    tls = _action("baseline.tls", 2, capability_name="tls.inspect",
+                  dependencies=(selection.action_id,))
+    final = _action("finalize.report", 3,
+                    dependencies=(selection.action_id, baseline.action_id, tls.action_id))
+    plan = ScanActionPlan(
+        scan_id=SCAN_ID, execution_plan_digest="b" * 64,
+        target_binding_digest="a" * 64,
+        actions=(selection, baseline, tls, final),
+    )
+    report = finalize_scan_report(
+        plan=plan, target_url="http://app.example.test:8080/",
+        action_results={
+            selection.action_id: _result_with_observation_count(selection, 1),
+            baseline.action_id: _result_with_observation_count(baseline, 1),
+            tls.action_id: _result(
+                tls, status=CapabilityResultStatus.SKIPPED,
+                reason=CapabilityResultReason.NOT_APPLICABLE,
+            ),
+        },
+        observations={
+            selection.action_id: ({
+                "kind": "origin_selection_observation",
+                "selected_origin": "http://app.example.test:8080",
+                "attempts": [{"origin": "https://app.example.test:8080", "reachable": False},
+                             {"origin": "http://app.example.test:8080", "reachable": True}],
+            },),
+            baseline.action_id: ({
+                "kind": "http_observation",
+                "request": {"origin": "http://app.example.test:8080"},
+                "response": {"status": 200},
+            },),
+        },
+    )
+    assert report["reachability"]["status"] == "reachable"
+    assert report["coverage"]["status"] == "complete"
+    assert "adapter_failed" not in report["coverage"]["reasons"]
+
+
 def test_finalizer_digest_binds_complete_plan_revision_chain():
     plan = _plan()
     results = _results(plan)
