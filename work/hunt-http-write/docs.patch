@@ -1,0 +1,235 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index ade9be8..7090233 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -261,2 +261,8 @@ different target UUIDs and device identities remain distinct.
+ 
++For authorized HTTP workflow actions such as device pairing, use `http.request_active` or exact
++saved `collections.replay_active` traffic under the existing state-changing policy. The passive
++HTTP tool's method restriction is not an authorization refusal. Reuse standing consent; do not
++invent per-call permission prompts or require a vulnerability verifier merely to perform pairing.
++Read the live capability schema, and distinguish an unavailable executor from absent authority.
++
+ ### Authorized service reuse
+diff --git a/docs/hunt-operator-workflows.md b/docs/hunt-operator-workflows.md
+index c5ef918..1bcdc84 100644
+--- a/docs/hunt-operator-workflows.md
++++ b/docs/hunt-operator-workflows.md
+@@ -130 +130,41 @@ unfinished work above. Budget extensions must reflect a real operator request, n
+ silent response to an exhausted allowance.
++
++## Authorized HTTP writes and pairing
++
++Start the Hunt with `policy.allow_state_changing_http: true` for an operator-authorized pairing or
++write workflow. Reuse the target's standing authorization; no additional per-call approval is
++introduced. Leave `capabilities: []` to derive the available set. An existing read-only Hunt keeps
++its immutable authority: start a new Hunt with the requested write policy rather than silently
++changing the old one.
++
++`http.request_active` accepts POST, PUT, PATCH and DELETE on web, API, network and device targets.
++For example, after selecting the actual device service from evidence, call
++`POST /hunts/{hunt_id}/capabilities/http.request_active` with:
++
++```json
++{"idempotency_key":"pair-start-001","input":{"method":"PUT","origin":"http://192.168.1.50:7345","path":"/pairing/start","json_body":{"DEVICE_NAME":"ShakerScan"}}}
++```
++
++The address, port, path and body above are illustrative, not a universal TV protocol. Use exactly
++one bounded JSON, form or UTF-8 text body (32 KiB). Selected credentials and sessions retain their
++existing capability grants; never silently widen a read-only profile. Reusable secrets and PINs
++should be supplied through encrypted profiles/collections, not planner body fields. Body values
++are excluded from planner/action summaries; the existing explicitly sensitive HTTP archive remains
++subject to its normal export controls.
++
++`collections.select` can inspect saved write entries without executing them. For a bound
++`confirmed_active` selection, call `collections.replay_active` with the collection ID and returned
++request IDs. The worker replays at most 25 exact saved requests, validates the selection digest,
++and reserves the actual plan's HTTP/state-change budget before traffic. The safe replay operation
++remains GET/HEAD/OPTIONS only.
++
++Both paths retain target pinning, selected credential validation, device health/pacing, durable
++idempotency and measured accounting. A retried identical action key or delivered queue message
++cannot start the same completed write again. Do not use a new key merely because a response was
++lost: inspect the action and target state first. A transport failure does not prove the write had
++no effect. Direct write redirects are returned, not followed automatically. A successful HTTP
++response is an observation, not proof of pairing or a vulnerability.
++
++These capabilities do not implement native WebSocket pairing or vendor-specific challenge/token
++negotiation. The regression fixtures exercise HTTP pairing-shaped requests, not a physical TV or
++a model-to-model evaluation.
+diff --git a/install/MANIFEST.sha256 b/install/MANIFEST.sha256
+index 24be70e..bcdf7a8 100644
+--- a/install/MANIFEST.sha256
++++ b/install/MANIFEST.sha256
+@@ -20,3 +20,3 @@ bdae5c462201dd0901a2c4b0f542d8929f7e63be39f76659caa3ee0725aa34f1  .claude/comman
+ 239b9d7d1eef0f2229f4d09e034ceae945daff682d53c619a6e3377f7955a021  .dockerignore
+-f3b03f61d3cafe3f4f25a8b534c183e9d0990b7cce8a6176778107a6a8e879fc  AGENTS.md
++30a96336ad1d53942a086cd32f3023763dc3f6c0478c6b01043d7f84f14435eb  AGENTS.md
+ feb03b7aa19f39f737f8548da242cd7f1a8cf6c15c0b0e45c95f4f635c7658fd  README.md
+@@ -33,3 +33,3 @@ f4c27746089fd514ec2ac77ecbec2333bad975338272ce0508862b531da026cb  api/authentica
+ 2e6539f940387b8e6c7ced4bdfd9e04dd5e617638ca8876429f54876630eecee  api/capabilities/exposure_probe.py
+-2b30ca11b643dd9f78d7d579bb9fab1434e0ab4ec729650eee8a10c5dd3d3195  api/capabilities/http.py
++6035c9393986c41e5c002056e074f0f6f3fef34c2293eaacf1583ef1626a0207  api/capabilities/http.py
+ 3442533dd937e51ef425f2e32c0d0c018f4bd05d2f0204c037ddbfd7cc31ce2e  api/check_registry.py
+@@ -51,3 +51,3 @@ f1dc5fdd82e17975971192415fbb927d38ce9e6437840a90b0492ddebafaae44  api/runtime/__
+ aafb73c9b97e15635b4c9dea3f49225834d45b6b5a8594ee8d452644f36c36dd  api/runtime/budgets.py
+-686146dce12556eace04962a826d5589ee9c814b2c15a2eee3d54cf52492bafc  api/runtime/capability_registry.py
++faafc87fce49828fad1aeaf7bcfe9a166eca710e1dec614a727e0ab0d8e6ed10  api/runtime/capability_registry.py
+ 52a945abc67420754af7b6e5c03cf4063c4453e28c0fd85b30c4d99b61e918cd  api/runtime/credential_resolver.py
+@@ -55,2 +55,3 @@ aafb73c9b97e15635b4c9dea3f49225834d45b6b5a8594ee8d452644f36c36dd  api/runtime/bu
+ f4d89d903e85895463106b8a45965e9cd55e0a53db60cf1164a3e2cd1dbb3018  api/runtime/credentials.py
++87095c67538bcd3d736d1b7b2948e9dd10e45946d5413bc9053ec951e3275de4  api/runtime/http_action_contract.py
+ d92b05d74b13ea3351c66e7ef32baa05e3969567ba774e21c634a3e7f05b54e4  api/runtime/json_fields.py
+@@ -145,3 +146,3 @@ e5e8bc38897095b675a6fee7907472ec7233c02919b0378889227c86e9299f9e  skills/device-
+ cd87e9cd53a76dad28a7680f87d6656f7b6b6af9c634f55dc40f4bb872dfba59  skills/device-triage/agents/openai.yaml
+-782df28d488e26abb6186e13410bfc7b79104b5c5b447de2b3e06343f541288c  skills/hunt/SKILL.md
++5f3fb31b0e6640a4087273b1013b6b90e2968916eac1bab667a289d77551e303  skills/hunt/SKILL.md
+ d685c5252233c773eed8ddc67d60b87d1890eff47aa48ea936a0a27b53f4380a  skills/js-analyze/SKILL.md
+@@ -161,3 +162,3 @@ f66b5753db359deaf59f4dae8beea68b5e37029628a540ab4055b79f96a1b51e  skills/review-
+ 53c89595ed411bc46af3518ac933539e5e01171564aa1fcb3691f1f5b8cbf941  skills/web/04-javascript-source-map-and-client-route-analysis.md
+-57a2984662c49d3fba73aaeee4fa62bd4a51d6974d7fa5bce50d99e7b205e303  skills/web/05-http-baselining-replay-and-differential-analysis.md
++e210090121036c0ab0d50d720b2da12f43c70b0736951159e66f9ed117b899a4  skills/web/05-http-baselining-replay-and-differential-analysis.md
+ 8c8ca6f3109f69338bbe40a4667f02410c528ef01145a6c6fc5e016e336c5596  skills/web/06-authentication-and-identity-enumeration-testing.md
+@@ -188,3 +189,3 @@ e2c87d9d64930061bcb2b7e8f4d41869c362205d282e1f15742b6c652921a43a  skills/web/30-
+ 85a4709a1cf359949389b7ee7ea5e92b4fcc99479bccfb9e21f0606bfaa293cb  skills/web/31-edge-waf-and-origin-exposure-validation.md
+-02d5c9d5907513e6579f2f41639515a7edaf5512b1bf6f395a2e60e44d1b14de  skills/web/32-service-protocol-and-device-investigation.md
++d3b508b6a9a9dcd7a34615e37bf9f2da5def55daf67fa586307c95b19163d075  skills/web/32-service-protocol-and-device-investigation.md
+ 1eeb02d8f3c13dd48e7e16cb41f64535b8fde995962077689d093c100c0e49d8  skills/web/README.md
+@@ -192,3 +193,3 @@ e2c87d9d64930061bcb2b7e8f4d41869c362205d282e1f15742b6c652921a43a  skills/web/30-
+ 435a6bdcb1724c2801d69a09c41a7ddd1be0a7166542d69a0e8e16f9c1da235a  skills/web/core/01-agent-trust-boundary.md
+-4cb98e751c530d7fc62d5afe5bf4896733518f183bd9151fc2f28d9c687f622b  skills/web/core/02-tool-execution-safety.md
++4934421acb0c7a444f9388e4fdce0341132a5741fa24707718b9e20b0a40deb2  skills/web/core/02-tool-execution-safety.md
+ eb55b4cdec0e20bd6b4a96e68c3c996761e49281e151150fffcd108b18ac73d9  skills/web/core/03-approval-and-risk-gates.md
+diff --git a/install/index.html b/install/index.html
+index cdcb375..8257ce5 100644
+--- a/install/index.html
++++ b/install/index.html
+@@ -661,2 +661,3 @@ download "$REPO_RAW_BASE/api/runtime/budgets.py" "$INSTALL_DIR/api/runtime/budge
+ download "$REPO_RAW_BASE/api/runtime/capability_registry.py" "$INSTALL_DIR/api/runtime/capability_registry.py"
++download "$REPO_RAW_BASE/api/runtime/http_action_contract.py" "$INSTALL_DIR/api/runtime/http_action_contract.py"
+ download "$REPO_RAW_BASE/api/runtime/browser_login_contract.py" "$INSTALL_DIR/api/runtime/browser_login_contract.py"
+diff --git a/install/index.sh b/install/index.sh
+index cdcb375..8257ce5 100644
+--- a/install/index.sh
++++ b/install/index.sh
+@@ -661,2 +661,3 @@ download "$REPO_RAW_BASE/api/runtime/budgets.py" "$INSTALL_DIR/api/runtime/budge
+ download "$REPO_RAW_BASE/api/runtime/capability_registry.py" "$INSTALL_DIR/api/runtime/capability_registry.py"
++download "$REPO_RAW_BASE/api/runtime/http_action_contract.py" "$INSTALL_DIR/api/runtime/http_action_contract.py"
+ download "$REPO_RAW_BASE/api/runtime/browser_login_contract.py" "$INSTALL_DIR/api/runtime/browser_login_contract.py"
+diff --git a/scripts/check_module_size.py b/scripts/check_module_size.py
+index 505f86a..b0a644c 100644
+--- a/scripts/check_module_size.py
++++ b/scripts/check_module_size.py
+@@ -32,3 +32,3 @@ LIMITS: dict[str, int] = {
+     "api/api.py": 20_897,
+-    "api/worker.py": 23_307,
++    "api/worker.py": 23_234,
+     "scanner/risk_scoring.py": 140,
+diff --git a/skills/hunt/SKILL.md b/skills/hunt/SKILL.md
+index da06699..3febbbe 100644
+--- a/skills/hunt/SKILL.md
++++ b/skills/hunt/SKILL.md
+@@ -110,3 +110,4 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
+   Browsers still block writes, cross-origin traffic, uploads, downloads, and realtime sockets;
+-  state-changing tests require the existing separately authorized typed verification paths.
++  use `http.request_active` or `collections.replay_active` for authorized HTTP writes rather than
++  trying to send them through a read-only browser capability.
+ - Execute only a capability returned by the run at
+@@ -133,5 +134,28 @@ reconstruct headers, cookies, tokens, bodies, or environment values. Use `collec
+ narrow the redacted index and `collections.replay_safe` for bounded GET/HEAD/OPTIONS replay on web,
+-API, or device HTTP targets; encrypted values are injected only inside the runtime. Mutations
+-require a separate typed, approval-gated verifier and are never enabled by the safe replay
+-capability.
++API, or device HTTP targets; encrypted values are injected only inside the runtime. For saved
++confirmed-active selections, use `collections.replay_active` when the run permits state-changing
++HTTP. It replays exact saved requests (up to 25 per call), including their worker-private bodies;
++`collections.replay_safe` stays read-only even when the same collection permits writes.
++
++## Authorized HTTP workflows, including device pairing
++
++A read-only capability's method restriction is not a ban on the operator's authorized task.
++When the objective includes pairing or another HTTP write, request `allow_state_changing_http`
++at Hunt start, reuse standing target authorization, and leave `capabilities` empty unless the
++operator asked to narrow it. Do not copy the read-only example's false write flag into that task.
++
++Use `http.request_active` for POST/PUT/PATCH/DELETE with exactly one `json_body`, `form_body`, or
++`raw_body` when needed. It uses the same pinned worker, selected principals, alternate-service
++origins, HTTP/self-signed HTTPS support, receipts and existing budgets. It returns redirects
++without repeating a write. Do not use a separate shell command or disguise a write as GET.
++Secrets belong in managed credential profiles or saved request collections, not body inputs;
++a selected profile/session must already permit the capability being used.
++
++Reuse the same idempotency key only for the identical action after a lost response. A new key
++means a new action and may repeat the device's side effect. Check the retained receipt and actual
++device state before retrying an uncertain result. HTTP success alone does not prove pairing.
++If an existing run lacks write authority, start a correctly configured Hunt using the same
++standing authorization; do not repeatedly ask for the same consent or invent permission. If the
++live server predates these capabilities, name the implementation/version gap rather than claiming
++the operator is unauthorized. WebSocket pairing still needs a compatible protocol executor.
+ 
+diff --git a/skills/web/05-http-baselining-replay-and-differential-analysis.md b/skills/web/05-http-baselining-replay-and-differential-analysis.md
+index 94f7883..d295b44 100644
+--- a/skills/web/05-http-baselining-replay-and-differential-analysis.md
++++ b/skills/web/05-http-baselining-replay-and-differential-analysis.md
+@@ -6,3 +6,3 @@ description: Turn captured traffic into stable controls and compare mutations ac
+   parsers, protocols, and time without mistaking noise for vulnerabilities.
+-version: 2.2.0
++version: 2.2.1
+ kind: methodology
+@@ -19,3 +19,6 @@ capabilities:
+ - candidate.verify
+-optional_capabilities: []
++optional_capabilities:
++- http.request_active
++- collections.replay_safe
++- collections.replay_active
+ missing_capabilities: []
+@@ -124,3 +127,6 @@ request copied approval receipts, or impose the example budgets as additional ru
+ 
+-Declared capability names: `http.request`, `authz.verify`, `browser.navigate`, `candidate.verify`.
++Declared capabilities: `http.request`, `authz.verify`, `browser.navigate`, `candidate.verify`;
++optional `http.request_active`, `collections.replay_safe`, and `collections.replay_active`. Use the
++active HTTP path for an authorized body-bearing write, or active replay for an exact approved
++saved request. Read-only `http.request` is not a reason to abandon a supported write workflow.
+ 
+diff --git a/skills/web/32-service-protocol-and-device-investigation.md b/skills/web/32-service-protocol-and-device-investigation.md
+index 81245bf..e7c0e97 100644
+--- a/skills/web/32-service-protocol-and-device-investigation.md
++++ b/skills/web/32-service-protocol-and-device-investigation.md
+@@ -5,3 +5,3 @@ title: 32. Service, Protocol and Connected-device Investigation
+ description: Investigate observed network services and connected devices using retained evidence, targeted fingerprints, supported service checks and web-interface pivots.
+-version: 1.0.0
++version: 1.0.1
+ kind: specialist
+@@ -20,2 +20,4 @@ optional_capabilities:
+ - http.request
++- http.request_active
++- collections.replay_active
+ - device.inspect
+@@ -107,3 +109,3 @@ and nonstandard ports are reasons to inspect the service, not to abandon the aut
+ | UPnP, SSDP or DLNA | Which description/control endpoints belong to this device, and which advertise web interfaces? | Retained device capability data; inspect an admitted HTTP description without treating advertised URLs as new asset authority |
+-| Smart-TV management web UI | What authentication, role and application surfaces are present? | Read-only HTTP/browser capabilities plus the relevant authentication, session or authorization methodology |
++| Smart-TV HTTP pairing or management API | What pairing, authentication and role surfaces are present? | `http.request_active` for an authorized body-bearing HTTP action, or `collections.replay_active` for saved confirmed-active traffic; inspect the actual pairing outcome |
+ 
+diff --git a/skills/web/core/02-tool-execution-safety.md b/skills/web/core/02-tool-execution-safety.md
+index d020765..17c5798 100644
+--- a/skills/web/core/02-tool-execution-safety.md
++++ b/skills/web/core/02-tool-execution-safety.md
+@@ -26,3 +26,4 @@ not an authority grant or proof that execution will succeed on a particular targ
+ |---|---|---|
+-| Baseline request | `http.request` | Read-only request; not arbitrary body replay or a raw connection |
++| Baseline request | `http.request` | Read-only request; use the active operation for authorized writes |
++| Authorized HTTP workflow | `http.request_active` | POST/PUT/PATCH/DELETE and bounded JSON/form/text bodies under saved write authority; no automatic write redirects |
+ | Paired object access | `authz.verify` | Read-only, evidence-backed principal comparison; not a generic diff engine |
+@@ -31,3 +32,3 @@ not an authority grant or proof that execution will succeed on a particular targ
+ | Client artifacts | `artifact.inspect`, `javascript.analyze` | Bounded redacted/static analysis, not arbitrary code or DOM execution |
+-| Captured traffic | `collections.inspect`, `collections.select`, `collections.replay_safe` | Saved IDs; safe-method replay is not mutation or authentication replay |
++| Captured traffic | `collections.inspect`, `collections.select`, `collections.replay_safe`, `collections.replay_active` | Saved IDs; active replay uses exact confirmed-active selections and run write authority; safe replay never writes |
+ | SQL/XSS proof | `sqli.verify`, `xss.verify` | Use the specific live verifier contract; a scanner signal alone is not proof |
+@@ -43,3 +44,5 @@ implemented transport/worker prerequisites even when its capability name is pres
+ 
+-Keep useful hypotheses for unsupported request shapes, token mutations, file uploads, realtime
++Use the active HTTP or saved active-replay capability for an already-authorized pairing or other
++write workflow. No extra per-request consent or special vulnerability verifier is needed. Keep useful
++hypotheses for unsupported request shapes, token mutations, file uploads, realtime
+ messages, synchronized races, OOB callbacks or arbitrary protocol exchanges. Do not invent adapters
