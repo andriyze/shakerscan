@@ -348,7 +348,13 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         "action_id": str(item.get("id")) if item.get("id") else None,
         "capability_name": item.get("capability_name"),
         "status": item.get("status"),
-        "input_digest": input_summary.get("input_digest"),
+        "input_digest": (
+            None
+            if item.get("capability_name") == "http.request"
+            and str((input_summary.get("input") or {}).get("method") or "").upper()
+                in {"POST", "PUT", "PATCH", "DELETE"}
+            else input_summary.get("input_digest")
+        ),
         "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
         "experiment_key": experiment_key,
         "receipt_id": str(item.get("receipt_id")) if item.get("receipt_id") else None,
