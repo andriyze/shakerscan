@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import json
 import re
 from types import MappingProxyType
+from .hunt_http_contract import validate_http_request_input
 from typing import Any, Iterable, Literal, Mapping
 
 
@@ -280,6 +281,11 @@ class CapabilityRegistry:
                 "capability input exceeds the 65536-byte limit"
             )
         _validate_schema_value(spec.input_schema, value, path="input", depth=0)
+        if spec.name == "http.request":
+            try:
+                validate_http_request_input(value)
+            except ValueError as exc:
+                raise CapabilityInputContractError(str(exc)) from exc
         return dict(value)
 
     def validate_hunt_input(self, name: str, value: Any) -> dict[str, Any]:
@@ -1139,12 +1145,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
-            "http.request", "Send one target-pinned read-only request, optionally as a managed principal.",
+            "http.request", "Send one target-pinned request, optionally as a managed principal. "
+            "POST/PUT/PATCH/DELETE require the Hunt's existing state-changing authority; "
+            "GET/HEAD/OPTIONS remain available without it.",
             "http", "passive", _HTTP_TARGETS, "agent.http_request", "1",
             None, {"http_requests": 1, "tool_wall_seconds": 15},
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
-                "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]},
+                "json_body": {"type": "object", "description": "Non-secret JSON body for an authorized write. Mutually exclusive with form_body."},
+                "form_body": {"type": "object", "description": "Non-secret form fields for an authorized write. Mutually exclusive with json_body."},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
                            "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "path": {"type": "string"},

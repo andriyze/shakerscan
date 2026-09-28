@@ -106,7 +106,14 @@ def _standing_authorization(approval_receipt: Any) -> bool:
 def _requires_approval(action: Any) -> bool | None:
     capability_name = str(_value(action, "capability_name", "") or "").strip()
     try:
-        return CAPABILITY_REGISTRY.require(capability_name).requires_active_approval
+        specification = CAPABILITY_REGISTRY.require(capability_name)
+        values = _value(action, "capability_input", {})
+        method = str(_value(values, "method", "") or "").upper()
+        # Writes must not inherit http.request's passive baseline shortcut.
+        return specification.requires_active_approval or (
+            capability_name == "http.request"
+            and method in {"POST", "PUT", "PATCH", "DELETE"}
+        )
     except KeyError:
         return None
 

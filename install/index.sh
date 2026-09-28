@@ -659,6 +659,7 @@ download "$REPO_RAW_BASE/api/runtime/__init__.py" "$INSTALL_DIR/api/runtime/__in
 download "$REPO_RAW_BASE/api/runtime/budget_reservations.py" "$INSTALL_DIR/api/runtime/budget_reservations.py"
 download "$REPO_RAW_BASE/api/runtime/budgets.py" "$INSTALL_DIR/api/runtime/budgets.py"
 download "$REPO_RAW_BASE/api/runtime/capability_registry.py" "$INSTALL_DIR/api/runtime/capability_registry.py"
+download "$REPO_RAW_BASE/api/runtime/hunt_http_contract.py" "$INSTALL_DIR/api/runtime/hunt_http_contract.py"
 download "$REPO_RAW_BASE/api/runtime/browser_login_contract.py" "$INSTALL_DIR/api/runtime/browser_login_contract.py"
 download "$REPO_RAW_BASE/api/runtime/credentials.py" "$INSTALL_DIR/api/runtime/credentials.py"
 download "$REPO_RAW_BASE/api/runtime/approval_policy.py" "$INSTALL_DIR/api/runtime/approval_policy.py"

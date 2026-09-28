@@ -35,6 +35,10 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
+try:
+    from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
+except ModuleNotFoundError:
+    from ..runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .boundary_handoff import compile_candidate_boundary_handoff
@@ -1568,6 +1572,12 @@ async def _execute_hunt_capability_lifecycle(
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
+            writes_http = False
+            if name == "http.request":
+                try:
+                    writes_http = require_http_request_authority(request.input, policy)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             principal_slot = (
                 agent_tools.normalize_principal_slot(request.input.get("as_principal"))
                 if name in {
@@ -1666,6 +1676,7 @@ async def _execute_hunt_capability_lifecycle(
                 )
             requires_call_approval = (
                 spec.requires_active_approval
+                or writes_http
                 or principal_slot != "anonymous"
                 or uses_session
                 or forges_identity
@@ -1681,7 +1692,7 @@ async def _execute_hunt_capability_lifecycle(
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier=(
                         "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity or uses_direct_origin or uses_service_origin
+                        else "active" if forges_identity or uses_direct_origin or uses_service_origin or writes_http
                         else str(spec.risk_tier)
                     ), always_require_receipt=True,
                     require_target_binding=True,
@@ -1837,6 +1848,8 @@ async def _execute_hunt_capability_lifecycle(
                             None,
                         )
                         charges[transport_dimension] = 1
+            if writes_http:
+                charges["state_changing_requests"] = 1
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
@@ -3772,7 +3785,10 @@ def _hunt_redacted_capability_input(
     capability_input: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return the bounded planner/audit projection of one capability input."""
-    redacted = _arsenal_routes._redact_agent_payload(dict(capability_input or {}))
+    values = dict(capability_input or {})
+    if capability_name == "http.request":
+        values = redact_http_request_body(values)
+    redacted = _arsenal_routes._redact_agent_payload(values)
     if isinstance(redacted, dict) and redacted.get("path"):
         redacted["path"] = _devices._redact_hunt_path_query(redacted["path"])
     return redacted if isinstance(redacted, dict) else {}

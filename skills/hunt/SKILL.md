@@ -64,6 +64,29 @@ If the server says additional authority is genuinely absent, explain the missing
 Do not repeatedly prompt for authority already represented by standing authorization, and do not
 convert a recoverable capability/budget shortage into failure of the whole investigation.
 
+## Authorized HTTP workflows
+
+`http.request` supports GET/HEAD/OPTIONS and authorized POST/PUT/PATCH/DELETE with
+one `json_body` or `form_body`. Read the running server's schema; do not declare
+PUT or pairing unavailable from an older read-only description. The same capability
+and saved principal references apply across web, API, network and device Hunts.
+
+For an operator-requested workflow such as TV pairing, request
+`allow_state_changing_http: true` when creating the Hunt and reuse the target's
+standing authorization. Do not ask again for each HTTP verb, port, or pairing step.
+An already-admitted passive Hunt has not gained write authority; start an appropriately
+configured Hunt using the existing target authorization rather than inventing a receipt.
+
+Bodies here are non-secret workflow inputs. Reusable secrets stay in managed profiles
+or encrypted collections. Do not claim that this capability completes a secret-bearing
+pairing exchange, or that a response status proves pairing succeeded. Preserve the
+actual response and report the specific remaining credential/protocol capability gap.
+Write redirects are observations; do not replay them automatically. Follow a necessary
+next step explicitly under the same authority and budget. A missing permission, missing
+executor, transport failure, and model refusal are different diagnoses.
+
+See `docs/hunt-http-writes.md` for the synthetic pairing-start request and remaining work.
+
 ## Investigate
 
 Choose the next smallest action that can answer or falsify a useful hypothesis:

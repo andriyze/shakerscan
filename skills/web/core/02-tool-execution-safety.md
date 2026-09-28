@@ -24,7 +24,7 @@ not an authority grant or proof that execution will succeed on a particular targ
 
 | Operation | Actual ShakerScan path | Important limit |
 |---|---|---|
-| Baseline request | `http.request` | Read-only request; not arbitrary body replay or a raw connection |
+| HTTP request / workflow step | `http.request` | GET/HEAD/OPTIONS are baseline requests; POST/PUT/PATCH/DELETE plus JSON/form bodies require saved state-changing authority and are metered. Not a raw socket or arbitrary body export. |
 | Paired object access | `authz.verify` | Read-only, evidence-backed principal comparison; not a generic diff engine |
 | Login session | `auth.session.establish` | Managed opaque references; never submit secret values in planner inputs |
 | Browser discovery | `browser.navigate`, `browser.interact` | Fresh context per call; up to eight read-only steps; no general writes, uploads or realtime sockets |

@@ -20079,6 +20079,7 @@ async def _revalidate_hunt_action_authority(
     target_url: str,
     policy: ScanPolicy,
     capability_name: str,
+    capability_input: Mapping[str, Any] | None = None,
 ) -> None:
     """Recheck mutable target and receipt authority immediately before traffic."""
     if agent_tools.CAPABILITY_REGISTRY.require(capability_name).placement_requirements.get("network_reachability"):
@@ -20101,7 +20102,9 @@ async def _revalidate_hunt_action_authority(
         raise CapabilityInputError("Hunt target locator changed after admission")
     authority_decision = await revalidate_scan_action_authority(
         conn,
-        action=SimpleNamespace(capability_name=capability_name),
+        action=SimpleNamespace(
+            capability_name=capability_name, capability_input=dict(capability_input or {}),
+        ),
         target_binding=target,
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=policy.approval_receipt_id,
@@ -21916,6 +21919,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             capability_name, dict(job_data.get("capability_input") or {}),
         )
         spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
 
         async with db_pool.acquire() as conn:
@@ -21992,6 +21996,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target = resolve_hunt_http_origin(target, capability_input["origin"], hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
+                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
                     subdomain_discovery=False,
                     scope_receipt_id=target.scope_receipt_id,
@@ -22004,6 +22009,11 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     ).items()
                 }
                 requested_budget = dict(stored.record.requested)
+                writes_http = False
+                if capability_name == "http.request":
+                    writes_http = require_http_request_authority(
+                        capability_input, hunt_policy, requested_budget=requested_budget,
+                    )
                 if expected_budget != requested_budget:
                     raise ReservationConflict(
                         "control-plane and worker HTTP budgets differ"
@@ -22030,6 +22040,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target_url=target_url,
                     policy=policy,
                     capability_name=capability_name,
+                    capability_input=capability_input,
                 )
                 lease_seconds = hunt_capability_lease_seconds(requested_budget)
                 running = stored.record.start(
@@ -22462,7 +22473,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target_url,
                     public_input,
                     target=target,
-                    allow_write=False,
+                    allow_write=writes_http,
                     transaction_recorder=_record_call,
                     trusted_headers=trusted_headers,
                     # Read from the persisted hunt policy, which the start handler wrote
@@ -22485,7 +22496,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             operation = execute_http
             adapter_type = HttpRequestExecutionAdapter
             redacted_execution = _redact_receipt_value({
-                **public_input,
+                **redact_http_request_body(public_input),
                 "as_principal": principal_slot,
                 "session_ref": str(supplied_session_ref or "") or None,
                 "credential_headers_injected": bool(trusted_headers),

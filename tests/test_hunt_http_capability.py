@@ -110,7 +110,10 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
         'network_binding": "runtime_target_binding"',
     ):
         assert required in handler
-    assert "allow_write=False" in handler
+    assert "allow_write=writes_http" in handler
+    assert "require_http_request_authority(" in handler
+    assert "requested_budget=requested_budget" in handler
+    assert "capability_input=capability_input" in handler
     assert "worker_session.close()" in handler
     assert "secondary_worker_session.close()" in handler
     assert "private_session.close()" in handler
