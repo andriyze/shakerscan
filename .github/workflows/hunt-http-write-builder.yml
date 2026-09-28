@@ -1,21 +1,21 @@
 name: Temporary Hunt HTTP write authoring
 
-# Temporary branch-only authoring job. Neither this workflow nor its applicator
-# enters the implementation branch. No main push, merge, release or force-push.
+# Branch-only authoring. This workflow and its applicators never enter the PR.
+# No main push, merge, release, force-push or required-check modification.
 on:
   push:
     branches: [build/hunt-http-write-validation]
     paths:
       - '.dev/hunt-http-write-draft/**'
       - '.github/workflows/hunt-http-write-builder.yml'
-
 permissions:
   contents: write
-
 concurrency:
   group: hunt-http-write-authoring
   cancel-in-progress: false
-
+defaults:
+  run:
+    shell: bash
 jobs:
   apply-and-validate:
     if: github.repository == 'andriyze/shakerscan'
@@ -33,13 +33,14 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: scanner/requirements.lock
-      - name: Apply exact-source-checked draft to detached base
+      - name: Apply exact-source-checked patch to detached base
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/hunt-http-artifacts"
           git archive --format=tar "$BASE" -o "$RUNNER_TEMP/hunt-http-artifacts/base-source.tar"
           git worktree add --detach "$RUNNER_TEMP/hunt-http-source" "$BASE"
-          python .dev/hunt-http-write-draft/apply_fix.py "$RUNNER_TEMP/hunt-http-source" --check --diff "$RUNNER_TEMP/hunt-http-artifacts/proposed.patch"
-          python .dev/hunt-http-write-draft/apply_fix.py "$RUNNER_TEMP/hunt-http-source"
+          python .dev/hunt-http-write-draft/apply_validated.py "$RUNNER_TEMP/hunt-http-source" --check --diff "$RUNNER_TEMP/hunt-http-artifacts/proposed.patch"
+          python .dev/hunt-http-write-draft/apply_validated.py "$RUNNER_TEMP/hunt-http-source"
       - name: Install locked repository dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
       - name: Regenerate advertised contracts and inventory
@@ -58,7 +59,17 @@ jobs:
         env:
           PYTHONPATH: scanner:api
         run: |
+          set -euo pipefail
           python -m pytest -q tests/test_hunt_http_write_contract.py tests/test_hunt_http_write_integration.py tests/test_hunt_http_capability.py --junitxml="$RUNNER_TEMP/hunt-http-artifacts/http-tests.xml" 2>&1 | tee "$RUNNER_TEMP/hunt-http-artifacts/http-tests.txt"
+      - name: Related authorization, device, service and runtime regressions
+        id: related
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/hunt-http-source
+        env:
+          PYTHONPATH: scanner:api
+        run: |
+          set -euo pipefail
+          python -m pytest -q tests/test_hunt_standing_authorization.py tests/test_hunt_start_adjustments.py tests/test_hunt_start_contract.py tests/test_hunt_device_parity.py tests/test_hunt_semantic_registry.py tests/test_hunt_redirects.py tests/test_hunt_session_service_authority.py tests/test_hunt_operator_execution.py tests/test_hunt_service_execution.py tests/test_hunt_device_traffic.py --junitxml="$RUNNER_TEMP/hunt-http-artifacts/related-tests.xml" 2>&1 | tee "$RUNNER_TEMP/hunt-http-artifacts/related-tests.txt"
       - name: Static repository checks
         id: static
         continue-on-error: true
@@ -79,6 +90,7 @@ jobs:
         working-directory: ${{ runner.temp }}/hunt-http-source
         env:
           TEST_OUTCOME: ${{ steps.tests.outcome }}
+          RELATED_OUTCOME: ${{ steps.related.outcome }}
           STATIC_OUTCOME: ${{ steps.static.outcome }}
         run: |
           set -euo pipefail
@@ -86,13 +98,13 @@ jobs:
           test "$actual" = "$BASE"
           git config user.name 'ChatGPT'
           git config user.email 'noreply@openai.com'
-          git add api tests skills docs install
+          git add api tests skills docs install ui/src/lib
           git diff --cached --check
           if git diff --cached --name-only | grep -E '^(\.github/|\.dev/)'; then
             echo 'Authoring files must not enter the implementation commit' >&2
             exit 1
           fi
-          git commit -m 'fix(hunt): enable authorized HTTP workflow writes' -m "Authoring validation: focused tests=$TEST_OUTCOME; static checks=$STATIC_OUTCOME. Draft pending full PR CI and end-to-end workflow validation."
+          git commit -m 'fix(hunt): enable authorized HTTP workflow writes' -m "Authoring validation: focused=$TEST_OUTCOME; related=$RELATED_OUTCOME; static=$STATIC_OUTCOME. Draft pending full PR CI and end-to-end workflow validation."
           git push origin "HEAD:refs/heads/$DESTINATION"
           git rev-parse HEAD | tee "$RUNNER_TEMP/hunt-http-artifacts/implementation-sha.txt"
           git diff "$BASE" HEAD --stat | tee "$RUNNER_TEMP/hunt-http-artifacts/implementation-stat.txt"
@@ -102,8 +114,9 @@ jobs:
             echo '## Draft implementation published'
             echo "Commit: $(git rev-parse HEAD)"
             echo "Focused tests: $TEST_OUTCOME"
+            echo "Related tests: $RELATED_OUTCOME"
             echo "Static checks: $STATIC_OUTCOME"
-            echo 'Normal PR checks are unchanged. Test/static failures remain blockers, not waived checks.'
+            echo 'Normal PR checks are unchanged. Failures remain blockers, not waived checks.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload source, readable patch and test evidence
         if: always()
@@ -114,5 +127,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Preserve validation failure status
-        if: steps.tests.outcome != 'success' || steps.static.outcome != 'success'
+        if: steps.tests.outcome != 'success' || steps.related.outcome != 'success' || steps.static.outcome != 'success'
         run: exit 1
