@@ -259,7 +259,7 @@ def test_anonymous_service_replay_admission_worker_wire_and_settlement(kind, act
                 life.specification = CAPABILITY_REGISTRY.require("http.request")
                 life.placement = life.specification.hunt_executor
                 next_action = await fn(str(HUNT), "http.request", SimpleNamespace(
-                    input={"path": "/"}, idempotency_key="after-unaffordable-replay"), life)
+                    input={"method": "GET", "path": "/"}, idempotency_key="after-unaffordable-replay"), life)
                 assert conn.actions[next_action["action_id"]]["status"] == "reserved"
             else:
                 assert result["status"] == "success", result
