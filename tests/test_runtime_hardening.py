@@ -813,6 +813,8 @@ verify_running_build_identity() { :; }
 verify_specialized_worker_identity() { :; }
 running_compose_service_count() { printf '1\n'; }
 running_device_worker_count() { printf '0\n'; }
+# No earlier release or leftover container: Compose converges the stack in place.
+start_clean_slate_reason() { :; }
 start_services() {
 __START_SERVICES__
 }
@@ -1178,6 +1180,8 @@ verify_specialized_worker_identity() { printf 'specialized:%s:%s\n' "$1" "$2"; }
 running_compose_service_count() { printf '1\n'; }
 running_device_worker_count() { printf '1\n'; }
 stop_services() { printf 'stop\n'; }
+# `stop` already removed everything, so `start` has nothing left to stop.
+start_clean_slate_reason() { :; }
 start_services() {
 __START_SERVICES__
 }
@@ -1204,9 +1208,14 @@ restart_services
     output = result.stdout
     primary_up = "compose:up --no-build -d --scale worker=3"
     device_up = "compose:--profile devices up --no-build -d --force-recreate device-worker"
+    gungnir_up = "compose:--profile gungnir up --no-build -d --force-recreate gungnir-worker"
     assert output.count("build-local") == 0
     assert output.count(device_up) == 1
     assert output.index(primary_up) < output.index(device_up)
+    # `stop` removes the Gungnir CT monitor too, so a restart must bring it back.
+    assert output.count(gungnir_up) == 1
+    assert output.index(primary_up) < output.index(gungnir_up)
+    assert output.count("stop\n") == 1
     assert "specialized:1:1" in output
 
 

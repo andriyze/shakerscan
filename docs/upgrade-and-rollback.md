@@ -1,6 +1,6 @@
 # Upgrade and Rollback
 
-**Status:** current source/installer upgrade runbook; reconciled 2026-08-29.
+**Status:** current source/installer upgrade runbook; reconciled 2026-09-28.
 
 ShakerScan upgrades are in-place and run database migrations when the API and workers start. Required
 schema invariants fail closed: if a migration cannot complete safely, the affected service exits
@@ -74,6 +74,12 @@ shakerscan start
 shakerscan status
 ```
 
+No separate stop is needed. When `start` finds an earlier release still answering, ShakerScan
+containers running without the API, or containers the API started outside Compose, it first pulls
+(for a source checkout, builds) the new images, then stops every ShakerScan container the way
+`shakerscan stop` does and starts the new release. An enabled connected-device worker and Gungnir CT monitor come back on the new image,
+and the running worker count is kept. Volumes, `results/`, and `.env` are not touched.
+
 After startup, confirm the API health check, UI, worker build status, existing targets/findings, and a
 safe Quick scan. Do not run `shakerscan reset` to recover from a migration failure; reset deletes the
 database volume.
@@ -81,6 +87,42 @@ database volume.
 If startup reports a fatal schema invariant, preserve the logs and backup. The error identifies the
 failed invariant and whether automatic repair was attempted. Repair the database offline or restore
 the pre-upgrade backup before retrying.
+
+### "Resource is still in use" or a container name already in use
+
+`shakerscan stop` removes every ShakerScan container, including the ones a plain
+`docker compose down` leaves attached: the opt-in connected-device worker and Gungnir CT monitor,
+workers added from the UI or `/workers` scaler (the API creates them through the Docker socket, so
+Compose cannot see them), and one-off `docker compose run` containers. Releases before this change
+left them running, which produced these symptoms:
+
+- `Network shakerscan_default  Resource is still in use` (and the same for
+  `shakerscan_signer-control`) during `shakerscan stop`;
+- `Conflict. The container name "/shakerscan-worker-N" is already in use` during an upgrade;
+- `network shakerscan_default has active endpoints` when Compose had to recreate the network;
+- startup failing closed on build identity because some workers were still on the previous image.
+
+`shakerscan doctor` names containers left running without the API and anything else still attached
+to a project network. On a runtime whose launcher predates this change, clear the leftovers by hand.
+These commands remove containers only; the PostgreSQL and Redis volumes, `results/`, and `.env` stay:
+
+```bash
+cd ~/.shakerscan
+docker network inspect -f '{{.Name}}: {{range .Containers}}{{.Name}} {{end}}' \
+  shakerscan_default shakerscan_signer-control
+shakerscan stop
+docker ps -aq --filter label=com.docker.compose.project=shakerscan | xargs -r docker rm -f
+docker network rm shakerscan_default shakerscan_signer-control
+curl -fsSL https://install.shakerscan.com | sh
+```
+
+Use the runtime's Compose project name if `COMPOSE_PROJECT_NAME` changed it. If `docker network rm`
+still reports active endpoints, detach a listed non-ShakerScan container with
+`docker network disconnect -f shakerscan_default <name>`; a name that matches no container is a stale
+endpoint, which `sudo systemctl restart docker` clears (common after a Docker or OS package upgrade).
+Afterwards re-enable any opt-in lane you used (`shakerscan devices start`, `shakerscan gungnir start`).
+Never use `docker compose down -v`, `shakerscan reset`, `docker system prune --volumes`, or
+`scripts/clean-shakerscan.sh` for this: each deletes the database.
 
 ## Roll back after a failed upgrade
 
