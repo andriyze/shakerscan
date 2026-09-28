@@ -773,3 +773,24 @@ def test_deleting_the_archive_does_not_require_enabling_raw_export():
     purge = purge[:purge.index("@router.delete")]
     assert "_require_operator(request)" in purge
     assert "_authorize_raw" not in purge
+
+
+def test_redacted_hunt_http_write_omits_body_and_unsalted_digest():
+    pin = "7319"
+    raw_digest = hashlib.sha256(json.dumps({"CHALLENGE_RESPONSE": pin}).encode()).hexdigest()
+    row = {
+        "id": "11111111-1111-4111-8111-111111111112",
+        "plane": "hunt", "hunt_run_id": "h1", "hunt_action_id": "a1",
+        "capability_name": "http.request", "adapter": "agent.http_request",
+        "method": "PUT", "url": "http://tv.test:7345/pair", "sequence": 0,
+        "request_body": json.dumps({"CHALLENGE_RESPONSE": pin, "token": "issued"}),
+        "request_body_sha256": raw_digest, "request_body_bytes": 52,
+    }
+    redacted = project(row, redaction="redacted")
+    assert redacted["request"]["body"] is None
+    assert redacted["request"]["sha256"] is None
+    assert pin not in json.dumps(redacted)
+    assert raw_digest not in json.dumps(redacted)
+    raw = project(row, redaction="raw")
+    assert pin in raw["request"]["body"]
+    assert raw["request"]["sha256"] == raw_digest
