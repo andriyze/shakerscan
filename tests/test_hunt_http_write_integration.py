@@ -6,6 +6,7 @@ PostgreSQL/Redis end-to-end worker coverage.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
