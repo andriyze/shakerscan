@@ -1,0 +1,25 @@
+name: Hunt HTTP write development validation
+
+# Development-only branch. This workflow is not part of the product PR.
+on:
+  push:
+    branches: [work/hunt-http-write-validation-20260928]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 7f5920bd5f4b08fbda11222871b0e2d68e0cd755
+          persist-credentials: false
+      - name: Export exact baseline for implementation and offline tests
+        run: git archive --format=tar.gz --output=/tmp/shakerscan-source.tar.gz HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hunt-http-write-baseline
+          path: /tmp/shakerscan-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
