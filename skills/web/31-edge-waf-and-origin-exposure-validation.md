@@ -226,8 +226,8 @@ For an explicitly authorized state-changing investigation, `http.request` also s
 `POST`, `PUT`, `PATCH` and `DELETE` with one `json_body` or `form_body`. Read the live schema
 and use the Hunt's saved state-changing authority; do not request a new authorization per verb.
 Compare only endpoints and effects the operator placed in scope, and retain the actual method,
-body kind and response evidence. Accepted method-override headers and form fields may be tested
-through that same path; verify which headers the runtime actually sent. Arbitrary raw encodings,
+body kind and response evidence. Method-override headers are executor-owned and blocked on this path because they would make the
+recorded method disagree with the effective method. Arbitrary raw encodings,
 multipart uploads and synchronized exchanges still require their own implemented transport.
 
 ### 7. Cache and identity confusion
