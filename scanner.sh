@@ -2261,6 +2261,8 @@ start_services() {
     local start_workers
     local requested_workers="${1:-}"
     local restore_device_workers="${2:-0}"
+    local restore_gungnir="${3:-0}"
+    local clean_slate_reason
 
     prepare_runtime_files
     persist_remote_access_env
@@ -2297,10 +2299,30 @@ start_services() {
         export SHAKERSCAN_DOCKER_GID="$(resolve_docker_socket_gid)"
         write_dotenv_value SHAKERSCAN_DOCKER_GID "$SHAKERSCAN_DOCKER_GID"
     fi
+    # The images are ready, so taking a stack down now cannot strand the host without a runnable
+    # release. Stop it completely the way `restart` does, keeping its worker count and opt-in lanes.
+    clean_slate_reason="$(start_clean_slate_reason)"
+    if [ -n "$clean_slate_reason" ]; then
+        if [ -z "$requested_workers" ]; then
+            start_workers="$(restart_worker_count)"
+        fi
+        if [ "$(running_device_worker_count)" -gt 0 ]; then
+            restore_device_workers=1
+        fi
+        if [ "$(running_compose_service_count gungnir-worker)" -gt 0 ]; then
+            restore_gungnir=1
+        fi
+        echo -e "${YELLOW}Stopping the running stack first (${clean_slate_reason}); it restarts with $start_workers worker(s).${NC}"
+        stop_services
+    fi
     compose_up -d --scale worker=$start_workers
     if [ "$restore_device_workers" -gt 0 ]; then
         echo -e "${YELLOW}Recreating connected-device worker from the selected image...${NC}"
         compose --profile devices up --no-build -d --force-recreate device-worker || return 1
+    fi
+    if [ "$restore_gungnir" -gt 0 ]; then
+        echo -e "${YELLOW}Recreating the Gungnir CT monitor from the selected image...${NC}"
+        compose --profile gungnir up --no-build -d --force-recreate gungnir-worker || return 1
     fi
     echo ""
     wait_for_url "API" "$(api_probe_url)/health" 120
@@ -2323,23 +2345,27 @@ start_services() {
 
 stop_services() {
     echo -e "${YELLOW}Stopping ShakerScan...${NC}"
-    compose down
+    # Anything `compose down` would leave attached keeps the project networks in use
+    # ("Network shakerscan_default Resource is still in use"), so remove it first.
+    remove_containers_outside_compose_down
+    # --remove-orphans also takes containers of services this release no longer defines.
+    compose down --remove-orphans
     remove_scan_worker_containers "Removing API-scaled worker containers left outside Compose..."
     echo -e "${GREEN}Services stopped${NC}"
 }
 
 restart_services() {
-    local restart_workers restart_device_workers
+    local restart_workers restart_device_workers restart_gungnir
     prepare_runtime_files
     restart_workers="$(restart_worker_count)"
-    # The connected-device worker is opt-in and its Compose profile is not
-    # included in an ordinary `compose down`. Remember that the operator had
-    # enabled it, then replace it from the selected image after the primary
-    # stack returns. Otherwise `restart` can leave this lane stale and wait for
-    # specialized-worker build identity until the timeout expires.
+    # The connected-device worker and the Gungnir CT monitor are opt-in lanes
+    # that `stop` removes with the rest of the project. Remember which ones the
+    # operator had enabled, then recreate them from the selected image after the
+    # primary stack returns, so neither is lost nor left on a stale image.
     restart_device_workers="$(running_device_worker_count)"
+    restart_gungnir="$(running_compose_service_count gungnir-worker)"
     stop_services
-    start_services "$restart_workers" "$restart_device_workers"
+    start_services "$restart_workers" "$restart_device_workers" "$restart_gungnir"
 }
 
 # Reload source into running containers without a full stop/start.
@@ -2596,6 +2622,72 @@ remove_scan_worker_containers() {
     for container in $containers; do
         docker rm -f "$container" >/dev/null 2>&1 || true
     done
+}
+
+# One "name|service|config-hash|oneoff" row per container of this Compose project.
+project_container_rows() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    docker ps -a \
+        --filter "label=com.docker.compose.project=$project" \
+        --format '{{.Names}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.config-hash"}}|{{.Label "com.docker.compose.oneoff"}}' \
+        2>/dev/null
+}
+
+# Containers the API started through the Docker socket (the worker scaler, the Gungnir
+# auto-start). They carry the project labels but not the config hash Compose selects its own
+# containers by, so Compose can neither see nor replace them.
+containers_started_outside_compose() {
+    project_container_rows | awk -F'|' '$3 == "" { print $1 }' | sort
+}
+
+# Containers a plain `compose down` leaves behind: the opt-in device and Gungnir lanes (their
+# profiles are not active for `down`), containers started outside Compose, and one-off
+# `compose run` containers. Each one still attached keeps the project networks "in use", and
+# survives an upgrade on its old image.
+containers_outside_compose_down() {
+    project_container_rows | awk -F'|' '$2 == "device-worker" || $2 == "gungnir-worker" || $3 == "" || $4 == "True" { print $1 }' | sort
+}
+
+remove_containers_outside_compose_down() {
+    local containers
+    local container
+    containers="$(containers_outside_compose_down)"
+    if [ -z "$containers" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}Stopping containers 'compose down' does not remove:${NC} $(echo $containers)"
+    # One graceful stop call for all of them, then removal.
+    docker stop $containers >/dev/null 2>&1 || true
+    for container in $containers; do
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    done
+}
+
+# Why `start` must stop the whole project before bringing it up, or nothing when Compose can
+# converge it in place. It cannot while an earlier release still answers (the opt-in lanes and
+# API-started workers would keep the old image and the build-identity check fails closed), while
+# containers run without the API (an interrupted stop or upgrade), or while containers started
+# outside Compose exist (`--scale` collides with their names).
+start_clean_slate_reason() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    local outside running_version
+
+    outside="$(containers_started_outside_compose)"
+    if [ -n "$outside" ]; then
+        echo "found containers started outside Compose: $(echo $outside)"
+        return 0
+    fi
+    if [ -z "$(docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ "$(running_compose_service_count api)" -eq 0 ]; then
+        echo "found ShakerScan containers running without the API"
+        return 0
+    fi
+    running_version="$(curl -fsS --max-time 5 "$(api_probe_url)/health" 2>/dev/null | jq -r '.scanner_version // empty' 2>/dev/null || true)"
+    if [ -n "$running_version" ] && ! build_versions_match "${SCANNER_VERSION:-}" "$running_version"; then
+        echo "found ShakerScan $running_version running"
+    fi
 }
 
 worker_log_containers() {
@@ -3070,9 +3162,12 @@ running_compose_service_count() {
     local service="$1"
     local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
     local count
+    # A one-off `compose run <service> ...` container shares the service label but is not
+    # an instance of the service (a one-off `api` container does not serve the API).
     count="$(docker ps \
         --filter "label=com.docker.compose.project=$project" \
         --filter "label=com.docker.compose.service=$service" \
+        --filter "label=com.docker.compose.oneoff=False" \
         --format '{{.Names}}' 2>/dev/null | wc -l | tr -d '[:space:]')"
     echo "${count:-0}"
 }
@@ -3197,6 +3292,32 @@ open_shell() {
     compose_run --rm worker /bin/bash
 }
 
+# Read-only: name what makes a stop report "Resource is still in use" or an upgrade fail to
+# replace the stack. `stop` removes ShakerScan's own leftovers; it never touches other containers.
+doctor_leftover_containers() {
+    local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
+    local running network holders found=0
+    running="$(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Names}}' 2>/dev/null | sort | tr '\n' ' ')"
+    if [ -n "${running// /}" ] && [ "$(running_compose_service_count api)" -eq 0 ]; then
+        echo -e "  ${YELLOW}attention${NC} ShakerScan containers are running without the API (an interrupted stop or upgrade): ${running}"
+        echo "            '$(cli_hint) stop' removes them without touching data volumes; then run '$(cli_hint) start'."
+        found=1
+    fi
+    if [ -z "${running// /}" ]; then
+        for network in $(docker network ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}' 2>/dev/null); do
+            holders="$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$network" 2>/dev/null || true)"
+            if [ -n "${holders// /}" ]; then
+                echo -e "  ${YELLOW}attention${NC} network $network is still in use by: ${holders}"
+                echo "            Detach each with 'docker network disconnect -f $network <name>'; restart Docker for a name that is no container."
+                found=1
+            fi
+        done
+    fi
+    if [ "$found" -eq 0 ]; then
+        echo -e "  ${GREEN}ok${NC} no leftover ShakerScan containers or networks in use"
+    fi
+}
+
 doctor() {
     detect_platform
     echo -e "${BLUE}ShakerScan Doctor${NC}"
@@ -3225,6 +3346,9 @@ doctor() {
 
     if docker_info_available; then
         echo -e "  ${GREEN}ok${NC} Docker daemon reachable"
+        if [ "$DOCKER_NEEDS_SUDO" -eq 0 ]; then
+            doctor_leftover_containers
+        fi
     else
         echo -e "  ${YELLOW}not ready${NC} Docker daemon is not reachable"
     fi
