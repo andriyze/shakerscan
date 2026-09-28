@@ -1,0 +1,132 @@
+name: Temporary PR241 completion validation
+on:
+  push:
+    branches: [work/pr241-http-completion-authoring]
+permissions:
+  contents: write
+concurrency:
+  group: pr241-completion-authoring
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: hunt_records
+          POSTGRES_PASSWORD: hunt-records-disposable-ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hunt_records"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      BASE: a6230a3f923940637a6940f7427865ae7ec131a5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
+      - name: Apply checked patch to exact detached implementation source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr241-artifacts"
+          python - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          encoded = ''.join(p.read_text() for p in sorted(Path('.authoring/pr241').glob('part*.b64')))
+          packed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(packed).hexdigest() == 'ca792708eed50380a954a05229e47caea348c2d4444c830683f1aebd0cffa61e'
+          patch = gzip.decompress(packed)
+          assert hashlib.sha256(patch).hexdigest() == '2b3458b6301197016e3be5e3ac4fafa3dd5901ffebd7ce14916ed9c56da3904b'
+          Path(os.environ['RUNNER_TEMP'], 'pr241-artifacts', 'implementation.patch').write_bytes(patch)
+          PY
+          git worktree add --detach "$RUNNER_TEMP/pr241-source" "$BASE"
+          cd "$RUNNER_TEMP/pr241-source"
+          git apply --check "$RUNNER_TEMP/pr241-artifacts/implementation.patch"
+          git apply "$RUNNER_TEMP/pr241-artifacts/implementation.patch"
+      - name: Install locked dependencies and Chromium
+        working-directory: ${{ runner.temp }}/pr241-source
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+          python -m playwright install --with-deps chromium
+      - name: Generate exact public and shipped contracts
+        working-directory: ${{ runner.temp }}/pr241-source
+        run: |
+          python scripts/generate_public_api_contract.py
+          SHAKERSCAN_UPDATE_API_CONTRACT=1 PYTHONPATH=. python -m pytest -q tests/test_api_characterization.py
+          python scripts/generate_capability_inventory.py
+          python scripts/generate_hunt_contract.py
+          python scripts/generate_scan_contract.py
+          python scripts/generate_install_manifest.py
+      - name: Real PostgreSQL private workflow value lifecycle
+        id: postgres
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/pr241-source
+        env:
+          HUNT_TEST_POSTGRES_DSN: postgresql://postgres:hunt-records-disposable-ci@127.0.0.1:5432/hunt_records
+          PYTHONPATH: .:api:scanner
+        run: |
+          set -euo pipefail
+          python -m pytest -q tests/test_hunt_http_values_postgres.py --junitxml="$RUNNER_TEMP/pr241-artifacts/http-values-postgres.xml" 2>&1 | tee "$RUNNER_TEMP/pr241-artifacts/postgres.log"
+      - name: Complete unmodified partitioned Python suite
+        id: suite
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/pr241-source
+        run: |
+          set -euo pipefail
+          python scripts/run_complete_python_suite.py --artifacts-dir "$RUNNER_TEMP/pr241-artifacts" 2>&1 | tee "$RUNNER_TEMP/pr241-artifacts/python-suite.log"
+      - name: All generated and static checks
+        id: static
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/pr241-source
+        run: |
+          set -euo pipefail
+          for generator in generate_public_api_contract generate_capability_inventory generate_hunt_contract generate_scan_contract generate_install_manifest; do
+            python "scripts/${generator}.py" --check
+          done
+          for checker in check_installed_import_closure check_module_size check_documentation_policy check_surface_dispositions check_scan_target_transport check_hunt_methodologies; do
+            python "scripts/${checker}.py"
+          done
+      - name: Publish implementation-only candidate for review
+        id: candidate
+        working-directory: ${{ runner.temp }}/pr241-source
+        run: |
+          set -euo pipefail
+          test -z "$(git ls-files .authoring .github/workflows/pr241-completion-validation.yml)"
+          git diff --check
+          git config user.name ChatGPT
+          git config user.email noreply@openai.com
+          git add api db docs install scripts skills tests ui .github/workflows/hunt-record-integrity.yml
+          git commit -m "fix(hunt): complete authorized replay and private HTTP pairing workflows" -m "Reuse the canonical Hunt runtime for active collection replay, encrypted short-lived PIN and response-token references, and the complete HTTP worker lifecycle. Preserve current target authorization, secret redaction, cancellation and write accounting. Include real PostgreSQL cleanup validation and regression coverage; validation outcomes are retained in the authoring run."
+          result="work/pr241-http-completion-${GITHUB_RUN_ID}"
+          git push origin "HEAD:refs/heads/$result"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/pr241-artifacts/candidate-sha.txt"
+          git diff "$BASE" HEAD > "$RUNNER_TEMP/pr241-artifacts/final-readable.patch"
+          git archive HEAD --format=tar -o "$RUNNER_TEMP/pr241-artifacts/implementation-source.tar"
+      - name: Retain evidence and exact source
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr241-completion-${{ github.sha }}
+          path: ${{ runner.temp }}/pr241-artifacts
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve any validation failure
+        if: always()
+        env:
+          POSTGRES_RESULT: ${{ steps.postgres.outcome }}
+          SUITE_RESULT: ${{ steps.suite.outcome }}
+          STATIC_RESULT: ${{ steps.static.outcome }}
+          CANDIDATE_RESULT: ${{ steps.candidate.outcome }}
+        run: |
+          test "$POSTGRES_RESULT" = success
+          test "$SUITE_RESULT" = success
+          test "$STATIC_RESULT" = success
+          test "$CANDIDATE_RESULT" = success
