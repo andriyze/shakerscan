@@ -1,0 +1,582 @@
+diff --git a/api/capabilities/http.py b/api/capabilities/http.py
+index 8400281..397512b 100644
+--- a/api/capabilities/http.py
++++ b/api/capabilities/http.py
+@@ -435,2 +435,3 @@ async def execute_bound_http_request(
+     )
++    raw_body = args.get("raw_body") if isinstance(args.get("raw_body"), str) else None
+     url = urllib.parse.urljoin(request_origin + "/", path.lstrip("/"))
+@@ -445,3 +446,4 @@ async def execute_bound_http_request(
+             "json" if json_body is not None
+-            else "form" if form_body is not None else None
++            else "form" if form_body is not None
++            else "raw" if raw_body is not None else None
+         ),
+@@ -510,2 +512,3 @@ async def execute_bound_http_request(
+                         ),
++                        content=raw_body.encode("utf-8") if raw_body is not None else None,
+                     )
+diff --git a/api/capabilities/hunt_http_identity.py b/api/capabilities/hunt_http_identity.py
+new file mode 100644
+index 0000000..7cfcfd8
+--- /dev/null
++++ b/api/capabilities/hunt_http_identity.py
+@@ -0,0 +1,53 @@
++"""Resolve one HTTP Hunt identity in the worker, before any target traffic."""
++from __future__ import annotations
++
++from typing import Any, Mapping
++
++from runtime.credential_refs import CredentialReferenceError, select_hunt_principal_reference
++from runtime.credential_resolver import (
++    CredentialResolutionError, WorkerCredentialResolver, validate_worker_credential_authority,
++)
++
++
++async def resolve_http_identity(*, pool: Any, stack: Any, session_store: Any,
++                                hunt_id: Any, target: Any, policy: Any,
++                                context: Mapping[str, Any], capability_name: str,
++                                capability_input: Mapping[str, Any]):
++    """Return worker-private (session, headers, principal); never widen a profile."""
++    import urllib.parse
++    session_ref = capability_input.get("session_ref")
++    principal = str(capability_input.get("as_principal") or "anonymous").strip().lower()
++    if session_ref and principal not in {"", "anonymous", "anon", "none"}:
++        raise CredentialReferenceError("HTTP request accepts either session_ref or as_principal, not both")
++    if not session_ref and principal in {"", "anonymous", "anon", "none"}:
++        return None, {}, "anonymous"
++    conn = await stack.enter_async_context(pool.acquire())
++    authority = await validate_worker_credential_authority(
++        conn, owner_kind="hunt", owner_id=str(hunt_id), target=target,
++        approval_receipt_id=policy.approval_receipt_id, scope_receipt_id=target.scope_receipt_id,
++        action_name=f"hunt.capability:{capability_name}",
++    )
++    if session_ref:
++        origin = capability_input.get("origin") or target.allowed_origins[0]
++        session = await session_store.load_for_worker(
++            conn, session_ref=session_ref, owner_kind="hunt", owner_id=hunt_id,
++            target=target, capability=capability_name,
++            selected_origins=(urllib.parse.urlunsplit(
++                (*urllib.parse.urlsplit(origin)[:2], "", "", ""),
++            ),),
++        )
++        return session, session.headers(), session.metadata.principal_slot
++    ref = select_hunt_principal_reference(context, principal, capability=capability_name)
++    matches = [item for item in context.get("credential_refs") or ()
++               if isinstance(item, Mapping) and item.get("profile_id") == ref["profile_id"]
++               and item.get("principal_slot") == ref["principal_slot"]]
++    if len(matches) != 1:
++        raise CredentialReferenceError("managed Hunt principal context is missing or ambiguous")
++    resolved = await stack.enter_async_context(WorkerCredentialResolver().resolve(
++        conn, profile_id=ref["profile_id"], target=target,
++        capability=capability_name, authority=authority,
++    ))
++    if (resolved.profile.current_version != ref["profile_version"]
++            or resolved.profile.principal_slot != principal):
++        raise CredentialResolutionError("managed Hunt principal changed after admission")
++    return None, resolved.http_headers().as_dict(), principal
+diff --git a/api/capabilities/inline.py b/api/capabilities/inline.py
+index 16fe4b8..e9414ac 100644
+--- a/api/capabilities/inline.py
++++ b/api/capabilities/inline.py
+@@ -105,2 +105,9 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
+             )
++        if "state_changing_requests" in self._requested_budget:
++            # A failed response can follow a successful mutation. Count the
++            # attempted write, never infer rollback from its HTTP status.
++            actual["state_changing_requests"] = min(
++                int(self._requested_budget["state_changing_requests"]),
++                1 if execution_started else 0,
++            )
+         error = str(result.get("error") or "").strip()
+diff --git a/api/hunt/interaction_router.py b/api/hunt/interaction_router.py
+index a43395d..2329b0d 100644
+--- a/api/hunt/interaction_router.py
++++ b/api/hunt/interaction_router.py
+@@ -1406,2 +1406,3 @@ async def _execute_hunt_capability_lifecycle(
+     call_approval_context = None
++    from runtime.http_action_contract import require_http_write_authority
+     spec = lifecycle.specification
+@@ -1570,2 +1571,7 @@ async def _execute_hunt_capability_lifecycle(
+                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
++            if name == "http.request_active":
++                try:
++                    require_http_write_authority(policy)
++                except ValueError as exc:
++                    raise HTTPException(status_code=403, detail=str(exc)) from exc
+             principal_slot = (
+@@ -1573,3 +1579,3 @@ async def _execute_hunt_capability_lifecycle(
+                 if name in {
+-                    "http.request", "collections.replay_safe", "auth.session.establish",
++                    "http.request", "http.request_active", "collections.replay_safe", "collections.replay_active", "auth.session.establish",
+                 }
+@@ -1594,5 +1600,5 @@ async def _execute_hunt_capability_lifecycle(
+                     raise HTTPException(status_code=403, detail=str(exc)) from exc
+-            if name == "collections.replay_safe":
++            if name in {"collections.replay_safe", "collections.replay_active"}:
+                 principal = _hunt_managed_principal_reference(
+-                    _hunt_json(run["context_pack"], {}), principal_slot,
++                    _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
+                 )
+@@ -1614,3 +1620,3 @@ async def _execute_hunt_capability_lifecycle(
+                 (
+-                    name in {"http.request", "browser.navigate", "browser.interact"}
++                    name in {"http.request", "http.request_active", "browser.navigate", "browser.interact"}
+                     and request.input.get("session_ref")
+@@ -1649,3 +1655,3 @@ async def _execute_hunt_capability_lifecycle(
+             if request.input.get("origin") is not None and (
+-                name in {"http.request", "tls.inspect", "auth.session.establish", "authz.verify"}
++                name in {"http.request", "http.request_active", "tls.inspect", "auth.session.establish", "authz.verify"}
+                 or is_scanner or is_browser
+@@ -1658,3 +1664,3 @@ async def _execute_hunt_capability_lifecycle(
+                 uses_service_origin = selected.allowed_origins != original.allowed_origins
+-            elif name == "collections.replay_safe":
++            elif name in {"collections.replay_safe", "collections.replay_active"}:
+                 # Replay takes no planner origin; it follows the operator's collection
+@@ -2321,3 +2327,3 @@ async def _execute_hunt_capability_lifecycle(
+                 raise collection_adapter.blocked_exception
+-        elif name == "collections.replay_safe":
++        elif name in {"collections.replay_safe", "collections.replay_active"}:
+             if durable_action_digest is None:
+@@ -2330,2 +2336,3 @@ async def _execute_hunt_capability_lifecycle(
+                 action_digest=durable_action_digest,
++                capability_name=name,
+             )
+@@ -2718,3 +2725,3 @@ async def _execute_hunt_capability_lifecycle(
+                 )
+-            elif name == "collections.replay_safe" and not worker_managed_budget and isinstance(receipt_payload, dict):
++            elif name in {"collections.replay_safe", "collections.replay_active"} and not worker_managed_budget and isinstance(receipt_payload, dict):
+                 actual_charges["http_requests"] = min(
+@@ -3774,3 +3781,4 @@ def _hunt_redacted_capability_input(
+     """Return the bounded planner/audit projection of one capability input."""
+-    redacted = _arsenal_routes._redact_agent_payload(dict(capability_input or {}))
++    from runtime.http_action_contract import redact_http_write_body
++    redacted = _arsenal_routes._redact_agent_payload(redact_http_write_body(capability_input or {}))
+     if isinstance(redacted, dict) and redacted.get("path"):
+@@ -3781,3 +3789,3 @@ def _hunt_redacted_capability_input(
+ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+-    selector = _hunt_collection_selector(values, hard_limit=200)
++    selector = _hunt_collection_selector(values, hard_limit=200, safe_methods_only=False)
+     async with _pool().acquire() as conn:
+@@ -3793,3 +3801,3 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values:
+     base_selected = _select_request_collection_index_rows(
+-        index_rows, _hunt_bound_selector(ref, hard_limit=2_000),
++        index_rows, _hunt_bound_selector(ref, hard_limit=2_000, safe_methods_only=False),
+     )
+@@ -3818,3 +3826,3 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values:
+ def _hunt_managed_principal_reference(
+-    context: Mapping[str, Any], value: Any,
++    context: Mapping[str, Any], value: Any, *, capability: str = "collections.replay_safe",
+ ) -> dict[str, Any] | None:
+@@ -3824,3 +3832,3 @@ def _hunt_managed_principal_reference(
+             value,
+-            capability="collections.replay_safe",
++            capability=capability,
+         )
+@@ -3837,7 +3845,10 @@ async def _enqueue_hunt_replay_capability(
+     action_digest: str,
++    capability_name: str = "collections.replay_safe",
+ ) -> dict[str, Any]:
+     """Place replay on a worker that executes the shared execute_replay_plan engine."""
+-    selector = _hunt_collection_selector(values, hard_limit=25)
++    from hunt.replay_authority import replay_authorization
++    active = capability_name == "collections.replay_active"
++    selector = _hunt_collection_selector(values, hard_limit=25, safe_methods_only=not active)
+     principal = _hunt_managed_principal_reference(
+-        context, values.get("as_principal"),
++        context, values.get("as_principal"), capability=capability_name,
+     )
+@@ -3850,3 +3861,3 @@ async def _enqueue_hunt_replay_capability(
+                 status_code=403,
+-                detail="Safe replay requires a saved request collection selection",
++                detail="Replay requires a saved request collection selection",
+             )
+@@ -3857,2 +3868,6 @@ async def _enqueue_hunt_replay_capability(
+             )
++        try:
++            replay_authorization(capability_name, _hunt_json(run["policy_json"], {}), str(ref.get("replay_policy") or ""))
++        except ValueError as exc:
++            raise HTTPException(status_code=403, detail=str(exc)) from exc
+         index_rows = await conn.fetch(
+@@ -3866,3 +3881,3 @@ async def _enqueue_hunt_replay_capability(
+     base_selected = _select_request_collection_index_rows(
+-        index_rows, _hunt_bound_selector(ref, hard_limit=25),
++        index_rows, _hunt_bound_selector(ref, hard_limit=2_000, safe_methods_only=not active),
+     )
+@@ -3884,3 +3899,3 @@ async def _enqueue_hunt_replay_capability(
+     if not replay_ids:
+-        raise HTTPException(status_code=422, detail="Safe replay selection is empty")
++        raise HTTPException(status_code=422, detail="Replay selection is empty")
+     redis_client = get_redis()
+@@ -3894,2 +3909,3 @@ async def _enqueue_hunt_replay_capability(
+         "type": "request_collection_replay",
++        "capability_name": capability_name,
+         "hunt_id": str(run["id"]),
+@@ -3926,3 +3942,3 @@ async def _enqueue_hunt_replay_capability(
+         "current_phase": "request_collection_replay_queued",
+-        "tool": "collections.replay_safe",
++        "tool": capability_name,
+     })
+@@ -4027,3 +4043,3 @@ def _hunt_device_adapter_execution_state(value: Mapping[str, Any]) -> dict[str,
+ 
+-def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> RequestSelector:
++def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int, safe_methods_only: bool = True) -> RequestSelector:
+     try:
+@@ -4035,3 +4051,3 @@ def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) ->
+             tags=tuple(str(item) for item in values.get("tags") or [])[:200],
+-            safe_methods_only=True,
++            safe_methods_only=safe_methods_only,
+             limit=max(1, min(int(values.get("limit") or hard_limit), hard_limit)),
+@@ -4076,3 +4092,3 @@ async def _hunt_bound_collection(
+ 
+-def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestCollectionSelection:
++def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int, safe_methods_only: bool = True) -> RequestCollectionSelection:
+     try:
+@@ -4089,3 +4105,3 @@ def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestC
+         tags=selector.tags,
+-        safe_methods_only=True,
++        safe_methods_only=selector.safe_methods_only or safe_methods_only,
+         max_requests=min(selector.max_requests, hard_limit),
+diff --git a/api/hunt/replay_authority.py b/api/hunt/replay_authority.py
+new file mode 100644
+index 0000000..67506ad
+--- /dev/null
++++ b/api/hunt/replay_authority.py
+@@ -0,0 +1,22 @@
++"""Keep active and safe Hunt replay distinct through admission and execution."""
++from __future__ import annotations
++
++from typing import Any, Mapping
++from scanner_tools.request_replay import ReplayAuthorization
++
++
++def replay_authorization(capability: str, policy: Mapping[str, Any], selection_policy: str) -> ReplayAuthorization:
++    if capability == "collections.replay_safe":
++        # A confirmed-active selection does not turn the safe capability into writes.
++        return ReplayAuthorization()
++    if capability != "collections.replay_active":
++        raise ValueError("Unknown Hunt collection replay capability")
++    if capability not in (policy.get("allowed_capabilities") or ()):
++        raise ValueError("Active replay is outside the persisted Hunt capability contract")
++    if selection_policy != "confirmed_active":
++        raise ValueError("Active replay requires a saved confirmed-active collection selection")
++    if not (policy.get("active_testing") is True and policy.get("allow_state_changing_http") is True
++            and policy.get("approval_receipt_id")):
++        raise ValueError("Active replay requires the Hunt's authorized state-changing HTTP policy")
++    return ReplayAuthorization(active_testing=True, allow_state_changing_http=True,
++                               approval_receipt_id=str(policy["approval_receipt_id"]))
+diff --git a/api/runtime/capability_registry.py b/api/runtime/capability_registry.py
+index 0be83f7..0ef2106 100644
+--- a/api/runtime/capability_registry.py
++++ b/api/runtime/capability_registry.py
+@@ -15,2 +15,3 @@ from typing import Any, Iterable, Literal, Mapping
+ 
++from .http_action_contract import validate_http_write_input
+ from .browser_login_contract import (BROWSER_LOGIN_BUDGET, BROWSER_LOGIN_INPUT_SCHEMA, BROWSER_LOGIN_PLANNER_SCHEMA)
+@@ -73,2 +74,4 @@ class CapabilitySpec:
+     planner_input_schema: Mapping[str, Any] | None = None
++    # Some shared adapters have a smaller planner-facing per-call envelope.
++    planner_budget_cost: Mapping[str, int] | None = None
+     redaction_contract: tuple[str, ...] = (
+@@ -107,5 +110,6 @@ class CapabilitySpec:
+             )
+-        for dimension, amount in self.budget_cost.items():
+-            if not str(dimension).strip() or int(amount) < 0:
+-                raise ValueError("budget costs require named non-negative dimensions")
++        for budget in (self.budget_cost, self.planner_budget_cost or {}):
++            for dimension, amount in budget.items():
++                if not str(dimension).strip() or int(amount) < 0:
++                    raise ValueError("budget costs require named non-negative dimensions")
+ 
+@@ -186,3 +190,3 @@ class CapabilitySpec:
+             "output_schema": self.output_schema,
+-            "budget_cost": dict(self.budget_cost),
++            "budget_cost": dict(self.planner_budget_cost or self.budget_cost),
+             "required_approval": self.required_approval,
+@@ -282,2 +286,7 @@ class CapabilityRegistry:
+         _validate_schema_value(spec.input_schema, value, path="input", depth=0)
++        if spec.name == "http.request_active":
++            try:
++                validate_http_write_input(value)
++            except (TypeError, ValueError) as exc:
++                raise CapabilityInputContractError(str(exc)) from exc
+         return dict(value)
+@@ -1167,2 +1176,27 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
+         ),
++        CapabilitySpec(
++            "http.request_active",
++            "Send one operator-authorized POST/PUT/PATCH/DELETE request with a JSON, form or text body; use for pairing and other approved workflows.",
++            "http", "active", _HTTP_TARGETS, "agent.http_request", "1",
++            "state_changing_http",
++            {"http_requests": 1, "state_changing_requests": 1, "tool_wall_seconds": 15},
++            {"network_reachability": True, "credentials_resolved_server_side": True,
++             "state_changing_http": True},
++            _http_principal_schema({
++                "method": {"type": "string", "enum": ["POST", "PUT", "PATCH", "DELETE"]},
++                "path": _SAME_ORIGIN_PATH_PROPERTY,
++                "query": {"type": "object"},
++                "headers": {"type": "object"},
++                "json_body": {"type": "object", "description": "Non-secret JSON body; use managed credentials or saved collections for secrets."},
++                "form_body": {"type": "object"},
++                "raw_body": {"type": "string", "maxLength": 32768},
++                "follow_redirects": {"type": "boolean", "enum": [False]},
++                "session_ref": {"type": "string",
++                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
++                "via_address": {"type": "string", "maxLength": 45},
++            }, required=("method", "path")),
++            "http-observation/v1", ("http_observation", "tool_receipt"),
++            hunt_executor="worker_http",
++            credential_transport="exact_origin", credential_interruption="cooperative",
++        ),
+         CapabilitySpec(
+@@ -1650,3 +1684,3 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
+             "collections.select", "Select a bounded redacted request subset from a bound collection.",
+-            "internal", "read_only", frozenset({"web", "api", "device"}),
++            "internal", "read_only", frozenset({"web", "api", "network", "device"}),
+             "collections.select", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True},
+@@ -1695,3 +1729,12 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
+             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
+-            planner_visible=False,
++            hunt_executor="worker_replay",
++            planner_budget_cost={"http_requests": 25, "state_changing_requests": 25, "tool_wall_seconds": 60},
++            planner_input_schema=_schema({
++                "collection_id": {"type": "string"},
++                "request_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
++                "methods": {"type": "array", "items": {"type": "string"}},
++                "path_regex": {"type": "string"},
++                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
++                "as_principal": {"type": "string", "enum": ["anonymous", "primary", "secondary", "service"]},
++            }, required=("collection_id",)),
+         ),
+diff --git a/api/runtime/http_action_contract.py b/api/runtime/http_action_contract.py
+new file mode 100644
+index 0000000..454b355
+--- /dev/null
++++ b/api/runtime/http_action_contract.py
+@@ -0,0 +1,50 @@
++"""Shared input and authority contract for operator-authorized HTTP writes.
++
++Transport and receipts stay in the existing HTTP worker. These helpers never
++infer authorization from a method, objective, body, or model name.
++"""
++from __future__ import annotations
++
++import json
++from typing import Any, Mapping
++
++HTTP_WRITE_CAPABILITY = "http.request_active"
++HTTP_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
++HTTP_BODY_FIELDS = ("json_body", "form_body", "raw_body")
++MAX_HTTP_WRITE_BODY_BYTES = 32_768
++
++
++def validate_http_write_input(value: Mapping[str, Any]) -> None:
++    """Reject ambiguous bodies before admission, not after reserving traffic."""
++    fields = [key for key in HTTP_BODY_FIELDS if key in value]
++    if len(fields) > 1:
++        raise ValueError("HTTP request accepts only one of json_body, form_body, raw_body")
++    if value.get("follow_redirects") is True:
++        raise ValueError("Write requests return redirects without following or repeating the write")
++    if fields:
++        body = value[fields[0]]
++        encoded = body.encode("utf-8") if isinstance(body, str) else json.dumps(
++            body, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
++        ).encode("utf-8")
++        if len(encoded) > MAX_HTTP_WRITE_BODY_BYTES:
++            raise ValueError("HTTP request body exceeds the 32768-byte limit")
++
++
++def require_http_write_authority(policy: Mapping[str, Any]) -> None:
++    """Use saved run authority; receipt validity is rechecked by normal dispatch."""
++    if not (policy.get("active_testing") is True
++            and policy.get("allow_state_changing_http") is True
++            and policy.get("approval_receipt_id")):
++        raise ValueError("http.request_active requires the Hunt's authorized state-changing HTTP policy")
++
++
++def redact_http_write_body(value: Mapping[str, Any]) -> dict[str, Any]:
++    """Never persist raw request-body values in planner/audit summaries."""
++    result = dict(value)
++    for key in HTTP_BODY_FIELDS:
++        if key in result:
++            body = result.pop(key)
++            result[key + "_present"] = True
++            if isinstance(body, Mapping):
++                result[key + "_field_names"] = sorted(str(name)[:200] for name in body)[:256]
++    return result
+diff --git a/api/worker.py b/api/worker.py
+index 469c379..95b1f0d 100644
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -86,2 +86,3 @@ from hunt.fragment_xss_proof import hunt_browser_xss_proof_adapter as _hunt_brow
+ from hunt.browser_credentials import browser_session_headers
++from runtime.http_action_contract import require_http_write_authority, redact_http_write_body
+ from capabilities.http import execute_bound_http_request
+@@ -19331,2 +19332,5 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+     """
++    from hunt.replay_authority import replay_authorization
++    capability_name = str(job_data.get("capability_name") or "collections.replay_safe")
++    active_replay = capability_name == "collections.replay_active"
+     job_id = str(job_data.get("job_id") or "").strip()
+@@ -19385,3 +19389,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+             path_regex=str(selector_raw.get("path_regex") or "") or None,
+-            safe_methods_only=True,
++            safe_methods_only=not active_replay,
+             limit=max(1, min(int(selector_raw.get("limit") or 25), 25)),
+@@ -19427,3 +19431,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                 )
+-                if not action or str(action["capability_name"]) != "collections.replay_safe":
++                if not action or str(action["capability_name"]) != capability_name:
+                     raise ReplayExecutionError("replay action identity is not valid")
+@@ -19499,2 +19503,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                 hunt_policy = _worker_json_object(run["policy_json"])
++                authorization = replay_authorization(capability_name, hunt_policy, replay_policy)
+                 existing_reservation = await store.load(
+@@ -19508,3 +19513,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                         or existing_reservation.record.capability_name
+-                        != "collections.replay_safe"
++                        != capability_name
+                         or existing_reservation.action_digest
+@@ -19594,3 +19599,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+             tags=stored_selection.tags,
+-            safe_methods_only=True,
++            safe_methods_only=stored_selection.safe_methods_only or not active_replay,
+             limit=min(stored_selection.max_requests, 2_000),
+@@ -19612,3 +19617,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+             default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
+-            authorization=ReplayAuthorization(),
++            authorization=authorization,
+         )
+@@ -19624,3 +19629,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+         if credential_profile_id:
+-            context_ref = select_hunt_principal_reference(context, principal_slot)
++            context_ref = select_hunt_principal_reference(context, principal_slot, capability=capability_name)
+             if context_ref is None or context_ref["profile_id"] != credential_profile_id:
+@@ -19637,3 +19642,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                     scope_receipt_id=hunt_policy.get("scope_receipt_id"),
+-                    action_name="hunt.capability:collections.replay_safe",
++                    action_name=f"hunt.capability:{capability_name}",
+                 )
+@@ -19644,3 +19649,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                         target=target,
+-                        capability="collections.replay_safe",
++                        capability=capability_name,
+                         authority=authority,
+@@ -19677,2 +19682,4 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+         )
++        if active_replay:
++            additional_budget["active_actions"] = 1
+         requested_budget = replay_reservation_budget(plan, additional_budget)
+@@ -19681,3 +19688,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+             owner_id=hunt_id,
+-            capability_name="collections.replay_safe",
++            capability_name=capability_name,
+             amounts=requested_budget,
+@@ -19873,3 +19880,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
+-            "collections.replay_safe"
++            capability_name
+         )
+@@ -19883,2 +19890,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                     active_testing=bool(hunt_policy.get("active_testing")),
++                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
+                     scope_receipt_id=target.scope_receipt_id,
+@@ -19965,3 +19973,3 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+             "receipt_id": public_receipt.get("receipt_id"), "receipt": public_receipt,
+-            "safe_methods_only": True,
++            "safe_methods_only": not active_replay,
+             "secret_values_visible": False,
+@@ -21986,2 +21994,4 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                     )
++                if capability_name == "http.request_active":
++                    require_http_write_authority(hunt_policy)
+                 target, target_url = _worker_hunt_web_target(
+@@ -21994,2 +22004,3 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                     active_testing=bool(hunt_policy.get("active_testing")),
++                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
+                     network_discovery=bool(hunt_policy.get("network_discovery")),
+@@ -22389,68 +22400,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+             supplied_session_ref = capability_input.get("session_ref")
+-            requested_principal = str(
+-                capability_input.get("as_principal") or "anonymous"
+-            ).strip().lower()
+-            if supplied_session_ref and requested_principal not in {
+-                "", "anonymous", "anon", "none",
+-            }:
+-                raise CredentialReferenceError(
+-                    "http.request accepts either session_ref or as_principal, not both"
+-                )
+-            if supplied_session_ref:
+-                async with db_pool.acquire() as authority_conn:
+-                    await validate_worker_credential_authority(
+-                        authority_conn,
+-                        owner_kind="hunt",
+-                        owner_id=str(hunt_id),
+-                        target=target,
+-                        approval_receipt_id=policy.approval_receipt_id,
+-                        scope_receipt_id=target.scope_receipt_id,
+-                        action_name="hunt.capability:http.request",
+-                    )
+-                    worker_session = await session_store.load_for_worker(
+-                        authority_conn,
+-                        session_ref=supplied_session_ref,
+-                        owner_kind="hunt",
+-                        owner_id=hunt_id,
+-                        target=target,
+-                        capability="http.request",
+-                        selected_origins=(urllib.parse.urlunsplit(
+-                            (*urllib.parse.urlsplit(capability_input.get("origin") or target_url)[:2], "", "", ""),
+-                        ),),
+-                    )
+-                trusted_headers = worker_session.headers()
+-                principal_slot = worker_session.metadata.principal_slot
+-            elif requested_principal not in {"", "anonymous", "anon", "none"}:
+-                principal_slot = requested_principal
+-                context_ref = _worker_hunt_profile_context(
+-                    context, principal_slot, capability="http.request",
+-                )
+-                conn = await credential_stack.enter_async_context(db_pool.acquire())
+-                authority = await validate_worker_credential_authority(
+-                    conn,
+-                    owner_kind="hunt",
+-                    owner_id=str(hunt_id),
+-                    target=target,
+-                    approval_receipt_id=policy.approval_receipt_id,
+-                    scope_receipt_id=target.scope_receipt_id,
+-                    action_name="hunt.capability:http.request",
+-                )
+-                resolved = await credential_stack.enter_async_context(
+-                    WorkerCredentialResolver().resolve(
+-                        conn,
+-                        profile_id=context_ref["profile_id"],
+-                        target=target,
+-                        capability="http.request",
+-                        authority=authority,
+-                    )
+-                )
+-                if (
+-                    resolved.profile.current_version
+-                    != int(context_ref.get("profile_version") or 0)
+-                    or resolved.profile.principal_slot != principal_slot
+-                ):
+-                    raise CredentialResolutionError(
+-                        "managed Hunt principal changed after admission"
+-                    )
+-                trusted_headers = resolved.http_headers().as_dict()
++            from capabilities.hunt_http_identity import resolve_http_identity
++            worker_session, trusted_headers, principal_slot = await resolve_http_identity(
++                pool=db_pool, stack=credential_stack, session_store=session_store,
++                hunt_id=hunt_id, target=target, policy=policy, context=context,
++                capability_name=capability_name, capability_input=capability_input,
++            )
+             public_input = dict(capability_input)
+@@ -22464,3 +22415,3 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+                     target=target,
+-                    allow_write=False,
++                    allow_write=policy.allow_state_changing_http and capability_name == "http.request_active",
+                     transaction_recorder=_record_call,
+@@ -22487,3 +22438,3 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
+             redacted_execution = _redact_receipt_value({
+-                **public_input,
++                **redact_http_write_body(public_input),
+                 "as_principal": principal_slot,
