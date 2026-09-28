@@ -1,0 +1,263 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -259,6 +259,16 @@
+ Web, API and network are views of the same target row and reuse its credentials and collections;
+ different target UUIDs and device identities remain distinct.
+ 
++### Authorized HTTP workflows
++
++Operator-requested HTTP setup, pairing and API writes use the existing `http.request`; inspect its
++live schema rather than assuming it is GET-only. Request state-changing policy at Hunt start and
++reuse standing authorization, not per-verb or per-port confirmations. Use `collections.replay_active`
++for bound confirmed-active captured requests. New PINs and tokens enter through `/hunts/{id}/http-values`
++and flow as opaque references; `response_captures` retains newly issued values inside the worker.
++Read `skills/hunt/SKILL.md` and `docs/hunt-http-writes.md` for that workflow. An implementation gap is
++not missing operator permission, and a successful request alone is not proof of pairing.
++
+ ### Authorized service reuse
+ 
+ An approved active Hunt with selected credentials may use those identities on HTTP or HTTPS
+--- a/api/capabilities/http_workflow.py
++++ b/api/capabilities/http_workflow.py
+@@ -7,12 +7,57 @@
+ 
+ from typing import Any, Mapping
+ import uuid
++import json
++from urllib.parse import quote
+ 
+ from capabilities.http import execute_bound_http_request
+ from runtime.credential_resolver import validate_worker_credential_authority
+ from runtime.http_workflow_values import (
+     bind_request_values, capture_response_values, private_http_inputs, save_values,
+ )
++
++
++def public_workflow_result(result: Mapping[str, Any], *, sealed_response: bool = True, header_values: tuple[str, ...] = ()) -> dict[str, Any]:
++    """Private exchanges expose measurements, never heuristic secret previews.
++
++    A pairing credential may have any field name, be numeric, or be echoed in
++    response headers/redirects. Unkeyed body hashes also expose short PINs to
++    guessing. Raw exchanges remain in the existing sensitive archive; ordinary
++    HTTP requests without private material keep their normal observations.
++    """
++    result = dict(result)
++    if not sealed_response:
++        # Authenticated reads remain useful: conceal known header material and
++        # literal/URL-encoded echoes without hiding unrelated response evidence.
++        needles = sorted({part for value in header_values for part in (value, quote(value, safe=""), json.dumps(value)[1:-1]) if part}, key=len, reverse=True)
++        def clean(value):
++            if isinstance(value, dict):
++                return {clean(key): clean(item) for key, item in value.items()}
++            if isinstance(value, list):
++                return [clean(item) for item in value]
++            if isinstance(value, str):
++                for needle in needles:
++                    value = value.replace(needle, "<redacted>")
++            return value
++        result = clean(result)
++        if isinstance(result.get("response"), dict):
++            result["response"].pop("body_sha256", None)
++            result["response"].pop("body_digest_scope", None)
++        return result
++    response = result.get("response")
++    if isinstance(response, Mapping):
++        measured = {key: response[key] for key in (
++            "status", "content_length", "content_length_header", "bytes_observed",
++            "content_semantically_populated", "truncated", "elapsed_ms", "set_cookie_metadata",
++        ) if key in response}
++        measured.update(body_values_visible=False, response_values_private=True)
++        result["response"] = measured
++    if isinstance(result.get("redirect_chain"), list):
++        result["redirect_chain"] = [
++            {key: hop[key] for key in ("status", "followed", "stopped") if key in hop}
++            for hop in result["redirect_chain"] if isinstance(hop, Mapping)
++        ]
++    return result
+ 
+ 
+ class HttpWorkflowExchange:
+@@ -23,6 +68,7 @@
+         self.execution, self.executor = execution, executor
+         self.wire_input: dict[str, Any] = {}
+         self.captured: dict[str, Any] | None = None
++        self.bound_header_values: tuple[str, ...] = ()
+ 
+     async def prepare(self, pool) -> None:
+         if private_http_inputs(self.inputs):
+@@ -38,6 +84,10 @@
+                 )
+         else:
+             self.wire_input = dict(self.inputs)
++        self.bound_header_values = tuple(
++            self.headers[entry["name"]][len(entry.get("prefix", "")):]
++            for entry in self.inputs.get("header_bindings", [])
++        )
+         self.wire_input.pop("session_ref", None)
+         self.wire_input.pop("as_principal", None)
+ 
+@@ -56,11 +106,14 @@
+                     self.captured = capture_response_values(responses[-1], self.inputs["response_captures"])
+                 except ValueError as exc:
+                     result = {**result, "ok": False, "error": str(exc)}
+-            return result
++            return public_workflow_result(result,
++                sealed_response=bool(self.inputs.get("response_captures") or self.inputs.get("body_bindings")),
++                header_values=self.bound_header_values) if private_http_inputs(self.inputs) else result
+         finally:
+             responses.clear()
+             self.wire_input.clear()
+             self.headers.clear()
++            self.bound_header_values = ()
+ 
+     async def settle(self, conn, *, owner_status: str, action_id, observations: list[dict]) -> tuple[Any, str | None]:
+         if self.captured is None:
+@@ -85,6 +138,7 @@
+             self.captured.clear()
+ 
+     def close(self) -> None:
++        self.bound_header_values = ()
+         self.wire_input.clear()
+         self.headers.clear()
+         if self.captured is not None:
+--- a/api/hunt/interaction_router.py
++++ b/api/hunt/interaction_router.py
+@@ -3893,7 +3893,7 @@
+             row["id"],
+         )
+     base_selected = _select_request_collection_index_rows(
+-        index_rows, _hunt_bound_selector(ref, hard_limit=25, safe_only=not active_replay),
++        index_rows, _hunt_bound_selector(ref, hard_limit=2_000, safe_only=not active_replay),
+     )
+     narrowed_ids = set(selector.request_ids)
+     narrowed_folders = set(selector.folders)
+--- a/api/runtime/material_binding.py
++++ b/api/runtime/material_binding.py
+@@ -10,4 +10,3 @@
+     sessions retain their exact-origin binding. No old session digest is rewritten.
+     """
+     return replace(target, allowed_origins=()).digest if owner_kind == "hunt" else target.digest
+-
+--- a/db/init.sql
++++ b/db/init.sql
+@@ -2289,4 +2289,3 @@
+ DROP TRIGGER IF EXISTS clear_hunt_http_values_on_finish ON hunt_runs;
+ CREATE TRIGGER clear_hunt_http_values_on_finish AFTER UPDATE OF status ON hunt_runs
+ FOR EACH ROW EXECUTE FUNCTION clear_terminal_hunt_http_values();
+-
+--- a/docs/hunt-http-writes.md
++++ b/docs/hunt-http-writes.md
+@@ -144,3 +144,10 @@
+ This HTTP change does not add WebSocket/SSAP pairing, browser writes, arbitrary
+ binary/XML bodies, or automatic conversion to permanent credential profiles.
+ Inspect the live protocol rather than assuming every TV pairs over HTTP PUT.
++
++PIN submissions and token-capture exchanges expose response measurements and opaque capture
++references, not raw previews, response-header values, redirect locations or unkeyed body hashes.
++A token can have an arbitrary field name, and a short PIN must not be guessable from a public hash.
++Subsequent reads with only private header bindings keep ordinary response evidence, with the known
++header values and their literal/URL-encoded echoes removed. They omit unkeyed body hashes as well.
++The complete transaction remains behind the existing explicitly sensitive archive/export boundary.
+--- a/tests/test_hunt_http_workflow_values.py
++++ b/tests/test_hunt_http_workflow_values.py
+@@ -131,6 +131,7 @@
+         r3, o3, _, err = await exchange(db, {"method": "GET", "path": "/state",
+             "header_bindings": [{"values_ref": paired["values_ref"], "key": "auth", "name": "AUTH"}]})
+         assert r3.status == "success" and not err
++        assert json.loads(o3[0]["response"]["body_sample"])["status"] == "paired"
+         public = json.dumps([o1, o2, o3, pin, first, paired, r1.redacted_execution, r2.redacted_execution, r3.redacted_execution])
+         encrypted = " ".join(row["encrypted"] for row in db.rows.values())
+         for value in ("9876", "temporary-secret", token):
+@@ -231,3 +232,38 @@
+     assert "ON DELETE CASCADE" in HTTP_VALUES_SCHEMA_SQL
+     assert "('completed','cancelled','failed')" in HTTP_VALUES_SCHEMA_SQL
+     assert "'budget_exhausted'" not in HTTP_VALUES_SCHEMA_SQL
++
++
++@pytest.mark.parametrize("mode", ["capture", "body", "header"])
++@pytest.mark.parametrize("marker", ["ykA4qR6D9WneLmJ", 'r7a"e\\f/+9'])
++def test_private_exchange_observations_never_echo_unrecognized_values(monkeypatch, mode, marker):
++    """A token's key/name is not a reliable redaction detector."""
++    import hashlib
++    response_body = json.dumps({"reply": marker}).encode()
++    mock_http(monkeypatch, lambda req: httpx.Response(200, content=response_body,
++        headers={"Location": "/continue?value=" + marker, "Server": marker,
++                 "Content-Type": "application/json"}))
++    async def run():
++        db = Memory()
++        inputs = {"method": "PUT", "path": "/pair"}
++        if mode == "capture":
++            inputs["response_captures"] = [{"name": "value", "path": "/reply"}]
++        else:
++            ref = await save_values(db, hunt_id=HUNT, target=target(), values={"value": marker})
++            binding = {"values_ref": ref["values_ref"], "key": "value"}
++            if mode == "body":
++                inputs.update(json_body={}, body_bindings=[{**binding, "path": "/value"}])
++            else:
++                inputs["header_bindings"] = [{**binding, "name": "AUTH"}]
++        result, observations, meta, error = await exchange(db, inputs)
++        assert result.status == "success" and error is None
++        assert (meta is not None) == (mode == "capture")
++        public = json.dumps([observations, result.redacted_execution, meta])
++        assert marker not in public
++        assert hashlib.sha256(response_body).hexdigest() not in public
++        assert observations[0]["response"]["status"] == 200
++        if mode != "header":
++            assert observations[0]["response"]["body_values_visible"] is False
++        else:
++            assert json.loads(observations[0]["response"]["body_sample"])["reply"] == "<redacted>"
++    asyncio.run(run())
+--- /dev/null
++++ b/tests/test_hunt_replay_selection.py
+@@ -0,0 +1,51 @@
++"""Exercise the real enqueue selector before replacing queue/storage I/O."""
++import ast
++import asyncio
++from contextlib import asynccontextmanager
++import json
++from pathlib import Path
++from typing import Any, Mapping
++import uuid
++
++from fastapi import HTTPException
++import pytest
++from request_collection_api import select_request_collection_index_rows
++from runtime.request_collection_store import RequestCollectionSelection, RequestCollectionContractError
++from scanner_tools.request_collections import RequestSelector
++
++
++@pytest.mark.parametrize('capability,method', [('collections.replay_active', 'PUT'), ('collections.replay_safe', 'GET')])
++def test_replay_narrows_before_applying_per_call_limit(capability, method):
++    collection = {'id': uuid.uuid4(), 'payload_sha256': 'a' * 64}
++    ref = {'collection_id': str(collection['id']), 'selection_id': str(uuid.uuid4()),
++           'replay_policy': 'confirmed_active', 'selector': {'safe_methods_only': False, 'max_requests': 100}}
++    rows = [{'request_id': f'r{i}', 'ordinal': i, 'method': method, 'safe_method': method == 'GET',
++             'normalized_path': f'/r{i}', 'supported': True} for i in range(100)]
++    queued = []
++    class DB:
++        @asynccontextmanager
++        async def acquire(self): yield self
++        async def fetch(self, *_): return rows
++        def hset(self, *_, **__): pass
++        def expire(self, *_): pass
++        def delete(self, *_): pass
++        def get(self, *_): return json.dumps({'status': 'success'})
++    db = DB()
++    async def bound(*_): return collection, ref
++    async def record(*_): pass
++    source = Path('api/hunt/interaction_router.py').read_text()
++    functions = [node for node in ast.parse(source).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
++        and node.name in {'_enqueue_hunt_replay_capability', '_hunt_collection_selector', '_hunt_bound_selector'}]
++    assert len(functions) == 3
++    namespace = {**globals(), '_pool': lambda: db, '_get': lambda _: 'queue', 'get_redis': lambda: db,
++        '_hunt_bound_collection': bound, '_hunt_managed_principal_reference': lambda *_, **__: None,
++        'record_cancellable_job_durable': record, 'utc_now_iso': lambda: '2026-09-28T00:00:00Z',
++        'enqueue_job': lambda _db, _name, payload: queued.append(payload),
++        '_select_request_collection_index_rows': select_request_collection_index_rows}
++    exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), '<real enqueue>', 'exec'), namespace)
++    result = asyncio.run(namespace['_enqueue_hunt_replay_capability'](
++        {'id': uuid.uuid4()}, {}, {'collection_id': str(collection['id']), 'request_ids': ['r75'], 'limit': 1},
++        action_id=uuid.uuid4(), action_digest='b' * 64, capability_name=capability))
++    assert result['status'] == 'success'
++    assert len(queued) == 1 and queued[0]['selector']['request_ids'] == ['r75']
++    assert queued[0]['capability_name'] == capability and queued[0]['selector']['limit'] == 1

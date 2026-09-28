@@ -32,7 +32,7 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: scanner/requirements.lock
-      - name: Apply checked patch to exact detached implementation source
+      - name: Apply checked implementation and privacy follow-up to exact source
         shell: bash
         run: |
           set -euo pipefail
@@ -46,11 +46,23 @@ jobs:
           patch = gzip.decompress(packed)
           assert hashlib.sha256(patch).hexdigest() == '2b3458b6301197016e3be5e3ac4fafa3dd5901ffebd7ce14916ed9c56da3904b'
           Path(os.environ['RUNNER_TEMP'], 'pr241-artifacts', 'implementation.patch').write_bytes(patch)
+          followup = Path('.authoring/pr241/followup.patch').read_bytes()
+          assert hashlib.sha256(followup).hexdigest() == '8e295e0b6d2701c9011be75489d16fdafc3c6d567374459c2a4198f2e8c9c7cd'
+          Path(os.environ['RUNNER_TEMP'], 'pr241-artifacts', 'followup.patch').write_bytes(followup)
           PY
           git worktree add --detach "$RUNNER_TEMP/pr241-source" "$BASE"
           cd "$RUNNER_TEMP/pr241-source"
           git apply --check "$RUNNER_TEMP/pr241-artifacts/implementation.patch"
           git apply "$RUNNER_TEMP/pr241-artifacts/implementation.patch"
+          git apply --check "$RUNNER_TEMP/pr241-artifacts/followup.patch"
+          git apply "$RUNNER_TEMP/pr241-artifacts/followup.patch"
+          python - <<'PY'
+          from pathlib import Path
+          for name in ('api/hunt/http_values_router.py', 'api/retest_contract.py', 'api/runtime/http_workflow_values.py'):
+              path = Path(name)
+              path.write_text('\n'.join(line.rstrip() for line in path.read_text().splitlines()) + '\n')
+          PY
+          git diff --check
       - name: Install locked dependencies and Chromium
         working-directory: ${{ runner.temp }}/pr241-source
         run: |
@@ -96,6 +108,7 @@ jobs:
           done
       - name: Publish implementation-only candidate for review
         id: candidate
+        if: steps.postgres.outcome == 'success' && steps.suite.outcome == 'success' && steps.static.outcome == 'success'
         working-directory: ${{ runner.temp }}/pr241-source
         run: |
           set -euo pipefail
@@ -103,7 +116,7 @@ jobs:
           git diff --check
           git config user.name ChatGPT
           git config user.email noreply@openai.com
-          git add api db docs install scripts skills tests ui .github/workflows/hunt-record-integrity.yml
+          git add AGENTS.md api db docs install scripts skills tests ui .github/workflows/hunt-record-integrity.yml
           git commit -m "fix(hunt): complete authorized replay and private HTTP pairing workflows" -m "Reuse the canonical Hunt runtime for active collection replay, encrypted short-lived PIN and response-token references, and the complete HTTP worker lifecycle. Preserve current target authorization, secret redaction, cancellation and write accounting. Include real PostgreSQL cleanup validation and regression coverage; validation outcomes are retained in the authoring run."
           result="work/pr241-http-completion-${GITHUB_RUN_ID}"
           git push origin "HEAD:refs/heads/$result"
