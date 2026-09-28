@@ -61,5 +61,4 @@ for existing credentials, never secrets in planner inputs.
 
 The regression fixture exercises the real registry, approval checker, pinned
 transport and adapter with synthetic HTTP responses. Full API/database/queue/worker
-execution, a real TV, and a controlled Sonnet/Astra comparison remain distinct
 validation tasks; a model refusal is not proof that the server denied an action.
