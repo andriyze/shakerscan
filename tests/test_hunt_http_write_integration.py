@@ -180,3 +180,18 @@ def test_alternate_service_reuses_authorized_asset_not_a_new_host():
     assert alternate in admitted.allowed_origins
     with pytest.raises(ValueError):
         resolve_hunt_http_origin(target(), "http://different.test:7345", POLICY)
+
+
+def test_public_hunt_write_digest_is_not_exposed_by_projection():
+    from api.hunt.run_service import public_hunt_action
+    raw_digest = hashlib.sha256(b'{"json_body":{"pin":"7319"}}').hexdigest()
+    action = public_hunt_action({
+        "id": str(uuid.uuid4()), "capability_name": "http.request", "status": "completed",
+        "input_summary": {
+            "input": {"method": "PUT", "path": "/pair", "body_kind": "json"},
+            "input_digest": raw_digest,
+        },
+        "result_summary": {},
+    })
+    assert action["input_digest"] is None
+    assert raw_digest not in json.dumps(action)
