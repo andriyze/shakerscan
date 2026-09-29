@@ -30,6 +30,13 @@ on:
         required: false
         type: string
         default: ""
+    secrets:
+      DOCKERHUB_USERNAME:
+        description: "Docker Hub account that pushes the candidate images by digest"
+        required: true
+      DOCKERHUB_TOKEN:
+        description: "Docker Hub access token for DOCKERHUB_USERNAME"
+        required: true
     outputs:
       scanner_digest:
         value: ${{ jobs.merge.outputs.scanner_digest }}
