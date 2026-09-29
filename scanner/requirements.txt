@@ -30,7 +30,7 @@ dnspython>=2.8.0
 pyOpenSSL>=26.0.0
 python-whois>=0.9.6
 shodan>=1.31.0
-paramiko>=4.0.0
+paramiko>=5.0.0
 
 # Test runner (so `make test` works in the api/worker image without an ad-hoc install).
 pytest>=8.0.0
