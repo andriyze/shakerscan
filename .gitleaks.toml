@@ -1,22 +1,44 @@
 # Secret-scanning configuration for gitleaks (https://github.com/gitleaks/gitleaks).
 #
-# ShakerScan detects exposed secrets in the applications it assesses, so its test suite and
-# fixtures deliberately contain planted, non-functional credentials in realistic formats. Those
-# paths are allowlisted here; everything else is scanned with the default rules.
+# ShakerScan tests use planted, non-functional credentials. Ignore those exact values while still
+# scanning every test file for new secrets. Generated contract hashes and Python bytecode are
+# excluded separately because they are derived from scanned source.
 title = "ShakerScan gitleaks configuration"
 
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Planted test fixtures, generated contract hashes, and protocol examples"
+[[allowlists]]
+description = "Generated contract hashes and Python bytecode"
 paths = [
-  '''^tests/''',
-  '''^client/tests/''',
-  '''^ui/src/.*\.test\.mjs$''',
-  '''^ui/tests/''',
-  '''^docs/generated/''',
+  '''^docs/generated/public-openapi-manifest\.json$''',
   '''^ui/src/lib/publicApi\.generated\.ts$''',
-  '''^scanner/scanner_tools/websocket_security\.py$''',
   '''(^|/)__pycache__/''',
+]
+
+[[allowlists]]
+description = "Exact inert fixture values and the RFC 6455 sample WebSocket key"
+regexTarget = "secret"
+regexes = [
+  "^0123456789abcdef0123456789abcdef$",
+  "^AKIAABCDEFGHIJKLMNOP$",
+  "^AbCdEf0123456789AbCdEf0123456789$",
+  "^PLANTEDcs5678$",
+  "^aabbccddeeff00112233445566778899$",
+  "^abc123def456$",
+  "^dGhlIHNhbXBsZSBub25jZQ==$",
+  "^eyJabc123\\.def456\\.ghi789$",
+  "^eyJhbGciOiJIUzI1NiIs\\.\\.\\.$",
+  "^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9$",
+  "^eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9\\.aaaa\\.bbbb$",
+  "^hunter2SECRET$",
+  "^mcp\\-operation\\-1$",
+  "^principal_slot=$",
+  "^sk\\-live\\-123456789$",
+  "^sk\\-live\\-abcdef0123456789$",
+  "^sk_live_PLANTEDkeyAAAAAAAAAAAA$",
+  "^sk_live_acme4f8a2b3cQ7xR1nW9$",
+  "^sk_test_1234567890abcdef$",
+  "^st_0123456789abcdef$",
+  "^wJ8x2Qr7Ld4Vn9Kc3Tp6$",
 ]

@@ -1472,7 +1472,7 @@ identity. These routes will be removed after remaining legacy callers migrate.
   escape hatch works only from loopback.
 
 **Integrated external tools**: `httpx` (HTTP probing), `katana` (crawling), `nuclei` (templates),
-`ffuf`/`meg`/`dirb`/`gobuster` (content discovery), `dalfox`/XSStrike (XSS), `sqlmap`/commix
+`ffuf`/`meg`/`dirb`/`gobuster` (content discovery), `dalfox` (XSS), `sqlmap`
 (injection), `subfinder`/Gungnir/dnsrecon (domain discovery), `tlsx`/SSLyze/testssl.sh/OpenSSL (TLS),
 `nmap`/masscan/netcat (ports and services), `nikto`, `hydra`/`medusa`, `whois`, Shodan client support,
 and Playwright (browser). The authoritative execution-facing adapter catalog is generated in §17;

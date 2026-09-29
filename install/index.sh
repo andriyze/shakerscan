@@ -463,7 +463,7 @@ if [ -z "$REPO_RAW_BASE" ]; then
         fi
         REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"
     else
-        stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
+        stable_raw="$(curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
             fail "failed to resolve the stable ShakerScan release channel"
         stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
         case "$stable_version" in
@@ -478,7 +478,7 @@ if [ -z "$REPO_RAW_BASE" ]; then
         # installer sees it set and installs instead of resolving again.
         delegate="$(mktemp "${TMPDIR:-/tmp}/shakerscan-installer.XXXXXX")" || \
             fail "failed to create a temporary file for the release installer"
-        if ! curl -fsSL "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
+        if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
             rm -f -- "$delegate"
             fail "failed to download the v${stable_version} installer"
         fi
