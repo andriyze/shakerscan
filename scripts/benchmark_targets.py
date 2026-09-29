@@ -870,9 +870,15 @@ def collect_scorecard(report, fixture):
         and str(row.get("reason")) == "zero_attempts"
     }
     if family_coverage:
+        expected_scan_families = {
+            FOCUSED_FAMILY_FOR_BENCHMARK_MISS.get(
+                str(entry["family"]), str(entry["family"])
+            )
+            for entry in expected if entry.get("family")
+        }
         family_attempt_failures.update(
-            str(entry.get("family")) for entry in expected
-            if entry.get("family") and attempts_by_family.get(str(entry["family"]), 0) == 0
+            family for family in expected_scan_families
+            if attempts_by_family.get(family, 0) == 0
         )
     family_attempt_failures = sorted(family_attempt_failures)
     return {

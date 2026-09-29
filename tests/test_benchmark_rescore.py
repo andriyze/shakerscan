@@ -51,6 +51,24 @@ def test_expected_family_without_candidates_fails_attempt_gate_even_when_complet
     assert attempt_gate["pass"] is False
 
 
+def test_function_access_expectation_uses_canonical_authz_surface_attempts():
+    fixture = {"expected": [
+        {"id": "users", "family": "broken_access_control", "route": "/api/Users"},
+    ], "gates": {}}
+    report = {"coverage": {"family_coverage": [
+        {"family": "authz_surface", "required": True,
+         "planned_candidates": 2, "attempted_candidates": 2,
+         "coverage_status": "complete"},
+    ]}}
+    card = b.collect_scorecard(report, fixture)
+    assert card["family_attempt_failures"] == []
+    attempt_gate = next(
+        gate for gate in b.apply_gates(card, fixture)
+        if gate["gate"] == "selected_families_attempted"
+    )
+    assert attempt_gate["pass"] is True
+
+
 def _jwt(**claims):
     def encode(value):
         raw = json.dumps(value, separators=(",", ":")).encode()
