@@ -1379,7 +1379,7 @@ def _run_datastore_credential_bootstrap(
         ["bash", "-c", harness],
         capture_output=True,
         text=True,
-        env={**os.environ, "POSTGRES_PASSWORD": "", "REDIS_PASSWORD": ""},
+        env={**os.environ, "POSTGRES_PASSWORD": "", "REDIS_PASSWORD": "", "MINIO_ROOT_PASSWORD": ""},
     )
     assert result.returncode == 0, result.stderr
     values = {}
@@ -1421,6 +1421,18 @@ def test_existing_datastore_passwords_are_preserved(tmp_path):
 
     assert values["POSTGRES_PASSWORD"] == "p" * 40
     assert values["REDIS_PASSWORD"] == "r" * 40
+
+
+def test_artifact_store_password_is_generated_once_instead_of_the_static_default(tmp_path):
+    values = _run_datastore_credential_bootstrap(tmp_path, command="build")
+
+    assert len(values.get("MINIO_ROOT_PASSWORD", "")) >= 32
+    assert values["MINIO_ROOT_PASSWORD"] != "shakerscan-local-artifacts"
+
+    again = _run_datastore_credential_bootstrap(
+        tmp_path, command="build", existing_env=(tmp_path / ".env").read_text(),
+    )
+    assert again["MINIO_ROOT_PASSWORD"] == values["MINIO_ROOT_PASSWORD"]
 
 
 def test_api_owns_loopback_session_signing_and_ui_never_receives_the_operator_secret():

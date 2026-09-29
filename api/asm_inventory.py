@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,6 +25,10 @@ try:
     from scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
 except ModuleNotFoundError:
     from scanner.scanner_tools.attempt_telemetry import ENDPOINT_ATTEMPT_SCHEMA_V1
+try:
+    import domain_rate
+except ModuleNotFoundError:
+    from . import domain_rate
 
 # Job type for the async exploitation pipeline (routed in worker.process_job).
 EXPLOIT_BATCH_JOB_TYPE = "exploit_batch"
@@ -40,27 +45,6 @@ CAMPAIGN_FINDING_RETEST = "finding_retest"
 CAMPAIGN_SURFACE_RECON = "surface_recon"
 
 DEFAULT_LEASE_TTL_SECONDS = 3600
-ASM_RATE_RESERVATION_TTL_SECONDS = 3600
-ASM_RATE_RESERVE_LUA = """
-local current = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
-local requested = tonumber(ARGV[1]) or 0
-local cap = tonumber(ARGV[2]) or 0
-local ttl = tonumber(ARGV[3]) or 3600
-local all_or_nothing = tostring(ARGV[4] or '0')
-if requested <= 0 then return 0 end
-if cap <= 0 then return 0 end
-if current >= cap then return 0 end
-if all_or_nothing == '1' and current + requested > cap then
-  return 0
-end
-local grant = requested
-if current + grant > cap then
-  grant = cap - current
-end
-redis.call('INCRBY', KEYS[1], grant)
-redis.call('EXPIRE', KEYS[1], ttl)
-return grant
-"""
 
 # HTTP methods we recognize as a leading token in a worklist entry.
 _HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
@@ -231,19 +215,10 @@ def normalize_check_family(value: Any) -> str:
     return family if family and family not in {"*", "none", "null"} else "all"
 
 
-def domain_rate_key(root_domain: str) -> str:
-    normalized = str(root_domain or "").strip().lower()
-    digest = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()[:16]
-    return f"asm:domain_rate:{digest}"
-
-
 def reserved_domain_rate_count(redis_client: Any, root_domain: str) -> int:
-    if not root_domain:
-        return 0
-    try:
-        return max(0, int(redis_client.get(domain_rate_key(root_domain)) or 0))
-    except Exception:
-        return 0
+    """Units on the root domain's hourly ledger: in-flight holds plus recorded work that the
+    ``target_endpoints`` window does not already count (see ``domain_rate``)."""
+    return domain_rate.usage(redis_client, root_domain)
 
 
 def reserve_domain_rate(
@@ -252,40 +227,26 @@ def reserve_domain_rate(
     cap: int,
     amount: int,
     *,
-    ttl_seconds: int = ASM_RATE_RESERVATION_TTL_SECONDS,
+    entry_id: str | None = None,
     all_or_nothing: bool = False,
 ) -> int:
-    """Reserve endpoint budget in Redis for a root domain.
+    """Hold endpoint units for one piece of background work on the root domain's ledger.
 
-    The caller should pass the remaining DB-adjusted hourly cap. This helper is
-    intentionally Redis-only so the API dispatcher and workers share the same
-    atomic reservation primitive.
+    ``cap`` is the headroom left after the database window (``cap - endpoints tested in the
+    last hour``). Re-reserving the same ``entry_id`` tops up its hold instead of adding a second
+    one. Fails closed (0) on a Redis error. Without a root domain nothing is limited.
     """
-    try:
-        cap = max(0, int(cap or 0))
-        amount = max(0, int(amount or 0))
-        ttl_seconds = max(60, int(ttl_seconds or ASM_RATE_RESERVATION_TTL_SECONDS))
-    except (TypeError, ValueError):
-        return 0
+    amount = max(0, int(amount or 0))
     if amount <= 0:
         return 0
     if not root_domain:
         return amount
-    if cap <= 0:
+    if int(cap or 0) <= 0:
         return 0
-    try:
-        granted = redis_client.eval(
-            ASM_RATE_RESERVE_LUA,
-            1,
-            domain_rate_key(root_domain),
-            amount,
-            cap,
-            ttl_seconds,
-            "1" if all_or_nothing else "0",
-        )
-        return max(0, int(granted or 0))
-    except Exception:
-        return 0
+    return domain_rate.reserve(
+        redis_client, root_domain, entry_id=entry_id or str(uuid.uuid4()),
+        requested=amount, headroom=int(cap), all_or_nothing=all_or_nothing,
+    )[0]
 
 
 def auth_state_from_options(options: dict[str, Any] | None) -> str:
@@ -2172,6 +2133,9 @@ async def mark_partial(conn, endpoint_ids: list, *, verdict: str | None = "parti
 # before throttling — gentle for one target, but caps a fleet of subdomains so
 # auto-enabled Continuous ASM cannot collectively hammer a domain. Operators can
 # set ASM_DEFAULT_DOMAIN_RATE_PER_HOUR=0 to restore the old unlimited behavior.
+# It governs background work only (ASM batches, ASM recon, scheduled Scans);
+# operator-submitted Scans are recorded against it but never delayed or reduced
+# by it. The ledger and the classification live in ``domain_rate``.
 try:
     _DEFAULT_DOMAIN_RATE_PER_HOUR = max(0, int(os.environ.get("ASM_DEFAULT_DOMAIN_RATE_PER_HOUR") or 1000))
 except (TypeError, ValueError):

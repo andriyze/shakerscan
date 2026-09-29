@@ -1204,6 +1204,21 @@ export interface Scan {
   result?: Record<string, unknown> | null
   options?: Record<string, unknown> | null
   execution_explanation?: Record<string, unknown> | null
+  /** Root-domain hourly test budget state (api/domain_rate.py). `waiting` only while queued. */
+  domain_rate?: {
+    schema?: string
+    state?: 'waiting' | 'waited' | 'admitted' | 'reduced' | string
+    work_class?: 'operator' | 'background' | string
+    root_domain?: string
+    cap_per_hour?: number
+    requested?: number
+    granted?: number
+    resume_estimate?: string | null
+    waiting_since?: string | null
+    wait_cycles?: number
+    reason?: string
+    reduction?: { dimension?: string; requested?: number; granted?: number; root_domain?: string; cap_per_hour?: number; reason?: string }
+  } | null
   scan_role?: 'standalone' | 'parent' | 'shard' | string | null
   parent_scan_id?: string | null
   shard_index?: number | null

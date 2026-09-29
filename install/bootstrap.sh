@@ -18,8 +18,17 @@ fail() {
     exit 1
 }
 
+# Installer sources must be HTTPS (or a local file:// tree for development). A plain-HTTP base
+# would let anyone on the network path replace the installer before it runs.
+for base in "$CHANNEL_RAW_BASE" "$RELEASE_RAW_ROOT" "$EXPLICIT_RAW_BASE"; do
+    case "$base" in
+        ""|https://*|file://*) ;;
+        *) fail "installer source must be an https:// or file:// URL: $base" ;;
+    esac
+done
+
 if [ -z "$EXPLICIT_RAW_BASE" ] && [ -z "$SELECTED_VERSION" ]; then
-    SELECTED_VERSION="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
+    SELECTED_VERSION="$(curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
         fail "failed to resolve the stable ShakerScan release channel"
     SELECTED_VERSION="$(printf '%s' "$SELECTED_VERSION" | tr -d '[:space:]')"
 fi
@@ -40,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-curl -fsSL "$release_base/install/index.sh" -o "$tmp" || \
+curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$release_base/install/index.sh" -o "$tmp" || \
     fail "failed to download the installer from $release_base"
 
 # The installer comes from the same tree it will install from, so the file manifest always matches

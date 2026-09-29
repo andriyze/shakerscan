@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 # ============================================================================
 # HTTP HELPER FUNCTIONS (using urllib)
@@ -56,6 +56,10 @@ async def _fetch_url(url: str, timeout: int = 10, headers: dict[str, str] | None
     """
     def _sync_fetch():
         try:
+            # Script and page URLs come from target HTML. urllib would also open file:// and
+            # ftp:// URLs, so a page could make the scanner read its own local files.
+            if urlsplit(url).scheme.lower() not in ("http", "https"):
+                return ""
             req = urllib.request.Request(url, headers=headers or {})
             with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                 return response.read().decode('utf-8', errors='ignore')

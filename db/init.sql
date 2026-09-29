@@ -137,6 +137,8 @@ CREATE TABLE scans (
     scan_continuation_applied_at TIMESTAMPTZ,
     coverage_status TEXT,
     coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Root-domain hourly test budget state (api/domain_rate.py): waits, reductions, work class.
+    domain_rate_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp, model_intake
     subject_ref TEXT,
 

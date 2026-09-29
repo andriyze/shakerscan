@@ -103,4 +103,7 @@ jobs:
       candidate_sha: ${{ needs.meta.outputs.candidate_sha }}
       created: ${{ needs.meta.outputs.created }}
       workflow_sha: ${{ needs.meta.outputs.workflow_sha }}
-    secrets: inherit
+    # Pass only what the build uses; `inherit` would also hand it every other repository secret.
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

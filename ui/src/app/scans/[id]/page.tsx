@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -131,6 +131,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
     .filter(([, count]) => count > 0)
   const scorePresentation = deviceScorePresentation(scan)
   const assurance = scanAssurance(scan)
+  const quota = domainRatePresentation(scan)
   const hasGrade = Boolean(scorePresentation.grade)
   const hasScore = typeof scorePresentation.score === 'number'
   const scanTypeLabel = formatScanTypeLabel(scan)
@@ -332,6 +333,11 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
         {resultPresentation.testingWarning && (
           <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
             {resultPresentation.testingWarning}
+          </p>
+        )}
+        {quota?.kind === 'reduced' && (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
+            {quota.label}: {quota.description}
           </p>
         )}
         {(resultPresentation.coverageIncomplete || resultPresentation.missingHeaders.length > 0) && (
@@ -2157,8 +2163,9 @@ function ScanDetailContent() {
   const isModelIntake = scan.run_kind === 'model_intake' || scan.scan_type === 'model_intake'
 
   // Show progress bar while running
-  if (scan.status === 'running' || scan.status === 'pending') {
+  if (scan.status === 'running' || scan.status === 'pending' || scan.status === 'queued') {
     const phase = scanPhasePresentation(scan)
+    const quota = domainRatePresentation(scan)
     const startedAt = scan.started_at || scan.created_at
     const elapsedSeconds = startedAt
       ? Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
@@ -2181,6 +2188,11 @@ function ScanDetailContent() {
                 </div>
                 <h1 id="scan-progress-heading" className="text-xl font-semibold text-white">{phase.label}</h1>
                 <p className="mt-1 max-w-2xl text-sm text-gray-400">{phase.description}</p>
+                {quota?.kind === 'reduced' && (
+                  <p className="mt-2 max-w-2xl rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
+                    {quota.description}
+                  </p>
+                )}
               </div>
               <div className="text-right">
                 <div className="text-3xl font-bold tabular-nums text-blue-300">{phase.progress}%</div>

@@ -157,12 +157,12 @@ class PublicClientTests(unittest.TestCase):
         fake_scan = mock.Mock()
         fake_scan.main.return_value = 0
         args = argparse.Namespace(args=["https://honey.shakerscan.com"])
-        with mock.patch.object(cli, "apply_connection", return_value="http://172.31.33.93:8080"), \
+        with mock.patch.object(cli, "apply_connection", return_value="http://10.0.20.17:8080"), \
              mock.patch.object(cli, "load", return_value=fake_scan):
             self.assertEqual(cli.cmd_scan(args), 0)
         self.assertEqual(fake_scan.main.call_args.args[0][:4], [
-            "--api-url", "http://172.31.33.93:8080",
-            "--ui-url", "http://172.31.33.93:3000",
+            "--api-url", "http://10.0.20.17:8080",
+            "--ui-url", "http://10.0.20.17:3000",
         ])
         self.assertEqual(cli.scan_ui_url("https://private.example.com"),
                          "https://private.example.com")

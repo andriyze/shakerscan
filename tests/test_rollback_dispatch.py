@@ -11,6 +11,7 @@ but `VAR=x curl ... | sh` sets it for curl. The doc now reads the script into `s
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -30,10 +31,15 @@ def _runnable(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     source = BOOTSTRAP.read_text(encoding="utf-8")
-    source = source.replace(
-        'curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION"', f"cat {channel}", 1)
-    source = source.replace(
-        'curl -fsSL "$release_base/install/index.sh" -o "$tmp"', f'cp {probe} "$tmp"', 1)
+    source, channel_replacements = re.subn(
+        r'curl -fsSL [^\n]*?"\$CHANNEL_RAW_BASE/install/STABLE_VERSION"',
+        lambda _: f"cat {channel}", source, count=1,
+    )
+    source, installer_replacements = re.subn(
+        r'curl -fsSL [^\n]*?"\$release_base/install/index.sh" -o "\$tmp"',
+        lambda _: f'cp {probe} "$tmp"', source, count=1,
+    )
+    assert (channel_replacements, installer_replacements) == (1, 1)
     script = tmp_path / "bootstrap_under_test.sh"
     script.write_text(source, encoding="utf-8")
     return script

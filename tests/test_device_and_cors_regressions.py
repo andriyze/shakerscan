@@ -22,8 +22,8 @@ class TestOnlyThisDeploymentsOwnWebPortsAreAdmitted:
     person happens to run on the same machine could serve a page that drives this API."""
 
     @pytest.mark.parametrize(("origin", "host"), [
-        ("http://172.31.33.227:3000", "172.31.33.227:8080"),
-        ("http://172.31.33.227:8080", "172.31.33.227:8080"),
+        ("http://10.0.20.15:3000", "10.0.20.15:8080"),
+        ("http://10.0.20.15:8080", "10.0.20.15:8080"),
         ("http://127.0.0.1:3000", "127.0.0.1:8080"),
     ])
     def test_the_ui_and_the_api_port_are_admitted(self, origin, host):
@@ -32,7 +32,7 @@ class TestOnlyThisDeploymentsOwnWebPortsAreAdmitted:
     @pytest.mark.parametrize("port", [9999, 1234, 8000, 5000])
     def test_another_service_on_the_same_address_is_refused(self, port):
         assert origin_is_same_deployment(
-            f"http://172.31.33.227:{port}", "172.31.33.227:8080",
+            f"http://10.0.20.15:{port}", "10.0.20.15:8080",
         ) is False
 
     def test_the_reported_reproduction_is_refused(self):
@@ -41,15 +41,15 @@ class TestOnlyThisDeploymentsOwnWebPortsAreAdmitted:
         assert origin_is_same_deployment("http://127.0.0.1:9999", "127.0.0.1:8080") is False
 
     def test_a_default_port_service_is_refused(self):
-        assert origin_is_same_deployment("http://172.31.33.227", "172.31.33.227:8080") is False
+        assert origin_is_same_deployment("http://10.0.20.15", "10.0.20.15:8080") is False
 
     def test_a_configured_ui_port_is_honoured(self, monkeypatch):
         monkeypatch.setenv("SHAKERSCAN_UI_PORT", "4100")
         assert origin_is_same_deployment(
-            "http://172.31.33.227:4100", "172.31.33.227:8080",
+            "http://10.0.20.15:4100", "10.0.20.15:8080",
         ) is True
         assert origin_is_same_deployment(
-            "http://172.31.33.227:9999", "172.31.33.227:8080",
+            "http://10.0.20.15:9999", "10.0.20.15:8080",
         ) is False
 
     def test_default_port_is_not_trusted_when_ui_moves(self, monkeypatch):
@@ -61,4 +61,4 @@ class TestOnlyThisDeploymentsOwnWebPortsAreAdmitted:
         assert origin_is_same_deployment(f"{scheme}://192.0.2.10", "192.0.2.10", scheme)
 
     def test_a_cross_site_origin_is_still_refused(self):
-        assert origin_is_same_deployment("http://evil.test:3000", "172.31.33.227:8080") is False
+        assert origin_is_same_deployment("http://evil.test:3000", "10.0.20.15:8080") is False

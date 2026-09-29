@@ -27,6 +27,7 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
 # executable scanners and Nuclei templates are deliberately absent.
 COPY --from=scanner-runtime /usr/local/lib/python3.12 /usr/local/lib/python3.12
 COPY --from=scanner-runtime /app/*.py /app/
+COPY --from=scanner-runtime /usr/share/doc/shakerscan /usr/share/doc/shakerscan
 COPY --from=scanner-runtime /app/ai_gate /app/ai_gate
 COPY --from=scanner-runtime /app/ai_targets /app/ai_targets
 COPY --from=scanner-runtime /app/arsenal_routes /app/arsenal_routes

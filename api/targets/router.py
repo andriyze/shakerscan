@@ -895,14 +895,14 @@ async def update_target(target_id: str, request: TargetUpdate):
             params.append(json.dumps(request.scan_options))
             param_idx += 1
 
-        if request.metadata_json is not None:
-            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
-            params.append(json.dumps(request.metadata_json))
-            param_idx += 1
-
+        # metadata_json and cohort both merge into the same column, so they share one assignment:
+        # PostgreSQL rejects an UPDATE that assigns a column twice.
+        metadata_patch = dict(request.metadata_json or {})
         if request.cohort is not None:
+            metadata_patch["cohort"] = request.cohort
+        if request.metadata_json is not None or request.cohort is not None:
             updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
-            params.append(json.dumps({"cohort": request.cohort}))
+            params.append(json.dumps(metadata_patch))
             param_idx += 1
 
         if not updates:
@@ -4572,6 +4572,7 @@ async def _enqueue_asm_exploit_batch(
     endpoint_filter: str | None = None,
     triggered_by: str = "api",
     domain_rate_reserved: int = 0,
+    domain_rate_hold_id: str | None = None,
 ) -> dict:
     """Create an asm_batch scan row and enqueue the exploit_batch job. Shared by
     POST /asm/test and the continuous dispatcher."""
@@ -4695,6 +4696,7 @@ async def _enqueue_asm_exploit_batch(
         "check_family": family,
         "endpoint_filter": endpoint_filter,
         "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
+        "domain_rate_hold_id": str(domain_rate_hold_id) if domain_rate_hold_id else None,
         "claimed_endpoint_ids": claimed_ids,
         "scan_job": canonical_job.queue_payload(),
         "triggered_by": triggered_by,

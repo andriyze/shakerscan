@@ -277,7 +277,7 @@ def test_join_token_command_prints_one_shareable_bounded_command(tmp_path, monke
 def test_control_plane_commands_resolve_remote_bind_when_local_api_is_omitted(tmp_path, monkeypatch):
     paths = fleet_cli.RuntimePaths(tmp_path)
     paths.dotenv.write_text(
-        "SHAKERSCAN_BIND_HOST=100.121.87.22\n"
+        "SHAKERSCAN_BIND_HOST=100.100.100.100\n"
         "SHAKERSCAN_API_PORT=9080\n"
         "FLEET_PUBLIC_URL=https://fleet.example.test\n"
         "FLEET_OPERATOR_TOKEN=operator-secret\n",
@@ -307,7 +307,7 @@ def test_control_plane_commands_resolve_remote_bind_when_local_api_is_omitted(tm
         ),
     )
 
-    assert calls[0][0] == "http://100.121.87.22:9080"
+    assert calls[0][0] == "http://100.100.100.100:9080"
 
 
 def test_revoke_join_token_command_uses_identifier_not_secret(tmp_path, monkeypatch, capsys):
@@ -1061,7 +1061,7 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
         encoding="utf-8",
     )
     paths.dotenv.write_text(
-        "SHAKERSCAN_BIND_HOST=100.121.87.22\nSHAKERSCAN_API_PORT=9080\n",
+        "SHAKERSCAN_BIND_HOST=100.100.100.100\nSHAKERSCAN_API_PORT=9080\n",
         encoding="utf-8",
     )
     calls = []
@@ -1099,7 +1099,7 @@ def test_broker_init_uses_private_ca_for_public_health_checks(tmp_path, monkeypa
     assert len(public_checks) == 2
     assert all(item[2] == ca_path.resolve() for item in public_checks)
     artifact_checks = [item for item in calls if item[1].startswith("/artifacts/storage/health")]
-    assert [item[0] for item in artifact_checks] == ["http://100.121.87.22:9080"]
+    assert [item[0] for item in artifact_checks] == ["http://100.100.100.100:9080"]
     env = fleet_cli.load_dotenv(paths.dotenv)
     assert env["EVIDENCE_S3_ENDPOINT_URL"] == "http://minio:9000"
     assert env["COMPOSE_PROFILES"] == "artifacts"

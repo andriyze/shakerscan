@@ -16,13 +16,13 @@ from runtime.models import ScanPolicy, TargetBinding
 
 
 TARGET = TargetBinding(
-    target_id="device-1", target_kind="device", canonical_host="172.31.32.220",
-    allowed_origins=("http://172.31.32.220",), allowed_addresses=("172.31.32.220",),
+    target_id="device-1", target_kind="device", canonical_host="10.0.20.16",
+    allowed_origins=("http://10.0.20.16",), allowed_addresses=("10.0.20.16",),
     allowed_root_domains=(), scope_receipt_id="scope-1",
 )
 POLICY = ScanPolicy(active_testing=True, network_discovery=True, approval_receipt_id="approval-1")
 XML = """<?xml version='1.0'?>
-<nmaprun><host><address addr='172.31.32.220' addrtype='ipv4'/><ports>
+<nmaprun><host><address addr='10.0.20.16' addrtype='ipv4'/><ports>
 <port protocol='tcp' portid='8443'><state state='open'/><script id='ssl-enum-ciphers'
  output='TLSv1.2: least strength: B'/><script id='http-security-headers'
  output='Content-Security-Policy: private-token-DO-NOT-LEAK'/></port>
@@ -50,7 +50,7 @@ def test_nse_prepares_only_reviewed_scripts_and_bound_ports():
         "ports": [8443, 8008], "scripts": ["ssl-enum-ciphers", "http-security-headers"],
     }, policy=POLICY)
     argv = prepared.commands[0].argv
-    assert argv[-1] == "172.31.32.220"
+    assert argv[-1] == "10.0.20.16"
     assert argv[argv.index("-p") + 1] == "8008,8443"
     assert argv[argv.index("--script") + 1].endswith("nse_http.nse,+ssl-enum-ciphers")
     assert "-sV" not in argv
@@ -142,19 +142,19 @@ def test_nse_keeps_observations_for_a_lan_host_that_reports_a_mac_address():
     # must not clear the scanned host and silently drop every observation.
     parser = network_capability_adapter("service.nse_check")
     xml = XML.replace(
-        "<address addr='172.31.32.220' addrtype='ipv4'/>",
-        "<address addr='172.31.32.220' addrtype='ipv4'/>"
+        "<address addr='10.0.20.16' addrtype='ipv4'/>",
+        "<address addr='10.0.20.16' addrtype='ipv4'/>"
         "<address addr='AA:BB:CC:DD:EE:FF' addrtype='mac' vendor='Example'/>",
     )
     result = parser.parse(xml)
     assert result.status == "succeeded"
-    assert [item["address"] for item in result.observations] == ["172.31.32.220"] * 2
+    assert [item["address"] for item in result.observations] == ["10.0.20.16"] * 2
 
 
 def test_nse_requested_script_that_never_ran_is_indeterminate_not_clean():
     parser = network_capability_adapter("service.nse_check")
     closed = """<?xml version='1.0'?>
-<nmaprun><host><address addr='172.31.32.220' addrtype='ipv4'/><ports>
+<nmaprun><host><address addr='10.0.20.16' addrtype='ipv4'/><ports>
 <port protocol='tcp' portid='8008'><state state='closed'/></port>
 </ports></host></nmaprun>"""
     result = parser.parse(closed, expected_ports=[8008], expected_scripts=["http-methods"])
@@ -246,7 +246,7 @@ def test_nse_nonzero_exit_keeps_partial_observations_and_examines_next_address()
     calls = []
     async def run_command(argv, **_kwargs):
         calls.append(argv[-1])
-        return SimpleNamespace(stdout=XML.replace("172.31.32.220", argv[-1]),
+        return SimpleNamespace(stdout=XML.replace("10.0.20.16", argv[-1]),
                                returncode=1 if len(calls) == 1 else 0, timed_out=False,
                                partial=False, stdout_truncated=False, cancelled=False)
     result = asyncio.run(NetworkExecutionAdapter(

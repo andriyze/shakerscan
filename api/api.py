@@ -506,6 +506,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 import parallel_scan
 import asm_inventory
+import domain_rate
 import adjudicate
 import hypothesis_lifecycle
 import hypothesis_scheduler
@@ -1442,33 +1443,17 @@ def _decode_redis_hash(raw: Any) -> dict[str, str]:
     return {_redis_text(key): _redis_text(value) for key, value in raw.items()}
 
 
-def _asm_domain_rate_key(root_domain: str) -> str:
-    return asm_inventory.domain_rate_key(root_domain)
+def _reserve_asm_domain_rate(r, root_domain: str, cap: int, amount: int, *, hold_id: str | None = None) -> int:
+    """Hold endpoint units on the root domain's hourly ledger before queuing an ASM batch.
 
-
-
-
-def _reserve_asm_domain_rate(r, root_domain: str, cap: int, amount: int) -> int:
-    """Reserve endpoint budget before queuing an ASM batch.
-
-    The DB count only sees endpoints after they finish. This Redis counter
-    closes the race where several targets under one root all queue full batches
-    in the same dispatcher tick and exceed the per-hour domain cap.
+    The DB window only sees endpoints after they finish; the hold closes the race where several
+    targets under one root queue full batches in the same dispatcher tick.
     """
-    try:
-        cap = max(0, int(cap or 0))
-        amount = max(0, int(amount or 0))
-    except (TypeError, ValueError):
-        return 0
-    if amount <= 0:
-        return 0
-    if not root_domain or cap <= 0:
-        return amount
-    try:
-        return asm_inventory.reserve_domain_rate(r, root_domain, cap, amount)
-    except Exception as exc:
-        print(f"[asm] domain rate reservation failed for {root_domain}: {exc}", flush=True)
-        return 0
+    if not root_domain or int(cap or 0) <= 0:
+        return max(0, int(amount or 0))
+    return domain_rate.reserve(
+        r, root_domain, entry_id=hold_id or str(uuid.uuid4()), requested=amount, headroom=cap,
+    )[0]
 
 
 def _is_truthy(value: Any, default: bool = False) -> bool:
@@ -3323,6 +3308,7 @@ async def run_due_schedules(pool: asyncpg.Pool):
                 scan_contract,
             )
             scan_options, _family = _apply_scan_check_family_policy(scan_options)
+            scan_options[domain_rate.ADMISSION_ORIGIN_KEY] = domain_rate.ORIGIN_SCHEDULE
             parallel_enabled, parallel_worker_count = _apply_auto_sharding_policy(
                 scan_options_model,
                 scan_options,
@@ -3768,12 +3754,10 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                     daily_cap = cfg['daily_endpoint_cap']
                     if daily_cap > 0:
                         dispatch_batch_size = min(dispatch_batch_size, max(0, daily_cap - tested_today))
+                    hold_id = str(uuid.uuid4())
                     if cap > 0 and root_domain:
                         dispatch_batch_size = _reserve_asm_domain_rate(
-                            r,
-                            root_domain,
-                            max(0, cap - used),
-                            dispatch_batch_size,
+                            r, root_domain, max(0, cap - used), dispatch_batch_size, hold_id=hold_id,
                         )
                     if dispatch_batch_size <= 0:
                         await _persist_asm_decision(
@@ -3783,12 +3767,16 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             source="dispatcher",
                         )
                         continue
-                    enq = await _enqueue_asm_exploit_batch(
-                        conn, r, target_id, target_url, base_opts,
-                        batch_size=dispatch_batch_size, stale_days=cfg['stale_days'],
-                        exploit_depth=cfg['exploit_depth'], triggered_by='dispatcher',
-                        domain_rate_reserved=dispatch_batch_size,
-                    )
+                    try:
+                        enq = await _enqueue_asm_exploit_batch(
+                            conn, r, target_id, target_url, base_opts,
+                            batch_size=dispatch_batch_size, stale_days=cfg['stale_days'],
+                            exploit_depth=cfg['exploit_depth'], triggered_by='dispatcher',
+                            domain_rate_reserved=dispatch_batch_size, domain_rate_hold_id=hold_id,
+                        )
+                    except Exception:
+                        domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0, finalized=False)
+                        raise
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
                     await _persist_asm_decision(
                         conn,
@@ -4012,6 +4000,7 @@ except ModuleNotFoundError:
     from api.credential_api import public_credential_validation_errors
 
 try:
+    from host_guard import configure_host_guard
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -4022,6 +4011,7 @@ try:
         public_v2_surface,
     )
 except ModuleNotFoundError:
+    from api.host_guard import configure_host_guard
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -7287,9 +7277,8 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 # covers the UI reached at the same host as the API itself, which the fixed allowlist could not
 # name: a LAN install answered on one private IP and the same engine opened by public IP, by
 # hostname or through a tunnel lost its CORS headers on reads and 403'd on every write.
-app.add_middleware(
-    SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"],
-)
+app.add_middleware(SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"])
+configure_host_guard(app, allow_origins=_cors_kwargs["allow_origins"], allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""))
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):
@@ -11892,6 +11881,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
     if result.get('options') is not None:
         result['options'] = _sanitize_scan_options(result['options'])
     result['execution_explanation'] = execution_explanation
+    result['domain_rate'] = domain_rate.public_view(result.pop('domain_rate_json', None), status=result.get('status'))
     # Raw action authority contains internal capability arguments. Public callers
     # receive the allowlisted explanation above plus content-addressed digests.
     result.pop('scan_action_plan_json', None)

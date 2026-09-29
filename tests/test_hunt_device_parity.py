@@ -69,14 +69,14 @@ class TestTheHttpBindingAcceptsEitherInventory:
 
     def test_a_bare_locator_becomes_a_usable_binding(self):
         target, url = self.binding(
-            target={"locator": "172.31.33.227"},
-            authorized_target_addresses=["172.31.33.227"],
+            target={"locator": "10.0.20.15"},
+            authorized_target_addresses=["10.0.20.15"],
         )
-        assert url == "http://172.31.33.227"
-        assert target.canonical_host == "172.31.33.227"
+        assert url == "http://10.0.20.15"
+        assert target.canonical_host == "10.0.20.15"
         assert target.target_id == DEVICE_ID
         assert target.target_kind == "device"
-        assert target.allowed_addresses == ("172.31.33.227",)
+        assert target.allowed_addresses == ("10.0.20.15",)
 
     def test_an_ipv6_locator_is_bracketed(self):
         target, url = self.binding(target={"locator": "2001:db8::10"})
@@ -90,15 +90,15 @@ class TestTheHttpBindingAcceptsEitherInventory:
     def test_a_web_target_binding_is_unchanged(self):
         run = {"target_kind": "web", "target_id": WEB_ID, "device_target_id": None}
         target, url = web_hunt_target(
-            run, {"target": {"url": "http://172.31.33.227:8443"}}, {},
+            run, {"target": {"url": "http://10.0.20.15:8443"}}, {},
         )
-        assert url == "http://172.31.33.227:8443"
+        assert url == "http://10.0.20.15:8443"
         assert target.target_id == WEB_ID
 
     def test_a_run_naming_no_asset_at_all_is_still_refused(self):
         run = {"target_kind": "device", "target_id": None, "device_target_id": None}
         with pytest.raises(CapabilityInputError, match="requires a Web, API, network or device"):
-            web_hunt_target(run, {"target": {"locator": "172.31.33.227"}}, {})
+            web_hunt_target(run, {"target": {"locator": "10.0.20.15"}}, {})
 
     def test_an_unusable_locator_is_refused(self):
         with pytest.raises(CapabilityInputError, match="persisted Hunt target URL is invalid"):

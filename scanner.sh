@@ -234,6 +234,7 @@ postgres_data_volume_exists() {
 
 ensure_runtime_datastore_credentials() {
     local current_postgres current_redis next_postgres next_redis ready_attempt
+    local current_minio next_minio
     local persist_postgres=1
 
     touch "$SCRIPT_DIR/.env"
@@ -271,6 +272,21 @@ ensure_runtime_datastore_credentials() {
     if [ "$next_redis" != "$current_redis" ]; then
         write_dotenv_value REDIS_PASSWORD "$next_redis"
     fi
+
+    # The optional artifacts profile (MinIO) reads its root credential from the environment on
+    # every start, so a generated value can be recorded immediately. Without it the compose
+    # files would fall back to a static, publicly known password.
+    current_minio="${MINIO_ROOT_PASSWORD:-$(read_dotenv_value MINIO_ROOT_PASSWORD)}"
+    if [ "${#current_minio}" -lt 32 ]; then
+        next_minio="$(generate_datastore_secret)"
+        if [ "${#next_minio}" -lt 32 ]; then
+            echo -e "${RED}Error: could not generate a strong artifact-store credential.${NC}" >&2
+            return 1
+        fi
+        write_dotenv_value MINIO_ROOT_PASSWORD "$next_minio"
+        current_minio="$next_minio"
+    fi
+    export MINIO_ROOT_PASSWORD="$current_minio"
 
     # PostgreSQL does keep a durable role password, so a changed value is only
     # true once the role has been rotated (start/restart) or once the cluster

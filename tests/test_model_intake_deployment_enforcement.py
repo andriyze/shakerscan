@@ -1,7 +1,12 @@
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
+import threading
+import urllib.error
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
@@ -75,20 +80,98 @@ def test_webhook_verifier_calls_pure_exact_bundle_gate(monkeypatch):
         def read(self, _limit):
             return json.dumps({"verified": True, "side_effects": False}).encode()
 
-    def urlopen(request, timeout):
+    def open_request(request, timeout):
         observed["url"] = request.full_url
         observed["payload"] = json.loads(request.data)
         observed["timeout"] = timeout
         return Response()
 
+    class Opener:
+        open = staticmethod(open_request)
+
     monkeypatch.setenv("SHAKERSCAN_API_URL", "https://scanner.corp.example")
     monkeypatch.setenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "x" * 40)
-    monkeypatch.setattr(webhook.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webhook.urllib.request, "build_opener", lambda *_args: Opener())
 
     assert webhook._verify(package, bundle)["verified"] is True
     assert observed["url"].endswith("/model-intake/admissions/v2/verify")
     assert observed["payload"]["expected_bundle_sha256"] == "a" * 64
     assert observed["payload"]["expected_components"]["model_artifact_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        "http://127.0.0.1.attacker.example",
+        "http://127.0.0.1@attacker.example",
+        "http://127.0.0.1:8080@attacker.example:80",
+        "http://scanner.corp.example",
+        "ftp://127.0.0.1",
+        "https://",
+    ],
+)
+def test_webhook_refuses_to_send_the_verifier_token_off_loopback_in_cleartext(monkeypatch, api_url):
+    monkeypatch.setenv("SHAKERSCAN_API_URL", api_url)
+    monkeypatch.setenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "x" * 40)
+    monkeypatch.setattr(
+        webhook.urllib.request,
+        "build_opener",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("token left the process")),
+    )
+    with pytest.raises(RuntimeError, match="HTTPS or loopback"):
+        webhook._verify({}, {"bundle_sha256": "a" * 64, "target_environment": "production"})
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    ["https://scanner.corp.example", "http://127.0.0.1:8080", "http://127.0.0.2", "http://[::1]:8080"],
+)
+def test_webhook_verifier_transport_accepts_https_and_loopback(api_url):
+    assert webhook._verifier_transport_allowed(api_url) is True
+
+
+def test_webhook_does_not_forward_verifier_token_after_redirect(monkeypatch):
+    received = []
+
+    class RedirectDestination(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"verified":true,"side_effects":false}')
+
+        def log_message(self, *_args):
+            pass
+
+    destination = ThreadingHTTPServer(("127.0.0.1", 0), RedirectDestination)
+
+    class Verifier(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://localhost:{destination.server_port}/capture")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    verifier = ThreadingHTTPServer(("127.0.0.1", 0), Verifier)
+    threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (destination, verifier)]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setenv("SHAKERSCAN_API_URL", f"http://127.0.0.1:{verifier.server_port}")
+        monkeypatch.setenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "review-probe-token")
+        assert webhook._verifier_transport_allowed(f"http://localhost:{destination.server_port}") is False
+
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            webhook._verify({}, {"bundle_sha256": "a" * 64, "target_environment": "production"})
+
+        assert exc.value.code == 302
+        assert received == []
+    finally:
+        for server in (verifier, destination):
+            server.shutdown()
+            server.server_close()
 
 
 def test_webhook_installation_is_namespace_scoped_certified_and_fail_closed():

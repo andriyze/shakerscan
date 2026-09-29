@@ -141,7 +141,7 @@ download() {
             ;;
     esac
     tmp="${staged_dst}.tmp"
-    if ! curl -fsSL "$src" -o "$tmp"; then
+    if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$src" -o "$tmp"; then
         rm -f "$tmp"
         fail "failed to download $src"
     fi
@@ -443,6 +443,15 @@ print_next_steps() {
 
 install_bootstrap_deps
 
+# Installer sources must be HTTPS (or a local file:// tree for development). A plain-HTTP base
+# would let anyone on the network path replace the files this installer verifies and runs.
+for base in "$REPO_RAW_BASE" "$RELEASE_ASSET_ROOT"; do
+    case "$base" in
+        ""|https://*|file://*) ;;
+        *) fail "installer source must be an https:// or file:// URL: $base" ;;
+    esac
+done
+
 # The stable install channel advances only after every release image exists.
 # Runtime files are then downloaded from the matching immutable tag, avoiding
 # both unpublished-image windows and main-vs-image source skew. A custom raw
@@ -454,7 +463,7 @@ if [ -z "$REPO_RAW_BASE" ]; then
         fi
         REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"
     else
-        stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
+        stable_raw="$(curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
             fail "failed to resolve the stable ShakerScan release channel"
         stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
         case "$stable_version" in
@@ -469,7 +478,7 @@ if [ -z "$REPO_RAW_BASE" ]; then
         # installer sees it set and installs instead of resolving again.
         delegate="$(mktemp "${TMPDIR:-/tmp}/shakerscan-installer.XXXXXX")" || \
             fail "failed to create a temporary file for the release installer"
-        if ! curl -fsSL "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
+        if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
             rm -f -- "$delegate"
             fail "failed to download the v${stable_version} installer"
         fi

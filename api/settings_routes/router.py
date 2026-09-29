@@ -638,6 +638,13 @@ def _sanitize_automation_settings_response(
 def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> tuple[bool, str]:
     temp_path: Path | None = None
     try:
+        rendered = {
+            key: None if raw_value is None else _normalize_env_value(raw_value)
+            for key, raw_value in updates.items()
+        }
+    except ValueError:
+        return False, "Refused to persist settings: a value contains a control or line-separator character"
+    try:
         if env_path.exists():
             lines = env_path.read_text(encoding="utf-8").splitlines()
         else:
@@ -652,12 +659,12 @@ def _persist_env_updates(env_path: Path, updates: dict[str, Optional[str]]) -> t
             if m:
                 indexed[m.group(1)] = idx
 
-        for key, raw_value in updates.items():
-            if raw_value is None:
+        for key, value in rendered.items():
+            if value is None:
                 if key in indexed:
                     lines[indexed[key]] = f"# {key}=  # removed by settings API"
                 continue
-            line = f"{key}={_normalize_env_value(raw_value)}"
+            line = f"{key}={value}"
             if key in indexed:
                 lines[indexed[key]] = line
             else:
@@ -1164,7 +1171,15 @@ async def _read_durable_setting(conn, key: str) -> str | None:
         return None
 
 
+# Characters that str.splitlines() treats as line boundaries, plus every other C0/C1 control
+# character except the newline _normalize_env_value escapes. Any of these in a value would let a
+# settings field plant an additional KEY=value line in the host environment file.
+_ENV_VALUE_FORBIDDEN = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+
+
 def _normalize_env_value(value: str) -> str:
+    if _ENV_VALUE_FORBIDDEN.search(value):
+        raise ValueError("environment values must not contain control or line-separator characters")
     return value.replace("\n", "\\n")
 
 

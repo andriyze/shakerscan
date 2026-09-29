@@ -51,6 +51,7 @@ try:
     )
     from finding_routes import router as _finding_routes
     from redaction import redact_sensitive
+    from redirect_policy import same_origin_opener
     from request_models import ScanAdvancedLimits, ScanPublicCompatibilityOptions, ScanRequest
     from retest_contract import parse_json_field
     from runtime.credential_migration import (
@@ -82,6 +83,7 @@ except ModuleNotFoundError:  # package import in host-side tests
         replace_placeholders as ai_replace_placeholders,
     )
     from ..finding_routes import router as _finding_routes
+    from ..redirect_policy import same_origin_opener
     from ..request_models import ScanAdvancedLimits, ScanPublicCompatibilityOptions, ScanRequest
     from ..retest_contract import parse_json_field
     from ..runtime.credential_migration import (
@@ -3163,7 +3165,8 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
     request = urllib.request.Request(request_url, data=data, headers=headers, method=method)
     started = utc_now()
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - user-configured local scanner target
+        # This runs inside the API process: a redirect off the configured origin is reported, not followed.
+        with same_origin_opener().open(request, timeout=timeout_seconds) as response:  # noqa: S310 - user-configured local scanner target
             raw_bytes = response.read(100_000)
             raw_text = raw_bytes.decode("utf-8", errors="replace")
             content_type = response.headers.get("Content-Type", "")
@@ -3192,12 +3195,13 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
         }
 
     elapsed_ms = round((utc_now() - started).total_seconds() * 1000, 1)
-    response_path_ok = bool(str(response_text or "").strip())
-    ok = 200 <= status_code < 400 and response_path_ok
+    redirect_response = 300 <= status_code < 400
+    response_path_ok = bool(str(response_text or "").strip()) and not redirect_response
+    ok = 200 <= status_code < 300 and response_path_ok
     return {
         "ok": ok,
         "supported": True,
-        "stage": "response_path" if not response_path_ok else "complete",
+        "stage": "redirect" if redirect_response else ("response_path" if not response_path_ok else "complete"),
         "status_code": status_code,
         "latency_ms": elapsed_ms,
         "content_type": content_type,

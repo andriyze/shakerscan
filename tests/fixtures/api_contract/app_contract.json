@@ -1,5 +1,6 @@
 {
   "middleware": [
+    "TrustedHostGuardMiddleware",
     "SameHostCorsMiddleware",
     "CORSMiddleware",
     "UnsafeOriginGuardMiddleware",

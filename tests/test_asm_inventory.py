@@ -10,30 +10,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import asm_inventory as a  # noqa: E402
+from tests.domain_rate_fake import DomainRateLedgerFake  # noqa: E402
 
 
-class _FakeRedis:
-    def __init__(self):
-        self.values = {}
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
-        current = int(self.values.get(key) or 0)
-        amount = int(amount)
-        cap = int(cap)
-        if amount <= 0:
-            return 0
-        if cap <= 0:
-            return 0
-        if current >= cap:
-            return 0
-        if str(all_or_nothing) == "1" and current + amount > cap:
-            return 0
-        granted = min(amount, cap - current)
-        self.values[key] = current + granted
-        return granted
+class _FakeRedis(DomainRateLedgerFake):
+    """Root-domain ledger mirror (see tests/domain_rate_fake.py)."""
 
 
 def test_inventory_semantics_does_not_call_scanner_candidates_confirmed_routes():
