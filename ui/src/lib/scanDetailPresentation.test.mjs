@@ -136,14 +136,14 @@ test('ambiguous v3 reports claim posture deductions only when they carry one', (
 test('raw and persisted forms of the same scan finding share one UI identity', () => {
   const raw = {
     title: 'Legacy TLS protocol negotiated',
-    url: 'https://gap-analytics.com/',
+    url: 'https://example.net/',
     tool: 'tls.inspect',
     cwe: 'CWE-326',
   }
   const persistedSummary = {
     id: 'finding-1',
     title: 'Legacy TLS protocol negotiated',
-    url: 'https://gap-analytics.com/',
+    url: 'https://example.net/',
     tool: 'tls.inspect',
   }
 
@@ -202,17 +202,17 @@ test('the testing tile names what active permission bought, or warns that it bou
 
 test('the conclusion names the next step for each limit it reports', () => {
   const redirected = scanResultPresentation({
-    target_url: 'https://a3sec.net',
+    target_url: 'https://example.org',
     result: {
       findings: [],
       result: { risk_assessment_state: 'not_examined', application_observed: false },
-      http: { status: 301, redirect_location: 'https://www.a3sec.net/' },
+      http: { status: 301, redirect_location: 'https://www.example.org/' },
       coverage: { reasons: ['application_not_observed', 'bound_origin_redirects_off_origin'] },
     },
   }, { band: 'weak', label: 'Weak coverage' })
   assert.deepEqual(redirected.nextSteps.map((step) => step.key), ['serving-origin'])
-  assert.equal(redirected.nextSteps[0].label, 'Scan www.a3sec.net instead')
-  assert.equal(redirected.nextSteps[0].href, '/scan/new?target=https%3A%2F%2Fwww.a3sec.net')
+  assert.equal(redirected.nextSteps[0].label, 'Scan www.example.org instead')
+  assert.equal(redirected.nextSteps[0].href, '/scan/new?target=https%3A%2F%2Fwww.example.org')
 
   const permittedOnly = scanResultPresentation({
     target_url: 'http://crapi-web',

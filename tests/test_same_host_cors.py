@@ -24,7 +24,7 @@ from public_api_contract import (  # noqa: E402
     origin_is_same_deployment,
 )
 
-CONFIGURED = ("http://localhost:3000", "http://172.31.33.227:3000")
+CONFIGURED = ("http://localhost:3000", "http://10.0.20.15:3000")
 
 
 def scope(method="POST", *, origin=None, host=None, extra=None):
@@ -63,8 +63,8 @@ def headers_of(sent):
 
 class TestTheSameDeploymentPredicate:
     @pytest.mark.parametrize(("origin", "host"), [
-        ("http://172.31.33.227:3000", "172.31.33.227:8080"),
-        ("http://18.215.239.210:3000", "18.215.239.210:8080"),
+        ("http://10.0.20.15:3000", "10.0.20.15:8080"),
+        ("http://203.0.113.40:3000", "203.0.113.40:8080"),
         ("http://127.0.0.1:3000", "127.0.0.1:8080"),
         ("https://192.168.1.165:3000", "192.168.1.165"),
         ("http://[2001:db8::1]:3000", "[2001:db8::1]:8080"),
@@ -73,12 +73,12 @@ class TestTheSameDeploymentPredicate:
         assert origin_is_same_deployment(origin, host) is True
 
     @pytest.mark.parametrize(("origin", "host"), [
-        ("http://evil.test", "172.31.33.227:8080"),
-        ("http://172.31.33.227.evil.test:3000", "172.31.33.227:8080"),
+        ("http://evil.test", "10.0.20.15:8080"),
+        ("http://10.0.20.15.evil.test:3000", "10.0.20.15:8080"),
         ("http://evil.test", "evil.test.internal:8080"),
-        ("null", "172.31.33.227:8080"),
-        ("http://172.31.33.227:3000", ""),
-        ("http://172.31.33.227:3000", "18.215.239.210:8080"),
+        ("null", "10.0.20.15:8080"),
+        ("http://10.0.20.15:3000", ""),
+        ("http://10.0.20.15:3000", "203.0.113.40:8080"),
     ])
     def test_a_different_site_never_matches(self, origin, host):
         assert origin_is_same_deployment(origin, host) is False
@@ -101,14 +101,14 @@ class TestMutationsFromEveryRouteToTheSameEngine:
 
     def test_the_upload_that_failed_now_reaches_the_endpoint(self):
         sent = asyncio.run(drive(self.guard(), scope(
-            origin="http://18.215.239.210:3000", host="18.215.239.210:8080",
+            origin="http://203.0.113.40:3000", host="203.0.113.40:8080",
         )))
         assert headers_of(sent)["content-type"] == "application/json"
         assert sent[0]["status"] == 200
 
     def test_a_configured_origin_still_works(self):
         sent = asyncio.run(drive(self.guard(), scope(
-            origin="http://172.31.33.227:3000", host="172.31.33.227:8080",
+            origin="http://10.0.20.15:3000", host="10.0.20.15:8080",
         )))
         assert sent[0]["status"] == 200
 
@@ -116,7 +116,7 @@ class TestMutationsFromEveryRouteToTheSameEngine:
         """A browser sets Host to the address it connected to and cannot forge it, so an
         attacker's page still carries its own Origin against our Host."""
         sent = asyncio.run(drive(self.guard(), scope(
-            origin="http://evil.test", host="172.31.33.227:8080",
+            origin="http://evil.test", host="10.0.20.15:8080",
         )))
         assert sent[0]["status"] == 403
         assert json.loads(sent[1]["body"])["detail"] == (
@@ -124,7 +124,7 @@ class TestMutationsFromEveryRouteToTheSameEngine:
         )
 
     def test_a_request_without_an_origin_is_untouched(self):
-        sent = asyncio.run(drive(self.guard(), scope(host="172.31.33.227:8080")))
+        sent = asyncio.run(drive(self.guard(), scope(host="10.0.20.15:8080")))
         assert sent[0]["status"] == 200
 
 
@@ -134,16 +134,16 @@ class TestReadsAndPreflightsCarryTheirHeaders:
 
     def test_a_read_from_the_same_address_is_readable_by_the_browser(self):
         sent = asyncio.run(drive(self.app(), scope(
-            "GET", origin="http://18.215.239.210:3000", host="18.215.239.210:8080",
+            "GET", origin="http://203.0.113.40:3000", host="203.0.113.40:8080",
         )))
         headers = headers_of(sent)
-        assert headers["access-control-allow-origin"] == "http://18.215.239.210:3000"
+        assert headers["access-control-allow-origin"] == "http://203.0.113.40:3000"
         assert headers["vary"] == "Origin"
         assert headers["access-control-expose-headers"] == "x-shakerscan-hunt-contract"
 
     def test_a_preflight_from_the_same_host_is_answered(self):
         sent = asyncio.run(drive(self.app(), scope(
-            "OPTIONS", origin="http://18.215.239.210:3000", host="18.215.239.210:8080",
+            "OPTIONS", origin="http://203.0.113.40:3000", host="203.0.113.40:8080",
             extra={
                 "access-control-request-method": "POST",
                 "access-control-request-headers": "content-type,idempotency-key",
@@ -151,13 +151,13 @@ class TestReadsAndPreflightsCarryTheirHeaders:
         )))
         headers = headers_of(sent)
         assert sent[0]["status"] == 200
-        assert headers["access-control-allow-origin"] == "http://18.215.239.210:3000"
+        assert headers["access-control-allow-origin"] == "http://203.0.113.40:3000"
         assert "POST" in headers["access-control-allow-methods"]
         assert headers["access-control-allow-headers"] == "content-type,idempotency-key"
 
     def test_a_foreign_origin_gets_no_header_from_this_layer(self):
         sent = asyncio.run(drive(self.app(), scope(
-            "GET", origin="http://evil.test", host="18.215.239.210:8080",
+            "GET", origin="http://evil.test", host="203.0.113.40:8080",
         )))
         assert "access-control-allow-origin" not in headers_of(sent)
 
@@ -165,18 +165,18 @@ class TestReadsAndPreflightsCarryTheirHeaders:
         """Registered outside the configured CORS layer, so whatever it recognised wins."""
         async def already_answered(_scope, _receive, send):
             await send({"type": "http.response.start", "status": 200, "headers": [
-                (b"access-control-allow-origin", b"http://18.215.239.210:3000"),
+                (b"access-control-allow-origin", b"http://203.0.113.40:3000"),
             ]})
             await send({"type": "http.response.body", "body": b""})
 
         app = SameHostCorsMiddleware(already_answered, expose_headers=("x-a",))
         sent = asyncio.run(drive(app, scope(
-            "GET", origin="http://18.215.239.210:3000", host="18.215.239.210:8080",
+            "GET", origin="http://203.0.113.40:3000", host="203.0.113.40:8080",
         )))
         start = next(item for item in sent if item["type"] == "http.response.start")
         allow = [key for key, _v in start["headers"] if key.lower() == b"access-control-allow-origin"]
         assert len(allow) == 1
 
     def test_a_request_without_an_origin_passes_straight_through(self):
-        sent = asyncio.run(drive(self.app(), scope("GET", host="18.215.239.210:8080")))
+        sent = asyncio.run(drive(self.app(), scope("GET", host="203.0.113.40:8080")))
         assert "access-control-allow-origin" not in headers_of(sent)

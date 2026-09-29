@@ -32,8 +32,8 @@ def test_the_installer_is_valid_posix_shell():
 
 def test_channel_resolution_hands_over_to_that_versions_installer():
     source = _source()
-    resolve = source.index('stable_raw="$(curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION")"')
-    handover = source.index('curl -fsSL "$REPO_RAW_BASE/install/index.sh"')
+    resolve = source.index('"$CHANNEL_RAW_BASE/install/STABLE_VERSION"')
+    handover = source.index('"$REPO_RAW_BASE/install/index.sh"')
     assert resolve < handover, "the handover must follow channel resolution"
     assert 'sh "$delegate" "$@"' in source
     assert 'exit "$delegate_status"' in source, (
@@ -46,7 +46,7 @@ def test_an_explicit_raw_base_still_installs_directly():
     # delegated installer sees it set and installs rather than resolving again.
     source = _source()
     guard = source.index('if [ -z "$REPO_RAW_BASE" ]; then')
-    handover = source.index('curl -fsSL "$REPO_RAW_BASE/install/index.sh"')
+    handover = source.index('"$REPO_RAW_BASE/install/index.sh"')
     assert guard < handover, "the handover must sit inside the unresolved-base branch"
     assert 'REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"' in source
 
@@ -55,7 +55,7 @@ def test_an_explicit_install_version_does_not_delegate():
     # A pinned version already names its tag; its own manifest is the one being asked for.
     source = _source()
     pinned = source.index('if [ -n "$INSTALL_VERSION" ]; then')
-    handover = source.index('curl -fsSL "$REPO_RAW_BASE/install/index.sh"')
+    handover = source.index('"$REPO_RAW_BASE/install/index.sh"')
     else_branch = source.index("    else\n", pinned)
     assert pinned < else_branch < handover
 
@@ -104,11 +104,15 @@ def _runnable_installer(tmp_path: Path) -> tuple[Path, Path]:
     )
     probe.chmod(0o755)
     source = INSTALLER.read_text(encoding="utf-8")
-    source = source.replace(
-        'curl -fsSL "$CHANNEL_RAW_BASE/install/STABLE_VERSION"', f"cat {channel}", 1)
-    source = source.replace(
-        'curl -fsSL "$REPO_RAW_BASE/install/index.sh" -o "$delegate"',
-        f'cp {probe} "$delegate"', 1)
+    source, channel_replacements = re.subn(
+        r'curl -fsSL [^\n]*?"\$CHANNEL_RAW_BASE/install/STABLE_VERSION"',
+        lambda _: f"cat {channel}", source, count=1,
+    )
+    source, delegate_replacements = re.subn(
+        r'curl -fsSL [^\n]*?"\$REPO_RAW_BASE/install/index.sh" -o "\$delegate"',
+        lambda _: f'cp {probe} "$delegate"', source, count=1,
+    )
+    assert (channel_replacements, delegate_replacements) == (1, 1)
     script = tmp_path / "index_under_test.sh"
     script.write_text(source, encoding="utf-8")
     return script, probe

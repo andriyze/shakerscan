@@ -32,7 +32,7 @@ shakerscan agent codex
 # or: shakerscan agent opencode
 ```
 
-Starting inside `~/.shakerscan` lets the agent load AGENTS, CLAUDE, and the task-specific skills.
+Starting inside `~/.shakerscan` lets the agent load `AGENTS.md` and the task-specific skills.
 Try:
 
 ```text

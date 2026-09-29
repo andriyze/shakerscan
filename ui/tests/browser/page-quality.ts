@@ -39,6 +39,9 @@ export async function visitAndAuditPage(page: Page, route: string, settleMs = 30
           const inputValue = control instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(control.type)
             ? control.value
             : ''
+          const imageAlt = [...element.querySelectorAll('img[alt]')]
+            .map((image) => image.getAttribute('alt') || '')
+            .join(' ')
           const name = element.getAttribute('aria-label')
             || labelledText
             || explicitLabel?.textContent
@@ -46,6 +49,7 @@ export async function visitAndAuditPage(page: Page, route: string, settleMs = 30
             || element.getAttribute('title')
             || inputValue
             || element.textContent
+            || imageAlt
           return !name?.trim()
         })
         .map((control) => control.outerHTML.slice(0, 180)),

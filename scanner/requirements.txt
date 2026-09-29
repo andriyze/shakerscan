@@ -24,8 +24,6 @@ defusedxml>=0.7.1
 # Python security tools and their direct runtime integrations. Keep scanner
 # executables exact; the generated lock pins every transitive dependency.
 sqlmap==1.10.5
-commix==0.1
-XSStrike==3.2.2
 certifi>=2026.6.17
 cryptography>=50.0.0
 dnspython>=2.8.0

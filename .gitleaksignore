@@ -1,0 +1,11 @@
+# Historical false positives only. Each fingerprint includes its immutable commit ID,
+# so new secrets in the same files remain visible to Gitleaks.
+2171f9faa5125cd9cdd8757dcd94cba057031d15:scripts/_maintenance_2_3_1.py:generic-api-key:11
+39d67d8815c3fff67af86a5921f9a3a89b4f40a5:tests/test_data_exposure.py:aws-access-token:35
+39d67d8815c3fff67af86a5921f9a3a89b4f40a5:tests/test_data_exposure.py:generic-api-key:35
+5aef4449b6a4d8bd9e44eaa229e7f80ab8a9e948:tests/test_runtime_credentials.py:private-key:52
+6bd417256240e12b455b21859ecc83c54c9f7d51:tests/e2e/fixtures/fixtures_server.py:aws-access-token:229
+6bd417256240e12b455b21859ecc83c54c9f7d51:tests/e2e/fixtures/fixtures_server.py:generic-api-key:230
+806234800882f8ef4dbed6ce10fe63e2aefebde6:tests/test_data_exposure.py:aws-access-token:35
+806234800882f8ef4dbed6ce10fe63e2aefebde6:tests/test_data_exposure.py:generic-api-key:35
+c90ffba450359d95a0990acdf7953f40fe535cd1:tests/test_exposure_probe_capability.py:private-key:27

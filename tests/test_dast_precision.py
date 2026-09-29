@@ -128,7 +128,7 @@ def test_ecdhe_rsa_is_not_static_rsa_key_exchange():
         },
     }
 
-    inventory = build_crypto_inventory(tls, "gap-analytics.com", 443)
+    inventory = build_crypto_inventory(tls, "example.net", 443)
 
     assert inventory["algorithms"]["static_rsa_key_exchange"] is False
     assert "static_rsa_key_exchange" not in inventory["issues"]
@@ -143,7 +143,7 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
             "severity": "high",
             "cvss_score": 7.5,
             "confidence": 0.6,
-            "evidence": {"url": "https://gap-analytics.com/admin", "path": None, "status_code": None},
+            "evidence": {"url": "https://example.net/admin", "path": None, "status_code": None},
         },
         {
             "tool": "client_side",
@@ -152,7 +152,7 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
             "cvss_score": 7.5,
             "confidence": 0.6,
             "evidence": {
-                "file": "https://gap-analytics.com/_next/static/chunks/03.js",
+                "file": "https://example.net/_next/static/chunks/03.js",
                 "type": "prototype_pollution_sink",
             },
         },
@@ -162,7 +162,7 @@ def test_precision_policy_downgrades_gap_analytics_style_leads():
             "severity": "medium",
             "cvss_score": 6.1,
             "confidence": 0.7,
-            "evidence": {"file": "https://clerk.gap-analytics.com/npm/@clerk/clerk-js/dist/clerk.browser.js"},
+            "evidence": {"file": "https://clerk.example.net/npm/@clerk/clerk-js/dist/clerk.browser.js"},
         },
     ]
 
@@ -1413,7 +1413,7 @@ def test_ssti_ignores_generic_next_html_shell_with_incidental_49(monkeypatch):
 
     result = asyncio.run(
         active_checks.ssti_test(
-            "https://gap-analytics.com/api/user/?id=1",
+            "https://example.net/api/user/?id=1",
             params_to_test=["id"],
             max_payloads=1,
         )

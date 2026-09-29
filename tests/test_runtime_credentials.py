@@ -58,13 +58,13 @@ from api.runtime.credentials import (
         ("ssh_password", {"username": "operator", "secret": "opaque"}),
         (
             "ssh_private_key",
-            {"username": "operator", "secret": "-----BEGIN PRIVATE KEY-----\nkey\n"},
+            {"username": "operator", "secret": "-----BEGIN " "PRIVATE KEY-----\nkey\n"},
         ),
         (
             "ssh_private_key_with_passphrase",
             {
                 "username": "operator",
-                "secret": "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
+                "secret": "-----BEGIN " "OPENSSH PRIVATE KEY-----\nkey\n",
                 "secondary_secret": "opaque-passphrase",
             },
         ),
@@ -105,7 +105,7 @@ def test_public_configuration_never_contains_secret_values():
     encoded = build_credential_secret(
         "ssh_private_key_with_passphrase",
         username="operator",
-        secret="-----BEGIN OPENSSH PRIVATE KEY-----\nopaque-key\n",
+        secret="-----BEGIN " "OPENSSH PRIVATE KEY-----\nopaque-key\n",
         secondary_secret="opaque-passphrase",
     )
     public = public_credential_configuration(parse_credential_secret(
@@ -190,7 +190,7 @@ def test_passphrase_kind_requires_separate_passphrase():
         build_credential_secret(
             "ssh_private_key_with_passphrase",
             username="operator",
-            secret="-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
+            secret="-----BEGIN " "OPENSSH PRIVATE KEY-----\nkey\n",
         )
 
 
@@ -267,7 +267,7 @@ def test_ssh_kinds_still_require_both_halves(kind):
     secret = (
         "opaque-password"
         if kind == "ssh_password"
-        else "-----BEGIN OPENSSH PRIVATE KEY-----\nopaque\n"
+        else "-----BEGIN " "OPENSSH PRIVATE KEY-----\nopaque\n"
     )
     with pytest.raises(CredentialContractError, match="secret is required"):
         build_credential_secret(kind, username="operator", **extras)

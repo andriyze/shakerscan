@@ -4000,6 +4000,7 @@ except ModuleNotFoundError:
     from api.credential_api import public_credential_validation_errors
 
 try:
+    from host_guard import configure_host_guard
     from public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -4010,6 +4011,7 @@ try:
         public_v2_surface,
     )
 except ModuleNotFoundError:
+    from api.host_guard import configure_host_guard
     from api.public_api_contract import (
         PublicV2BodyLimitMiddleware,
         PublicV2IdempotencyMiddleware,
@@ -7275,9 +7277,8 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 # covers the UI reached at the same host as the API itself, which the fixed allowlist could not
 # name: a LAN install answered on one private IP and the same engine opened by public IP, by
 # hostname or through a tunnel lost its CORS headers on reads and 403'd on every write.
-app.add_middleware(
-    SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"],
-)
+app.add_middleware(SameHostCorsMiddleware, expose_headers=_cors_kwargs["expose_headers"])
+configure_host_guard(app, allow_origins=_cors_kwargs["allow_origins"], allow_origin_regex=str(_cors_kwargs.get("allow_origin_regex") or ""))
 
 _fastapi_openapi = getattr(app, "openapi", None)
 if callable(_fastapi_openapi):

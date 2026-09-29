@@ -1011,7 +1011,7 @@ def test_check_sqli_response_suppresses_extraction_for_reflected_param():
 
 
 def test_custom_sqli_test_ignores_reflecting_app(monkeypatch):
-    """Reproduces the tidyhelpers false positive: an app that echoes the query
+    """Reproduces an observed false positive: an app that echoes the query
     (so the SQL payload appears in the page) but raises no DB error and returns
     no real banner must produce zero SQLi findings."""
 
@@ -1023,7 +1023,7 @@ def test_custom_sqli_test_ignores_reflecting_app(monkeypatch):
 
     monkeypatch.setattr(active_checks, "run", reflecting_run)
 
-    result = asyncio.run(custom_sqli_test("https://tidyhelpers.com/search?query=test"))
+    result = asyncio.run(custom_sqli_test("https://example.net/search?query=test"))
 
     assert result["scan_completed"] is True
     assert result["vulnerable"] is False

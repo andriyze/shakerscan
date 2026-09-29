@@ -81,6 +81,21 @@ An explicit or environment-configured instance wins over the zero-config public 
 
 This command does not install firewall rules, create router forwards, disable existing authorization, or bypass API token transport requirements. Bearer credentials are still refused over plain HTTP. Do not carry an Enterprise token environment into an unauthenticated LAN session.
 
+### Host names the API answers to
+
+The API refuses requests addressed to a public DNS name it was not given (HTTP 421), which stops
+DNS-rebinding pages from reading it through the operator's browser. IP addresses, `localhost`,
+single-label names, private-use suffixes (`.local`, `.lan`, `.home.arpa`, `.internal` and similar),
+Tailscale MagicDNS names (`*.ts.net`), `SHAKERSCAN_PUBLIC_HOST` and the hosts of configured CORS
+origins always work. To reach the engine by another name, such as a tunnel or reverse proxy
+hostname, list it in the server's `.env`:
+
+```bash
+SHAKERSCAN_ALLOWED_HOSTS=scan.example.com,.tunnel.example.net
+```
+
+Entries are exact names, `.suffix` entries, or `*` to turn the check off.
+
 The selected UI/API bind and display host are persisted in the server's owner-only `.env`, like existing remote settings. Reserve the server's DHCP address, or rerun `start --lan` after an address change to rediscover it. Cached Tailscale addresses are not used for a new explicit LAN start.
 
 Return to a persisted localhost-only binding with:

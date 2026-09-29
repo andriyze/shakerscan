@@ -30,3 +30,35 @@ updates:
     open-pull-requests-limit: 3
     cooldown:
       default-days: 7
+  - package-ecosystem: docker-compose
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  # Python: the scanner/API lock is hash-pinned; the client is a separate PyPI package.
+  - package-ecosystem: pip
+    directory: "/scanner"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: pip
+    directory: "/client"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: npm
+    directory: "/ui"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      ui-minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: "/posture"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

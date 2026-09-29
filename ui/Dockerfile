@@ -68,13 +68,15 @@ RUN set -eu; \
     done; \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
-# Copy built assets
+# Copy built assets. The server runs as the image's unprivileged `node` user; only the Next.js
+# cache directory needs to be writable by it.
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/UI_BUILD_VERSION ./UI_BUILD_VERSION
 COPY --from=builder /app/UI_EXPECTED_API_BUILD_FINGERPRINT ./UI_EXPECTED_API_BUILD_FINGERPRINT
 COPY --from=builder /app/UI_SOURCE_REVISION ./UI_SOURCE_REVISION
+RUN mkdir -p /app/.next/cache && chown -R node:node /app/.next/cache
 
 # Serve as the image's unprivileged `node` user. The application files stay root-owned and
 # read-only to the server; only Next.js's runtime cache directory is writable.
@@ -82,5 +84,7 @@ RUN mkdir -p .next/cache && chown -R node:node .next/cache
 USER node
 
 EXPOSE 3000
+
+USER node
 
 CMD ["node", "server.js"]

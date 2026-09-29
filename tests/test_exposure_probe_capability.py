@@ -24,7 +24,7 @@ from tests.test_scan_orchestrator import SCAN_ID, _action
 def test_secret_material_outranks_structural_disclosure():
     private_key = classify_exposure(
         path="/id_rsa", status=200, headers={"Content-Type": "text/plain"},
-        body=b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn...",
+        body=b"-----BEGIN " b"OPENSSH PRIVATE KEY-----\nb3Blbn...",
     )
     assert private_key is not None
     assert private_key.exposure_class == "private_key_material"
@@ -124,7 +124,7 @@ def test_intentionally_public_well_known_files_are_not_confidential():
     assert ordinary.exposure_class == "listed_file"
     assert not ordinary.proves_sensitive_exposure
     # Secret material inside a well-known file is still reported (secret check runs first).
-    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n"
+    key = b"-----BEGIN " b"RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n"
     leaked = classify_confidential_file(
         path="/.well-known/security.txt", status=200,
         headers={"Content-Type": "text/plain"}, body=key,
@@ -133,7 +133,7 @@ def test_intentionally_public_well_known_files_are_not_confidential():
 
 
 def test_secret_material_excerpt_withholds_content():
-    body = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA_secret_bytes\n"
+    body = b"-----BEGIN " b"RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA_secret_bytes\n"
     signature = classify_exposure(
         path="/id_rsa", status=200, headers={"Content-Type": "text/plain"}, body=body,
     )
