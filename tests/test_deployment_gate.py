@@ -7,6 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 import api  # noqa: E402
+from scan.finding_identity import canonical_finding_fingerprint  # noqa: E402
 
 
 def _scan(findings, status="completed", run_kind="web_dast", scan_type="smart"):
@@ -51,38 +52,76 @@ def test_target_active_only_marks_provenance():
     assert match and match[0].get("from_target_active") is True
 
 
+_EXPOSURE = {"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}
+
+
+def _persisted(fid, fingerprint, *, scan_id, last_seen_scan_id):
+    active = {**_crit(fid, fingerprint, _EXPOSURE["title"]), **{k: _EXPOSURE[k] for k in ("severity", "tool", "url")}}
+    row = {"id": fid, "fingerprint": fingerprint, "severity": "high",
+           "scan_id": scan_id, "last_seen_scan_id": last_seen_scan_id}
+    return active, row
+
+
 def test_reobserved_persisted_finding_does_not_duplicate_an_unfingerprinted_report():
-    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
-    history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
-                        "scan_id": "old-scan", "last_seen_scan_id": scan["id"]}], "total": 1, "complete": True}
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="old-scan",
+                             last_seen_scan_id=scan["id"])
+    history = {"rows": [row], "total": 1, "complete": True}
     decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
     assert decision["decision"] == "block"
     assert len(decision["blocking_findings"]) == 1
     assert decision["carried_over"]["count"] == 0
     assert not decision["blocking_findings"][0].get("from_target_active")
+    assert decision["blocking_findings"][0]["id"] == "f1"
 
 
-def test_same_display_text_from_an_earlier_scan_remains_a_separate_blocker():
-    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
-    history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
-                        "scan_id": "old-scan", "last_seen_scan_id": "old-scan"}], "total": 1, "complete": True}
+def test_an_earlier_scan_is_not_double_counted_after_a_later_scan_takes_the_row_over():
+    """findings.scan_id and last_seen_scan_id move to the newest scan that re-observed a row.
+    Viewing the earlier scan's decision must still count its report row and the persisted row
+    once (live: 17 blockers for 9 findings on the first of two Juice Shop scans)."""
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="later-scan",
+                             last_seen_scan_id="later-scan")
+    history = {"rows": [row], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["carried_over"]["count"] == 0
+
+
+def test_an_exception_on_the_persisted_finding_covers_the_scan_that_reported_it():
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id=scan["id"],
+                             last_seen_scan_id=scan["id"])
+    exception = {"id": "e1", "finding_id": "f1", "status": "active", "policy_id": None,
+                 "target_id": "t1", "owner": "o", "approver": "a", "reason": "r",
+                 "compensating_controls": "c", "expires_at": "2099-01-01T00:00:00+00:00"}
+    decision = api.build_deployment_decision(
+        scan, target_active_findings=[active], target_history={"rows": [row], "total": 1, "complete": True},
+        db_exceptions=[exception],
+    )
+    assert decision["blocking_findings"] == []
+    assert [item["id"] for item in decision["applied_exceptions"]] == ["f1"]
+    assert decision["decision"] == "needs_approval"
+
+
+def test_same_display_text_with_a_different_fingerprint_remains_a_separate_blocker():
+    scan = _scan([dict(_EXPOSURE)])
+    active, row = _persisted("f1", "t:another-finding", scan_id="old-scan", last_seen_scan_id="old-scan")
+    history = {"rows": [row], "total": 1, "complete": True}
     decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
     assert len(decision["blocking_findings"]) == 2
     assert decision["blocking_findings"][1]["from_target_active"] is True
     assert decision["carried_over"]["count"] == 1
 
 
-def test_one_unidentified_report_cannot_hide_two_reobserved_active_rows():
-    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = [{**_crit(fid, f"t:{fid}", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
-              for fid in ("f1", "f2")]
-    history = {"rows": [{"id": fid, "fingerprint": f"t:{fid}", "severity": "high",
-                        "scan_id": "old-scan", "last_seen_scan_id": scan["id"]} for fid in ("f1", "f2")],
-               "total": 2, "complete": True}
-    decision = api.build_deployment_decision(scan, target_active_findings=active, target_history=history)
-    assert len(decision["blocking_findings"]) == 2
+def test_one_report_row_cannot_hide_two_active_rows():
+    scan = _scan([dict(_EXPOSURE)])
+    first, first_row = _persisted("f1", canonical_finding_fingerprint(_EXPOSURE), scan_id="old-scan",
+                                  last_seen_scan_id=scan["id"])
+    second, second_row = _persisted("f2", "t:f2", scan_id="old-scan", last_seen_scan_id=scan["id"])
+    history = {"rows": [first_row, second_row], "total": 2, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[first, second], target_history=history)
+    assert [item["id"] for item in decision["blocking_findings"]] == ["f1", "f2"]
     assert decision["decision"] == "block"
 
 

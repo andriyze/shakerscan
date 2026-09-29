@@ -53,6 +53,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
+from scan.finding_identity import canonical_finding_fingerprint
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -8089,6 +8090,14 @@ def build_deployment_decision(
             raw_decision = "allow"
             rationale = "No high/critical findings met the deployment block threshold."
         policy_name = f"{scan_type or 'scan'}-default-v1"
+    if product == "dast" and isinstance(findings, list):
+        # Report rows carry no persisted identity, and findings.scan_id moves to whichever
+        # scan last saw a row. Derive the fingerprint persistence keyed each row by.
+        findings = [
+            {**item, "fingerprint": item.get("fingerprint") or canonical_finding_fingerprint(item)}
+            if isinstance(item, dict) else item
+            for item in findings
+        ]
 
     if raw_decision == "review":
         raw_decision = "needs_approval"

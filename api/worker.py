@@ -411,12 +411,12 @@ try:
 except ImportError:
     from scanner.constants import resolve_scan_budget
 try:
-    from findings import templated_finding_identity as _templated_finding_identity
+    from scan.finding_identity import canonical_finding_fingerprint
     from scan.finding_reconciliation import reconcile_legacy_finding_row
 except ModuleNotFoundError as exc:
-    if exc.name != "findings":
+    if exc.name not in {"findings", "scan"}:
         raise
-    from scanner.findings import templated_finding_identity as _templated_finding_identity
+    from api.scan.finding_identity import canonical_finding_fingerprint
     from api.scan.finding_reconciliation import reconcile_legacy_finding_row
 
 # Configuration
@@ -2839,29 +2839,9 @@ def generate_finding_fingerprint(finding: dict) -> str:
     reported per payload variant collapse to a single DB row instead of dozens
     (docs proposed-next-steps §5). Non-endpoint findings (TLS, headers, DNS,
     config) keep the stable scanner ID so distinct config issues never merge.
+    The API recomputes the same value to match report rows to persisted rows.
     """
-    # Templated identity for endpoint findings — primary count-explosion fix.
-    try:
-        templated = _templated_finding_identity(finding)
-    except Exception:
-        templated = None
-    if templated:
-        return "t:" + hashlib.sha256(templated.encode()).hexdigest()[:16]
-
-    # Prefer scanner's original ID if available (full format: "tool:hash")
-    scanner_id = finding.get('id', '')
-    if scanner_id:
-        return scanner_id
-
-    # Fallback to computed fingerprint for findings without scanner ID
-    key_parts = [
-        finding.get('title', ''),
-        finding.get('tool', ''),
-        finding.get('url', ''),
-        finding.get('cwe', '')
-    ]
-    key_string = '|'.join(str(p) for p in key_parts)
-    return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+    return canonical_finding_fingerprint(finding)
 
 
 def _finding_proof_rank(finding: dict[str, Any]) -> int:
