@@ -850,18 +850,31 @@ def collect_scorecard(report, fixture):
     ]
     selected_family_gaps = list(canonical_coverage.get("selected_family_gaps") or [])
     canonical_grade_reliable = (report.get("result") or {}).get("grade_reliable")
+    attempts_by_family: dict[str, int] = {}
+    for row in family_coverage:
+        family = str(row.get("family") or "")
+        if family:
+            attempts_by_family[family] = attempts_by_family.get(family, 0) + max(
+                0, int(row.get("attempted_candidates") or 0)
+            )
     attempted_families = {
-        str(row.get("family"))
-        for row in family_coverage
-        if int(row.get("attempted_candidates") or 0) > 0
-        or str(row.get("coverage_status")) == "complete"
+        family for family, attempts in attempts_by_family.items() if attempts > 0
     }
-    # Mandatory family-attempt gate (§17): a selected expected family that
-    # attempted nothing is a hard failure, independent of finding matching.
-    family_attempt_failures = sorted({
-        row.get("family") for row in family_coverage
-        if row.get("required") and str(row.get("reason")) == "zero_attempts"
-    })
+    # A complete action with no candidates examined is not a family attempt.
+    # Current V2 reports may omit the family row entirely when discovery made
+    # no candidate manifest. Check every expected family against actual attempts
+    # whenever the canonical per-family coverage is available.
+    family_attempt_failures = {
+        str(row["family"]) for row in family_coverage
+        if row.get("family") and row.get("required")
+        and str(row.get("reason")) == "zero_attempts"
+    }
+    if family_coverage:
+        family_attempt_failures.update(
+            str(entry.get("family")) for entry in expected
+            if entry.get("family") and attempts_by_family.get(str(entry["family"]), 0) == 0
+        )
+    family_attempt_failures = sorted(family_attempt_failures)
     return {
         "total_findings": len(findings),
         "verified_high_critical": len(verified_hc),

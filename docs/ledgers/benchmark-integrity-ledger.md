@@ -277,3 +277,9 @@ claim instead of deleting it.
 - The authenticated unseeded crAPI scan `1763470d-c4f5-41c4-b708-7c18a6b263e3` still failed
   the quality gate: no SQL injection request candidate and no object-authorization candidate
   were tested. This correction does not claim either detector or authenticated discovery works.
+- A fresh two-principal fix-build scan `7dce9e6b-9a98-4f53-8201-040e4c5bb8a9` confirmed
+  the same recall gap. Its BOLA family row reported `complete` with zero candidates, SQL injection
+  had no family row, and the benchmark incorrectly marked its selected-family attempt gate green.
+  The gate now requires actual candidate attempts for every expected family when canonical
+  family coverage is present. This makes the coverage failure explicit; it does not change the
+  0/4 recall result or relax proof requirements.

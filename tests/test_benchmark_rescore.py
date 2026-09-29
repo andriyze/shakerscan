@@ -30,6 +30,27 @@ def test_crapi_sqli_expectation_matches_sql_backend_route_only():
     assert b.match_expectation(expectation, [finding], set()) is None
 
 
+def test_expected_family_without_candidates_fails_attempt_gate_even_when_complete():
+    fixture = {"expected": [
+        {"id": "coupon", "family": "sqli", "route": "/workshop/api/shop/apply_coupon"},
+        {"id": "orders", "family": "bola", "route": "/workshop/api/shop/orders"},
+    ], "gates": {}}
+    report = {"coverage": {"family_coverage": [
+        {"family": "bola", "required": True, "planned_candidates": 0,
+         "attempted_candidates": 0, "coverage_status": "complete"},
+        {"family": "authz_surface", "required": True, "planned_candidates": 14,
+         "attempted_candidates": 14, "coverage_status": "complete"},
+    ]}}
+    card = b.collect_scorecard(report, fixture)
+    assert card["attempted_families"] == ["authz_surface"]
+    assert card["family_attempt_failures"] == ["bola", "sqli"]
+    attempt_gate = next(
+        gate for gate in b.apply_gates(card, fixture)
+        if gate["gate"] == "selected_families_attempted"
+    )
+    assert attempt_gate["pass"] is False
+
+
 def _jwt(**claims):
     def encode(value):
         raw = json.dumps(value, separators=(",", ":")).encode()
