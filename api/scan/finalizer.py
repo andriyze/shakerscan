@@ -1171,6 +1171,7 @@ def _posture_sections(
     """
     http_section: dict[str, Any] = {}
     tls_section: dict[str, Any] = {}
+    unexamined_tls: list[dict[str, Any]] = []
     dns_section: dict[str, Any] = {}
     technologies: list[dict[str, Any]] = []
     server_versions: dict[str, Any] = {}
@@ -1243,6 +1244,19 @@ def _posture_sections(
                     "set_cookie_metadata": list(response.get("set_cookie_metadata") or ()),
                 }
             elif kind == "tls_protocol":
+                if row.get("status") == "not_examined":
+                    # A frozen address this worker could not route carries no TLS
+                    # evidence; it is named as a coverage gap, never shown as the
+                    # target's TLS posture.
+                    gap = row.get("examination_gap")
+                    unexamined_tls.append({
+                        "origin": row.get("origin"),
+                        "address": row.get("pinned_address"),
+                        "reason": (
+                            gap.get("reason") if isinstance(gap, Mapping) else None
+                        ) or "not_examined",
+                    })
+                    continue
                 candidate = {
                     key: row.get(key) for key in (
                         "protocol", "cipher", "cipher_bits", "weak_cipher",
@@ -1298,6 +1312,8 @@ def _posture_sections(
     sections: dict[str, Any] = {}
     if http_section:
         sections["http"] = http_section
+    if unexamined_tls:
+        tls_section["unexamined_addresses"] = unexamined_tls[:64]
     if tls_section:
         sections["tls"] = tls_section
     if dns_section:

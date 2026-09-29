@@ -4094,6 +4094,8 @@ def _canonical_tls_placement_result(
         dict(item)
         for item in placed.get("observations") or []
         if isinstance(item, Mapping) and item.get("kind") == "tls_protocol"
+        # A frozen address the worker could not route made no handshake.
+        and item.get("status") != "not_examined"
     ][:4096]
     observation = observations[0] if observations else {}
     consumed = (
@@ -15724,6 +15726,8 @@ def _canonical_pre_scan_validation(
     tls_reachable = any(
         isinstance(item, Mapping)
         and item.get("kind") == "tls_protocol"
+        # An address the worker could not route was never contacted.
+        and item.get("status") != "not_examined"
         and item.get("pinned_address") in allowed_addresses
         for item in tls_observations
     )

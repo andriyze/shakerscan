@@ -110,7 +110,7 @@ test('the page renders one coverage-gaps panel and colours a qualified conclusio
   assert.match(detail, /resultPresentation\.confidenceTone === 'qualified' \? 'text-amber-200'/)
   assert.match(detail, /that did not finish:/)
   assert.doesNotMatch(detail, /What was not established<\/p>/)
-  assert.match(detail, /absence of a finding in an unfinished family is not evidence of safety/)
+  assert.match(detail, /missing or incomplete coverage does not establish absence of vulnerabilities/)
 })
 
 test('finding rows show a route, a proof label, and survive narrow screens', () => {

@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -173,6 +173,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
     + resultPresentation.coverageGapReasons.length
     + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
+    + (resultPresentation.candidateGapFamilies.length > 0 ? 1 : 0)
   const assuranceGaps = (assurance?.gaps || [])
     .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
 
@@ -255,7 +256,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 {resultPresentation.coverageIncomplete
                   ? resultPresentation.incompleteFamilies.length > 0
                     ? `Scores the work that ran; ${resultPresentation.incompleteFamilies.length} selected check ${resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} did not finish.`
-                    : 'Scores the work that ran; the run did not finish everything it planned.'
+                    : resultPresentation.candidateGapFamilies.length > 0
+                      ? 'Scores the work that ran; some selected checks had no testable candidates.'
+                      : 'Scores the work that ran; review the coverage limits below.'
                   : 'How much planned work, candidate testing, identity coverage and verification ran.'}
               </p>
             </>
@@ -327,7 +330,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           <div><dt className="inline text-gray-500">Identity assurance </dt><dd className="inline text-gray-200">{resultPresentation.authenticationAssurance}</dd></div>
           <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
           {resultPresentation.resolvedFamilies.length > 0 && (
-            <div><dt className="inline text-gray-500">Check families run </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
+            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
           )}
         </dl>
         {resultPresentation.testingWarning && (
@@ -367,10 +370,17 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                   <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
                 </li>
               )}
+              {resultPresentation.candidateGapFamilies.length > 0 && (
+                <li>
+                  • Selected check families with no testable candidates recorded:{' '}
+                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.join(', ')}</span>.
+                  Their absence of findings does not establish that those vulnerability classes were tested.
+                </li>
+              )}
               {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}
               {resultPresentation.coverageIncomplete && (
                 <li className="text-amber-100/60">
-                  Findings above are real; absence of a finding in an unfinished family is not evidence of safety. Coverage details are in the execution section below.
+                  Findings above are real; missing or incomplete coverage does not establish absence of vulnerabilities. Coverage details are in the execution section below.
                 </li>
               )}
             </ul>
@@ -678,45 +688,12 @@ function ScanFindingContextCard({
   error: string | null
 }) {
   if (!scan?.target_id) return null
-  const rawCurrent = Array.isArray(scan?.result?.findings) ? scan.result.findings : []
-  const scanPersistedCurrent = Array.isArray(scan?.findings) ? scan.findings : []
-  const historyPersistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
-  const persistedCurrent = [
-    ...scanPersistedCurrent,
-    ...historyPersistedCurrent.filter((finding) => (
-      !scanPersistedCurrent.some((current: Finding) => current.id === finding.id)
-    )),
-  ]
-  const persistedByKey = new Map(
-    persistedCurrent.map((finding: Finding) => [scanFindingIdentity(finding), finding]),
-  )
-  const currentKeys = new Set(rawCurrent.map(scanFindingIdentity))
-  const additionalPersistedCurrent = persistedCurrent.filter(
-    (finding: Finding) => !currentKeys.has(scanFindingIdentity(finding)),
-  )
-  const current = [
-    ...rawCurrent.map((finding: any, index: number) => {
-      const persisted = persistedByKey.get(scanFindingIdentity(finding))
-      return {
-        ...finding,
-        ...persisted,
-        _rowKey: `raw-${persisted?.id || finding.id || finding.fingerprint || index}`,
-        _origin: 'observed in this scan' as const,
-        _persisted: Boolean(persisted?.id || finding.id),
-      }
-    }),
-    ...additionalPersistedCurrent.map((finding) => ({
-      ...finding,
-      _rowKey: `persisted-${finding.id}`,
-      _origin: 'observed in this scan' as const,
-      _persisted: true,
-    })),
-  ]
+  const { current, persistedCurrentCount } = reconciledScanFindings(scan, targetFindings)
   // The list is what an operator reads first, so the proven critical must not sit under a
   // thousand informational candidates: order by proof, then severity, keeping the server's
   // order within a tier.
   current.sort((a: any, b: any) => findingPriority(a) - findingPriority(b))
-  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrent.length)
+  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrentCount)
   const provenCount = current.filter((finding: any) => (
     finding.verified === true && String(finding.proof_state || '') === 'verified'
   )).length

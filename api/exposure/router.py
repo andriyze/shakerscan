@@ -46,6 +46,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .services_router import router as services_router
 from .service_inventory import origin as _service_origin
+from .proof_rollup import active_finding_proof_counts
 
 router = APIRouter()
 router.include_router(services_router)
@@ -1145,6 +1146,24 @@ async def exposure_assets(
             root_domain,
         )
 
+    # The finding list preserves scan-time deterministic proof after an inconclusive
+    # retest. Reuse its projection here instead of counting only the latest verdict.
+    target_ids = [row["id"] for row in target_rows]
+    ai_ids = [row["id"] for row in ai_rows]
+    async with _pool().acquire() as conn:
+        proof_rows = await conn.fetch(
+            """SELECT f.*, CASE WHEN latest_retest.verdict IS NOT NULL
+                       THEN latest_retest.verification_mode END AS latest_retest_mode
+               FROM findings f
+               LEFT JOIN LATERAL (
+                   SELECT verdict, verification_mode FROM finding_verifications
+                   WHERE finding_id=f.id ORDER BY created_at DESC, id DESC LIMIT 1
+               ) latest_retest ON TRUE
+               WHERE f.status='active'
+                 AND (f.target_id=ANY($1::uuid[]) OR f.ai_target_id=ANY($2::uuid[]))""",
+            target_ids, ai_ids,
+        )
+    proof_counts = active_finding_proof_counts(proof_rows)
     assets: list[dict[str, Any]] = []
 
     for row in target_rows:
@@ -1156,9 +1175,10 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
-        verified = int(row.get("active_verified") or 0)
-        needs_verification = int(row.get("active_needs_verification") or 0)
-        investigator_verified = int(row.get("investigator_verified_count") or 0)
+        proof = proof_counts.get(("target", str(row["id"])), {})
+        verified = proof.get("verified", 0)
+        needs_verification = proof.get("needs_verification", 0) + int(row.get("investigator_suspected_count") or 0)
+        investigator_verified = proof.get("investigator_verified", 0)
         investigator_suspected = int(row.get("investigator_suspected_count") or 0)
         completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("url"), kind=asset_kind)
@@ -1249,8 +1269,9 @@ async def exposure_assets(
         crit = int(row["active_critical"] or 0)
         high = int(row["active_high"] or 0)
         total = int(row["active_total"] or 0)
-        verified = int(row.get("active_verified") or 0)
-        needs_verification = int(row.get("active_needs_verification") or 0)
+        proof = proof_counts.get(("ai", str(row["id"])), {})
+        verified = proof.get("verified", 0)
+        needs_verification = proof.get("needs_verification", 0)
         completion = _scan_completion_flags(row.get("completion_status"), row.get("top_coverage_status"))
         exposure_class = _exposure_class(row.get("endpoint_url"), kind="ai")
         total_scans = int(row.get("scan_count") or 0)

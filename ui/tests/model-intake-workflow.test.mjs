@@ -477,7 +477,7 @@ test('the deployment bundle arrives prefilled from the scanned revision', () => 
 
 test('fields the operator should not have to invent are offered, not demanded', () => {
   assert.match(workflow, /suggestIdempotencyKey/)
-  assert.match(workflow, /crypto\.randomUUID/)
+  assert.match(workflow, /createRandomUUID/)
   assert.match(workflow, /Replace the suggestion with your release ticket/)
   // Manifest and policy-decision IDs come back from the workflow itself.
   assert.match(workflow, /setManifestId\(latestManifest\.id\)/)

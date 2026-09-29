@@ -239,3 +239,40 @@ def test_observed_technologies_carry_a_label_not_an_invented_percentage():
     for item in items:
         assert "confidence" not in item, "the probe assigns no numeric confidence"
         assert item["confidence_label"] == "observed"
+
+
+def test_tls_addresses_the_worker_could_not_route_are_named_not_projected():
+    obs = _observations()
+    success = dict(obs["baseline.tls"][0], origin="https://target.test",
+                   pinned_address="192.0.2.10")
+    obs["baseline.tls"] = [
+        {"kind": "tls_protocol", "status": "not_examined",
+         "origin": "https://target.test", "pinned_address": "2001:db8::10", "port": 443,
+         "examination_gap": {"reason": "worker_route_unavailable",
+                             "address_family": "ipv6"}},
+        success,
+    ]
+    tls = _posture_sections(obs)["tls"]
+    assert tls["status"] == "success"
+    assert tls["protocol"] == "TLSv1.3"
+    assert tls["unexamined_addresses"] == [{
+        "origin": "https://target.test",
+        "address": "2001:db8::10",
+        "reason": "worker_route_unavailable",
+    }]
+
+
+def test_tls_with_only_unroutable_addresses_carries_no_posture():
+    obs = _observations()
+    obs["baseline.tls"] = [{
+        "kind": "tls_protocol", "status": "not_examined",
+        "origin": "https://target.test", "pinned_address": "2001:db8::10", "port": 443,
+        "examination_gap": {"reason": "worker_route_unavailable"},
+    }]
+    sections = _posture_sections(obs)
+    assert sections["tls"] == {"unexamined_addresses": [{
+        "origin": "https://target.test",
+        "address": "2001:db8::10",
+        "reason": "worker_route_unavailable",
+    }]}
+    assert "certificate" not in sections["tls"]

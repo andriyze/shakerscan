@@ -254,31 +254,40 @@ def _batch_plan(tool, reserved):
     )
 
 
-def test_a_batched_attempt_is_paced_to_spend_what_it_reserved():
-    """The wall is the only runtime enforcement these tools have.
+def test_a_batched_attempt_never_outruns_its_request_ceiling_over_the_full_wall():
+    """The reservation must bound traffic over the WHOLE wall, not a fraction of it.
 
-    Nothing counts their requests, so the inter-request delay is what keeps
-    real traffic inside the reservation. A fixed one-second delay made the wall
-    bind long before the requests did: sqlmap needs roughly a hundred requests
-    to reach a verdict on an obvious injection and takes about two seconds
-    unpaced, but at one second apiece no slice a batch could afford let it
-    finish, so every attempt returned unproven.
+    Nothing counts these tools' requests at run time and the process runs until the wall
+    kills it, so the inter-request delay is the only bound on traffic across that entire
+    window. An earlier pacing spread the reserved requests over 0.6 of the wall to leave
+    start-up headroom; over the full wall the tool kept issuing requests and sent ~1.67x
+    its reserved count, tripping the pinned connection/wire ceiling and failing the whole
+    attempt as ``adapter_failed`` with the full hold consumed and nothing proven -- the
+    exact way every injectable SQLi candidate came back partial on the benchmark. The
+    delay must make the reserved request count a true upper bound for the whole wall.
     """
-    plan = _batch_plan("sqlmap", {"http_requests": 160, "tool_wall_seconds": 30})
-    argv = list(plan.argv)
-    delay = float(argv[argv.index("--delay") + 1])
-    hard = dict(plan.hard_budget)
-    assert hard["http_requests"] <= 160 and hard["tool_wall_seconds"] <= 30
-    # The pacing must leave headroom: planning to consume the whole wall means
-    # start-up and teardown push the tool past its deadline and every attempt
-    # returns "timeout" having proved nothing.
-    planned_span = delay * hard["http_requests"]
-    assert planned_span < hard["tool_wall_seconds"], (
-        f"pacing plans {planned_span:.1f}s of a {hard['tool_wall_seconds']}s wall"
-    )
-    assert planned_span <= hard["tool_wall_seconds"] * 0.9
-    # ...and still be slow enough that the wall bounds the traffic.
-    assert delay > 0
+    for reserved in ({"http_requests": 160, "tool_wall_seconds": 30},
+                     {"http_requests": 400, "tool_wall_seconds": 180}):
+        plan = _batch_plan("sqlmap", reserved)
+        argv = list(plan.argv)
+        delay = float(argv[argv.index("--delay") + 1])
+        hard = dict(plan.hard_budget)
+        assert hard["http_requests"] <= reserved["http_requests"]
+        assert hard["tool_wall_seconds"] <= reserved["tool_wall_seconds"]
+        # Requests the tool can actually issue before the wall kills it. This is the
+        # figure the connection/wire ceiling meters, and it must stay at or below the
+        # reserved request ceiling -- the assertion that fails on the 0.6-of-the-wall
+        # pacing, which lets the tool send far more than it reserved.
+        requests_over_full_wall = hard["tool_wall_seconds"] / delay
+        assert requests_over_full_wall <= hard["http_requests"], (
+            f"pacing lets the tool send {requests_over_full_wall:.0f} of a "
+            f"{hard['http_requests']}-request ceiling over its {hard['tool_wall_seconds']}s wall"
+        )
+        # ...while still reaching a verdict early: ~a hundred requests fit well inside
+        # the wall, so a real injection is confirmed, not starved.
+        verdict_requests = 100
+        assert delay * verdict_requests < hard["tool_wall_seconds"]
+        assert delay > 0
 
 
 def test_pacing_never_claims_more_requests_than_the_wall_can_cover():

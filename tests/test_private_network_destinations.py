@@ -68,6 +68,27 @@ def test_a_refusing_deployment_says_which_setting_refused_the_internal_target(mo
     assert "'internal'" in detail, "the environment the target was judged under is named"
 
 
+def test_a_target_shown_as_internal_but_judged_as_production_is_explained(monkeypatch):
+    """The target list derives an ``internal`` cohort from a private URL; policy reads only the
+    stored environment/cohort, so the same row is judged as production. The refusal must not
+    read as a contradiction of what the target list shows."""
+    from asset_cohorts import target_cohort
+    from target_authorization import effective_target_environment
+
+    url = "http://172.17.0.1:3001"
+    assert target_cohort(url=url, metadata={}) == "internal"
+    environment = effective_target_environment({})
+    assert environment == "production"
+
+    monkeypatch.setenv(SETTING, "refuse")
+    for judged in (environment, "unknown", ""):
+        detail = _refusal(url, environment=judged)
+        assert "evaluated under the 'production' environment" in detail
+        assert "an 'internal' cohort does not make it a Lab target" in detail
+        assert "set the target's cohort to Lab" in detail
+        assert "judged as" not in detail
+
+
 def test_a_lab_target_stays_admitted_under_a_refusing_deployment(monkeypatch):
     monkeypatch.setenv(SETTING, "refuse")
     assert _admit("http://172.17.0.1:3001", environment="lab") == ["172.17.0.1"]

@@ -315,10 +315,11 @@ EXTERNAL_VERIFICATION_FLOORS: dict[str, dict[str, int]] = {
 # and the family spent its entire budget proving nothing. Below these floors an
 # attempt is not worth starting -- funding the top of a ranked manifest and
 # reporting the rest as unattempted is strictly better than diluting all of it.
-# How much of a batched attempt's wall its pacing may plan to consume. The
-# remainder absorbs process start-up and teardown so a healthy run finishes
-# inside its deadline instead of being killed at it.
-_BATCH_ATTEMPT_WALL_UTILISATION = 0.6
+# The fraction of its reserved request ceiling a batched attempt is paced to
+# actually send across the WHOLE wall. Below 1.0 it keeps a headroom margin so
+# scheduling jitter cannot push the tool over the pinned connection/wire ceiling
+# and fail the whole attempt (see _batch_attempt_pacing).
+_BATCH_ATTEMPT_REQUEST_HEADROOM = 0.9
 # nuclei's global request rate, as fixed in its argv; batch pacing may lower it, never raise it.
 _NUCLEI_RATE_CEILING = 10
 # The tool-keyed view of the shared per-attempt floors, so argv enforcement can
@@ -980,29 +981,38 @@ def build_scanner_argv(
 
 
 def _batch_attempt_pacing(http: int, wall: int, *, minimum_seconds: float) -> tuple[float, int]:
-    """Pace one batched attempt so its wall is a true bound on its requests.
+    """Pace one batched attempt so its reservation bounds its traffic over the whole wall.
 
-    Nothing counts requests at run time for these tools: the wall is the only
-    enforcement, so the inter-request delay is what keeps actual traffic inside
-    the reservation. A fixed one-second delay made the wall bind long before the
-    requests did -- sqlmap needs about a hundred requests to reach a verdict on
-    an obvious injection and spends two seconds doing so unpaced, but at one
-    second apiece it could not finish inside any slice a batch could afford, so
-    every attempt returned unproven. Pacing the reservation across the wall lets
-    the attempt spend what it reserved and no more.
+    Nothing counts requests at run time for these tools, and the process runs until the
+    wall kills it, so the inter-request delay is the only thing that keeps actual traffic
+    inside the reservation over that entire window. The delay must therefore bound the
+    request count across the FULL wall.
+
+    Pacing across only a fraction of the wall (an earlier attempt to leave process
+    start-up headroom) made the delay too small: over the full wall the tool kept issuing
+    requests and sent ~1/fraction times its reserved count -- e.g. a 400-request / 180s
+    attempt paced at 0.6 of the wall ran ~666 requests, tripped the pinned
+    connection/wire ceiling at request 401, and failed as ``adapter_failed`` with the
+    full request hold consumed and nothing proven. On the benchmark this is exactly how
+    every injectable SQLi candidate came back partial: sqlmap did real work, overran the
+    ceiling, and its verdict was discarded. Higher-latency remote targets keep the tool
+    busy longer and trip it even more reliably.
+
+    A verdict needs far fewer requests than the reservation grants (sqlmap reaches one on
+    an obvious injection in about a hundred), so pacing the reserved count across the full
+    wall still reaches the verdict early while keeping the reservation a true upper bound.
+    ``_BATCH_ATTEMPT_REQUEST_HEADROOM`` keeps the paced rate strictly under the ceiling so
+    scheduling jitter cannot cross it.
     """
     requests = max(1, int(http))
     seconds = max(1, int(wall))
-    # Pace against a fraction of the wall, never all of it. Spreading the
-    # reserved requests across the whole deadline leaves no room for process
-    # start-up, connection set-up, or the proxy hop, so the tool is guaranteed
-    # to still be working when the wall expires: every attempt came back
-    # "timeout" and the family proved nothing despite being correctly funded.
-    usable = max(1.0, seconds * _BATCH_ATTEMPT_WALL_UTILISATION)
-    delay = usable / requests
+    # Pace the reserved count (less a headroom margin) across the WHOLE wall, so
+    # requests_sent = wall / delay stays below the ceiling however long the tool runs.
+    paced_requests = max(1.0, requests * _BATCH_ATTEMPT_REQUEST_HEADROOM)
+    delay = seconds / paced_requests
     if delay < minimum_seconds:
-        # Too little wall to pace this many requests: keep the floor and admit
-        # the smaller number the wall can actually cover.
+        # Too little wall to pace this many requests even at the floor delay: keep the
+        # floor and admit only the smaller number the wall can actually cover.
         delay = minimum_seconds
         requests = max(1, int(seconds / delay))
     return delay, min(int(http), requests)

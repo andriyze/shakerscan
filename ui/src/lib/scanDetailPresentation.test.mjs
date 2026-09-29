@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, formatResumeTime, notExaminedExplanation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, formatResumeTime, notExaminedExplanation, reconciledScanFindings, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -66,6 +66,31 @@ test('a shallow clean scan leads with an honest conclusion instead of a perfect 
   assert.equal(result.confidence, 'Weak coverage — this is not a clean bill of health.')
   assert.equal(result.observedRiskScore, 100)
   assert.deepEqual(result.missingHeaders, ['content-security-policy'])
+})
+
+test('selected active families without candidate actions are named as examination gaps', () => {
+  const result = scanResultPresentation({
+    status: 'completed',
+    options: { scan_execution_plan: {
+      budget_profile: 'thorough',
+      policy: { active_testing: true },
+      resolved_families: ['recon', 'xss', 'sqli', 'bola', 'sensitive_exposure'],
+    } },
+    result: {
+      findings: [],
+      result: { risk_score: 100, risk_grade: 'A', grade_reliable: true },
+      coverage: { family_coverage: [
+        { family: 'bola', planned_candidates: 0, attempted_candidates: 0, coverage_status: 'complete', reason: 'no_candidates' },
+        { family: 'sensitive_exposure', planned_candidates: 12, attempted_candidates: 12, coverage_status: 'complete' },
+      ] },
+    },
+  }, { band: 'strong', label: 'Strong coverage' })
+
+  assert.deepEqual(result.candidateGapFamilies, ['xss', 'sqli', 'bola'])
+  assert.equal(result.coverageIncomplete, true)
+  assert.doesNotMatch(result.confidence, /supports this run-level conclusion/)
+  assert.doesNotMatch(result.confidence, /did not finish everything it planned/)
+  assert.match(result.confidence, /listed coverage gaps limit/)
 })
 
 test('an unobservable application leads with not examined instead of clean', () => {
@@ -264,6 +289,36 @@ test('a partial history never reads as an all-clear', () => {
   assert.equal(summary.state, 'partial')
   assert.equal(summary.complete, false)
   assert.equal(summary.count, 0)
+})
+
+test('a report finding without a fingerprint joins its durable row once', () => {
+  const raw = { title: 'Sensitive exposure', url: 'http://app/.env', tool: 'probe', severity: 'high', proof_state: 'verified' }
+  const saved = { ...raw, id: 'finding-1', fingerprint: 't:canonical', scan_id: 'scan-2', verified: true }
+  const scan = { id: 'scan-2', result: { findings: [raw] }, findings: [saved] }
+  const result = reconciledScanFindings(scan, [saved])
+  assert.equal(result.current.length, 1)
+  assert.equal(result.persistedCurrentCount, 1)
+  assert.equal(result.current[0].id, 'finding-1')
+  assert.equal(result.current[0]._persisted, true)
+})
+
+test('display fallback matches one-to-one and does not collapse distinct fingerprints', () => {
+  const raw = { title: 'Same label', url: 'http://app/Item', tool: 'probe', severity: 'high' }
+  const rows = ['first', 'second'].map((id) => ({ ...raw, id, fingerprint: `fp-${id}`, last_seen_scan_id: 'scan-2' }))
+  const once = reconciledScanFindings({ id: 'scan-2', result: { findings: [raw] } }, rows)
+  assert.equal(once.current.length, 2)
+  assert.equal(once.persistedCurrentCount, 2)
+  const named = reconciledScanFindings({ id: 'scan-2', result: { findings: [{ ...raw, fingerprint: 'fp-new' }] } }, rows)
+  assert.equal(named.current.length, 3)
+  const differentCase = reconciledScanFindings({ id: 'scan-2', result: { findings: [{ ...raw, url: 'http://app/item' }] } }, rows)
+  assert.equal(differentCase.current.length, 3)
+})
+
+test('history rows from earlier scans stay outside this scan findings', () => {
+  const old = { id: 'old', fingerprint: 'fp-old', scan_id: 'scan-1', last_seen_scan_id: 'scan-1', title: 'Old' }
+  const result = reconciledScanFindings({ id: 'scan-2', result: { findings: [] } }, [old])
+  assert.equal(result.current.length, 0)
+  assert.equal(result.persistedCurrentCount, 0)
 })
 
 test('the release line claims an earlier-scan origin only when the decision says so', () => {

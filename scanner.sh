@@ -2749,8 +2749,11 @@ show_worker_logs() {
 }
 
 run_v2_scan_cli() {
+    # Local commands call the API on its bind address; the public host may not be
+    # reachable from this machine (a cloud NAT address does not hairpin). Links
+    # printed for the operator keep the public UI address.
     local cli_args=(
-        --api-url "$(api_base_url)"
+        --api-url "$(api_probe_url)"
         --ui-url "$(ui_base_url)"
     )
     if [ "$CONFIRM_ACTIVE" -eq 1 ]; then
@@ -2771,7 +2774,7 @@ run_v2_product_cli() {
         return 1
     fi
     python3 "$SCRIPT_DIR/scripts/v2_cli.py" \
-        --api-url "$(api_base_url)" "$product" "$@"
+        --api-url "$(api_probe_url)" "$product" "$@"
 }
 
 
@@ -3553,8 +3556,8 @@ gungnir_cmd() {
             echo -e "${GREEN}Gungnir stopped${NC}"
             ;;
         status)
-            if curl -s "$(api_base_url)/gungnir/status" > /dev/null 2>&1; then
-                STATUS=$(curl -s "$(api_base_url)/gungnir/status")
+            if curl -s "$(api_probe_url)/gungnir/status" > /dev/null 2>&1; then
+                STATUS=$(curl -s "$(api_probe_url)/gungnir/status")
                 RUNNING=$(echo $STATUS | jq -r '.running')
                 if [ "$RUNNING" = "true" ]; then
                     echo -e "${GREEN}Gungnir CT Monitor: Running${NC}"
@@ -3628,8 +3631,8 @@ devices_cmd() {
             ;;
         status)
             compose --profile devices ps device-worker
-            if curl -fsS "$(api_base_url)/devices/readiness" >/dev/null 2>&1; then
-                curl -fsS "$(api_base_url)/devices/readiness" | jq '{enabled,status,reason,worker_count,capable_worker_count,required_worker_tools}'
+            if curl -fsS "$(api_probe_url)/devices/readiness" >/dev/null 2>&1; then
+                curl -fsS "$(api_probe_url)/devices/readiness" | jq '{enabled,status,reason,worker_count,capable_worker_count,required_worker_tools}'
             fi
             ;;
         logs)
@@ -3835,7 +3838,7 @@ case $COMMAND in
             echo -e "${RED}Error: the API helper is missing from this runtime.${NC}" >&2
             exit 1
         fi
-        exec python3 "$SCRIPT_DIR/scripts/api_cli.py" --api-url "$(api_base_url)" "${ARGS[@]}"
+        exec python3 "$SCRIPT_DIR/scripts/api_cli.py" --api-url "$(api_probe_url)" "${ARGS[@]}"
         ;;
     credentials)
         run_v2_product_cli "credentials" "${ARGS[@]}"
@@ -3932,7 +3935,7 @@ case $COMMAND in
             fi
         done
         exec python3 "$SCRIPT_DIR/scripts/local_planner_adapter.py" episode \
-            --api-url "$(api_base_url)" \
+            --api-url "$(api_probe_url)" \
             --episode-id "${ARGS[0]}" \
             --max-decisions "${ARGS[1]:-5}"
         ;;

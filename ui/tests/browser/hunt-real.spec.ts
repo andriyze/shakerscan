@@ -23,6 +23,10 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
   expect(createdTarget.ok()).toBeTruthy()
   const target = await createdTarget.json()
   expect(target.id).toBeTruthy()
+  const authorizationResponse = await request.get(`${API_URL}/targets/${target.id}/authorization`)
+  expect(authorizationResponse.ok()).toBeTruthy()
+  const authorization = (await authorizationResponse.json()).authorization
+  const hasStandingAuthorization = Boolean(authorization?.standing && authorization?.approval_receipt_id)
 
   await page.goto(`/hunt?target=${encodeURIComponent(target.id)}`)
   await expect(page.getByLabel('Target', { exact: true })).toHaveValue(target.id)
@@ -51,7 +55,7 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
       allow_state_changing_http: false,
       network_discovery: false,
       allow_oob_interactions: false,
-      authorization_confirmed: false,
+      authorization_confirmed: hasStandingAuthorization,
     },
     credential_refs: {},
     capabilities: [],

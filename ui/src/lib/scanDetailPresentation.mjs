@@ -27,6 +27,65 @@ export function scanFindingIdentity(finding) {
   ].join('|')
 }
 
+function scanFindingDisplayIdentity(finding) {
+  const item = record(finding)
+  return [
+    String(item.title || '').trim().toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, ''),
+    String(item.tool || '').trim().toLowerCase(),
+    String(item.severity || '').trim().toLowerCase(),
+  ].join('|')
+}
+
+/** Join the report to durable rows observed by this scan without counting both copies.
+ *  A display-only match needs scan linkage and is consumed once; distinct fingerprints
+ *  always remain distinct even when their visible titles and URLs are identical. */
+export function reconciledScanFindings(scan, targetFindings = []) {
+  const item = record(scan)
+  const scanId = String(item.id || '')
+  const raw = Array.isArray(record(item.result).findings) ? item.result.findings : []
+  const persisted = []
+  const persistedIds = new Set()
+  const attached = Array.isArray(item.findings) ? item.findings : []
+  const linkedHistory = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
+    const row = record(finding)
+    return String(row.scan_id || '') === scanId || String(row.last_seen_scan_id || '') === scanId
+  })
+  for (const finding of [...attached, ...linkedHistory]) {
+    const row = record(finding)
+    const key = String(row.id || scanFindingIdentity(row))
+    if (persistedIds.has(key)) continue
+    persistedIds.add(key)
+    persisted.push(finding)
+  }
+  const matched = new Set()
+  const current = raw.map((finding, index) => {
+    const source = record(finding)
+    let match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex) && (
+      (source.id && String(record(row).id || '') === String(source.id))
+      || (source.fingerprint && String(record(row).fingerprint || '') === String(source.fingerprint))
+    ))
+    if (match < 0 && !source.fingerprint) {
+      match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex)
+        && scanFindingDisplayIdentity(row) === scanFindingDisplayIdentity(source))
+    }
+    if (match >= 0) matched.add(match)
+    const saved = match >= 0 ? record(persisted[match]) : null
+    return {
+      ...source, ...saved,
+      _rowKey: `raw-${saved?.id || source.id || source.fingerprint || index}`,
+      _origin: 'observed in this scan',
+      _persisted: Boolean(saved?.id),
+    }
+  })
+  for (const [index, finding] of persisted.entries()) {
+    if (matched.has(index)) continue
+    current.push({ ...record(finding), _rowKey: `persisted-${record(finding).id || index}`,
+      _origin: 'observed in this scan', _persisted: true })
+  }
+  return { current, persistedCurrentCount: persisted.length }
+}
+
 /** Local "about 16:40" for a quota resume estimate; `timeZone` is injectable for tests. */
 export function formatResumeTime(value, { timeZone } = {}) {
   const date = new Date(String(value || ''))
@@ -435,12 +494,22 @@ export function scanResultPresentation(scan, assurance) {
   const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
     ? coverage.selected_family_gaps.map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
     : []
+  const candidateRows = Array.isArray(coverage.family_coverage) ? coverage.family_coverage : null
+  const candidateGapFamilies = candidateRows ? resolvedFamilies
+    .filter((family) => ACTIVE_FAMILIES.has(String(family)))
+    .filter((family) => {
+      const row = candidateRows.find((item) => record(item).family === family)
+      return !row || (Number(record(row).planned_candidates || 0) === 0
+        && Number(record(row).attempted_candidates || 0) === 0)
+    })
+    .map((family) => String(family).replaceAll('_', ' ')) : []
   const assuranceGaps = Array.isArray(assurance?.gaps) ? assurance.gaps : []
   // A strong examination score describes the work that ran. When the run stopped before its
   // plan completed, or the scorer itself marked the grade unreliable, the conclusion is only as
   // wide as the completed work, and the supporting sentence must say so instead of endorsing it.
   const coverageIncomplete = coverageWarnings.length > 0
     || incompleteFamilies.length > 0
+    || candidateGapFamilies.length > 0
     || assuranceGaps.length > 0
     || result.grade_reliable === false
     || authenticationRequested
@@ -452,7 +521,9 @@ export function scanResultPresentation(scan, assurance) {
     : weakExamination
     ? `${assuranceLabel} — this is not a clean bill of health.`
     : coverageIncomplete
-      ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+      ? incompleteFamilies.length > 0
+        ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+        : `${assuranceLabel} for the work that ran; the listed coverage gaps limit what can be concluded from this run.`
       : `${assuranceLabel} supports this run-level conclusion.`
   const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
   const nextSteps = nextStepsFor({
@@ -475,6 +546,7 @@ export function scanResultPresentation(scan, assurance) {
     coverageIncomplete,
     coverageGapReasons,
     incompleteFamilies,
+    candidateGapFamilies,
     observedCount: findings.length,
     observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
     observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),

@@ -19,6 +19,7 @@ TRIAGE_FIELDS_FROM_FINDING = (
 PROOF_FIELDS_FROM_FINDING = (
     "browser_proof",
     "poe_result",
+    "proof_contract_v2",
     "proof_state",
 )
 

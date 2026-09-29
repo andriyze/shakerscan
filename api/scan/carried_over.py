@@ -99,9 +99,57 @@ def summarize_carried_over(
     }
 
 
+def merge_target_active_blockers(
+    blocking: list[dict[str, Any]],
+    active: list[dict[str, Any]],
+    history: Mapping[str, Any] | None,
+    scan_id: Any,
+) -> list[dict[str, Any]]:
+    """Merge durable blockers without double-counting a finding this scan reported.
+
+    Report rows are matched to persisted rows by id or by the fingerprint persistence keyed
+    them by (the caller derives it for report rows that omit it). ``findings.scan_id`` is not
+    usable for this: a later scan that re-observes a row takes it over. A matched report row
+    takes the persisted row's id, so a policy exception recorded against the persisted finding
+    also covers this scan's copy of it.
+    """
+    observed_ids = {
+        str(row.get("id")) for row in (history or {}).get("rows", [])
+        if isinstance(row, Mapping) and row.get("id")
+        and (str(row.get("scan_id") or "") == str(scan_id or "")
+             or str(row.get("last_seen_scan_id") or "") == str(scan_id or ""))
+    }
+    report_count = len(blocking)
+    index_by_key: dict[str, int] = {}
+    for index, finding in enumerate(blocking):
+        for value in (finding.get("id"), finding.get("fingerprint")):
+            if value:
+                index_by_key.setdefault(str(value), index)
+    for extra in active:
+        fid = str(extra.get("id") or "")
+        fingerprint = str(extra.get("fingerprint") or "")
+        match = index_by_key.get(fid) if fid else None
+        if match is None and fingerprint:
+            match = index_by_key.get(fingerprint)
+        if match is not None:
+            if match < report_count and fid:
+                blocking[match]["id"] = fid
+                index_by_key.setdefault(fid, match)
+            continue
+        merged = dict(extra)
+        if fid not in observed_ids:
+            merged["from_target_active"] = True
+        blocking.append(merged)
+        for value in (fid, fingerprint):
+            if value:
+                index_by_key.setdefault(value, len(blocking) - 1)
+    return blocking
+
+
 __all__ = [
     "HISTORY_ROW_CAP",
     "gate_findings_from_rows",
     "load_target_history",
+    "merge_target_active_blockers",
     "summarize_carried_over",
 ]

@@ -52,7 +52,8 @@ except ModuleNotFoundError:
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
-from scan.carried_over import gate_findings_from_rows, load_target_history, summarize_carried_over
+from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
+from scan.finding_identity import canonical_finding_fingerprint
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -8089,6 +8090,14 @@ def build_deployment_decision(
             raw_decision = "allow"
             rationale = "No high/critical findings met the deployment block threshold."
         policy_name = f"{scan_type or 'scan'}-default-v1"
+    if product == "dast" and isinstance(findings, list):
+        # Report rows carry no persisted identity, and findings.scan_id moves to whichever
+        # scan last saw a row. Derive the fingerprint persistence keyed each row by.
+        findings = [
+            {**item, "fingerprint": item.get("fingerprint") or canonical_finding_fingerprint(item)}
+            if isinstance(item, dict) else item
+            for item in findings
+        ]
 
     if raw_decision == "review":
         raw_decision = "needs_approval"
@@ -8115,22 +8124,12 @@ def build_deployment_decision(
     # findings in, deduped by id/fingerprint, for the DAST product only (AI Gate and
     # Model Intake carry their own decision objects). Exceptions below still apply.
     if product == "dast" and target_active_findings:
-        seen_keys = {str(f.get("id") or "") for f in blocking_findings if f.get("id")}
-        seen_keys |= {str(f.get("fingerprint") or "") for f in blocking_findings if f.get("fingerprint")}
-        for extra in _deployment_gate_findings(
-            target_active_findings,
-            minimum=str(policy_profile.get("minimum_block_severity") or "high"),
-        ):
-            fid = str(extra.get("id") or "")
-            ffp = str(extra.get("fingerprint") or "")
-            if (fid and fid in seen_keys) or (ffp and ffp in seen_keys):
-                continue
-            extra["from_target_active"] = True
-            blocking_findings.append(extra)
-            if fid:
-                seen_keys.add(fid)
-            if ffp:
-                seen_keys.add(ffp)
+        blocking_findings = merge_target_active_blockers(
+            blocking_findings,
+            _deployment_gate_findings(target_active_findings,
+                                      minimum=str(policy_profile.get("minimum_block_severity") or "high")),
+            target_history, scan.get("id"),
+        )
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
     # A policy-scoped exception (non-null policy_id) only applies when the scan is
     # evaluated under that exact policy profile — so a lenient-policy waiver cannot

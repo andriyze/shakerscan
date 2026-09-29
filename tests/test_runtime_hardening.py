@@ -1579,3 +1579,43 @@ def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networ
     for service in ("agent-tool-worker", "device-worker", "model-intake-sandbox"):
         assert "network: ${SHAKERSCAN_BUILD_NETWORK:-default}" not in _compose_service_block(compose, service)
     assert "network_mode: ${SHAKERSCAN_BUILD_NETWORK" not in compose
+
+
+def test_local_cli_wrappers_call_the_bind_address_not_the_public_host(tmp_path):
+    """A cloud host's public address may not hairpin: on EC2 `scanner.sh hunt start`
+    timed out calling its own public IP. Local CLIs use the bind address; the operator's
+    printed links keep the public host."""
+    script = (ROOT / "scanner.sh").read_text()
+    functions = "\n".join(
+        name + "() {" + script.split(name + "() {", 1)[1].split("\n}", 1)[0] + "\n}"
+        for name in (
+            "public_access_host", "format_url_host", "api_base_url", "ui_base_url",
+            "probe_access_host", "api_probe_url", "run_v2_scan_cli", "run_v2_product_cli",
+        )
+    )
+    (tmp_path / "scripts").mkdir()
+    for name in ("scan_cli.py", "v2_cli.py"):
+        (tmp_path / "scripts" / name).write_text("")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").write_text('#!/bin/sh\nshift\necho "$*"\n')
+    (fake_bin / "python3").chmod(0o755)
+    harness = f'''
+set -eu
+RED='' NC=''
+CONFIRM_ACTIVE=0
+SCRIPT_DIR={shlex.quote(str(tmp_path))}
+SHAKERSCAN_BIND_HOST=172.31.32.215
+SHAKERSCAN_PUBLIC_HOST=54.174.235.115
+{functions}
+run_v2_scan_cli https://t.example
+run_v2_product_cli hunt start
+'''
+    result = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=10, check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stderr
+    scan_line, hunt_line = result.stdout.strip().splitlines()
+    assert scan_line.startswith("--api-url http://172.31.32.215:8080 --ui-url http://54.174.235.115:3000")
+    assert hunt_line == "--api-url http://172.31.32.215:8080 hunt start"

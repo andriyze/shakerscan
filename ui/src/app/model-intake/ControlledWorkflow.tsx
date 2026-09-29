@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { Activity, Bot, CheckCircle2, Clipboard, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
 import { Card, useToast } from '@/components/ui'
+import { createRandomUUID } from '@/lib/clientRandom'
 import {
   attachModelIntakeStaticRun,
   cancelModelIntakeAgentSession,
@@ -104,7 +105,7 @@ function positiveOrBlank(value: unknown): string {
 }
 
 function suggestIdempotencyKey(submissionId: string): string {
-  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+  const suffix = createRandomUUID().replace(/-/g, '').slice(0, 12)
   const prefix = submissionId ? submissionId.slice(0, 8) : 'model-intake'
   return `${prefix}-promote-${suffix}`
 }

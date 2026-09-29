@@ -10,10 +10,63 @@ import base64
 import json
 import os
 import sys
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import benchmark_targets as b  # noqa: E402
+
+
+def test_crapi_sqli_expectation_matches_sql_backend_route_only():
+    with open(os.path.join(b.FIXTURE_DIR, "crapi.yaml"), encoding="utf-8") as fixture_file:
+        fixture = yaml.safe_load(fixture_file)
+    expectation = next(item for item in fixture["expected"] if item["id"] == "sqli-coupon")
+    finding = {
+        "finding_id": "coupon-sqli", "classes": {"sqli"}, "severity": "high",
+        "verified": True, "hay": "sql injection at /workshop/api/shop/apply_coupon",
+    }
+    assert b.match_expectation(expectation, [finding], set()) == finding
+    finding["hay"] = "sql injection at /community/api/v2/coupon"
+    assert b.match_expectation(expectation, [finding], set()) is None
+
+
+def test_expected_family_without_candidates_fails_attempt_gate_even_when_complete():
+    fixture = {"expected": [
+        {"id": "coupon", "family": "sqli", "route": "/workshop/api/shop/apply_coupon"},
+        {"id": "orders", "family": "bola", "route": "/workshop/api/shop/orders"},
+    ], "gates": {}}
+    report = {"coverage": {"family_coverage": [
+        {"family": "bola", "required": True, "planned_candidates": 0,
+         "attempted_candidates": 0, "coverage_status": "complete"},
+        {"family": "authz_surface", "required": True, "planned_candidates": 14,
+         "attempted_candidates": 14, "coverage_status": "complete"},
+    ]}}
+    card = b.collect_scorecard(report, fixture)
+    assert card["attempted_families"] == ["authz_surface"]
+    assert card["family_attempt_failures"] == ["bola", "sqli"]
+    attempt_gate = next(
+        gate for gate in b.apply_gates(card, fixture)
+        if gate["gate"] == "selected_families_attempted"
+    )
+    assert attempt_gate["pass"] is False
+
+
+def test_function_access_expectation_uses_canonical_authz_surface_attempts():
+    fixture = {"expected": [
+        {"id": "users", "family": "broken_access_control", "route": "/api/Users"},
+    ], "gates": {}}
+    report = {"coverage": {"family_coverage": [
+        {"family": "authz_surface", "required": True,
+         "planned_candidates": 2, "attempted_candidates": 2,
+         "coverage_status": "complete"},
+    ]}}
+    card = b.collect_scorecard(report, fixture)
+    assert card["family_attempt_failures"] == []
+    attempt_gate = next(
+        gate for gate in b.apply_gates(card, fixture)
+        if gate["gate"] == "selected_families_attempted"
+    )
+    assert attempt_gate["pass"] is True
 
 
 def _jwt(**claims):

@@ -54,6 +54,7 @@ async function fixture(page: Page, mode: 'success' | 'lost-response' | 'conflict
   expect(writes).toHaveLength(0)
   await panel.getByLabel('Budget dimension', { exact: true }).selectOption('max_tcp_ports')
   await panel.getByLabel('New total budget').fill('65535')
+  await expect(panel.getByRole('button', { name: 'Extend budget', exact: true })).toBeEnabled()
   return { panel, writes, errors, current: () => run }
 }
 
