@@ -696,8 +696,9 @@ def _fetch_url_metadata(
         parsed_json = json.loads(body) if body.strip() else None
     except json.JSONDecodeError:
         parsed_json = None
+    redirect_response = 300 <= status < 400
     return {
-        "ok": 200 <= status < 400,
+        "ok": 200 <= status < 300,
         "url": url,
         "method": method,
         "status_code": status,
@@ -707,7 +708,7 @@ def _fetch_url_metadata(
             for key, value in headers.items()
             if key.lower() in {"www-authenticate", "content-type", "server"}
         },
-        "json": parsed_json if isinstance(parsed_json, dict) else None,
+        "json": parsed_json if isinstance(parsed_json, dict) and not redirect_response else None,
         "body_excerpt": body[:1000],
     }
 

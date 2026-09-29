@@ -51,3 +51,7 @@ def test_fetch_helper_only_opens_web_urls(tmp_path):
     assert asyncio.run(client_side._fetch_url(f"file://{local_file}")) == ""
     with _serve_page("<html>ok</html>", {}) as origin:
         assert asyncio.run(client_side._fetch_url(f"{origin}/")) == "<html>ok</html>"
+
+
+def test_fetch_helper_ignores_malformed_script_url():
+    assert asyncio.run(client_side._fetch_url("http://[invalid-host/file.js")) == ""

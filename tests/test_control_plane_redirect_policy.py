@@ -65,13 +65,15 @@ def test_same_origin_redirect_decision(current, redirect, expected):
 
 def test_mcp_metadata_fetch_reports_but_does_not_follow_cross_origin_redirect():
     with _http_server({"/internal": (200, {}, b'{"secret": "internal"}')}) as (internal, internal_seen):
-        routes = {"/mcp": (302, {"Location": f"{internal}/internal"}, b"")}
+        routes = {"/mcp": (302, {"Location": f"{internal}/internal", "Content-Type": "application/json"}, b'{"tools":[{"name":"fake"}]}')}
         with _http_server(routes) as (target, target_seen):
             result = ai_assurance._fetch_url_metadata(
                 f"{target}/mcp", headers={"Authorization": "Bearer operator-configured"},
             )
 
     assert result["status_code"] == 302
+    assert result["ok"] is False
+    assert result["json"] is None
     assert "internal" not in result["body_excerpt"]
     assert [item["path"] for item in target_seen] == ["/mcp"]
     assert internal_seen == []
@@ -110,4 +112,27 @@ def test_ai_connectivity_probe_does_not_carry_headers_across_origins():
     assert result["status_code"] == 302
     assert result["ok"] is False
     assert target_seen and target_seen[0]["authorization"] == "Bearer operator-configured"
+    assert other_seen == []
+
+
+def test_ai_connectivity_probe_does_not_accept_redirect_body_as_a_reply():
+    with _http_server({"/collect": (200, {}, b"unexpected")}) as (other, other_seen):
+        routes = {"/chat": (302, {"Location": f"{other}/collect", "Content-Type": "text/html"}, b"<p>Found</p>")}
+        with _http_server(routes) as (target, _target_seen):
+            result = ai_router._run_ai_target_connectivity_probe(
+                {
+                    "target_type": "api_chat",
+                    "method": "GET",
+                    "endpoint_url": f"{target}/chat",
+                    "request_template": {},
+                    "response_path": "reply",
+                },
+                prompt="connectivity check",
+                timeout_seconds=5,
+            )
+
+    assert result["status_code"] == 302
+    assert result["ok"] is False
+    assert result["stage"] == "redirect"
+    assert result["response_path_ok"] is False
     assert other_seen == []
