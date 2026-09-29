@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 import model_intake_admission_webhook as webhook  # noqa: E402
@@ -89,6 +91,37 @@ def test_webhook_verifier_calls_pure_exact_bundle_gate(monkeypatch):
     assert observed["url"].endswith("/model-intake/admissions/v2/verify")
     assert observed["payload"]["expected_bundle_sha256"] == "a" * 64
     assert observed["payload"]["expected_components"]["model_artifact_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        "http://127.0.0.1.attacker.example",
+        "http://127.0.0.1@attacker.example",
+        "http://127.0.0.1:8080@attacker.example:80",
+        "http://scanner.corp.example",
+        "ftp://127.0.0.1",
+        "https://",
+    ],
+)
+def test_webhook_refuses_to_send_the_verifier_token_off_loopback_in_cleartext(monkeypatch, api_url):
+    monkeypatch.setenv("SHAKERSCAN_API_URL", api_url)
+    monkeypatch.setenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "x" * 40)
+    monkeypatch.setattr(
+        webhook.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("token left the process")),
+    )
+    with pytest.raises(RuntimeError, match="HTTPS or loopback"):
+        webhook._verify({}, {"bundle_sha256": "a" * 64, "target_environment": "production"})
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    ["https://scanner.corp.example", "http://127.0.0.1:8080", "http://127.0.0.2", "http://[::1]:8080"],
+)
+def test_webhook_verifier_transport_accepts_https_and_loopback(api_url):
+    assert webhook._verifier_transport_allowed(api_url) is True
 
 
 def test_webhook_installation_is_namespace_scoped_certified_and_fail_closed():

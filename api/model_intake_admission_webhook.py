@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 from typing import Any
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from fastapi import FastAPI, HTTPException
@@ -32,10 +34,23 @@ def _decode_annotation(value: Any, label: str) -> dict[str, Any]:
     return decoded
 
 
+def _verifier_transport_allowed(api_url: str) -> bool:
+    """The verifier token may travel over HTTPS, or over plain HTTP only to a loopback address."""
+    parsed = urllib.parse.urlsplit(api_url)
+    if parsed.scheme == "https":
+        return bool(parsed.hostname)
+    if parsed.scheme != "http" or parsed.username is not None or parsed.password is not None:
+        return False
+    try:
+        return ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        return False
+
+
 def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
     api_url = os.getenv("SHAKERSCAN_API_URL", "").rstrip("/")
     token = os.getenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "")
-    if not api_url or (not api_url.startswith("https://") and not api_url.startswith("http://127.0.0.1")):
+    if not api_url or not _verifier_transport_allowed(api_url):
         raise RuntimeError("verifier API must be HTTPS or loopback")
     payload = {
         "admission_package": package,
