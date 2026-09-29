@@ -74,6 +74,18 @@ def test_same_display_text_from_an_earlier_scan_remains_a_separate_blocker():
     assert decision["carried_over"]["count"] == 1
 
 
+def test_one_unidentified_report_cannot_hide_two_reobserved_active_rows():
+    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
+    active = [{**_crit(fid, f"t:{fid}", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+              for fid in ("f1", "f2")]
+    history = {"rows": [{"id": fid, "fingerprint": f"t:{fid}", "severity": "high",
+                        "scan_id": "old-scan", "last_seen_scan_id": scan["id"]} for fid in ("f1", "f2")],
+               "total": 2, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=active, target_history=history)
+    assert len(decision["blocking_findings"]) == 2
+    assert decision["decision"] == "block"
+
+
 def test_decision_carries_the_target_history_summary_over_all_severities():
     scan = _scan([{"id": "f1", "fingerprint": "fp1", "title": "Seen", "severity": "low"}])
     history = {"rows": [

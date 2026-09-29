@@ -8123,6 +8123,7 @@ def build_deployment_decision(
         }
         seen_keys = {str(f.get("id") or "") for f in blocking_findings if f.get("id")}
         seen_keys |= {str(f.get("fingerprint") or "") for f in blocking_findings if f.get("fingerprint")}
+        matched_unidentified_reports: set[int] = set()
         for extra in _deployment_gate_findings(
             target_active_findings,
             minimum=str(policy_profile.get("minimum_block_severity") or "high"),
@@ -8134,12 +8135,15 @@ def build_deployment_decision(
             # Scanner reports can omit both identifiers while persistence assigns a
             # canonical fingerprint. Link an exact report match only when the durable
             # row says this scan re-observed it; display similarity alone is insufficient.
-            if fid in observed_active_ids and any(
-                not current.get("id") and not current.get("fingerprint")
-                and all(current.get(field) == extra.get(field) for field in ("title", "severity", "tool", "url"))
-                for current in blocking_findings
-            ):
-                continue
+            if fid in observed_active_ids:
+                match = next((index for index, current in enumerate(blocking_findings)
+                              if index not in matched_unidentified_reports
+                              and not current.get("id") and not current.get("fingerprint")
+                              and all(current.get(field) == extra.get(field)
+                                      for field in ("title", "severity", "tool", "url"))), None)
+                if match is not None:
+                    matched_unidentified_reports.add(match)
+                    continue
             if fid not in observed_active_ids:
                 extra["from_target_active"] = True
             blocking_findings.append(extra)
