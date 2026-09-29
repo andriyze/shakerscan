@@ -483,6 +483,22 @@ def test_agent_prepares_the_workspace_against_the_connected_instance(monkeypatch
     assert cli.ENV_TOKEN not in env, "the token stays in its file, never in the agent's environment"
 
 
+def test_agent_auto_detect_prefers_the_same_order_as_the_runtime_launcher(monkeypatch, tmp_path, capsys, clean_environ):
+    """When several agents are installed, the client and scanner.sh both prefer Codex first."""
+    monkeypatch.setenv(cli.ENV_CONFIG_DIR, str(tmp_path / "cfg"))
+    cli.save_profile("https://scanner.example.com", SECRET)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/local/bin/{name}" if name in cli.AGENTS else None)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout="", stderr=""),
+    )
+    workspace = tmp_path / "ws"
+    assert cli.main(["agent", "--workspace", str(workspace), "--no-launch"]) == 0
+    out = capsys.readouterr().out
+    assert f"launch:    cd {workspace} && codex\n" in out
+
+
 def test_agent_pi_is_handed_the_kit_skills_and_commands(monkeypatch, tmp_path, capsys, clean_environ):
     """Pi has no MCP client and loads project resources only behind a trust prompt, so the
     launch names the canonical skills and the slash commands and nothing else."""
@@ -494,7 +510,7 @@ def test_agent_pi_is_handed_the_kit_skills_and_commands(monkeypatch, tmp_path, c
     skills = sorted(path.parent.name for path in (workspace / "skills").glob("*/SKILL.md"))
     assert {"shakerscan", "hunt"} <= set(skills)
     flags = " ".join(f"--skill skills/{name}" for name in skills)
-    assert f"launch:    cd {workspace} && pi {flags} --prompt-template .claude/commands\n" in out
+    assert f"launch:    cd {workspace} && pi --no-approve {flags} --prompt-template .claude/commands\n" in out
     assert "skills/web" not in out and "scanner-skill" not in out
     assert "pi:        no MCP client" in out
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8").startswith("# Connected ShakerScan instance")
@@ -506,7 +522,7 @@ def test_agent_pi_is_handed_the_kit_skills_and_commands(monkeypatch, tmp_path, c
     monkeypatch.setenv(cli.ENV_TOKEN, "leak")
     assert cli.main(["agent", "--workspace", str(workspace)]) == 0, "pi alone on the PATH is picked"
     assert launched["cwd"] == workspace and launched["file"] == "pi"
-    assert launched["argv"] == ["pi", *flags.split(), "--prompt-template", ".claude/commands"]
+    assert launched["argv"] == ["pi", "--no-approve", *flags.split(), "--prompt-template", ".claude/commands"]
     env = launched["env"]
     assert env["SHAKERSCAN_AGENT_NAME"] == "pi" and env["SHAKERSCAN_API_BASE"] == "https://scanner.example.com"
     assert cli.ENV_TOKEN not in env and env[cli.ENV_TOKEN_FILE].endswith("token")

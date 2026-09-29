@@ -239,7 +239,7 @@ class ResearchCampaignLaunchRequest(BaseModel):
         pattern="^(configured_ai|agent|local_codex)$",
         description=(
             "Who chooses each bounded action. Agent mode is the clean-install default and uses "
-            "the current Codex/Claude/OpenCode session; configured_ai uses the provider in AI settings."
+            "the current Codex/Claude/OpenCode/Pi session; configured_ai uses the provider in AI settings."
         ),
     )
     duration_hours: int = Field(default=24, ge=1, le=168)

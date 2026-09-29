@@ -67,12 +67,17 @@ If stopped, use `./scanner.sh start`. Use `./scanner.sh start --remote` for a VP
 Tailscale and then use its printed URLs. Without Tailscale, public binding is acceptable only behind
 a firewall, VPN, or reverse proxy with exact browser origins in the CORS allowlist.
 
-After a curl install, run agents from the installed runtime so this guide and shipped skills exist:
+After a curl install, start agents through the ShakerScan launcher so this guide, shipped skills,
+runtime URLs, and planner identity are all applied consistently:
 
 ```bash
-shakerscan agent codex       # or claude, opencode, or pi
-# equivalent: cd ~/.shakerscan && codex
+shakerscan agent             # auto-detects codex, claude, opencode, then pi
+shakerscan agent pi          # or name one explicitly
 ```
+
+Do not describe a bare agent binary as equivalent to the launcher. Pi in particular needs explicit
+ShakerScan skill/template flags; the launcher also supplies shared runtime environment for every
+supported agent.
 
 **Connected remote instance.** `shakerscan agent …` can also run against a remote, authenticating
 ShakerScan instance (ShakerScan Enterprise) after `shakerscan connect`; it then sets

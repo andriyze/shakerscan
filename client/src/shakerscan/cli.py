@@ -20,6 +20,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from ._vendored import kit_sources, load
 
 INSTALL_ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
 CLIENT_COMMANDS = ("connect", "disconnect", "agent", "api", "scan", "check", "mcp", "hunt", "doctor", "version")
-AGENTS = ("claude", "codex", "opencode", "pi")
+AGENTS = ("codex", "claude", "opencode", "pi")
 CONNECT_PATH = "/_enterprise/connect/"
 ENV_CONFIG_DIR = "SHAKERSCAN_CONFIG_DIR"
 DEFAULT_API_URL = "http://127.0.0.1:8080"
@@ -364,7 +365,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if args.claude:
         code = max(code, register_claude_code())
     if not args.claude:
-        print("next:      shakerscan agent claude   (or codex, opencode, pi: the ShakerScan agent workspace against this instance)")
+        print("next:      shakerscan agent          (auto-detects codex, claude, opencode, then pi)")
         print("           claude mcp add --scope user shakerscan -- shakerscan mcp   (MCP only, any client)")
     else:
         print("next:      shakerscan agent claude   (the ShakerScan agent workspace against this instance)")
@@ -501,14 +502,15 @@ def prepare_workspace(
 def pi_arguments(workspace: Path) -> list[str]:
     """Pi's launch flags: the kit's canonical skills and its slash commands, named explicitly.
 
-    Pi reads AGENTS.md by itself but discovers skills and prompt templates only under ``.pi/`` or
-    ``.agents/``, behind a project-trust prompt, and it has no MCP client: it reaches the
-    instance through ``shakerscan api|scan|hunt``. Naming the resources loads exactly these and
-    trusts nothing else in the workspace (no extension, no settings); the flat ``skills/*.md``
-    compatibility stubs and the ``skills/web/`` methodology catalog stay out of its skill index.
-    Paths are relative to the workspace, which is where the agent starts.
+    Pi reads AGENTS.md regardless of project trust, but its project-local settings/resources under
+    ``.pi/`` or ``.agents/`` are trust-gated. The launcher uses ``--no-approve`` so those
+    unrelated project resources are not admitted, while explicit ``--skill`` and
+    ``--prompt-template`` paths still load. Pi has no MCP client, so it reaches the instance
+    through ``shakerscan api|scan|hunt``. The flat ``skills/*.md`` compatibility stubs and
+    the ``skills/web/`` methodology catalog stay out of its skill index. Paths are relative to
+    the workspace, which is where the agent starts.
     """
-    args: list[str] = []
+    args: list[str] = ["--no-approve"]
     for skill in sorted((workspace / "skills").glob("*/SKILL.md")):
         args += ["--skill", skill.parent.relative_to(workspace).as_posix()]
     if (workspace / ".claude" / "commands").is_dir():
@@ -583,8 +585,8 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if args.agent and args.agent not in AGENTS:
         raise ClientError(f"unsupported agent '{args.agent}'; use one of {', '.join(AGENTS)}")
     if not agents and not args.no_launch:
-        raise ClientError("no supported agent on this PATH; install Claude Code, Codex, OpenCode or Pi, or pass --no-launch")
-    agent = agents[0] if agents else "claude"
+        raise ClientError("no supported agent on this PATH; install Codex, Claude Code, OpenCode or Pi, or pass --no-launch")
+    agent = agents[0] if agents else AGENTS[0]
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else (Path.cwd() if args.here else config_dir() / "agent")
     executable = client_executable()
     written = prepare_workspace(workspace, url, who, executable, authenticated=authenticated)
@@ -605,14 +607,14 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if agent == "pi":
         argv += pi_arguments(workspace)
         print("pi:        no MCP client; skills and slash commands passed explicitly, the instance via `shakerscan api|scan|hunt`")
-    command = " ".join(argv)
+    command = shlex.join(argv)
     if args.no_launch:
         if authenticated:
-            print(f"launch:    cd {workspace} && {command}")
+            print(f"launch:    cd {shlex.quote(str(workspace))} && {command}")
         else:
             # The kit's `shakerscan api` calls need the engine's address; the MCP registration
             # already carries it.
-            print(f"launch:    cd {workspace} && {ENV_URL}={url} {ENV_ALLOW_REMOTE}=true {command}")
+            print(f"launch:    cd {shlex.quote(str(workspace))} && {ENV_URL}={shlex.quote(url)} {ENV_ALLOW_REMOTE}=true {command}")
         return 0
     if not shutil.which(agent):
         raise ClientError(f"{agent} is not on this PATH")

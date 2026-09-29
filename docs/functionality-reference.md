@@ -979,7 +979,7 @@ editing either input invalidates the preview and clears its confirmations.
 ### 11.6 Hunt
 
 Hunt is the canonical AI-driven investigation workflow for web, API, network, and device targets.
-The current Codex, Claude, or OpenCode session plans through `POST /hunts`, `/query`, and the
+The current Codex, Claude, OpenCode, or Pi session plans through `POST /hunts`, `/query`, and the
 server-returned capability manifest; ShakerScan alone executes actions. Active or credentialed
 capabilities require a live, target-bound approval that is revalidated per call. A target
 authorized once (`POST /targets/{id}/authorization`, standing, revocable) supplies that approval
@@ -1263,7 +1263,7 @@ allowlist. Gated mode can additionally dispatch `asm.improve`, `asm.recon`, `asm
 `finding.retest`, `scan.focused_family`, `experiment.http_diff`, and `experiment.workflow` through the existing Arsenal gateway when a matching
 scope/approval receipt and the global execution flag are present. Target IDs/URLs and receipts are
 injected by the server. Research campaigns persist one of three planner modes. `agent` is the
-clean-install default: the current Codex/Claude/OpenCode session reads the immutable observation and
+clean-install default: the current Codex/Claude/OpenCode/Pi session reads the immutable observation and
 submits one bounded decision without a stored provider. `configured_ai` uses AI settings and durable
 server autopilot. `local_codex` uses the host-side
 `./scanner.sh research <episode-id> [max-decisions]` with an isolated ephemeral Codex process and

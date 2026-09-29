@@ -3432,20 +3432,18 @@ show_env_help() {
         echo "  $SCRIPT_DIR/scanner.sh agent pi"
     fi
     echo ""
-    echo "Manual equivalent:"
-    echo "  cd \"$SCRIPT_DIR\""
-    echo "  export SHAKERSCAN_API_BASE=\"$(api_probe_url)\""
-    echo "  export SHAKERSCAN_UI_BASE=\"$(ui_base_url)\""
-    echo "  codex   # or claude, opencode, or pi"
+    echo "Use the launcher above for normal agent work."
+    echo "It sets ShakerScan runtime URLs and planner identity and applies agent-specific integration."
+    echo "Direct agent invocation is only a debugging path and is not equivalent to the launcher."
 }
 
-# Pi reads AGENTS.md by itself but discovers skills and prompt templates only under .pi/ or
-# .agents/, behind a project-trust prompt, and it has no MCP client. Name the canonical skill
-# directories and the slash commands explicitly instead: nothing else in the runtime directory
-# (no extension, no settings) is loaded or trusted, and the flat skills/*.md compatibility stubs
-# and the skills/web/ methodology catalog stay out of its skill index.
+# Pi reads AGENTS.md regardless of project trust. Its .pi/.agents project resources are
+# trust-gated, so decline those explicitly while passing ShakerScan's canonical skills and prompt
+# templates on argv. Command-line resources still load, there is no trust prompt, and unrelated
+# project extensions/settings are not admitted. The flat skills/*.md compatibility stubs and the
+# skills/web/ methodology catalog stay out of Pi's skill index.
 exec_pi_agent() {
-    local args=() skill
+    local args=(--no-approve) skill
     for skill in "$SCRIPT_DIR"/skills/*/SKILL.md; do
         if [ -f "$skill" ]; then
             args+=(--skill "${skill%/SKILL.md}")
@@ -3504,9 +3502,8 @@ start_agent() {
     done
 
     echo -e "${RED}Error: no supported agent command found.${NC}"
-    echo "Install Codex, Claude Code, OpenCode, or Pi, then run:"
-    echo "  cd \"$SCRIPT_DIR\""
-    echo "  codex   # or claude, opencode, or pi"
+    echo "Install Codex, Claude Code, OpenCode, or Pi, then rerun the ShakerScan launcher:"
+    echo "  $SCRIPT_DIR/scanner.sh agent"
     return 1
 }
 

@@ -131,14 +131,14 @@ def test_pi_launcher_names_the_canonical_skills_and_commands(tmp_path):
     skills = sorted(str(path.parent) for path in (runtime / "skills").glob("*/SKILL.md"))
     assert str(runtime / "skills" / "shakerscan") in skills and str(runtime / "skills" / "hunt") in skills
     expected = [flag for skill in skills for flag in ("--skill", skill)]
-    assert argv == expected + ["--prompt-template", str(runtime / ".claude" / "commands")]
+    assert argv == ["--no-approve", *expected, "--prompt-template", str(runtime / ".claude" / "commands")]
     assert not any("skills/web" in arg or arg.endswith(".md") for arg in argv)
 
 
 def test_pi_launcher_starts_without_a_kit(tmp_path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    assert _start_fake_pi(tmp_path, runtime) == [str(runtime), "pi"]
+    assert _start_fake_pi(tmp_path, runtime) == [str(runtime), "pi", "--no-approve"]
 
 
 def test_wrapper_subcommand_help_is_non_mutating_and_informative():

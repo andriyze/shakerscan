@@ -283,7 +283,7 @@ safety stops while suppressing command noise, payloads, and secrets.
 ## Device targets in Hunt
 
 Connected devices use ShakerScan's canonical, target-kind-aware Hunt runtime. The current Codex,
-Claude, or OpenCode session is the planner, while ShakerScan executes a closed device capability
+Claude, OpenCode, or Pi session is the planner, while ShakerScan executes a closed device capability
 contract. Start through `POST /hunts`, drive only capabilities returned by that run, and confirm an
 immutable SSH plan through `POST /hunts/{hunt_id}/shell-plans/{plan_id}/confirm`. The former
 `/devices/{device_id}/agent/session` and `/device-agent/session/*` writes are quarantined migration
