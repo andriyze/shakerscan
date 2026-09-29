@@ -1650,7 +1650,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 19 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 393 | Python sources + Compose manifests |
+| Runtime environment keys | 394 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 123 | `scanner/scanner_tools/` |
 | UI pages | 39 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2532,7 +2532,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `FLEET_EDGE_MODE` | `api/api.py` |
 | `FLEET_EXPECTED_WORKER_IMAGE_DIGEST` | `docker-compose.broker-worker.yml`, `docker-compose.worker.yml` |
 | `FLEET_GATEWAY_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `FLEET_GATEWAY_PROXY_SECRET` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `FLEET_GATEWAY_PROXY_SECRET` | `api/fleet_routes/router.py`, `api/host_guard.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_HEARTBEAT_TIMEOUT_MINUTES` | `api/fleet_routes/router.py`, `api/operations/router.py` |
 | `FLEET_HEARTBEAT_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `FLEET_JOIN_RATE_LIMIT_PER_MINUTE` | `api/fleet_routes/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2696,6 +2696,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SCAN_VERIFICATION_MAX` | `scanner/scanner.py` |
 | `SHAKERSCAN_AGENT_TOOL_OUTPUT_BYTES` | `api/worker.py` |
 | `SHAKERSCAN_AGENT_TOOL_RESULT_TTL_SECONDS` | `api/worker.py` |
+| `SHAKERSCAN_ALLOWED_HOSTS` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_GID` | `docker-compose.release.yml` |
 | `SHAKERSCAN_API_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_API_TOKEN` | `scripts/scan_cli.py`, `scripts/v2_cli.py` |
@@ -2761,7 +2762,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_POSTURE_RESOLVER` | `api/public_check.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PRIVATE_NETWORK_TARGETS` | `api/deployment_policy.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_PUBLIC_API_URL` | `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_PUBLIC_HOST` | `api/api.py`, `api/host_guard.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_CONSUMER_GROUP` | `api/job_queue.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
