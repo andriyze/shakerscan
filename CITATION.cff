@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use ShakerScan in research or publications, please cite it as below."
+title: "ShakerScan"
+abstract: "Open-source application-security platform with a deterministic Scan and agent-driven Hunt for web applications, APIs, AI systems and network-connected devices."
+type: software
+authors:
+  - name: "Andriy"
+    alias: "andriyze"
+repository-code: "https://github.com/andriyze/shakerscan"
+url: "https://shakerscan.com"
+license: AGPL-3.0-only
+keywords:
+  - application security
+  - DAST
+  - security scanner
+  - penetration testing
+  - AI security
