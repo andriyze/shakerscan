@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import errno
 import hashlib
+import ipaddress
 import math
+import socket
 import ssl
 import time
 from typing import Any, Mapping
@@ -45,6 +48,62 @@ def _origin(value: str) -> str | None:
 def _origin_key(value: str):
     parsed = urllib.parse.urlsplit(value)
     return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+# A TCP connect failing with one of these is either this host's kernel refusing an
+# address it has no route to (nothing is sent) or a remote router's ICMP answer. Only
+# the first is a limit of the worker rather than an observation of the target.
+_ROUTE_FAILURE_ERRNOS = frozenset({
+    errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT,
+})
+
+
+def _socket_errno(exc: BaseException) -> int | None:
+    if isinstance(exc, ssl.SSLError) or not isinstance(exc, OSError):
+        return None
+    return exc.errno if isinstance(exc.errno, int) else None
+
+
+def worker_route_gap(address: str, port: int = 443) -> dict[str, Any] | None:
+    """Return why this worker cannot originate traffic to ``address``, else None.
+
+    Connecting a UDP socket makes the kernel select a route and source address without
+    transmitting a datagram. That separates "this worker has no route for the address" --
+    a Docker bridge without IPv6 egress answers every frozen AAAA address with
+    ENETUNREACH -- from a remote network that happened to answer a TCP SYN with the same
+    errno, which remains a failure of the target path.
+    """
+    try:
+        parsed = ipaddress.ip_address(str(address).strip())
+    except ValueError:
+        return None
+    family_label = f"ipv{parsed.version}"
+    try:
+        probe = socket.socket(
+            socket.AF_INET6 if parsed.version == 6 else socket.AF_INET,
+            socket.SOCK_DGRAM,
+        )
+    except OSError as exc:
+        if exc.errno not in _ROUTE_FAILURE_ERRNOS:
+            return None
+        return {
+            "reason": "worker_address_family_unavailable",
+            "address_family": family_label,
+            "errno": errno.errorcode.get(exc.errno, str(exc.errno)),
+        }
+    try:
+        probe.connect((str(parsed), int(port)))
+    except OSError as exc:
+        if exc.errno not in _ROUTE_FAILURE_ERRNOS:
+            return None
+        return {
+            "reason": "worker_route_unavailable",
+            "address_family": family_label,
+            "errno": errno.errorcode.get(exc.errno, str(exc.errno)),
+        }
+    finally:
+        probe.close()
+    return None
 
 
 async def inspect_tls_origin(
@@ -165,10 +224,29 @@ async def inspect_tls_origin(
 
     protocol_results: list[dict[str, Any]] = []
     successful: list[tuple[dict[str, Any], bytes]] = []
+    route_gap: dict[str, Any] | None = None
+
+    def record_failure(label: str, exc: BaseException) -> None:
+        nonlocal route_gap
+        code = _socket_errno(exc)
+        protocol_results.append({
+            "protocol": label,
+            "supported": False,
+            "error_type": type(exc).__name__,
+            **(
+                {"error_errno": errno.errorcode.get(code, str(code))}
+                if code is not None else {}
+            ),
+        })
+        if code in _ROUTE_FAILURE_ERRNOS and route_gap is None:
+            route_gap = worker_route_gap(selected_address, port)
+
     for label, version in (
         ("TLSv1.2", ssl.TLSVersion.TLSv1_2),
         ("TLSv1.3", ssl.TLSVersion.TLSv1_3),
     ):
+        if route_gap is not None:
+            break
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
@@ -178,11 +256,7 @@ async def inspect_tls_origin(
         try:
             snapshot, certificate = await handshake(context)
         except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-            protocol_results.append({
-                "protocol": label,
-                "supported": False,
-                "error_type": type(exc).__name__,
-            })
+            record_failure(label, exc)
         else:
             cipher = snapshot.get("cipher")
             protocol_results.append({
@@ -197,7 +271,7 @@ async def inspect_tls_origin(
 
     # If the two supported modern profiles both fail, one default negotiation
     # distinguishes a reachable legacy-only endpoint from a non-TLS service.
-    if not successful:
+    if not successful and route_gap is None:
         fallback = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         fallback.check_hostname = False
         fallback.verify_mode = ssl.CERT_NONE
@@ -205,11 +279,7 @@ async def inspect_tls_origin(
         try:
             snapshot, certificate = await handshake(fallback)
         except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-            protocol_results.append({
-                "protocol": "default_negotiation",
-                "supported": False,
-                "error_type": type(exc).__name__,
-            })
+            record_failure("default_negotiation", exc)
         else:
             cipher = snapshot.get("cipher")
             protocol_results.append({
@@ -243,6 +313,33 @@ async def inspect_tls_origin(
         timeout,
         max(1, math.ceil(time.perf_counter() - started)),
     )
+    if route_gap is not None and not successful:
+        # The kernel refused the connect locally: nothing reached the target, so this
+        # is a limit of the worker, not TLS evidence about the address. Say so instead
+        # of reporting a handshake failure the target never had a chance to cause.
+        return {
+            "ok": False,
+            "status": "not_examined",
+            "error": f"tls_route_unavailable:{route_gap['reason']}",
+            "observation": {
+                "kind": "tls_protocol",
+                "origin": normalized_origin,
+                "server_hostname": parsed.hostname,
+                "pinned_address": selected_address,
+                "attempted_addresses": [selected_address],
+                "connected_addresses": [],
+                "address_policy": socket_factory.policy_receipt,
+                "port": port,
+                "status": "not_examined",
+                "examination_gap": dict(route_gap),
+                "protocol_attempts": protocol_results,
+                "certificate_trust": "not_evaluated",
+            },
+            "budget_consumed": {
+                "tcp_ports_attempted": attempts,
+                "tool_wall_seconds": elapsed,
+            },
+        }
     if not successful:
         return {
             "ok": False,
@@ -502,8 +599,10 @@ async def inspect_tls_binding(
         }
     observations: list[Mapping[str, Any]] = []
     errors: list[str] = []
+    route_errors: list[str] = []
     consumed = {"tcp_ports_attempted": 0, "tool_wall_seconds": 0}
     successes = 0
+    examined = 0
     for origin in origins:
         for address in addresses:
             result = await inspect_tls_origin(
@@ -518,15 +617,29 @@ async def inspect_tls_binding(
                     consumed[name] += max(0, int(measured.get(name) or 0))
             if isinstance(result.get("observation"), Mapping):
                 observations.append(dict(result["observation"]))
+            if result.get("status") == "not_examined":
+                # The frozen address stays in the record with its examination gap, but a
+                # worker that cannot route it (a Docker bridge without IPv6 egress facing
+                # a CDN's AAAA records) must not turn every such target partial forever.
+                route_errors.append(str(result.get("error") or "")[:200])
+                continue
+            examined += 1
             if result.get("ok"):
                 successes += 1
             elif result.get("error"):
                 errors.append(str(result["error"])[:200])
-    total = len(origins) * len(addresses)
-    partial = 0 < successes < total
+    if not examined:
+        # Nothing this worker could route: no TLS evidence exists, which is a failure,
+        # never a clean result.
+        errors = route_errors
+    partial = 0 < successes < examined
     return {
         "ok": successes > 0,
-        "status": "partial" if partial else "success" if successes == total else "failed",
+        "status": (
+            "partial" if partial
+            else "success" if examined and successes == examined
+            else "failed"
+        ),
         "partial": partial,
         "error": "tls_binding_partial" if partial else errors[0] if errors else None,
         "errors": errors[:100],

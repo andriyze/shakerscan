@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import ipaddress
+import socket
 
+from api.capabilities import tls as tls_capability
 from api.capabilities.tls import inspect_tls_binding, inspect_tls_origin
 from api.runtime.models import TargetBinding
 from scanner import scanner as scanner_main
@@ -264,3 +268,229 @@ def test_scanner_never_falls_back_to_in_process_tls():
     assert result["runtime"]["reason"] == "tls_capability_placement_missing"
     assert result["runtime"]["tcp_ports_attempted"] == 0
     assert result["tlsx"] == {"endpoints": [], "certificate": {}}
+
+
+def _cdn_target() -> TargetBinding:
+    # A CDN name: several A records plus AAAA records, all frozen at submission.
+    return TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",),
+        allowed_addresses=(
+            "192.0.2.10", "192.0.2.11", "2001:db8::10", "2001:db8::11",
+        ),
+        allowed_root_domains=("example.test",),
+    )
+
+
+def _ipv6_unreachable_connection(calls):
+    async def fake_open_connection(**kwargs):
+        calls.append(kwargs["host"])
+        if ipaddress.ip_address(kwargs["host"]).version == 6:
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+        return object(), _Writer()
+
+    return fake_open_connection
+
+
+def _worker_without_ipv6_route(address, _port=443):
+    if ipaddress.ip_address(address).version == 6:
+        return {
+            "reason": "worker_route_unavailable",
+            "address_family": "ipv6",
+            "errno": "ENETUNREACH",
+        }
+    return None
+
+
+def test_addresses_the_worker_cannot_route_do_not_make_a_cdn_target_partial(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(asyncio, "open_connection", _ipv6_unreachable_connection(calls))
+    monkeypatch.setattr(
+        tls_capability, "worker_route_gap", _worker_without_ipv6_route, raising=False,
+    )
+
+    result = asyncio.run(inspect_tls_binding(target=_cdn_target()))
+
+    assert result["status"] == "success"
+    assert result["partial"] is False
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert result["errors"] == []
+    by_address = {item["pinned_address"]: item for item in result["observations"]}
+    # Every frozen address stays in the record; the unroutable ones say why.
+    assert set(by_address) == set(_cdn_target().allowed_addresses)
+    for address in ("192.0.2.10", "192.0.2.11"):
+        assert by_address[address]["status"] == "success"
+    for address in ("2001:db8::10", "2001:db8::11"):
+        observation = by_address[address]
+        assert observation["status"] == "not_examined"
+        assert observation["connected_addresses"] == []
+        assert observation["examination_gap"] == {
+            "reason": "worker_route_unavailable",
+            "address_family": "ipv6",
+            "errno": "ENETUNREACH",
+        }
+        assert observation["protocol_attempts"] == [{
+            "protocol": "TLSv1.2",
+            "supported": False,
+            "error_type": "OSError",
+            "error_errno": "ENETUNREACH",
+        }]
+        assert "certificate_sha256" not in observation
+    # A locally refused connect is not retried per protocol profile.
+    assert calls.count("2001:db8::10") == 1
+    assert calls.count("2001:db8::11") == 1
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 3 + 3 + 1 + 1
+
+
+def test_a_remote_unreachable_answer_stays_a_partial_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(asyncio, "open_connection", _ipv6_unreachable_connection(calls))
+    # The worker has an IPv6 route, so ENETUNREACH came from the target path.
+    monkeypatch.setattr(
+        tls_capability, "worker_route_gap", lambda *_args: None, raising=False,
+    )
+
+    result = asyncio.run(inspect_tls_binding(target=_cdn_target()))
+
+    assert result["status"] == "partial"
+    assert result["partial"] is True
+    assert result["errors"] == [
+        "tls_handshake:no_supported_protocol",
+        "tls_handshake:no_supported_protocol",
+    ]
+    failed = [
+        item for item in result["observations"] if item["status"] == "failed"
+    ]
+    assert {item["pinned_address"] for item in failed} == {
+        "2001:db8::10", "2001:db8::11",
+    }
+    assert all(
+        attempt["error_errno"] == "ENETUNREACH"
+        for item in failed for attempt in item["protocol_attempts"]
+    )
+    assert calls.count("2001:db8::10") == 3
+
+
+def test_a_binding_with_no_routable_address_fails_rather_than_passing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(asyncio, "open_connection", _ipv6_unreachable_connection(calls))
+    monkeypatch.setattr(
+        tls_capability, "worker_route_gap", _worker_without_ipv6_route, raising=False,
+    )
+    target = TargetBinding(
+        target_id="target-1",
+        target_kind="web",
+        canonical_host="app.example.test",
+        allowed_origins=("https://app.example.test",),
+        allowed_addresses=("2001:db8::10",),
+        allowed_root_domains=("example.test",),
+    )
+
+    result = asyncio.run(inspect_tls_binding(target=target))
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["error"] == "tls_route_unavailable:worker_route_unavailable"
+    assert result["observations"][0]["status"] == "not_examined"
+
+
+def test_hunt_tls_on_an_unroutable_address_is_an_explicit_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(asyncio, "open_connection", _ipv6_unreachable_connection(calls))
+    monkeypatch.setattr(
+        tls_capability, "worker_route_gap", _worker_without_ipv6_route, raising=False,
+    )
+
+    result = asyncio.run(inspect_tls_origin(
+        "https://app.example.test",
+        target=_cdn_target(),
+        pinned_address="2001:db8::10",
+    ))
+
+    assert result["ok"] is False
+    assert result["status"] == "not_examined"
+    assert result["error"] == "tls_route_unavailable:worker_route_unavailable"
+    assert result["budget_consumed"]["tcp_ports_attempted"] == 1
+
+
+class _RouteProbeSocket:
+    connect_errno: int | None = None
+    created: list[tuple[int, int]] = []
+
+    def __init__(self, family, kind):
+        type(self).created.append((family, kind))
+        self.closed = False
+
+    def connect(self, _address):
+        if type(self).connect_errno is not None:
+            raise OSError(type(self).connect_errno, "probe")
+
+    def close(self):
+        self.closed = True
+
+
+def test_worker_route_gap_uses_a_no_traffic_route_lookup(monkeypatch):
+    monkeypatch.setattr(tls_capability.socket, "socket", _RouteProbeSocket)
+    _RouteProbeSocket.created = []
+
+    _RouteProbeSocket.connect_errno = errno.ENETUNREACH
+    assert tls_capability.worker_route_gap("2001:db8::10") == {
+        "reason": "worker_route_unavailable",
+        "address_family": "ipv6",
+        "errno": "ENETUNREACH",
+    }
+    # A connected datagram socket selects a route without sending anything.
+    assert _RouteProbeSocket.created == [(socket.AF_INET6, socket.SOCK_DGRAM)]
+
+    _RouteProbeSocket.connect_errno = None
+    assert tls_capability.worker_route_gap("192.0.2.10") is None
+    _RouteProbeSocket.connect_errno = errno.ECONNREFUSED
+    assert tls_capability.worker_route_gap("192.0.2.10") is None
+
+
+def test_scanner_tls_projection_ignores_addresses_that_were_never_contacted():
+    unexamined = {
+        "kind": "tls_protocol",
+        "origin": "https://app.example.test",
+        "server_hostname": "app.example.test",
+        "pinned_address": "2001:db8::10",
+        "port": 443,
+        "status": "not_examined",
+        "examination_gap": {"reason": "worker_route_unavailable"},
+    }
+    examined = {
+        "kind": "tls_protocol",
+        "origin": "https://app.example.test",
+        "server_hostname": "app.example.test",
+        "pinned_address": "192.0.2.10",
+        "port": 443,
+        "status": "success",
+        "protocol": "TLSv1.3",
+        "certificate_sha256": "a" * 64,
+    }
+    result = scanner_main._canonical_tls_placement_result(
+        {
+            "status": "success",
+            "observations": [unexamined, examined],
+            "budget_consumed": {"tcp_ports_attempted": 4, "tool_wall_seconds": 2},
+            "receipt": {"receipt_hash": "b" * 64},
+        },
+        {"target_binding_digest": "c" * 64},
+        host="app.example.test",
+        port=443,
+        scheme="https",
+    )
+    assert [item["ip"] for item in result["tlsx"]["endpoints"]] == ["192.0.2.10"]
+    assert result["tlsx"]["certificate"]["fingerprints"] == {"sha256": "a" * 64}
+
+    validation = scanner_main._canonical_pre_scan_validation(
+        "https://app.example.test",
+        {"target_binding": {"allowed_addresses": ["2001:db8::10"]}},
+        {"tls.inspect": {"observations": [unexamined]}},
+    )
+    assert validation["connectivity"]["reachable"] is False
