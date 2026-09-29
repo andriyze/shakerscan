@@ -4572,6 +4572,7 @@ async def _enqueue_asm_exploit_batch(
     endpoint_filter: str | None = None,
     triggered_by: str = "api",
     domain_rate_reserved: int = 0,
+    domain_rate_hold_id: str | None = None,
 ) -> dict:
     """Create an asm_batch scan row and enqueue the exploit_batch job. Shared by
     POST /asm/test and the continuous dispatcher."""
@@ -4695,6 +4696,7 @@ async def _enqueue_asm_exploit_batch(
         "check_family": family,
         "endpoint_filter": endpoint_filter,
         "domain_rate_reserved": max(0, int(domain_rate_reserved or 0)),
+        "domain_rate_hold_id": str(domain_rate_hold_id) if domain_rate_hold_id else None,
         "claimed_endpoint_ids": claimed_ids,
         "scan_job": canonical_job.queue_payload(),
         "triggered_by": triggered_by,

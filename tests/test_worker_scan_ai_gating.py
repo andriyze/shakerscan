@@ -15,6 +15,7 @@ from pathlib import Path
 from tests.api_sources import (
     api_tree_source, definition_source, route_is_declared, route_source,
 )
+from tests.domain_rate_fake import DomainRateLedgerFake
 
 import pytest
 
@@ -1259,6 +1260,7 @@ class _FakeSlotRedis:
 class _FakeJobRedis(_FakeSlotRedis):
     def __init__(self):
         super().__init__()
+        self.ledger = DomainRateLedgerFake()
         self.hashes = []
         self.values = {}
         self.pushed = []
@@ -1286,24 +1288,9 @@ class _FakeJobRedis(_FakeSlotRedis):
         return len(self.pushed)
 
     def eval(self, script, numkeys, key, *args):
-        if "ZREMRANGEBYSCORE" in script or "ZSCORE" in script:
-            return super().eval(script, numkeys, key, *args)
-        amount, cap, _ttl, *rest = args
-        all_or_nothing = rest[0] if rest else "0"
-        current = int(self.values.get(key) or 0)
-        amount = int(amount)
-        cap = int(cap)
-        if amount <= 0:
-            return 0
-        if cap <= 0:
-            return 0
-        if current >= cap:
-            return 0
-        if str(all_or_nothing) == "1" and current + amount > cap:
-            return 0
-        granted = min(amount, cap - current)
-        self.values[key] = current + granted
-        return granted
+        if DomainRateLedgerFake.handles(script):
+            return self.ledger.eval(script, numkeys, key, *args)
+        return super().eval(script, numkeys, key, *args)
 
     def set(self, key, value, nx=False, ex=None):
         self.sets.append((key, value, nx, ex))
@@ -2179,6 +2166,11 @@ class _FakeRateConn:
     async def fetchval(self, query, *args):
         self.fetchval_calls.append((query, args))
         return self.used
+
+    async def fetch(self, query, *args):
+        # Resume estimates read when database-window endpoints leave the hour.
+        self.fetchval_calls.append((query, args))
+        return []
 
     async def execute(self, query, *args):
         self.executions.append((query, args))
@@ -3806,7 +3798,8 @@ def test_domain_endpoint_budget_reservation_accounts_for_db_and_redis_usage():
     target_id = "33333333-3333-3333-3333-333333333333"
     conn = _FakeRateConn(root_domain="example.test", cap=5, used=2)
     redis = _FakeJobRedis()
-    redis.values[worker.asm_inventory.domain_rate_key("example.test")] = 1
+    # One unit already in flight on the ledger (another piece of background work's hold).
+    worker.domain_rate.reserve(redis, "example.test", entry_id="other", requested=1, headroom=5)
 
     granted = asyncio.run(
         worker._reserve_target_domain_endpoint_budget(
@@ -3842,6 +3835,243 @@ def test_domain_endpoint_budget_reservation_denies_exhausted_db_budget():
     assert granted["limited"] is True
     assert granted["used"] == 5
     assert granted["reserved"] == 0
+
+
+def _operator_scan_options():
+    return {"budget_profile": "fast", "scan_execution_plan_digest": "a" * 64}
+
+
+def test_live_sequence_operator_scans_are_never_throttled_and_both_are_recorded(monkeypatch):
+    # 2026-09-27 soak: an operator fast scan on strength.ukrtampa.com was cut to 1000/2500
+    # endpoints, then an operator balanced scan on ukrtampa.com sat queued for 45 minutes.
+    conn = _FakeRateConn(root_domain="example.com", cap=1000, used=0)
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
+    first_scan = "11111111-1111-4111-8111-111111111111"
+    second_scan = "22222222-2222-4222-8222-222222222222"
+
+    async def run():
+        # 1. Operator active scan on sub.example.com (root example.com): fast = 2500 endpoints.
+        with worker.domain_rate.settlement_scope(lambda: redis):
+            first_options = _operator_scan_options()
+            admitted = await worker._admit_scan_on_domain_rate(
+                redis, {"job_id": "job-1", "scan_id": first_scan}, job_id="job-1",
+                scan_id=first_scan, target_id="33333333-3333-4333-8333-333333333333",
+                options=first_options, reserve_amount=2500,
+            )
+            assert admitted == first_options  # no budget cut, no reduction record
+            worker.domain_rate.mark_executing(first_scan)
+            worker.domain_rate.measure(first_scan, 1800)
+        # 2. Operator scan on example.com right after: balanced = 10000 endpoints.
+        with worker.domain_rate.settlement_scope(lambda: redis):
+            second_options = _operator_scan_options()
+            admitted = await worker._admit_scan_on_domain_rate(
+                redis, {"job_id": "job-2", "scan_id": second_scan}, job_id="job-2",
+                scan_id=second_scan, target_id="44444444-4444-4444-8444-444444444444",
+                options=second_options, reserve_amount=10_000,
+            )
+            assert admitted == second_options
+            assert redis.ledger.entries("example.com") == {
+                f"c:{first_scan}": 1800, f"h:{second_scan}": 10_000,
+            }
+            worker.domain_rate.mark_executing(second_scan)
+            worker.domain_rate.measure(second_scan, 4000)
+
+    asyncio.run(run())
+
+    assert redis.pushed == []  # nothing was parked behind the quota
+    assert not any(domain_rate_phase in str(query) for query, _args in conn.executions
+                   for domain_rate_phase in ("waiting_for_domain_rate",))
+    assert redis.ledger.entries("example.com") == {f"c:{first_scan}": 1800, f"c:{second_scan}": 4000}
+    records = [json.loads(args[1]) for query, args in conn.executions if "domain_rate_json" in query]
+    assert [record["work_class"] for record in records] == ["operator", "operator"]
+    assert all(record["state"] == "admitted" and "reduction" not in record for record in records)
+
+
+def test_background_asm_backs_off_after_operator_scan_and_resumes_when_the_hour_passes():
+    conn = _FakeRateConn(root_domain="example.com", cap=1000, used=0)
+    redis = _FakeJobRedis()
+    worker.domain_rate.reserve(redis, "example.com", entry_id="operator-scan", requested=2500,
+                               headroom=1000, enforce=False)
+    worker.domain_rate.settle(redis, "example.com", entry_id="operator-scan", consumed=1200)
+
+    async def admit_batch(entry):
+        return await worker._reserve_target_domain_endpoint_budget(
+            conn, redis, target_id="55555555-5555-4555-8555-555555555555", amount=50,
+            entry_id=entry,
+        )
+
+    waiting = asyncio.run(admit_batch("asm-1"))
+    assert waiting["granted"] == 0 and waiting["limited"] is True
+    assert waiting["work_class"] == "background"
+    assert waiting["resume_at"] == worker.domain_rate._iso(redis.ledger.now_ms + 3600 * 1000)
+    redis.ledger.advance(3601)
+    admitted = asyncio.run(admit_batch("asm-1"))
+    assert admitted["granted"] == 50 and admitted["limited"] is False
+
+
+def test_asm_batches_still_respect_the_cap_and_the_worker_tops_up_the_dispatcher_hold():
+    conn = _FakeRateConn(root_domain="example.com", cap=120, used=20)
+    redis = _FakeJobRedis()
+    # The API dispatcher holds a 50-endpoint batch under a pre-generated hold id ...
+    worker.asm_inventory.reserve_domain_rate(redis, "example.com", 100, 50, entry_id="hold-1")
+    # ... and the worker admits the same batch under that id without holding it twice.
+    rate = asyncio.run(worker._reserve_target_domain_endpoint_budget(
+        conn, redis, target_id="55555555-5555-4555-8555-555555555555", amount=50,
+        entry_id="hold-1",
+    ))
+    assert rate["granted"] == 50
+    assert redis.ledger.entries("example.com") == {"h:hold-1": 50}
+    # A second batch only gets what is left of the cap (120 - 20 tested - 50 held).
+    second = asyncio.run(worker._reserve_target_domain_endpoint_budget(
+        conn, redis, target_id="55555555-5555-4555-8555-555555555555", amount=100,
+        entry_id="hold-2",
+    ))
+    assert second["granted"] == 50 and second["limited"] is True
+
+
+def test_background_scheduled_scan_waits_with_reason_and_resume_estimate(monkeypatch):
+    conn = _FakeRateConn(root_domain="example.com", cap=1000, used=0)
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
+    worker.domain_rate.reserve(redis, "example.com", entry_id="asm", requested=1000, headroom=1000)
+    scan_id = "22222222-2222-4222-8222-222222222222"
+    options = {**_operator_scan_options(), "admission_origin": "schedule"}
+
+    admitted = asyncio.run(worker._admit_scan_on_domain_rate(
+        redis, {"job_id": "job-s", "scan_id": scan_id, "options": options}, job_id="job-s",
+        scan_id=scan_id, target_id="33333333-3333-4333-8333-333333333333",
+        options=options, reserve_amount=700,
+    ))
+
+    assert admitted is None
+    assert len(redis.pushed) == 1
+    query, args = next((q, a) for q, a in conn.executions if "domain_rate_json" in q)
+    assert args[1] == "queued" and args[2] == "waiting_for_domain_rate"
+    record = json.loads(args[3])
+    assert record["state"] == "waiting" and record["work_class"] == "background"
+    expected_resume = worker.domain_rate._iso(redis.ledger.now_ms + 3600 * 1000)
+    assert record["resume_estimate"] == expected_resume
+    assert "example.com's hourly test budget" in record["reason"]
+    assert redis.hashes[-1][2]["domain_rate_resume_at"] == expected_resume
+
+
+def test_background_scan_is_admitted_whole_or_waits_never_silently_cut(monkeypatch):
+    # The canonical executor rebuilds its budget from the immutable plan, so a runtime "cut" would
+    # only be a label. Background Scans must hold the full executable plan.
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
+    scan_id = "22222222-2222-4222-8222-222222222222"
+    options = {**_operator_scan_options(), "admission_origin": "schedule"}
+
+    def admit(conn, amount):
+        monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+        return asyncio.run(worker._admit_scan_on_domain_rate(
+            redis, {"job_id": "job-s", "scan_id": scan_id, "options": options}, job_id="job-s",
+            scan_id=scan_id, target_id="33333333-3333-4333-8333-333333333333", options=options,
+            reserve_amount=amount,
+        ))
+
+    # 400 endpoints tested this hour leave 600 < the 700-endpoint plan: wait, do not cut.
+    busy = _FakeRateConn(root_domain="example.com", cap=1000, used=400)
+    assert admit(busy, 700) is None
+    assert redis.ledger.entries("example.com") == {}
+    # A quiet domain admits the full plan.
+    quiet = _FakeRateConn(root_domain="example.com", cap=1000, used=0)
+    admitted = admit(quiet, 700)
+    assert admitted == options
+    assert redis.ledger.entries("example.com") == {f"h:{scan_id}": 700}
+    record = json.loads(next(a for q, a in quiet.executions if "domain_rate_json" in q)[1])
+    assert record["state"] == "admitted" and record["work_class"] == "background"
+    assert "reduction" not in record
+
+
+def test_oversized_background_plan_fails_with_actionable_reason(monkeypatch):
+    conn = _FakeRateConn(root_domain="example.com", cap=1000, used=0)
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(conn))
+    scan_id = "22222222-2222-4222-8222-222222222222"
+    options = {**_operator_scan_options(), "admission_origin": "schedule"}
+    admitted = asyncio.run(worker._admit_scan_on_domain_rate(
+        redis, {"job_id": "job-s", "scan_id": scan_id, "options": options}, job_id="job-s",
+        scan_id=scan_id, target_id="33333333-3333-4333-8333-333333333333",
+        options=options, reserve_amount=10_000,
+    ))
+    assert admitted is None and redis.pushed == []
+    query, args = next((q, a) for q, a in conn.executions if "domain_rate_plan_exceeds_cap" in q)
+    assert "Lower the Scan's max_endpoints" in args[1]
+    assert json.loads(args[2])["state"] == "blocked"
+
+
+def test_cancelled_queued_asm_batch_releases_dispatch_hold(monkeypatch):
+    class Conn:
+        async def fetchval(self, query, *_args):
+            assert "SELECT root_domain FROM targets" in query
+            return "example.com"
+
+    async def cancelled(_scan_id):
+        return "cancelled"
+
+    redis = _FakeJobRedis()
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(Conn()))
+    monkeypatch.setattr(worker, "get_redis", lambda: redis)
+    monkeypatch.setattr(worker, "_confirmed_scan_handoff_status", cancelled)
+    hold_id = "dispatcher-hold"
+    worker.domain_rate.reserve(redis, "example.com", entry_id=hold_id,
+                               requested=1000, headroom=1000)
+
+    async def run():
+        with worker.domain_rate.settlement_scope(lambda: redis):
+            await worker.process_exploit_batch_job({
+                "job_id": "job-asm", "scan_id": "22222222-2222-4222-8222-222222222222",
+                "target_id": "33333333-3333-4333-8333-333333333333",
+                "target": "https://example.com", "domain_rate_hold_id": hold_id,
+            })
+
+    asyncio.run(run())
+    assert redis.ledger.entries("example.com") == {}
+
+
+def test_asm_partial_grant_releases_claimed_endpoints_and_records_the_reduction():
+    rate = {"granted": 20, "requested": 50, "root_domain": "example.com", "cap": 1000}
+    reduction = worker.domain_rate.reduction_record(rate)
+    assert (reduction["requested"], reduction["granted"]) == (50, 20)
+    assert "example.com's hourly test budget" in reduction["reason"]
+    record = worker.domain_rate.admitted_record({**rate, "work_class": "background"}, reduction)
+    assert record["state"] == "reduced" and record["reduction"] == reduction
+    result = {"coverage": {"status": "complete", "reasons": []}}
+    worker.domain_rate.annotate_result(result, reduction)
+    assert result["scan_metadata"]["domain_rate_reduction"] == reduction
+    assert result["coverage"]["reasons"] == [reduction["reason"]]
+
+
+def test_parallel_shards_are_admitted_by_their_scans_work_class(monkeypatch):
+    seen = []
+
+    async def fake_reserve(*_args, **kwargs):
+        seen.append(kwargs["work"])
+        return {"granted": 0, "limited": True, "requested": 2, "root_domain": "example.test", "cap": 1}
+
+    monkeypatch.setattr(worker, "db_pool", _FakeAsmPool(_FakeAsmConn()))
+    monkeypatch.setattr(worker, "DOMAIN_RATE_REQUEUE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(worker, "_reserve_target_domain_endpoint_budget", fake_reserve)
+    for extra in ({}, {"admission_origin": "schedule"}):
+        redis = _FakeJobRedis()
+        monkeypatch.setattr(worker, "get_redis", lambda redis=redis: redis)
+        asyncio.run(worker.process_scan_shard_job({
+            "job_id": "job-rate-shard",
+            "scan_id": "22222222-2222-2222-2222-222222222222",
+            "parent_scan_id": "55555555-5555-5555-5555-555555555555",
+            "target_id": "33333333-3333-3333-3333-333333333333",
+            "target": "https://example.test",
+            "options": {"scan_type": "smart", "custom_endpoints": ["GET /a?id=1", "GET /b?id=1"], **extra},
+            "shard_label": "coverage[0]",
+            "shard_index": 0,
+            "shard_count": 1,
+        }))
+    assert seen == ["operator", "background"]
 
 
 def test_parallel_shard_waits_when_domain_endpoint_budget_exhausted(monkeypatch):
@@ -5162,9 +5392,11 @@ def test_canonical_rate_reservation_uses_immutable_plan_not_legacy_mode(monkeypa
         "prepare_worker_dispatch",
         lambda options: (dict(options), admission),
     )
+    # The domain quota's unit is endpoints: enforcing the HTTP request budget must not switch
+    # the reservation to the 77 HTTP requests (the unit bug behind the live 40% budget cut).
     assert worker._standalone_scan_rate_reservation_amount({
         "request_budget_mode": "enforce",
-    }) == 77
+    }) == 13
     assert worker._standalone_scan_rate_reservation_amount({
         "request_budget_mode": "off",
     }) == 13

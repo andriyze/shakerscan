@@ -1362,6 +1362,7 @@ async def _run_schema_migrations_once(pool) -> None:
                 ADD COLUMN IF NOT EXISTS budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS coverage_status TEXT,
                 ADD COLUMN IF NOT EXISTS coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS domain_rate_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS scan_job_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS scan_job_digest TEXT
             """)
