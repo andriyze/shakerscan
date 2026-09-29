@@ -3450,7 +3450,13 @@ show_env_help() {
     echo ""
     echo "Use the launcher above for normal agent work."
     echo "It sets ShakerScan runtime URLs and planner identity and applies agent-specific integration."
-    echo "Direct agent invocation is only a debugging path and is not equivalent to the launcher."
+    echo ""
+    echo "Direct invocation (debugging only; not equivalent to the launcher):"
+    echo "  cd \"$SCRIPT_DIR\""
+    echo "  export SHAKERSCAN_API_BASE=\"$(api_probe_url)\""
+    echo "  export SHAKERSCAN_UI_BASE=\"$(ui_base_url)\""
+    echo "  codex   # or claude, or opencode"
+    echo "Pi requires launcher-supplied skill/template flags; use the launcher for Pi."
 }
 
 # Pi reads AGENTS.md regardless of project trust. Its .pi/.agents project resources are
