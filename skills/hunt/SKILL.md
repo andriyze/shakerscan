@@ -5,7 +5,7 @@ description: Drive ShakerScan Hunt for an authorized web, API, network, or conne
 
 # Hunt
 
-Use the current Codex, Claude Code, or OpenCode session as the planner. ShakerScan is the only
+Use the current Codex, Claude Code, OpenCode, or Pi session as the planner. ShakerScan is the only
 executor and remains authoritative for target binding, approvals, credentials, budgets, evidence,
 candidates, and proof. Do not start a second in-server reasoning loop.
 

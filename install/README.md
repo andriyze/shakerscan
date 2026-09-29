@@ -36,7 +36,7 @@ The installed skills include the general ShakerScan workflow plus interactive se
 JavaScript analysis, content discovery, bounded research/Deep Hunt, and skill-system review. The
 Claude Code commands include the matching `/research` entry point.
 
-It then creates a `shakerscan` launcher in `~/.local/bin`, adds that directory to future shell sessions when needed, and runs `shakerscan start -y`, which uses the latest Docker Hub images by default. Because a child install script cannot modify the current shell's PATH, installer output also shows absolute commands such as `~/.local/bin/shakerscan agent codex`. Users can also `cd ~/.shakerscan` and start Codex, Claude, or OpenCode there so the agent reads the installed docs and skills.
+It then creates a `shakerscan` launcher in `~/.local/bin`, adds that directory to future shell sessions when needed, and runs `shakerscan start -y`, which uses the latest Docker Hub images by default. Because a child install script cannot modify the current shell's PATH, installer output also shows absolute commands such as `~/.local/bin/shakerscan agent codex`. Use that launcher for Codex, Claude, OpenCode, and Pi rather than treating a bare agent binary as equivalent: it sets ShakerScan runtime URLs and planner identity for every agent and applies agent-specific setup. Pi additionally receives the canonical skills and prompt templates explicitly.
 
 The release runtime enables confirmation-gated AI Operations execution by default so a first-time
 user can launch Deep Hunt with the current coding agent as the keyless planner. Deep Hunt still

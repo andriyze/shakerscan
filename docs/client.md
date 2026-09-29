@@ -137,7 +137,7 @@ pipx install shakerscan                           # or: uv tool install shakersc
 shakerscan connect http://192.168.1.50:8080       # saves the address; runs doctor
 shakerscan doctor                                 # engine: reachable (healthy), mcp: N tools
 shakerscan api GET /findings
-shakerscan agent opencode                         # or claude, codex: the full agent workspace
+shakerscan agent opencode                         # or claude, codex, pi: the full agent workspace
 ```
 
 A plain-http address is always saved without a token (a bearer token is never sent over http);
@@ -216,7 +216,7 @@ directory, where `AGENTS.md`, the skills and the `.claude` commands (`/scan`,
 the connected instance:
 
 ```bash
-shakerscan agent claude        # or codex, opencode; the first one installed when omitted
+shakerscan agent claude        # or codex, opencode, pi; omitted => codex, claude, opencode, then pi
 shakerscan agent opencode --url http://192.168.1.50:8080   # an open-source engine on a trusted LAN
 ```
 
@@ -231,7 +231,12 @@ prepends a note naming the connected instance and the rules of a remote session 
 engine, use `shakerscan api`/`scan`/`hunt` and the MCP tools, refusals name what is missing),
 registers the MCP server for that workspace (`.mcp.json` for Claude Code, `opencode.json` for
 OpenCode, `codex mcp add` for Codex), exports the connection with the token left in its file,
-and starts the agent there. `--no-launch` prepares the workspace and prints how to start. The
+and starts the agent there. Pi has no MCP client: it is started with `--no-approve`, `--skill`
+for each kit skill, and `--prompt-template .claude/commands`. That keeps trust-gated project
+settings/extensions out of the launch without a trust prompt while still loading AGENTS.md and
+the explicitly named ShakerScan resources. Pi reaches the instance through `shakerscan api`,
+`scan` and `hunt`. `--no-launch` prepares the workspace and prints a shell-safe command to
+start it. The
 kit's API calls go through `shakerscan api`, so the same commands work locally and remotely.
 
 `shakerscan api METHOD PATH [JSON]` calls the instance directly (`shakerscan api GET

@@ -2206,7 +2206,7 @@ print_help() {
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
-    echo "  agent [name]       Start Codex, Claude, or OpenCode in this runtime dir"
+    echo "  agent [name]       Start Codex, Claude, OpenCode, or Pi in this runtime dir"
     echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
@@ -3440,17 +3440,41 @@ show_env_help() {
         echo "  $launcher agent codex"
         echo "  $launcher agent claude"
         echo "  $launcher agent opencode"
+        echo "  $launcher agent pi"
     else
         echo "  $SCRIPT_DIR/scanner.sh agent codex"
         echo "  $SCRIPT_DIR/scanner.sh agent claude"
         echo "  $SCRIPT_DIR/scanner.sh agent opencode"
+        echo "  $SCRIPT_DIR/scanner.sh agent pi"
     fi
     echo ""
-    echo "Manual equivalent:"
+    echo "Use the launcher above for normal agent work."
+    echo "It sets ShakerScan runtime URLs and planner identity and applies agent-specific integration."
+    echo ""
+    echo "Direct invocation (debugging only; not equivalent to the launcher):"
     echo "  cd \"$SCRIPT_DIR\""
     echo "  export SHAKERSCAN_API_BASE=\"$(api_probe_url)\""
     echo "  export SHAKERSCAN_UI_BASE=\"$(ui_base_url)\""
     echo "  codex   # or claude, or opencode"
+    echo "Pi requires launcher-supplied skill/template flags; use the launcher for Pi."
+}
+
+# Pi reads AGENTS.md regardless of project trust. Its .pi/.agents project resources are
+# trust-gated, so decline those explicitly while passing ShakerScan's canonical skills and prompt
+# templates on argv. Command-line resources still load, there is no trust prompt, and unrelated
+# project extensions/settings are not admitted. The flat skills/*.md compatibility stubs and the
+# skills/web/ methodology catalog stay out of Pi's skill index.
+exec_pi_agent() {
+    local args=(--no-approve) skill
+    for skill in "$SCRIPT_DIR"/skills/*/SKILL.md; do
+        if [ -f "$skill" ]; then
+            args+=(--skill "${skill%/SKILL.md}")
+        fi
+    done
+    if [ -d "$SCRIPT_DIR/.claude/commands" ]; then
+        args+=(--prompt-template "$SCRIPT_DIR/.claude/commands")
+    fi
+    exec pi ${args[@]+"${args[@]}"}
 }
 
 start_agent() {
@@ -3458,7 +3482,7 @@ start_agent() {
     local candidates=()
 
     if [ "$agent" = "-h" ] || [ "$agent" = "--help" ] || [ "$agent" = "help" ]; then
-        echo "Usage: $0 agent [codex|claude|opencode]"
+        echo "Usage: $0 agent [codex|claude|opencode|pi]"
         echo "Starts a supported coding agent inside the ShakerScan runtime directory."
         echo "With no name, the first installed supported agent is selected."
         return 0
@@ -3467,12 +3491,12 @@ start_agent() {
     if [ -n "$agent" ]; then
         candidates=("$agent")
     else
-        candidates=(codex claude opencode)
+        candidates=(codex claude opencode pi)
     fi
 
     for agent in "${candidates[@]}"; do
         case "$agent" in
-            codex|claude|opencode)
+            codex|claude|opencode|pi)
                 if command_exists "$agent"; then
                     echo "Starting $agent in $SCRIPT_DIR"
                     echo "This lets the agent read README.md, AGENTS.md, skills/, and .claude/."
@@ -3486,20 +3510,22 @@ start_agent() {
                     # configuration used by `scanner.sh status`.
                     export SHAKERSCAN_API_BASE="${SHAKERSCAN_API_BASE:-$(api_probe_url)}"
                     export SHAKERSCAN_UI_BASE="${SHAKERSCAN_UI_BASE:-$(ui_base_url)}"
+                    if [ "$agent" = "pi" ]; then
+                        exec_pi_agent
+                    fi
                     exec "$agent"
                 fi
                 ;;
             *)
-                echo -e "${RED}Error: unsupported agent '$agent'. Use codex, claude, or opencode.${NC}"
+                echo -e "${RED}Error: unsupported agent '$agent'. Use codex, claude, opencode, or pi.${NC}"
                 return 1
                 ;;
         esac
     done
 
     echo -e "${RED}Error: no supported agent command found.${NC}"
-    echo "Install Codex, Claude Code, or OpenCode, then run:"
-    echo "  cd \"$SCRIPT_DIR\""
-    echo "  codex   # or claude, or opencode"
+    echo "Install Codex, Claude Code, OpenCode, or Pi, then rerun the ShakerScan launcher:"
+    echo "  $SCRIPT_DIR/scanner.sh agent"
     return 1
 }
 

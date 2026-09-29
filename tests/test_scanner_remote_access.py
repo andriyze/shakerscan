@@ -90,7 +90,55 @@ def test_agent_launcher_has_non_mutating_help():
         check=True,
     )
     assert "Usage:" in result.stdout
-    assert "codex|claude|opencode" in result.stdout
+    assert "codex|claude|opencode|pi" in result.stdout
+
+
+def _start_fake_pi(tmp_path, runtime_dir: Path) -> list[str]:
+    functions = SCANNER_SH.read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    capture = tmp_path / "pi-argv"
+    fake_agent = fake_bin / "pi"
+    fake_agent.write_text(
+        '#!/bin/sh\n{ pwd; printf "%s\\n" "$SHAKERSCAN_AGENT_NAME"; for a in "$@"; do printf "%s\\n" "$a"; done; } > "$CAPTURE"\n',
+        encoding="utf-8",
+    )
+    fake_agent.chmod(0o755)
+    command = functions + f"""
+SCRIPT_DIR="{runtime_dir}"
+start_agent pi
+"""
+    result = subprocess.run(
+        ["bash", "-s"],
+        input=command,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "CAPTURE": str(capture)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return capture.read_text(encoding="utf-8").splitlines()
+
+
+def test_pi_launcher_names_the_canonical_skills_and_commands(tmp_path):
+    """Pi has no MCP client and loads project resources only behind a trust prompt: the
+    launcher names exactly the skill directories and the slash commands, never the flat
+    compatibility stubs or the skills/web methodology catalog."""
+    runtime = SCANNER_SH.parent
+    cwd, agent_name, *argv = _start_fake_pi(tmp_path, runtime)
+    assert (cwd, agent_name) == (str(runtime), "pi")
+    skills = sorted(str(path.parent) for path in (runtime / "skills").glob("*/SKILL.md"))
+    assert str(runtime / "skills" / "shakerscan") in skills and str(runtime / "skills" / "hunt") in skills
+    expected = [flag for skill in skills for flag in ("--skill", skill)]
+    assert argv == ["--no-approve", *expected, "--prompt-template", str(runtime / ".claude" / "commands")]
+    assert not any("skills/web" in arg or arg.endswith(".md") for arg in argv)
+
+
+def test_pi_launcher_starts_without_a_kit(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    assert _start_fake_pi(tmp_path, runtime) == [str(runtime), "pi", "--no-approve"]
 
 
 def test_wrapper_subcommand_help_is_non_mutating_and_informative():
