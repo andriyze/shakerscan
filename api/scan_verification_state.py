@@ -28,6 +28,7 @@ try:
         _truthy,
         _CONFIRMED_EVIDENCE_LEVELS,
         _DETERMINISTIC_PROOF_TYPES,
+        has_deterministic_exploit_proof,
     )
 except ImportError:
     import os
@@ -38,6 +39,7 @@ except ImportError:
         _truthy,
         _CONFIRMED_EVIDENCE_LEVELS,
         _DETERMINISTIC_PROOF_TYPES,
+        has_deterministic_exploit_proof,
     )
 
 
@@ -148,6 +150,12 @@ def scan_time_verification_fields(finding: dict[str, Any]) -> dict[str, Any] | N
         or proof_type in _DETERMINISTIC_PROOF_TYPES
         or (_truthy(validation.get("verified")) and evidence_level in _CONFIRMED_EVIDENCE_LEVELS)
         or _has_satisfied_proof_contract(evidence)
+        or (
+            ("proof_contract_v2" in finding or "proof_contract_v2" in evidence)
+            and has_deterministic_exploit_proof({
+                "proof_contract_v2": finding.get("proof_contract_v2") or evidence.get("proof_contract_v2"),
+            })
+        )
     )
     weak_proof = (
         verdict == "likely_vulnerable"

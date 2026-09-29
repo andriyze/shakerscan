@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { HUNT_BUDGET_DIMENSIONS } from '@/lib/huntContract.generated'
+import { createRandomUUID } from '@/lib/clientRandom'
 import { amendHuntBudget, getHuntV2, resumeHuntV2, type HuntV2 } from '@/lib/huntV2'
 import { Button, Card, Field, Select } from '@/components/ui'
 
@@ -27,7 +28,7 @@ export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; on
     const revision = hunt.budget_revision ?? 0
     const resumeRequested = hunt.status === 'budget_exhausted' && resume
     const signature = JSON.stringify([hunt.hunt_id, revision, dimension, parsed, resumeRequested])
-    const key = attempt.current?.signature === signature ? attempt.current.key : crypto.randomUUID()
+    const key = attempt.current?.signature === signature ? attempt.current.key : createRandomUUID()
     attempt.current = { signature, key }
     setBusyAction('extend')
     setError(null)

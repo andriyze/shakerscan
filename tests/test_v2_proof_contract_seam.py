@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scanner"))
 
 from scan_verification_state import scan_time_verification_fields  # noqa: E402
+from evidence_triage import build_evidence_with_triage  # noqa: E402
 
 
 def _v2_contract_evidence(**overrides):
@@ -165,3 +166,37 @@ def test_unreadable_evidence_is_no_evidence():
     for bad in ("not json", "", b"\xff\xfe", "[1,2,3]", "null"):
         fields = scan_time_verification_fields({"severity": "critical", "evidence": bad})
         assert (fields or {}).get("last_verification_verdict") != "exploited", bad
+
+
+def _receipt_backed_envelope(**overrides):
+    proof = {
+        "schema_version": "proof-contract/v2",
+        "contract_id": "scan.exposure.verify_batch.sensitive_exposure_proof",
+        "contract_version": "1.0.0",
+        "reexecution": {"required": False, "performed": True, "verifier_build": "exposure.verify_batch"},
+        "predicate": {"satisfied": True, "missing": []},
+        "verdict": "verified",
+        "promotable": True,
+    }
+    proof.update(overrides)
+    return proof
+
+
+def test_receipt_backed_exposure_proof_survives_finding_persistence():
+    finding = {"severity": "high", "evidence": {"response_status": 200},
+               "proof_contract_v2": _receipt_backed_envelope(), "proof_state": "verified"}
+    persisted = build_evidence_with_triage(finding)
+    assert persisted["proof_contract_v2"] == finding["proof_contract_v2"]
+    assert scan_time_verification_fields({"severity": "high", "evidence": persisted})[
+        "last_verification_verdict"] == "exploited"
+
+
+def test_incomplete_proof_envelope_cannot_promote_a_finding():
+    for broken in (
+        _receipt_backed_envelope(promotable=False),
+        _receipt_backed_envelope(predicate={"satisfied": False, "missing": ["deterministic_proof"]}),
+        _receipt_backed_envelope(reexecution={"required": True, "performed": False,
+                                              "verifier_build": "exposure.verify_batch"}),
+    ):
+        finding = {"severity": "high", "evidence": {"proof_contract_v2": broken}}
+        assert (scan_time_verification_fields(finding) or {}).get("last_verification_verdict") != "exploited"

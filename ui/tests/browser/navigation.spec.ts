@@ -16,7 +16,14 @@ for (const route of STATIC_ROUTES) {
 test('sidebar links are internal, unique, and navigable', async ({ page }) => {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
   const openNavigation = page.getByLabel('Open navigation')
-  if (await openNavigation.isVisible()) await openNavigation.click()
+  if (await openNavigation.isVisible()) {
+    // A click before the client hydrates can be lost. Retry the actual drawer
+    // interaction instead of waiting for networkidle on a polling dashboard.
+    await expect(async () => {
+      if (await page.locator('nav:visible a[href]').count() === 0) await openNavigation.click()
+      await expect(page.locator('nav:visible a[href]').first()).toBeVisible()
+    }).toPass({ timeout: 10_000 })
+  }
   // The responsive shell keeps the desktop sidebar in the DOM while the mobile
   // drawer is open. Audit the active navigation surface, not its hidden twin.
   const hrefs = await page.locator('aside:visible a[href], nav:visible a[href]').evaluateAll((links) => (
@@ -42,6 +49,7 @@ test('production shell sends browser security headers', async ({ page }) => {
   expect(headers['x-powered-by']).toBeUndefined()
   expect(headers['x-content-type-options']).toBe('nosniff')
   expect(headers['x-frame-options']).toBe('DENY')
+  expect(headers['cross-origin-opener-policy']).toBe('same-origin')
   expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
   expect(headers['permissions-policy']).toContain('camera=()')
   expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")

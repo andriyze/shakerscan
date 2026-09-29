@@ -1407,6 +1407,7 @@ async def dashboard():
                     scan_type, run_kind, findings_count, created_at, completed_at
                 FROM scans
                 WHERE (scan_role IS NULL OR scan_role <> 'shard')
+                  AND status = 'completed'
                   AND COALESCE(run_kind, '') <> 'model_intake'
                   AND COALESCE(scan_type, '') <> 'model_intake'
                   AND device_target_id IS NULL
