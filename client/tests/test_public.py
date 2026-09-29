@@ -195,3 +195,43 @@ def test_scan_ui_url_preserves_reverse_proxy_authority_and_path():
         assert cli.scan_ui_url(url) == url
     assert cli.scan_ui_url("http://localhost:8080") == "http://localhost:3000"
     assert cli.scan_ui_url("http://[fd00::10]:8080") == "http://[fd00::10]:3000"
+
+
+def _forwarded(argv):
+    """Run main() with the runtime CLIs stubbed; return (url_args, forwarded argv) per call."""
+    calls = []
+    fake = mock.Mock()
+    fake.main.side_effect = lambda forwarded: calls.append(list(forwarded)) or 0
+    with mock.patch.object(cli, "apply_connection", side_effect=lambda args: args.url or "http://127.0.0.1:8080"), \
+         mock.patch.object(cli, "load", return_value=fake):
+        assert cli.main(argv) == 0
+    return calls[0]
+
+
+def test_scan_forwards_options_before_the_target_without_a_separator():
+    assert _forwarded(["scan", "--budget-profile", "fast", "https://t.example", "--json"])[4:] == [
+        "--budget-profile", "fast", "https://t.example", "--json",
+    ]
+    assert _forwarded(["scan", "https://t.example", "--budget-profile", "fast"])[4:] == [
+        "https://t.example", "--budget-profile", "fast",
+    ]
+    assert _forwarded(["scan", "--", "--budget-profile", "fast", "https://t.example"])[4:] == [
+        "--budget-profile", "fast", "https://t.example",
+    ]
+
+
+def test_leading_connection_options_stay_with_the_client():
+    forwarded = _forwarded(["scan", "--url", "http://10.0.0.5:8080", "--timeout=30",
+                            "--active-testing", "https://t.example"])
+    assert forwarded[:2] == ["--api-url", "http://10.0.0.5:8080"]
+    assert forwarded[4:] == ["--active-testing", "https://t.example"]
+    # After the first forwarded token, a --timeout belongs to the runtime CLI.
+    assert _forwarded(["hunt", "list", "--timeout", "5"])[-3:] == ["list", "--timeout", "5"]
+    assert _forwarded(["api", "--url=http://10.0.0.5:8080", "GET", "/health"]) == [
+        "--api-url", "http://10.0.0.5:8080", "GET", "/health",
+    ]
+
+
+def test_split_connection_options_keeps_help_with_the_client():
+    assert cli.split_connection_options(["--help"]) == (["--help"], [])
+    assert cli.split_connection_options(["https://t.example", "-h"]) == ([], ["https://t.example", "-h"])

@@ -1033,6 +1033,35 @@ COMMANDS = {
     "check": cmd_check,
 }
 
+# Commands that forward their arguments to a runtime CLI after the connection options.
+FORWARDING_COMMANDS = ("api", "scan", "hunt")
+_CONNECTION_OPTIONS = ("--url", "--token-file", "--timeout")
+
+
+def split_connection_options(tokens: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split the leading client-owned options from the arguments a forwarding command passes on.
+
+    The first token that is not a connection option (or -h/--help) starts the forwarded part, so
+    an option that follows the target, such as the scan CLI's own flags, is always forwarded.
+    """
+    tokens = list(tokens)
+    own: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("-h", "--help"):
+            own.append(token)
+            index += 1
+        elif token in _CONNECTION_OPTIONS:
+            own.extend(tokens[index:index + 2])
+            index += 2
+        elif token.split("=", 1)[0] in _CONNECTION_OPTIONS:
+            own.append(token)
+            index += 1
+        else:
+            break
+    return own, tokens[index:]
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -1159,7 +1188,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return main(["doctor", *argv[1:]])
         return run_engine(argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    if argv and argv[0] in FORWARDING_COMMANDS:
+        # argparse.REMAINDER rejects a forwarded option in first place, so
+        # `shakerscan scan --budget-profile fast URL` failed unless `--` came first.
+        # Only the leading connection options are the client's; the rest is forwarded as is.
+        own, forwarded = split_connection_options(argv[1:])
+        args = parser.parse_args([argv[0], *own])
+        args.args = forwarded
+    else:
+        args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
         return 0
