@@ -29,7 +29,7 @@ def active_finding_proof_counts(rows: Iterable[Mapping[str, Any]]) -> dict[tuple
             if finding.get("tool") in {"autonomous_workflow", "bola"}:
                 item["investigator_verified"] += 1
         elif (
-            finding.get("last_verification_verdict") in {None, "inconclusive", "error", "likely_vulnerable"}
+            finding.get("last_verification_verdict") in {None, "inconclusive", "error", "likely_vulnerable", "exploited"}
             or finding.get("analyst_verdict") in {"needs_review", "retest_needed"}
         ):
             item["needs_verification"] += 1
