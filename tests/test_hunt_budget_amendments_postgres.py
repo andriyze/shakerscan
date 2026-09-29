@@ -37,6 +37,10 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
         hunt_ddl = re.search(r"CREATE TABLE hunt_runs \(.*?\n\);", ddl, re.S)[0]
         # Exercise upgrading an existing pre-amendment table, then idempotent startup.
         await conn.execute(hunt_ddl.replace("    budget_revision INTEGER NOT NULL DEFAULT 0,\n", ""))
+        await conn.execute("""CREATE TABLE hunt_actions (
+            hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE CASCADE,
+            private_http_result TEXT
+        )""")
         await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
         await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
         run = run_row(kind)
@@ -111,11 +115,14 @@ async def test_budget_amendment_serializes_with_usage_and_reloads_after_restart(
             child, json.dumps({"hunt_dispatch": {"hunt_id": hunt_id}}),
         )
         await conn.execute("UPDATE hunt_runs SET status='budget_exhausted' WHERE id=$1", run["id"])
+        await conn.execute("INSERT INTO hunt_actions(hunt_run_id, private_http_result) VALUES($1, $2)",
+                           run["id"], "enc:fernet:sealed")
         cancelled = await restarted.cancel(hunt_id)
         assert cancelled["status"] == "cancelled"
         assert cancelled["cancelled_scan_ids"] == [str(child)]
         assert cancelled["budget_used"] == charged
         assert await conn.fetchval("SELECT status FROM scans WHERE id=$1", child) == "cancelling"
+        assert await conn.fetchval("SELECT private_http_result FROM hunt_actions WHERE hunt_run_id=$1", run["id"]) is None
         # Cancellation wins over a later replay and over any new extension.
         assert (await restarted.amend_budget(hunt_id, request(resume=False)))["status"] == "cancelled"
         with pytest.raises(HTTPException, match="unfinished"):
