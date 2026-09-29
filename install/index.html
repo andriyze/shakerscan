@@ -416,7 +416,7 @@ print_next_steps() {
     say ""
     print_path_activation
     say "1) Drive it with an AI agent (recommended) - just ask in plain English:"
-    say "     $(sk) agent        # auto-detects codex, claude, or opencode"
+    say "     $(sk) agent        # auto-detects codex, claude, opencode, or pi"
     say ""
     say "   Then try asking:"
     say "     \"Scan https://example.com and summarize the findings\""

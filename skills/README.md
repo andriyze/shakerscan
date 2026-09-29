@@ -13,13 +13,14 @@ so it can read the repository instructions and skill files:
 shakerscan agent codex
 shakerscan agent claude
 shakerscan agent opencode
+shakerscan agent pi
 ```
 
 From a source checkout:
 
 ```bash
 ./scanner.sh start
-codex   # or claude, or opencode
+codex   # or claude, opencode, or pi
 ```
 
 For a VPS accessed over Tailscale, start with `./scanner.sh start --remote`. Remote mode may bind the

@@ -30,6 +30,7 @@ Use the browser URLs printed by `status`; API commands running on the ShakerScan
 shakerscan agent codex
 # or: shakerscan agent claude
 # or: shakerscan agent opencode
+# or: shakerscan agent pi
 ```
 
 Starting inside `~/.shakerscan` lets the agent load AGENTS, CLAUDE, and the task-specific skills.

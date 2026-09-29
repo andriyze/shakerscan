@@ -70,7 +70,7 @@ a firewall, VPN, or reverse proxy with exact browser origins in the CORS allowli
 After a curl install, run agents from the installed runtime so this guide and shipped skills exist:
 
 ```bash
-shakerscan agent codex       # or claude, or opencode
+shakerscan agent codex       # or claude, opencode, or pi
 # equivalent: cd ~/.shakerscan && codex
 ```
 

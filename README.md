@@ -43,14 +43,18 @@ shakerscan scan https://app.example.test \
 
 ## Use an AI agent
 
-ShakerScan ships `AGENTS.md` and task skills for Codex, Claude Code, and OpenCode. Start an
+ShakerScan ships `AGENTS.md` and task skills for Codex, Claude Code, OpenCode, and Pi. Start an
 installed agent inside the ShakerScan runtime:
 
 ```bash
 shakerscan agent codex
 shakerscan agent claude
 shakerscan agent opencode
+shakerscan agent pi
 ```
+
+Pi has no MCP client; the launcher hands it the kit's skills and slash commands and it drives
+ShakerScan through `shakerscan api`, `scan`, and `hunt`.
 
 The agent can drive Hunt, inspect findings, use saved credentials and request collections, and work
 through the same server-side authorization, scope, budget, evidence, and proof controls as the UI

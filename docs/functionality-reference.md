@@ -48,7 +48,7 @@ ShakerScan is an open-source security scanner for **web applications, APIs, AI s
 network-connected devices**. It runs
 locally as a Docker stack with a web UI, a REST API, a PostgreSQL database, a Redis job queue, and a
 scalable pool of scan workers. It is designed to be driven either directly (CLI / UI / REST) or
-through an AI coding agent (Claude Code, Codex, OpenCode) using plain-English requests.
+through an AI coding agent (Claude Code, Codex, OpenCode, Pi) using plain-English requests.
 
 It covers two complementary pillars:
 
