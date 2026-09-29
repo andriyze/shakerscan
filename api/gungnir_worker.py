@@ -62,6 +62,16 @@ async def get_monitored_domains() -> list[str]:
         return [r['root_domain'] for r in rows if r['root_domain']]
 
 
+def match_root_domain(subdomain: str, domains: list[str]) -> str | None:
+    """Return the most specific monitored root that ``subdomain`` sits under, if any.
+
+    Matching is on label boundaries: ``a.example.com`` belongs to ``example.com`` and never
+    to a shorter string suffix such as ``le.com``, whose ASM policy it would otherwise inherit.
+    """
+    matches = [domain for domain in domains if subdomain.endswith("." + domain.lower().rstrip("."))]
+    return max(matches, key=len) if matches else None
+
+
 async def store_subdomain(subdomain: str, root_domain: str) -> bool:
     """Insert discovered subdomain as target. Returns True if new.
 
@@ -172,17 +182,16 @@ async def run_gungnir(domains: list[str]):
                 # Remove wildcard prefix
                 subdomain = subdomain.replace('*.', '')
 
-                # Find matching root domain
-                for domain in domains:
-                    if subdomain.endswith(domain) and subdomain != domain:
-                        seen.add(subdomain)
-                        is_new = await store_subdomain(subdomain, domain)
-                        if is_new:
-                            stats['found_count'] += 1
-                            stats['session_found'] += 1
-                            stats['last_discovery'] = subdomain
-                            print(f"[gungnir] NEW: {subdomain} (root: {domain})", flush=True)
-                        break
+                # Find the monitored root this name belongs to
+                domain = match_root_domain(subdomain, domains)
+                if domain:
+                    seen.add(subdomain)
+                    is_new = await store_subdomain(subdomain, domain)
+                    if is_new:
+                        stats['found_count'] += 1
+                        stats['session_found'] += 1
+                        stats['last_discovery'] = subdomain
+                        print(f"[gungnir] NEW: {subdomain} (root: {domain})", flush=True)
 
         async def read_stderr():
             while True:
