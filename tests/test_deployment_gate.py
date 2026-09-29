@@ -51,6 +51,29 @@ def test_target_active_only_marks_provenance():
     assert match and match[0].get("from_target_active") is True
 
 
+def test_reobserved_persisted_finding_does_not_duplicate_an_unfingerprinted_report():
+    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
+    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+    history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
+                        "scan_id": "old-scan", "last_seen_scan_id": scan["id"]}], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert decision["decision"] == "block"
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["carried_over"]["count"] == 0
+    assert not decision["blocking_findings"][0].get("from_target_active")
+
+
+def test_same_display_text_from_an_earlier_scan_remains_a_separate_blocker():
+    scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
+    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+    history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
+                        "scan_id": "old-scan", "last_seen_scan_id": "old-scan"}], "total": 1, "complete": True}
+    decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
+    assert len(decision["blocking_findings"]) == 2
+    assert decision["blocking_findings"][1]["from_target_active"] is True
+    assert decision["carried_over"]["count"] == 1
+
+
 def test_decision_carries_the_target_history_summary_over_all_severities():
     scan = _scan([{"id": "f1", "fingerprint": "fp1", "title": "Seen", "severity": "low"}])
     history = {"rows": [
