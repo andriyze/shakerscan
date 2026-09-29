@@ -418,39 +418,52 @@ def test_hunt_tls_on_an_unroutable_address_is_an_explicit_failure(monkeypatch):
     assert result["budget_consumed"]["tcp_ports_attempted"] == 1
 
 
-class _RouteProbeSocket:
-    connect_errno: int | None = None
-    created: list[tuple[int, int]] = []
-
-    def __init__(self, family, kind):
-        type(self).created.append((family, kind))
-        self.closed = False
-
-    def connect(self, _address):
-        if type(self).connect_errno is not None:
-            raise OSError(type(self).connect_errno, "probe")
-
-    def close(self):
-        self.closed = True
+_IF_INET6_LOOPBACK_ONLY = "00000000000000000000000000000001 01 80 10 80       lo\n"
+_IF_INET6_GLOBAL = _IF_INET6_LOOPBACK_ONLY + (
+    "20010db8000000000000000000000002 02 40 00 00     eth0\n"
+    "fe800000000000000000000000000002 02 40 20 80     eth0\n"
+)
+_ROUTE_WITH_DEFAULT = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+    "eth0\t00000000\t010013AC\t0003\t0\t0\t0\t00000000\n"
+)
 
 
-def test_worker_route_gap_uses_a_no_traffic_route_lookup(monkeypatch):
-    monkeypatch.setattr(tls_capability.socket, "socket", _RouteProbeSocket)
-    _RouteProbeSocket.created = []
+def _kernel_tables(monkeypatch, tmp_path, *, if_inet6, route=_ROUTE_WITH_DEFAULT):
+    inet6 = tmp_path / "if_inet6"
+    inet6.write_text(if_inet6)
+    routes = tmp_path / "route"
+    routes.write_text(route)
+    monkeypatch.setattr(tls_capability, "_PROC_IF_INET6", str(inet6))
+    monkeypatch.setattr(tls_capability, "_PROC_ROUTE", str(routes))
 
-    _RouteProbeSocket.connect_errno = errno.ENETUNREACH
-    assert tls_capability.worker_route_gap("2001:db8::10") == {
+
+def test_worker_route_gap_reads_the_kernel_tables_without_opening_a_socket(monkeypatch, tmp_path):
+    def no_socket(*_args, **_kwargs):
+        raise AssertionError("the route check must not open a socket")
+
+    monkeypatch.setattr(socket, "socket", no_socket)
+    _kernel_tables(monkeypatch, tmp_path, if_inet6=_IF_INET6_LOOPBACK_ONLY)
+    assert tls_capability.worker_route_gap("2001:db8::10", errno.ENETUNREACH) == {
         "reason": "worker_route_unavailable",
         "address_family": "ipv6",
         "errno": "ENETUNREACH",
     }
-    # A connected datagram socket selects a route without sending anything.
-    assert _RouteProbeSocket.created == [(socket.AF_INET6, socket.SOCK_DGRAM)]
+    # IPv4 still has its default route, so an unreachable answer is the target path's.
+    assert tls_capability.worker_route_gap("192.0.2.10", errno.ENETUNREACH) is None
 
-    _RouteProbeSocket.connect_errno = None
-    assert tls_capability.worker_route_gap("192.0.2.10") is None
-    _RouteProbeSocket.connect_errno = errno.ECONNREFUSED
-    assert tls_capability.worker_route_gap("192.0.2.10") is None
+    # A worker with a global IPv6 address keeps an IPv6 unreachable answer as a failure.
+    _kernel_tables(monkeypatch, tmp_path, if_inet6=_IF_INET6_GLOBAL)
+    assert tls_capability.worker_route_gap("2001:db8::10", errno.ENETUNREACH) is None
+
+    # Unreadable tables (not Linux) never convert a failure into an examination gap.
+    monkeypatch.setattr(tls_capability, "_PROC_IF_INET6", str(tmp_path / "missing"))
+    assert tls_capability.worker_route_gap("2001:db8::10", errno.ENETUNREACH) is None
+    assert tls_capability.worker_route_gap("2001:db8::10", errno.EAFNOSUPPORT) == {
+        "reason": "worker_address_family_unavailable",
+        "address_family": "ipv6",
+        "errno": "EAFNOSUPPORT",
+    }
 
 
 def test_scanner_tls_projection_ignores_addresses_that_were_never_contacted():

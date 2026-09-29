@@ -8,7 +8,6 @@ import errno
 import hashlib
 import ipaddress
 import math
-import socket
 import ssl
 import time
 from typing import Any, Mapping
@@ -64,46 +63,56 @@ def _socket_errno(exc: BaseException) -> int | None:
     return exc.errno if isinstance(exc.errno, int) else None
 
 
-def worker_route_gap(address: str, port: int = 443) -> dict[str, Any] | None:
+_PROC_IF_INET6 = "/proc/net/if_inet6"
+_PROC_ROUTE = "/proc/net/route"
+
+
+def _worker_has_family_egress(version: int) -> bool | None:
+    """Whether this worker has a usable address/route in the IP family, from the kernel's own
+    tables. None when they cannot be read (not Linux), so the caller keeps the failure."""
+    try:
+        if version == 6:
+            with open(_PROC_IF_INET6, encoding="ascii") as handle:
+                rows = [line.split() for line in handle if line.strip()]
+            # address, ifindex, prefix length, scope, flags, interface; scope 00 is global.
+            return any(len(row) >= 6 and row[5] != "lo" and int(row[3], 16) == 0 for row in rows)
+        with open(_PROC_ROUTE, encoding="ascii") as handle:
+            rows = [line.split() for line in handle][1:]
+        return any(len(row) >= 2 and row[0] != "lo" for row in rows)
+    except (OSError, ValueError):
+        return None
+
+
+def worker_route_gap(address: str, observed_errno: int | None = None) -> dict[str, Any] | None:
     """Return why this worker cannot originate traffic to ``address``, else None.
 
-    Connecting a UDP socket makes the kernel select a route and source address without
-    transmitting a datagram. That separates "this worker has no route for the address" --
-    a Docker bridge without IPv6 egress answers every frozen AAAA address with
-    ENETUNREACH -- from a remote network that happened to answer a TCP SYN with the same
-    errno, which remains a failure of the target path.
+    Called after a connect failed with a route errno. A Docker bridge without IPv6 egress
+    answers every frozen AAAA address with ENETUNREACH locally; a remote router can return the
+    same errno for a target path that does exist. Only the first is a limit of the worker, and
+    the kernel's interface and route tables tell them apart without opening a socket.
     """
     try:
         parsed = ipaddress.ip_address(str(address).strip())
     except ValueError:
         return None
     family_label = f"ipv{parsed.version}"
-    try:
-        probe = socket.socket(
-            socket.AF_INET6 if parsed.version == 6 else socket.AF_INET,
-            socket.SOCK_DGRAM,
-        )
-    except OSError as exc:
-        if exc.errno not in _ROUTE_FAILURE_ERRNOS:
-            return None
+    errno_name = (
+        errno.errorcode.get(observed_errno, str(observed_errno))
+        if observed_errno is not None else None
+    )
+    if observed_errno == errno.EAFNOSUPPORT:
         return {
             "reason": "worker_address_family_unavailable",
             "address_family": family_label,
-            "errno": errno.errorcode.get(exc.errno, str(exc.errno)),
+            "errno": errno_name,
         }
-    try:
-        probe.connect((str(parsed), int(port)))
-    except OSError as exc:
-        if exc.errno not in _ROUTE_FAILURE_ERRNOS:
-            return None
-        return {
-            "reason": "worker_route_unavailable",
-            "address_family": family_label,
-            "errno": errno.errorcode.get(exc.errno, str(exc.errno)),
-        }
-    finally:
-        probe.close()
-    return None
+    if _worker_has_family_egress(parsed.version) is not False:
+        return None
+    return {
+        "reason": "worker_route_unavailable",
+        "address_family": family_label,
+        "errno": errno_name,
+    }
 
 
 async def inspect_tls_origin(
@@ -239,7 +248,7 @@ async def inspect_tls_origin(
             ),
         })
         if code in _ROUTE_FAILURE_ERRNOS and route_gap is None:
-            route_gap = worker_route_gap(selected_address, port)
+            route_gap = worker_route_gap(selected_address, code)
 
     for label, version in (
         ("TLSv1.2", ssl.TLSVersion.TLSv1_2),
