@@ -47,6 +47,13 @@ def _verifier_transport_allowed(api_url: str) -> bool:
         return False
 
 
+class _NoVerifierRedirects(urllib.request.HTTPRedirectHandler):
+    """Keep the verifier bearer token on the configured endpoint."""
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
 def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
     api_url = os.getenv("SHAKERSCAN_API_URL", "").rstrip("/")
     token = os.getenv("MODEL_INTAKE_DEPLOYMENT_VERIFIER_TOKEN", "")
@@ -67,7 +74,7 @@ def _verify(package: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.build_opener(_NoVerifierRedirects()).open(request, timeout=10) as response:
         result = json.loads(response.read(2_000_000))
     if result.get("verified") is not True or result.get("side_effects") is not False:
         raise RuntimeError("exact bundle was not admitted")
