@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { carriedOverFromDecision, carriedOverSummary, notExaminedExplanation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, formatResumeTime, notExaminedExplanation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -340,4 +340,47 @@ test('a redirect-only origin says where the application is', () => {
     http: { status: 301 },
   })
   assert.match(text, /redirects to https:\/\/honey\.example\.com, outside this scan's origin/)
+})
+
+test('a quota wait names the domain and the estimated resume time instead of blaming workers', () => {
+  const scan = {
+    status: 'queued',
+    current_phase: 'waiting_for_domain_rate',
+    progress: 5,
+    domain_rate: {
+      state: 'waiting',
+      work_class: 'background',
+      root_domain: 'ukrtampa.com',
+      cap_per_hour: 1000,
+      resume_estimate: '2026-09-27T16:40:00Z',
+    },
+  }
+  const phase = scanPhasePresentation(scan, { timeZone: 'UTC' })
+  assert.equal(phase.label, "Waiting for ukrtampa.com's hourly test budget (resumes about 16:40)")
+  assert.match(phase.description, /1000 tested endpoints per hour/)
+  assert.match(phase.description, /estimated about 16:40/)
+  assert.equal(phase.progress, 5)
+  const unknown = scanPhasePresentation({ ...scan, domain_rate: { ...scan.domain_rate, resume_estimate: null } }, { timeZone: 'UTC' })
+  assert.equal(unknown.label, "Waiting for ukrtampa.com's hourly test budget")
+  // A queued scan without a quota wait is still waiting for a worker.
+  assert.equal(scanPhasePresentation({ status: 'queued' }).label, 'Waiting for a worker')
+})
+
+test('a past wait is not presented as the current reason', () => {
+  const scan = { status: 'running', current_phase: 'active_sqli', domain_rate: { state: 'waited', root_domain: 'example.com' } }
+  assert.equal(domainRatePresentation(scan), null)
+  assert.equal(scanPhasePresentation(scan).label, 'Testing the attack surface')
+})
+
+test('a quota budget reduction is shown in plain words', () => {
+  const reason = "Background ASM batch reduced to 20 of 50 endpoints by ukrtampa.com's hourly test budget (1000 endpoints per hour across its targets); the rest return to the inventory."
+  const quota = domainRatePresentation({
+    status: 'completed',
+    domain_rate: { state: 'reduced', root_domain: 'ukrtampa.com', reduction: { requested: 50, granted: 20, reason } },
+  })
+  assert.equal(quota.kind, 'reduced')
+  assert.equal(quota.label, "Budget reduced by ukrtampa.com's hourly test budget")
+  assert.equal(quota.description, reason)
+  assert.equal(domainRatePresentation({ status: 'completed', domain_rate: { state: 'admitted', work_class: 'operator' } }), null)
+  assert.equal(formatResumeTime('not a date'), '')
 })

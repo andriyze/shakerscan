@@ -315,7 +315,8 @@ def test_worker_replay_uses_durable_store_and_exact_plan():
     assert "Pinn" in handler and "ReplayTransport" in handler
     assert "validate_worker_credential_authority" in handler
     assert "WorkerCredentialResolver" in handler
-    assert 'capability="collections.replay_safe"' in handler
+    assert "capability=capability_name" in handler
+    assert "revalidate_hunt_replay_authority" in handler
     assert 'capability="request.replay"' not in handler
     assert "bind_replay_credential_headers" in handler
     assert '"receipt_context": receipt_context' in handler

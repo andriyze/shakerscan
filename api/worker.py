@@ -71,6 +71,7 @@ from runtime.worker_projection import (
 )
 import parallel_scan
 import asm_inventory
+import domain_rate
 import target_resolution
 import family_proof
 import agent_tools
@@ -5646,26 +5647,14 @@ def _known_endpoint_count(options: dict[str, Any] | None) -> int:
 
 
 def _standalone_scan_rate_reservation_amount(options: dict[str, Any] | None) -> int:
-    """Resolve domain-rate admission from immutable canonical Scan authority.
+    """Active endpoints the immutable canonical Scan plan may test: the domain quota's unit.
 
-    The worker never re-derives authority from compatibility labels or mutable
-    scanner flags. Missing V2 authority is rejected by ``prepare_worker_dispatch``.
+    Never the HTTP request budget (a different unit). Missing V2 authority is rejected by
+    ``prepare_worker_dispatch``.
     """
-    opts = options or {}
-    if not is_deterministic_dast(opts):
-        return 0
-    request_budget_mode = _effective_request_budget_mode(opts)
-    _normalized, admission = prepare_worker_dispatch(opts)
-    if admission.plan is None:
-        return 0
-    if request_budget_mode == "enforce":
-        return max(0, int(admission.plan.budget.max_http_requests))
-    known = _known_endpoint_count(opts)
-    if known > 0:
-        return min(known, max(0, int(admission.plan.budget.max_endpoints)))
-    if not admission.plan.policy.active_testing:
-        return 0
-    return max(0, int(admission.plan.budget.max_endpoints))
+    return domain_rate.planned_endpoints(
+        options, prepare=prepare_worker_dispatch, is_dast=is_deterministic_dast,
+    )
 
 
 async def _reserve_target_domain_endpoint_budget(
@@ -5676,58 +5665,41 @@ async def _reserve_target_domain_endpoint_budget(
     amount: int,
     already_reserved: int = 0,
     all_or_nothing: bool = False,
+    entry_id: str | None = None,
+    work: str = domain_rate.WORK_BACKGROUND,
 ) -> dict[str, Any]:
-    """Reserve known-endpoint execution budget for a target root domain.
+    """Admit endpoint work against its root domain's hourly test ledger (``domain_rate``).
 
-    The cap lives in the target's ASM config and is enforced by combining
-    completed endpoint attempts from Postgres with in-flight reservations in
-    Redis. This is intentionally endpoint-count based because that is the
-    durable unit Full Coverage and ASM allocators can prove before execution.
+    Background work is limited by ``cap - database window - ledger``; operator work is recorded
+    without limit. A denial carries an estimated ``resume_at``.
     """
-    try:
-        amount = max(0, int(amount or 0))
-        already_reserved = max(0, int(already_reserved or 0))
-    except (TypeError, ValueError):
-        amount = 0
-        already_reserved = 0
+    amount = max(0, int(amount or 0))
     if amount <= 0:
         return {"granted": 0, "limited": False, "reason": "no_known_endpoints"}
-    if not target_id:
-        return {"granted": amount, "limited": False, "reason": "no_target_id"}
     try:
         tid = uuid.UUID(str(target_id))
     except (TypeError, ValueError):
-        return {"granted": amount, "limited": False, "reason": "invalid_target_id"}
-
+        return {"granted": amount, "limited": False, "reason": "no_target_id"}
     row = await conn.fetchrow("SELECT root_domain, asm_config FROM targets WHERE id = $1", tid)
     root_domain = str(_row_get(row, "root_domain") or "").strip().lower()
     cfg = asm_inventory.merge_asm_config(parse_json_field(_row_get(row, "asm_config")) or {})
     cap = int(cfg.get("max_requests_per_hour_per_domain") or 0)
     if not root_domain or cap <= 0:
         return {"granted": amount, "limited": False, "reason": "unlimited", "root_domain": root_domain, "cap": cap}
-
     used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
-    remaining_cap = max(0, cap - int(used or 0))
-    needed = max(0, amount - already_reserved)
-    granted_new = asm_inventory.reserve_domain_rate(
-        r,
-        root_domain,
-        remaining_cap,
-        needed,
-        all_or_nothing=all_or_nothing,
+    rate = domain_rate.admit(
+        r, root_domain=root_domain, cap=cap, db_used=int(used or 0), entry_id=entry_id,
+        amount=amount, work=work, all_or_nothing=all_or_nothing,
     )
-    granted = min(amount, already_reserved + granted_new)
-    return {
-        "granted": granted,
-        "limited": granted < amount,
-        "root_domain": root_domain,
-        "cap": cap,
-        "used": int(used or 0),
-        "reserved": asm_inventory.reserved_domain_rate_count(r, root_domain),
-        "already_reserved": already_reserved,
-        "requested": amount,
-        "reason": "reserved" if granted >= amount else "domain_rate_limited",
-    }
+    rate["already_reserved"] = max(0, int(already_reserved or 0))
+    if rate["held"] > 0:
+        domain_rate.track(root_domain, rate["entry_id"])
+    if rate["limited"] and rate["granted"] <= 0:
+        try:
+            rate["resume_at"] = await domain_rate.resume_estimate(conn, r, rate)
+        except Exception as exc:  # advisory only; the wait itself is still recorded
+            print(f"[domain-rate] resume estimate unavailable for {root_domain}: {exc}", flush=True)
+    return rate
 
 
 async def _requeue_for_domain_rate(
@@ -5741,10 +5713,7 @@ async def _requeue_for_domain_rate(
     rate: dict[str, Any],
 ) -> None:
     canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
-    wait_cycles = int((
-        _redis_scalar_text(r.hget(f"job:{job_id}", "domain_rate_wait_cycles"))
-        if canonical_queue else job_data.get("domain_rate_wait_cycles") or 0
-    ) or 0) + 1
+    wait_cycles = domain_rate.wait_cycles(r, job_data, job_id)
     requeued = _safe_requeue_payload(job_data)
     if not canonical_queue:
         requeued["domain_rate_wait_cycles"] = wait_cycles
@@ -5753,21 +5722,24 @@ async def _requeue_for_domain_rate(
     mapping = {
         "status": "queued",
         "scan_id": scan_id or "",
-        "current_phase": "waiting_for_domain_rate",
+        "current_phase": domain_rate.WAITING_PHASE,
         "domain_rate_wait_cycles": str(wait_cycles),
         "domain_rate_root_domain": str(rate.get("root_domain") or ""),
         "domain_rate_requested": str(rate.get("requested") or ""),
         "domain_rate_granted": str(rate.get("granted") or 0),
         "domain_rate_cap": str(rate.get("cap") or ""),
+        "domain_rate_resume_at": str(rate.get("resume_at") or ""),
     }
     if parent_id:
         mapping["parent_scan_id"] = parent_id
     r.hset(f"job:{job_id}", mapping=mapping)
     r.expire(f"job:{job_id}", 86400)
+    rate["wait_cycles"] = wait_cycles
     print(
         f"[{log_prefix}] waiting for domain rate budget "
         f"({rate.get('root_domain') or 'unknown'}: granted {rate.get('granted') or 0}/"
-        f"{rate.get('requested') or 0}, cap={rate.get('cap') or 'unlimited'})",
+        f"{rate.get('requested') or 0}, cap={rate.get('cap') or 'unlimited'}, "
+        f"resume about {rate.get('resume_at') or 'unknown'})",
         flush=True,
     )
     await asyncio.sleep(DOMAIN_RATE_REQUEUE_DELAY_SECONDS)
@@ -13353,6 +13325,51 @@ def _apply_scan_collection_replay_remaining_budget(
     return adjusted
 
 
+async def _admit_scan_on_domain_rate(
+    r, job_data: dict[str, Any], *, job_id: str, scan_id: str, target_id: str,
+    options: dict[str, Any], reserve_amount: int,
+) -> dict[str, Any] | None:
+    """Admit a Scan's planned endpoints on its root domain's hourly ledger.
+
+    Returns the options to execute with, or ``None`` after parking background work for later.
+    The immutable plan cannot be lowered at runtime, so admission is whole or wait; operator
+    Scans are always admitted (see ``domain_rate``).
+    """
+    work = domain_rate.work_class(options)
+    try:
+        async with db_pool.acquire() as conn:
+            rate = await _reserve_target_domain_endpoint_budget(
+                conn, r, target_id=target_id, amount=reserve_amount,
+                all_or_nothing=True, entry_id=str(scan_id), work=work,
+            )
+    except Exception as exc:
+        # Background work fails closed; an operator Scan is never held back by the quota.
+        operator = work == domain_rate.WORK_OPERATOR
+        rate = {"granted": reserve_amount if operator else 0, "limited": not operator,
+                "requested": reserve_amount, "reason": str(exc), "work_class": work}
+    granted = max(0, int(rate.get("granted") or 0))
+    if rate.get("unadmittable"):
+        await domain_rate.fail_oversized_scan(db_pool, r, job_id=job_id, scan_id=scan_id, decision=rate)
+        return None
+    if granted <= 0 and rate.get("limited"):
+        async with db_pool.acquire() as conn:
+            await domain_rate.record_wait(
+                conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
+                status="queued", from_statuses=("pending", "queued", "running"),
+            )
+        await _requeue_for_domain_rate(
+            r, job_data, job_id=job_id, scan_id=scan_id, log_prefix=job_id[:8], rate=rate,
+        )
+        return None
+    if rate.get("root_domain"):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET domain_rate_json=$2::jsonb WHERE id=$1",
+                uuid.UUID(scan_id), json.dumps(domain_rate.admitted_record(rate)),
+            )
+    return options
+
+
 async def process_scan_job(job_data: dict):
     """Process a scan job."""
     job_id = job_data.get('job_id', 'unknown')
@@ -13490,68 +13507,18 @@ async def process_scan_job(job_data: dict):
     # A broker ingest job carries immutable output from execution that already
     # happened on the remote node. It must not reserve execution budget again:
     # doing so can strand a submitted result behind its own still-live broker
-    # reservation and can requeue trusted ingestion as executable work.
+    # reservation and can requeue trusted ingestion as executable work. Its lease-time
+    # hold is settled with the submitted result instead.
     reserve_amount = 0 if broker_ingest else _standalone_scan_rate_reservation_amount(options)
-    runtime_request_grant: int | None = None
-    enforcing_request_budget = _effective_request_budget_mode(options) == "enforce"
+    if broker_ingest and (options or {}).get("request_budget_domain"):
+        domain_rate.track(str(options["request_budget_domain"]), str(scan_id), executing=True)
     if reserve_amount > 0 and target_id:
-        try:
-            async with db_pool.acquire() as conn:
-                rate = await _reserve_target_domain_endpoint_budget(
-                    conn,
-                    r,
-                    target_id=target_id,
-                    amount=reserve_amount,
-                    already_reserved=int(job_data.get('domain_rate_reserved') or 0),
-                    all_or_nothing=False,
-                )
-        except Exception as exc:
-            rate = {"granted": 0, "limited": True, "requested": reserve_amount, "reason": str(exc)}
-        granted = max(0, int(rate.get("granted") or 0))
-        if granted <= 0 and rate.get("limited"):
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    """UPDATE scans
-                       SET status='queued', current_phase='waiting_for_domain_rate',
-                           progress=5, started_at=NULL
-                       WHERE id=$1 AND status <> 'cancelled'""",
-                    uuid.UUID(scan_id),
-                )
-            await _requeue_for_domain_rate(
-                r,
-                job_data,
-                job_id=job_id,
-                scan_id=scan_id,
-                log_prefix=job_id[:8],
-                rate=rate,
-            )
+        options = await _admit_scan_on_domain_rate(
+            r, job_data, job_id=job_id, scan_id=scan_id, target_id=target_id,
+            options=options, reserve_amount=reserve_amount,
+        )
+        if options is None:
             return
-        if 0 < granted < reserve_amount:
-            options = dict(options or {})
-            budget = dict(options.get("custom_budget") or {})
-            if enforcing_request_budget:
-                budget["request_max"] = granted
-            else:
-                budget["active_max_endpoints"] = granted
-            options["custom_budget"] = budget
-            options[
-                "domain_rate_request_grant"
-                if enforcing_request_budget
-                else "domain_rate_active_endpoint_grant"
-            ] = granted
-            print(
-                f"[{job_id[:8]}] domain rate limited standalone scan "
-                f"{'request' if enforcing_request_budget else 'active endpoint'} budget "
-                f"to {granted}/{reserve_amount} for {rate.get('root_domain') or 'unknown'}",
-                flush=True,
-            )
-        if granted > 0:
-            options = dict(options or {})
-            options["request_budget_reserved"] = granted
-            if enforcing_request_budget:
-                runtime_request_grant = granted
-            if rate.get("root_domain"):
-                options["request_budget_domain"] = str(rate["root_domain"])
 
     # Initial progress
     await update_scan_progress(scan_id, "starting", 5, job_id=job_id)
@@ -13569,6 +13536,7 @@ async def process_scan_job(job_data: dict):
     # Scanner tools run in this process, so their calls are collected here and archived
     # when the scan finishes. A broker result came from another node with its own record.
     capture_started = http_archive.start_scan_capture(scanner_http_capture, job_data.get("_broker_result_id"))
+    domain_rate.mark_executing(str(scan_id))
 
     try:
         try:
@@ -13587,7 +13555,6 @@ async def process_scan_job(job_data: dict):
                         options,
                         scan_id=scan_id,
                         job_id=job_id,
-                        runtime_request_grant=runtime_request_grant,
                     )
                 else:
                     result = await run_scan(
@@ -13727,6 +13694,7 @@ async def process_scan_job(job_data: dict):
         result_coverage = coverage_rollup.apply_action_coverage(
             result_coverage, [dict(row) for row in action_rows],
         )
+        domain_rate.measure(str(scan_id), domain_rate.tested_endpoints(result))
         coverage_status = str(result_coverage.get("status") or ("failed" if error else "complete"))
         budget_used = merge_scan_budget_usage(
             replay_budget_used, scanner_budget_used,
@@ -16318,21 +16286,33 @@ async def process_scan_shard_job(job_data: dict):
         return
 
     endpoint_count = 0 if broker_ingest else _known_endpoint_count(options)
+    if broker_ingest and (options or {}).get("request_budget_domain"):
+        domain_rate.track(str(options["request_budget_domain"]), str(scan_id), executing=True)
     if endpoint_count > 0:
+        work = domain_rate.work_class(options)
         try:
             async with db_pool.acquire() as conn:
                 rate = await _reserve_target_domain_endpoint_budget(
-                    conn,
-                    r,
-                    target_id=target_id,
-                    amount=endpoint_count,
-                    all_or_nothing=True,
+                    conn, r, target_id=target_id, amount=endpoint_count,
+                    all_or_nothing=True, entry_id=str(scan_id), work=work,
                 )
         except Exception as exc:
-            rate = {"granted": 0, "limited": True, "requested": endpoint_count, "reason": str(exc)}
+            operator = work == domain_rate.WORK_OPERATOR
+            rate = {"granted": endpoint_count if operator else 0, "limited": not operator,
+                    "requested": endpoint_count, "reason": str(exc), "work_class": work}
+        if rate.get("unadmittable"):
+            _release_parallel_shard_slot(r, parent_id, job_id)
+            await domain_rate.fail_oversized_scan(db_pool, r, job_id=job_id, scan_id=scan_id, decision=rate)
+            await _reconcile_parallel_child_completion(parent_id, r, f"shard {job_id[:8]}")
+            return
         if rate.get("limited"):
             _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
+            async with db_pool.acquire() as conn:
+                await domain_rate.record_wait(
+                    conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
+                    status="queued", from_statuses=("pending", "queued"),
+                )
             await _requeue_for_domain_rate(
                 r,
                 job_data,
@@ -16388,6 +16368,7 @@ async def process_scan_shard_job(job_data: dict):
     capture_started = http_archive.start_scan_capture(
         scanner_http_capture, job_data.get("_broker_result_id"),
     )
+    domain_rate.mark_executing(str(scan_id))
     try:
         try:
             if job_data.get("_broker_result_id"):
@@ -16405,6 +16386,7 @@ async def process_scan_shard_job(job_data: dict):
             result = {'target': target, 'error': str(e),
                       'result': {'score': None, 'grade': None}, 'findings': []}
             print(f"[{job_id[:8]}] Shard '{label}' run_scan error: {e}", flush=True)
+        domain_rate.measure(str(scan_id), domain_rate.tested_endpoints(result))
 
         # Archive before result persistence: a later scoring or storage failure must not
         # erase the exact traffic that explains what this shard actually attempted.
@@ -17384,6 +17366,9 @@ async def process_exploit_batch_job(job_data: dict):
     now = utc_now()
     slot_acquired = False
 
+    # Register the dispatcher's hold before any early return can strand it.
+    await domain_rate.track_dispatch_hold(db_pool, job_data)
+
     if parent_id:
         async with db_pool.acquire() as conn:
             current = await conn.fetchrow("""
@@ -17637,10 +17622,12 @@ async def process_exploit_batch_job(job_data: dict):
                 amount=len(endpoint_ids),
                 already_reserved=int(job_data.get('domain_rate_reserved') or 0),
                 all_or_nothing=False,
+                entry_id=str(job_data.get('domain_rate_hold_id') or scan_id),
             )
     except Exception as exc:
         rate = {"granted": 0, "limited": True, "requested": len(endpoint_ids), "reason": str(exc)}
-    granted = max(0, int(rate.get("granted") or 0))
+    rate_entry = str(rate.get("entry_id") or job_data.get('domain_rate_hold_id') or scan_id)
+    granted, reduction = max(0, int(rate.get("granted") or 0)), None
     if granted <= 0 and endpoint_ids:
         try:
             async with db_pool.acquire() as conn:
@@ -17651,13 +17638,9 @@ async def process_exploit_batch_job(job_data: dict):
             _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
         async with db_pool.acquire() as conn:
-            released_claim = await conn.execute(
-                """
-                UPDATE scans
-                SET status='pending', started_at=NULL, current_phase='waiting_for_domain_rate'
-                WHERE id=$1 AND status='running'
-                """,
-                uuid.UUID(scan_id),
+            released_claim = await domain_rate.record_wait(
+                conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
+                status="pending", from_statuses=("running",),
             )
         if released_claim.endswith("0"):
             # Cancellation or another terminal transition won the race. Do not put
@@ -17688,11 +17671,13 @@ async def process_exploit_batch_job(job_data: dict):
         claimed = claimed[:granted]
         endpoints = endpoints[:granted]
         endpoint_ids = endpoint_ids[:granted]
-        print(
-            f"[asm {job_id[:8]}] domain rate limited batch to {granted} endpoint(s) "
-            f"for {rate.get('root_domain') or 'unknown'}",
-            flush=True,
-        )
+        reduction = domain_rate.reduction_record(rate)
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE scans SET domain_rate_json=$2::jsonb WHERE id=$1",
+                uuid.UUID(scan_id), json.dumps(domain_rate.admitted_record(rate, reduction)),
+            )
+        print(f"[asm {job_id[:8]}] {reduction['reason']}", flush=True)
 
     print(
         f"[asm {job_id[:8]}] testing {len(endpoints)} inventory endpoints "
@@ -17963,11 +17948,13 @@ async def process_exploit_batch_job(job_data: dict):
         try:
             scan_opts = await _hydrate_generic_scan_credentials(scan_opts, scan_id)
             scan_opts = await _hydrate_managed_scan_credentials(scan_opts, scan_id)
+            domain_rate.mark_executing(rate_entry)
             result = await _execute_reserved_deterministic_scan(
                 target, scan_opts, scan_id=scan_id, job_id=job_id,
             )
         except Exception as e:
             result = {'target': target, 'error': str(e), 'result': {'score': None, 'grade': None}, 'findings': []}
+        domain_rate.annotate_result(result, reduction)
         findings = result.get('findings', []) or []
         error = result.get('error')
         meta = result.get('scan_metadata') if isinstance(result.get('scan_metadata'), dict) else {}
@@ -18071,6 +18058,7 @@ async def process_exploit_batch_job(job_data: dict):
                                 completed_ids,
                                 verdict=('findings' if findings else 'clean'),
                             )
+                        domain_rate.measure(rate_entry, len(endpoint_ids) - len(completed_ids))
                         if missing_ids:
                             incomplete_ids.extend(missing_ids)
                             await asm_inventory.record_endpoint_attempts(
@@ -18100,6 +18088,7 @@ async def process_exploit_batch_job(job_data: dict):
                             await asm_inventory.mark_partial(conn, incomplete_ids, verdict=verdict)
                     elif partial:
                         verdict = 'partial_findings' if findings else ('partial_timeout' if meta.get('timed_out') else 'partial')
+                        domain_rate.measure(rate_entry, len(endpoint_ids))
                         await asm_inventory.mark_partial(conn, endpoint_ids, verdict=verdict)
                         await asm_inventory.record_endpoint_attempts(
                             conn,
@@ -18126,6 +18115,7 @@ async def process_exploit_batch_job(job_data: dict):
                         )
                     else:
                         verdict = 'partial_findings' if findings else 'missing_endpoint_telemetry'
+                        domain_rate.measure(rate_entry, len(endpoint_ids))
                         await asm_inventory.mark_partial(conn, endpoint_ids, verdict=verdict)
                         await asm_inventory.record_endpoint_attempts(
                             conn,
@@ -19370,6 +19360,11 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             r"[0-9a-f]{64}", expected_environment_sha256
         ):
             raise ReplayExecutionError("replay job environment digest is invalid")
+        from capabilities.replay import require_hunt_replay_authority, revalidate_hunt_replay_authority, REPLAY_CAPABILITIES
+        capability_name = str(job_data.get("capability_name") or "collections.replay_safe")
+        if capability_name not in REPLAY_CAPABILITIES:
+            raise ReplayExecutionError("unknown replay capability")
+        active_replay = capability_name == "collections.replay_active"
         replay_policy = str(job_data.get("replay_policy") or "").strip()
         if replay_policy not in {"safe_reads", "confirmed_active"}:
             raise ReplayExecutionError("replay job policy is not executable")
@@ -19383,7 +19378,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             request_ids=tuple(str(item) for item in selector_raw.get("request_ids") or ()),
             methods=tuple(str(item) for item in selector_raw.get("methods") or ()),
             path_regex=str(selector_raw.get("path_regex") or "") or None,
-            safe_methods_only=True,
+            safe_methods_only=not active_replay,
             limit=max(1, min(int(selector_raw.get("limit") or 25), 25)),
         )
         credential_profile_id = str(job_data.get("credential_profile_id") or "").strip()
@@ -19425,7 +19420,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                        WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
                     uuid.UUID(action_id), uuid.UUID(hunt_id),
                 )
-                if not action or str(action["capability_name"]) != "collections.replay_safe":
+                if not action or str(action["capability_name"]) != capability_name:
                     raise ReplayExecutionError("replay action identity is not valid")
                 collection = await conn.fetchrow(
                     f"""SELECT c.id, c.encrypted_payload, c.payload_sha256,
@@ -19497,6 +19492,12 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     raise ReplayExecutionError("request collection selection changed")
                 context = _worker_json_object(run["context_pack"])
                 hunt_policy = _worker_json_object(run["policy_json"])
+                require_hunt_replay_authority(capability_name, hunt_policy, replay_policy=replay_policy)
+                if active_replay:
+                    initial_target, initial_url = _worker_hunt_web_target(run, context, hunt_policy)
+                    await revalidate_hunt_replay_authority(conn, run=run, target=initial_target,
+                        target_url=initial_url, capability_name=capability_name, replay_policy=replay_policy,
+                        revalidate=_revalidate_hunt_action_authority)
                 existing_reservation = await store.load(
                     conn, reservation_id, for_update=True,
                 )
@@ -19506,7 +19507,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         or existing_reservation.record.owner_kind != "hunt"
                         or existing_reservation.record.owner_id != hunt_id
                         or existing_reservation.record.capability_name
-                        != "collections.replay_safe"
+                        != capability_name
                         or existing_reservation.action_digest
                         != queued_action_digest
                     ):
@@ -19592,7 +19593,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             methods=stored_selection.methods,
             path_regex=stored_selection.path_regex,
             tags=stored_selection.tags,
-            safe_methods_only=True,
+            safe_methods_only=stored_selection.safe_methods_only or not active_replay,
             limit=min(stored_selection.max_requests, 2_000),
         )
         allowed_request_ids = {
@@ -19610,7 +19611,11 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             selector,
             allowed_origins=target.allowed_origins,
             default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
-            authorization=ReplayAuthorization(),
+            authorization=ReplayAuthorization(
+                active_testing=active_replay and hunt_policy.get("active_testing") is True,
+                allow_state_changing_http=active_replay and hunt_policy.get("allow_state_changing_http") is True,
+                approval_receipt_id=hunt_policy.get("approval_receipt_id") if active_replay else None,
+            ),
         )
         receipt_context = {
             "collection_id": collection_id,
@@ -19622,7 +19627,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         if expected_environment_sha256:
             receipt_context["environment_digest"] = expected_environment_sha256
         if credential_profile_id:
-            context_ref = select_hunt_principal_reference(context, principal_slot)
+            context_ref = select_hunt_principal_reference(context, principal_slot, capability=capability_name)
             if context_ref is None or context_ref["profile_id"] != credential_profile_id:
                 raise ReplayExecutionError("managed principal queue reference changed")
             if context_ref["profile_version"] != expected_profile_version:
@@ -19635,14 +19640,14 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     target=target,
                     approval_receipt_id=hunt_policy.get("approval_receipt_id"),
                     scope_receipt_id=hunt_policy.get("scope_receipt_id"),
-                    action_name="hunt.capability:collections.replay_safe",
+                    action_name=f"hunt.capability:{capability_name}",
                 )
                 resolved = await credential_stack.enter_async_context(
                     WorkerCredentialResolver().resolve(
                         conn,
                         profile_id=credential_profile_id,
                         target=target,
-                        capability="collections.replay_safe",
+                        capability=capability_name,
                         authority=authority,
                     )
                 )
@@ -19674,12 +19679,13 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             wall_seconds=int(job_data.get("tool_wall_seconds") or 60),
             request_count=len(plan.requests),
             managed_principal=bool(credential_profile_id),
+            active_replay=active_replay,
         )
         requested_budget = replay_reservation_budget(plan, additional_budget)
         requested = DurableBudgetReservation.request(
             owner_kind="hunt",
             owner_id=hunt_id,
-            capability_name="collections.replay_safe",
+            capability_name=capability_name,
             amounts=requested_budget,
             reservation_id=reservation_id,
         )
@@ -19777,13 +19783,17 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             async with db_pool.acquire() as conn:
                 async with conn.transaction():
                     owner = await conn.fetchrow(
-                        "SELECT id, status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE",
                         uuid.UUID(hunt_id),
                     )
                     if not owner or str(owner["status"]) not in {
                         "active", "awaiting_planner", "budget_exhausted"
                     }:
                         raise ReplayExecutionError("Hunt stopped before the next replay request")
+                    if active_replay:
+                        await revalidate_hunt_replay_authority(conn, run=owner, target=target,
+                            target_url=target_url, capability_name=capability_name, replay_policy=replay_policy,
+                            revalidate=_revalidate_hunt_action_authority)
                     latest = await store.load(
                         conn, reservation_id, for_update=True,
                     )
@@ -19871,21 +19881,15 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
 
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
-            "collections.replay_safe"
+            capability_name
         )
         async with db_pool.acquire() as authority_conn:
-            await _revalidate_hunt_action_authority(
-                authority_conn,
-                run=run,
-                target=target,
-                target_url=target_url,
-                policy=ScanPolicy(
-                    active_testing=bool(hunt_policy.get("active_testing")),
-                    scope_receipt_id=target.scope_receipt_id,
-                    approval_receipt_id=hunt_policy.get("approval_receipt_id"),
-                ),
-                capability_name=replay_spec.name,
-            )
+            await revalidate_hunt_replay_authority(authority_conn, run=run, target=target,
+                target_url=target_url, capability_name=capability_name, replay_policy=replay_policy,
+                revalidate=_revalidate_hunt_action_authority)
+        from capabilities.replay import RecordedHuntReplayTransport
+        archived_calls, replay_recorder = http_archive.hunt_run_call_recorder(run, action_id=action_id,
+            capability_name=capability_name, adapter=replay_spec.adapter, target_url=target_url)
         replay_adapter = ReplayExecutionAdapter(
             specification=replay_spec,
             execution_kwargs={
@@ -19898,7 +19902,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     _worker_json_object(run["budget_json"])
                 ),
                 "consumed": held_ledger,
-                "transport": PinnedAiohttpReplayTransport(),
+                "transport": RecordedHuntReplayTransport(PinnedAiohttpReplayTransport(), replay_recorder, principal_slot=principal_slot),
                 "timeout_seconds": max(
                     0.1,
                     min(
@@ -19925,24 +19929,28 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 "receipt_input_digest": queued_action_digest,
             },
         )
-        execution = await _dispatch_registered_hunt_adapter(
-            hunt_id=hunt_id,
-            action_id=action_id,
-            specification=replay_spec,
-            target=target,
-            capability_input={
-                "collection_id": collection_id,
-                "request_ids": list(selector.request_ids),
-                "limit": selector.limit,
-            },
-            requested_budget=persisted.record.requested,
-            adapter=replay_adapter,
-            reservation_id=reservation_id,
-            action_digest=queued_action_digest,
-            heartbeat=lambda: asyncio.sleep(0),
-            cancelled=lambda: bool(redis_client.exists(cancel_key)),
-            adapter_managed_cancellation=True,
-        )
+        try:
+            execution = await _dispatch_registered_hunt_adapter(
+                hunt_id=hunt_id,
+                action_id=action_id,
+                specification=replay_spec,
+                target=target,
+                capability_input={
+                    "collection_id": collection_id,
+                    "request_ids": list(selector.request_ids),
+                    "limit": selector.limit,
+                },
+                requested_budget=persisted.record.requested,
+                adapter=replay_adapter,
+                reservation_id=reservation_id,
+                action_digest=queued_action_digest,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: bool(redis_client.exists(cancel_key)),
+                adapter_managed_cancellation=True,
+            )
+        finally:
+            async with db_pool.acquire() as archive_conn:
+                await http_archive.archive_hunt_capture(archive_conn, archived_calls, hunt_id, run["id"], RESULTS_DIR)
         outcome = replay_adapter.outcome
         if outcome is None:
             raise ReplayExecutionError(
@@ -19963,7 +19971,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "used_after_reconciliation": settled_ledger,
             "reservation_id": reservation_id,
             "receipt_id": public_receipt.get("receipt_id"), "receipt": public_receipt,
-            "safe_methods_only": True,
+            "safe_methods_only": not active_replay,
             "secret_values_visible": False,
             "durable_budget_settled": True,
             "network_binding": "runtime_target_binding",
@@ -20041,6 +20049,7 @@ def _worker_terminal_network_result(
     ]
     return {
         "verified_finding_ids": list((action_result or {}).get("verified_finding_ids") or []),
+        "captures": list((action_result or {}).get("captures") or []),
         "job_id": job_id,
         "status": status,
         "ok": status == "success",
@@ -20079,6 +20088,7 @@ async def _revalidate_hunt_action_authority(
     target_url: str,
     policy: ScanPolicy,
     capability_name: str,
+    capability_input: Mapping[str, Any] | None = None,
 ) -> None:
     """Recheck mutable target and receipt authority immediately before traffic."""
     if agent_tools.CAPABILITY_REGISTRY.require(capability_name).placement_requirements.get("network_reachability"):
@@ -20101,7 +20111,9 @@ async def _revalidate_hunt_action_authority(
         raise CapabilityInputError("Hunt target locator changed after admission")
     authority_decision = await revalidate_scan_action_authority(
         conn,
-        action=SimpleNamespace(capability_name=capability_name),
+        action=SimpleNamespace(
+            capability_name=capability_name, capability_input=dict(capability_input or {}),
+        ),
         target_binding=target,
         scope_receipt_id=target.scope_receipt_id,
         approval_receipt_id=policy.approval_receipt_id,
@@ -21884,6 +21896,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
     worker_session = None
     secondary_worker_session = None
     private_session = None
+    http_exchange = None
     result: dict[str, Any] = {
         "job_id": job_id,
         "status": "failed",
@@ -21916,6 +21929,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             capability_name, dict(job_data.get("capability_input") or {}),
         )
         spec = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
+        from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
 
         async with db_pool.acquire() as conn:
@@ -21926,7 +21940,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 if not run:
                     raise CapabilityInputError("HTTP Hunt does not exist")
                 action = await conn.fetchrow(
-                    """SELECT id, capability_name, status FROM hunt_actions
+                    """SELECT id, capability_name, status, result_summary FROM hunt_actions
                        WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
                     action_id,
                     hunt_id,
@@ -21992,6 +22006,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target = resolve_hunt_http_origin(target, capability_input["origin"], hunt_policy)
                 policy = ScanPolicy(
                     active_testing=bool(hunt_policy.get("active_testing")),
+                    allow_state_changing_http=bool(hunt_policy.get("allow_state_changing_http")),
                     network_discovery=bool(hunt_policy.get("network_discovery")),
                     subdomain_discovery=False,
                     scope_receipt_id=target.scope_receipt_id,
@@ -22004,6 +22019,11 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     ).items()
                 }
                 requested_budget = dict(stored.record.requested)
+                writes_http = False
+                if capability_name == "http.request":
+                    writes_http = require_http_request_authority(
+                        capability_input, hunt_policy, requested_budget=requested_budget,
+                    )
                 if expected_budget != requested_budget:
                     raise ReservationConflict(
                         "control-plane and worker HTTP budgets differ"
@@ -22030,6 +22050,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     target_url=target_url,
                     policy=policy,
                     capability_name=capability_name,
+                    capability_input=capability_input,
                 )
                 lease_seconds = hunt_capability_lease_seconds(requested_budget)
                 running = stored.record.start(
@@ -22457,38 +22478,23 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             public_input.pop("session_ref", None)
             public_input.pop("as_principal", None)
 
-            async def execute_http() -> dict[str, Any]:
-                return await execute_bound_http_request(
-                    target_url,
-                    public_input,
-                    target=target,
-                    allow_write=False,
-                    transaction_recorder=_record_call,
-                    trusted_headers=trusted_headers,
-                    # Read from the persisted hunt policy, which the start handler wrote
-                    # only after validating the target-bound approval receipt. ScanPolicy
-                    # does not carry this flag, so the row is the authority.
-                    allow_identity_headers=bool(
-                        hunt_policy.get("allow_identity_headers")
-                    ),
-                    direct_origin_addresses=tuple(
-                        hunt_policy.get("direct_origin_addresses") or ()
-                    ),
-                    principal_slot=principal_slot,
-                    timeout_seconds=min(
-                        60,
-                        max(1, int(spec.default_timeout_ms / 1000)),
-                    ),
-                    allow_bound_origin_redirects=True,
-                )
-
-            operation = execute_http
+            from functools import partial
+            from capabilities.http_workflow import prepare_http_operation
+            operation, http_exchange, workflow_headers = await prepare_http_operation(
+                pool=db_pool, run=run, context=context, policy=hunt_policy, action_id=action_id,
+                target=target, target_url=target_url, inputs=public_input, trusted_headers=trusted_headers,
+                principal_slot=principal_slot, requested_budget=persisted.record.requested,
+                timeout_seconds=min(60, max(1, int(spec.default_timeout_ms / 1000))), recorder=_record_call,
+                revalidate=partial(_revalidate_hunt_action_authority, run=run, target=target,
+                    target_url=target_url, policy=policy, capability_name=capability_name,
+                    capability_input=capability_input),
+            )
             adapter_type = HttpRequestExecutionAdapter
             redacted_execution = _redact_receipt_value({
-                **public_input,
+                **redact_http_request_body(public_input),
                 "as_principal": principal_slot,
                 "session_ref": str(supplied_session_ref or "") or None,
-                "credential_headers_injected": bool(trusted_headers),
+                "credential_headers_injected": workflow_headers,
                 "secret_values_visible": False,
             })
 
@@ -22571,6 +22577,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     )
                 }
                 await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
+                if http_exchange is not None:
+                    await http_exchange.persist(conn, run=locked, status=status)
+                    receipt_result["captures"] = http_exchange.public_result()
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -22722,6 +22731,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
+                    "captures": http_exchange.public_result() if http_exchange else [],
                     "session": (
                         settled_session.public_dict()
                         if settled_session is not None else None
@@ -22770,6 +22780,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             "budget_reservation_state": terminal.status,
             "receipt_id": str(receipt_id),
             "receipt": capability_receipt.public_dict(),
+            "captures": http_exchange.public_result() if http_exchange else [],
             "session": (
                 settled_session.public_dict()
                 if settled_session is not None else None
@@ -22903,6 +22914,7 @@ async def process_job(job_data: dict):
             "check_family": outer_payload.get("check_family"),
             "endpoint_filter": outer_payload.get("endpoint_filter"),
             "domain_rate_reserved": outer_payload.get("domain_rate_reserved"),
+            "domain_rate_hold_id": outer_payload.get("domain_rate_hold_id"),
             "claimed_endpoint_ids": claimed_ids,
             "triggered_by": outer_payload.get("triggered_by"),
             _RESEARCH_DISPATCH_CORRELATION_KEY: outer_payload.get(
@@ -22974,35 +22986,37 @@ async def process_job(job_data: dict):
         await asyncio.sleep(2)
         return
     try:
-        if job_type == 'discovery':
-            await process_discovery_job(job_data)
-        elif job_type == 'agent_scanner_tool':
-            await process_agent_scanner_tool_job(job_data)
-        elif job_type == 'authentication_validation':
-            from authenticated_assurance.worker import process_validation_job
-            await process_validation_job(job_data, pool=db_pool, worker_id=_worker_runtime_identity(), build_fingerprint=_worker_build_fingerprint())
-        elif job_type == 'canonical_scanner_capability':
-            await process_canonical_scanner_capability_job(job_data)
-        elif job_type == 'request_collection_replay':
-            await process_request_collection_replay_job(job_data)
-        elif job_type == 'canonical_browser_capability':
-            await process_canonical_browser_capability_job(job_data)
-        elif job_type == 'canonical_http_capability':
-            await process_canonical_http_capability_job(job_data)
-        elif job_type == 'canonical_network_capability':
-            await process_canonical_network_capability_job(job_data)
-        elif job_type == 'finding_retest':
-            await process_finding_retest_job(job_data)
-        elif job_type == parallel_scan.PLAN_JOB_TYPE:
-            await process_scan_plan_job(job_data)
-        elif job_type == parallel_scan.SHARD_JOB_TYPE:
-            await process_scan_shard_job(job_data)
-        elif job_type == parallel_scan.MERGE_JOB_TYPE:
-            await process_scan_merge_job(job_data)
-        elif job_type == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
-            await process_exploit_batch_job(job_data)
-        else:
-            await process_scan_job(job_data)
+        # Holds taken on a root domain's hourly test ledger are settled however the job ends.
+        with domain_rate.settlement_scope(get_redis):
+            if job_type == 'discovery':
+                await process_discovery_job(job_data)
+            elif job_type == 'agent_scanner_tool':
+                await process_agent_scanner_tool_job(job_data)
+            elif job_type == 'authentication_validation':
+                from authenticated_assurance.worker import process_validation_job
+                await process_validation_job(job_data, pool=db_pool, worker_id=_worker_runtime_identity(), build_fingerprint=_worker_build_fingerprint())
+            elif job_type == 'canonical_scanner_capability':
+                await process_canonical_scanner_capability_job(job_data)
+            elif job_type == 'request_collection_replay':
+                await process_request_collection_replay_job(job_data)
+            elif job_type == 'canonical_browser_capability':
+                await process_canonical_browser_capability_job(job_data)
+            elif job_type == 'canonical_http_capability':
+                await process_canonical_http_capability_job(job_data)
+            elif job_type == 'canonical_network_capability':
+                await process_canonical_network_capability_job(job_data)
+            elif job_type == 'finding_retest':
+                await process_finding_retest_job(job_data)
+            elif job_type == parallel_scan.PLAN_JOB_TYPE:
+                await process_scan_plan_job(job_data)
+            elif job_type == parallel_scan.SHARD_JOB_TYPE:
+                await process_scan_shard_job(job_data)
+            elif job_type == parallel_scan.MERGE_JOB_TYPE:
+                await process_scan_merge_job(job_data)
+            elif job_type == asm_inventory.EXPLOIT_BATCH_JOB_TYPE:
+                await process_exploit_batch_job(job_data)
+            else:
+                await process_scan_job(job_data)
     except ExecutionScopeError as exc:
         # Deterministic authority/compiler failures cannot succeed on another
         # delivery. Terminalize them once with the actionable reason instead of

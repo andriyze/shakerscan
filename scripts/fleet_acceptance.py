@@ -199,12 +199,12 @@ def _acceptance_request_max(shard_count: int) -> int:
     """Return a bounded parent budget for the transport acceptance scan.
 
     The acceptance target is deliberately limited to one known endpoint per
-    shard. Reusing the ordinary ``standard`` ceiling (currently 1,866
-    requests) can consume the default 1,000-request hourly domain reservation
-    before every shard obtains a lease, leaving a fresh acceptance run waiting
-    on its own conservative reservations. Keep the safety gate enabled while
-    giving each shard enough room for the passive scanner setup around its one
-    assigned URL.
+    shard, so each shard only needs room for the passive scanner setup around
+    its one assigned URL. (Through 2.5.5 broker leases reserved HTTP requests
+    against the root domain's hourly *endpoint* quota, and the ordinary
+    ``standard`` ceiling could park a fresh run behind its own reservations.
+    The acceptance Scan is operator-submitted: the quota now records it but
+    never limits it; see ``api/domain_rate.py``.)
     """
     count = max(1, min(12, int(shard_count or 1)))
     return min(900, count * 100)

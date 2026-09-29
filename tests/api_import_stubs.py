@@ -50,6 +50,9 @@ def install_fastapi_exception_stubs() -> None:
 
     exceptions.RequestValidationError = RequestValidationError
     handlers.request_validation_exception_handler = request_validation_exception_handler
+    if not hasattr(fastapi, "Depends"):
+        # Metadata-only compatibility import; no dependency is executed by the stub.
+        fastapi.Depends = lambda dependency=None, **_kwargs: dependency
     if not hasattr(fastapi, "APIRouter"):
         fastapi.APIRouter = APIRouter
     if not hasattr(fastapi, "status"):

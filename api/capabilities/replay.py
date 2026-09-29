@@ -11,9 +11,46 @@ from hunt.service_binding import replay_uses_service_origin
 from hunt.target_binding import web_hunt_target
 
 
+
+REPLAY_CAPABILITIES = frozenset({"collections.replay_safe", "collections.replay_active"})
+
+
+def require_hunt_replay_authority(
+    capability_name: str, policy: Mapping[str, Any], *, replay_policy: str | None = None,
+) -> bool:
+    """A live saved write grant enables exact replay; a tool name never grants it."""
+    if capability_name not in REPLAY_CAPABILITIES:
+        raise ValueError("unknown Hunt replay capability")
+    active = capability_name == "collections.replay_active"
+    if active:
+        if policy.get("active_testing") is not True or policy.get("allow_state_changing_http") is not True:
+            raise ValueError("active replay requires the Hunt's existing state-changing HTTP permission")
+        if replay_policy is not None and replay_policy != "confirmed_active":
+            raise ValueError("active replay requires a bound confirmed_active collection selection")
+    elif replay_policy == "discovery_only":
+        raise ValueError("the bound collection is discovery-only")
+    return active
+
+async def revalidate_hunt_replay_authority(conn: Any, *, run: Mapping[str, Any], target: Any,
+    target_url: str, capability_name: str, replay_policy: str, revalidate: Any) -> None:
+    """Revalidate the same saved authority before decrypting and between writes."""
+    import json
+    from runtime.models import ScanPolicy
+    policy = run["policy_json"]
+    policy = json.loads(policy) if isinstance(policy, str) else policy
+    require_hunt_replay_authority(capability_name, policy, replay_policy=replay_policy)
+    if capability_name not in policy.get("allowed_capabilities", ()):
+        raise ValueError("replay is outside the persisted Hunt manifest")
+    await revalidate(conn, run=run, target=target, target_url=target_url,
+        policy=ScanPolicy(active_testing=bool(policy.get("active_testing")),
+            allow_state_changing_http=bool(policy.get("allow_state_changing_http")),
+            scope_receipt_id=target.scope_receipt_id,
+            approval_receipt_id=policy.get("approval_receipt_id")), capability_name=capability_name)
+
+
 def hunt_replay_additional_budget(
     *, wall_seconds: int, device_requests: int = 0, managed_principal: bool = False,
-    uses_service_origin: bool = False,
+    uses_service_origin: bool = False, active_replay: bool = False,
 ) -> dict[str, int]:
     """Reserve Hunt dimensions owned by the worker alongside the exact replay plan."""
     budget = {
@@ -22,7 +59,7 @@ def hunt_replay_additional_budget(
     }
     if device_requests:
         budget["device_fragility_points"] = int(device_requests)
-    if managed_principal or uses_service_origin:
+    if managed_principal or uses_service_origin or active_replay:
         budget["active_actions"] = 1
     return budget
 
@@ -30,6 +67,7 @@ def hunt_replay_additional_budget(
 def worker_hunt_replay_budget(
     *, run: Mapping[str, Any], context: Mapping[str, Any], policy: Mapping[str, Any],
     origins: Sequence[str], wall_seconds: int, request_count: int, managed_principal: bool,
+    active_replay: bool = False,
 ) -> dict[str, int]:
     """Derive the durable worker charge from revalidated server-owned selection.
 
@@ -43,6 +81,7 @@ def worker_hunt_replay_budget(
         device_requests=request_count if run.get("device_target_id") else 0,
         managed_principal=managed_principal,
         uses_service_origin=replay_uses_service_origin(original, origins),
+        active_replay=active_replay,
     )
 
 
@@ -103,3 +142,34 @@ class ReplayExecutionAdapter:
             parser_version=str(receipt.parser_version),
             redacted_execution=dict(receipt.redacted_execution),
         )
+
+
+class RecordedHuntReplayTransport:
+    """Archive the exact request plan and bounded response through the existing store.
+
+    The transport may add framing headers, so fidelity is explicitly plan-level,
+    not a complete packet capture. Values go only to the private archive callback.
+    """
+
+    def __init__(self, transport: Any, recorder: Any, *, principal_slot: str) -> None:
+        self.transport, self.recorder, self.principal_slot = transport, recorder, principal_slot
+
+    async def send(self, request: Any, **kwargs: Any) -> Any:
+        from datetime import datetime, timezone
+        started_at = datetime.now(timezone.utc)
+        result = None
+        try:
+            result = await self.transport.send(request, **kwargs)
+            return result
+        finally:
+            self.recorder({"method": request.method, "url": request.url,
+                "request_headers": dict(request.headers), "request_body": request.body,
+                "response_headers": dict(result.response_headers) if result else None,
+                "response_body": result.response_body if result else None,
+                "status_code": result.status_code if result else None,
+                "remote_ip": result.connected_address if result else None,
+                "elapsed_ms": result.elapsed_ms if result else None,
+                "error": result.error_code if result else "cancelled_or_failed",
+                "response_body_truncated": result is None or bool(result.error_code),
+                "started_at": started_at, "principal_slot": self.principal_slot or "anonymous",
+                "fidelity": "exact_replay_plan_bounded_response"})

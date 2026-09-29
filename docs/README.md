@@ -23,6 +23,7 @@ belong in Git history or immutable release notes rather than the active document
 - [Hunt authorization behavior](hunt-authorization-behavior.md)
 - [Hunt authorization workflow](hunt-authorization-workflow.md)
 - [Hunt investigation evaluation](hunt-investigation-evaluation.md)
+- [Hunt HTTP writes](hunt-http-writes.md) — authorized state-changing HTTP workflow execution.
 - [Operator-complete Hunt implementation](hunt-operator-workflows.md)
 - [Hunt authorization proof completion](hunt-proof-completion.md)
 - [Hunt review integrity](hunt-review-integrity.md)

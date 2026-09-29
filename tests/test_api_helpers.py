@@ -509,6 +509,59 @@ def test_scan_detail_exposes_verified_content_free_stage_prefix(monkeypatch):
     assert "observations" not in json.dumps(checkpoint)
 
 
+def test_scan_detail_explains_a_domain_rate_wait(monkeypatch):
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    waiting = {
+        "schema": "domain_rate/v1",
+        "state": "waiting",
+        "work_class": "background",
+        "root_domain": "ukrtampa.com",
+        "cap_per_hour": 1000,
+        "resume_estimate": "2026-09-27T16:40:00Z",
+        "reason": "Waiting for ukrtampa.com's hourly test budget",
+    }
+    rows = {"status": "queued"}
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {
+                "id": scan_id,
+                "job_id": None,
+                "status": rows["status"],
+                "current_phase": "waiting_for_domain_rate",
+                "scan_role": "standalone",
+                "options": {},
+                "execution_context": {},
+                "result": None,
+                "domain_rate_json": json.dumps(waiting),
+            }
+
+        async def fetch(self, query, *args):
+            return []
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+
+    detail = asyncio.run(api_module.get_scan(str(scan_id)))
+    assert detail["current_phase"] == "waiting_for_domain_rate"
+    assert detail["domain_rate"]["state"] == "waiting"
+    assert detail["domain_rate"]["resume_estimate"] == "2026-09-27T16:40:00Z"
+    assert "domain_rate_json" not in detail
+
+    rows["status"] = "running"
+    assert asyncio.run(api_module.get_scan(str(scan_id)))["domain_rate"]["state"] == "waited"
+
+
 def test_scan_execution_endpoints_project_content_safe_action_state(monkeypatch):
     scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     plan = {

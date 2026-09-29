@@ -77,6 +77,7 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi.responses"] = responses_mod
 
 from tests.api_import_stubs import install_fastapi_exception_stubs  # noqa: E402
+from tests.domain_rate_fake import DomainRateLedgerFake  # noqa: E402
 
 install_fastapi_exception_stubs()
 import api as api_module  # noqa: E402
@@ -539,28 +540,8 @@ def test_parallel_parent_rollup_keeps_unfinished_parent_below_complete():
     assert result["progress"] == 90
 
 
-class _FakeAsmRedis:
-    def __init__(self):
-        self.store = {}
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def eval(self, _script, _numkeys, key, amount, cap, _ttl, all_or_nothing="0"):
-        current = int(self.store.get(key) or 0)
-        amount = int(amount)
-        cap = int(cap)
-        if amount <= 0:
-            return 0
-        if cap <= 0:
-            return 0
-        if current >= cap:
-            return 0
-        if str(all_or_nothing) == "1" and current + amount > cap:
-            return 0
-        granted = min(amount, cap - current)
-        self.store[key] = current + granted
-        return granted
+class _FakeAsmRedis(DomainRateLedgerFake):
+    """Root-domain ledger mirror (see tests/domain_rate_fake.py)."""
 
 
 def test_asm_domain_rate_reservation_clamps_remaining_budget():
@@ -2566,28 +2547,47 @@ def test_legacy_broker_jobs_with_private_inputs_are_detected_for_local_routing()
     })
 
 
-def test_broker_request_budget_reservation_enforces_fleet_default(monkeypatch):
+def test_broker_operator_scan_keeps_full_request_budget_and_is_recorded_on_the_domain(monkeypatch):
+    # An operator Scan leased to a broker node keeps its whole HTTP request budget (the quota is
+    # endpoints, never HTTP requests) and is recorded, not limited, on the root-domain ledger.
+    executions = []
+
     class Conn:
         async def fetchrow(self, _query, *_args):
             return {"root_domain": "example.test", "asm_config": {"max_requests_per_hour_per_domain": 100}}
 
+        async def execute(self, query, *args):
+            executions.append((query, args))
+
     async def tested(*_args, **_kwargs):
-        return 10
+        raise AssertionError("operator admission must not consult the hourly window")
+
+    def forbidden_reserve(*_args, **_kwargs):
+        raise AssertionError("operator Scans are never admission-limited by the domain quota")
 
     monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
-    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", lambda *_args, **_kwargs: 25)
+    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", forbidden_reserve)
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 250)
+    redis = DomainRateLedgerFake()
     payload = {
         "scan_id": "11111111-1111-4111-8111-111111111111",
         "options": {"scan_type": "standard", "custom_budget": {"request_max": 50}},
     }
-    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
-    assert receipt["granted"] == 25
+    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), redis, payload))
+    assert receipt["granted"] == 50
     assert payload["options"]["request_budget_mode"] == "enforce"
-    assert payload["options"]["custom_budget"]["request_max"] == 25
+    assert payload["options"]["custom_budget"]["request_max"] == 50
+    assert "active_max_endpoints" not in payload["options"]["custom_budget"]
     assert payload["options"]["request_budget_domain"] == "example.test"
+    assert receipt["domain_rate"]["work_class"] == "operator"
+    assert receipt["domain_rate"]["endpoints_held"] == 250
+    # 250 endpoints held although the cap is 100: recorded so background work backs off.
+    assert redis.entries("example.test") == {"h:11111111-1111-4111-8111-111111111111": 250}
+    recorded = json.loads(executions[0][1][1])
+    assert recorded["work_class"] == "operator" and recorded["state"] == "admitted"
 
 
-def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monkeypatch):
+def test_broker_immutable_background_plan_requires_all_or_nothing_endpoint_budget(monkeypatch):
     class Conn:
         async def fetchrow(self, _query, *_args):
             return {
@@ -2599,6 +2599,9 @@ def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monk
         async def fetchval(self, *_args):
             raise AssertionError("immutable action plans must not receive a partial fair share")
 
+        async def execute(self, *_args):
+            return "UPDATE 1"
+
     async def tested(*_args, **_kwargs):
         return 10
 
@@ -2606,15 +2609,17 @@ def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monk
 
     def reserve(*args, **kwargs):
         calls.append((args, kwargs))
-        return 50
+        return 40
 
     monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
     monkeypatch.setattr(api_module.asm_inventory, "reserved_domain_rate_count", lambda *_args: 0)
     monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", reserve)
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 40)
     payload = {
         "scan_id": "11111111-1111-4111-8111-111111111111",
         "options": {
             "scan_type": "standard",
+            "admission_origin": "schedule",
             "scan_execution_plan_digest": "c" * 64,
             "custom_budget": {"request_max": 50},
         },
@@ -2625,13 +2630,17 @@ def test_broker_immutable_action_plan_requires_all_or_nothing_domain_budget(monk
     )
 
     assert receipt["granted"] == 50
-    assert calls[0][0][3] == 50
+    assert receipt["domain_rate"]["endpoints_held"] == 40
+    assert calls[0][0][2] == 90  # headroom: cap minus the 10 endpoints tested this hour
+    assert calls[0][0][3] == 40  # endpoint units, not the 50 HTTP requests
     assert calls[0][1]["all_or_nothing"] is True
+    assert calls[0][1]["entry_id"] == "11111111-1111-4111-8111-111111111111"
 
 
-def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):
+def test_broker_background_parallel_child_holds_its_full_plan(monkeypatch):
     parent_id = "22222222-2222-4222-8222-222222222222"
     reservation_calls = []
+    executions = []
 
     class Conn:
         async def fetchrow(self, _query, *_args):
@@ -2641,10 +2650,11 @@ def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):
                 "parent_scan_id": parent_id,
             }
 
-        async def fetchval(self, query, *args):
-            assert "status IN ('pending','queued','running')" in query
-            assert str(args[0]) == parent_id
-            return 4
+        async def fetchval(self, *_args):
+            raise AssertionError("a partial sibling token must not admit a full immutable plan")
+
+        async def execute(self, query, *args):
+            executions.append((query, args))
 
     async def tested(*_args, **_kwargs):
         return 0
@@ -2656,24 +2666,31 @@ def test_broker_request_budget_fairly_partitions_parallel_siblings(monkeypatch):
     monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
     monkeypatch.setattr(api_module.asm_inventory, "reserved_domain_rate_count", lambda *_args: 0)
     monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", reserve)
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 80)
     payload = {
         "scan_id": "11111111-1111-4111-8111-111111111111",
-        "options": {"scan_type": "standard", "custom_budget": {"request_max": 80}},
+        "options": {"scan_type": "standard", "admission_origin": "schedule",
+                    "custom_budget": {"request_max": 500}},
     }
 
     receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
 
-    assert receipt["requested"] == 80
-    assert receipt["reservation_request"] == 25
-    assert receipt["granted"] == 25
-    assert receipt["pending_sibling_count"] == 4
-    assert reservation_calls == [("example.test", 100, 25, {"all_or_nothing": False})]
-    assert payload["options"]["custom_budget"]["request_max"] == 25
+    assert receipt["requested"] == 500
+    assert receipt["granted"] == 500
+    assert receipt["reservation_request"] == 80
+    assert receipt["domain_rate"]["endpoints_held"] == 80
+    assert receipt["pending_sibling_count"] == 1
+    assert reservation_calls == [("example.test", 100, 80, {
+        "entry_id": "11111111-1111-4111-8111-111111111111", "all_or_nothing": True,
+    })]
+    # The canonical executor keeps this whole plan.
+    assert payload["options"]["custom_budget"] == {"request_max": 500}
+    recorded = json.loads(executions[0][1][1])
+    assert recorded["state"] == "admitted" and "reduction" not in recorded
 
 
-def test_broker_request_budget_zero_pending_race_still_partitions_running_siblings(monkeypatch):
+def test_broker_background_second_sibling_waits_for_full_plan_headroom(monkeypatch):
     parent_id = "22222222-2222-4222-8222-222222222222"
-    reservation_calls = []
 
     class Conn:
         async def fetchrow(self, _query, *_args):
@@ -2683,30 +2700,94 @@ def test_broker_request_budget_zero_pending_race_still_partitions_running_siblin
                 "parent_scan_id": parent_id,
             }
 
-        async def fetchval(self, query, *_args):
-            assert "'running'" in query
-            return 4
+        async def fetchval(self, *_args):
+            raise AssertionError("sibling count cannot authorize a partial plan")
+
+        async def execute(self, *_args):
+            return "UPDATE 1"
 
     async def tested(*_args, **_kwargs):
         return 0
 
-    def reserve(_redis, _root_domain, _cap, amount, **_kwargs):
-        reservation_calls.append(amount)
-        return amount
-
     monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
-    monkeypatch.setattr(api_module.asm_inventory, "reserved_domain_rate_count", lambda *_args: 0)
-    monkeypatch.setattr(api_module.asm_inventory, "reserve_domain_rate", reserve)
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 80)
+    redis = DomainRateLedgerFake()
     payload = {
         "scan_id": "11111111-1111-4111-8111-111111111111",
-        "options": {"scan_type": "standard", "custom_budget": {"request_max": 80}},
+        "options": {"scan_type": "standard", "admission_origin": "schedule",
+                    "custom_budget": {"request_max": 80}},
     }
 
-    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), object(), payload))
+    receipt = asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), redis, payload))
+    assert receipt["domain_rate"]["endpoints_held"] == 80
+    second = {"scan_id": "33333333-3333-4333-8333-333333333333", "options": dict(payload["options"])}
+    assert asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), redis, second)) is None
+    assert redis.entries("example.test") == {"h:11111111-1111-4111-8111-111111111111": 80}
+    assert second["_domain_rate_wait"]["requested"] == 80
 
-    assert receipt["pending_sibling_count"] == 4
-    assert receipt["granted"] == 25
-    assert reservation_calls == [25]
+
+def test_broker_oversized_background_plan_is_terminal_with_actionable_reason(monkeypatch):
+    executions = []
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"root_domain": "example.test", "asm_config": {"max_requests_per_hour_per_domain": 100}}
+
+        async def execute(self, query, *args):
+            executions.append((query, args))
+
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 250)
+    payload = {"scan_id": "11111111-1111-4111-8111-111111111111",
+               "options": {"scan_type": "standard", "admission_origin": "schedule",
+                           "custom_budget": {"request_max": 500}}}
+    assert asyncio.run(fleet_router_module._broker_reserve_request_budget(
+        Conn(), DomainRateLedgerFake(), payload,
+    )) is None
+    assert payload["_domain_rate_unadmittable"] is True
+    assert "domain_rate_plan_exceeds_cap" in executions[0][0]
+    assert json.loads(executions[0][1][2])["state"] == "blocked"
+
+
+def test_broker_background_scan_waits_visibly_when_the_domain_is_exhausted(monkeypatch):
+    executions = []
+
+    class Conn:
+        async def fetchrow(self, _query, *_args):
+            return {"root_domain": "example.test", "asm_config": {"max_requests_per_hour_per_domain": 100}}
+
+        async def fetch(self, _query, *_args):
+            return []
+
+        async def execute(self, query, *args):
+            executions.append((query, args))
+
+    async def tested(*_args, **_kwargs):
+        return 0
+
+    redis = DomainRateLedgerFake()
+    fleet_router_module.domain_rate.reserve(
+        redis, "example.test", entry_id="asm-batch", requested=100, headroom=100,
+    )
+    monkeypatch.setattr(api_module.asm_inventory, "domain_tested_recently_count", tested)
+    monkeypatch.setattr(fleet_router_module.domain_rate, "planned_endpoints", lambda *_a, **_k: 10)
+    monkeypatch.setattr(fleet_router_module, "get_redis", lambda: redis)
+    payload = {
+        "scan_id": "11111111-1111-4111-8111-111111111111",
+        "options": {"scan_type": "standard", "admission_origin": "schedule",
+                    "custom_budget": {"request_max": 80}},
+    }
+
+    assert asyncio.run(fleet_router_module._broker_reserve_request_budget(Conn(), redis, payload)) is None
+    asyncio.run(fleet_router_module._mark_broker_budget_wait(Conn(), payload))
+
+    query, args = executions[-1]
+    assert "domain_rate_json" in query
+    assert args[1] == "waiting_for_domain_rate"
+    waiting = json.loads(args[2])
+    assert waiting["state"] == "waiting" and waiting["root_domain"] == "example.test"
+    # The asm-batch hold frees one hold TTL after it was taken.
+    assert waiting["resume_estimate"] is not None
+    assert "_domain_rate_wait" not in payload
 
 
 def test_broker_request_budget_explicit_off_preserves_operator_control():

@@ -179,7 +179,7 @@ export default function ScanExecutionSettingsPanel() {
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.batch_size, 'endpoint')} per batch</span>
               <span className="rounded border border-gray-800 px-2 py-1">Retest after {countLabel(asmConfig.stale_days, 'day')}</span>
               <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.daily_endpoint_cap, 'endpoint')}/day cap</span>
-              <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'request')}/hour/domain</span>
+              <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'endpoint')}/hour per root domain (background work)</span>
             </span>
           )}
         </ToggleField>

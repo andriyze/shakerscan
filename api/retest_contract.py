@@ -1362,6 +1362,7 @@ async def _run_schema_migrations_once(pool) -> None:
                 ADD COLUMN IF NOT EXISTS budget_used_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS coverage_status TEXT,
                 ADD COLUMN IF NOT EXISTS coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS domain_rate_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS scan_job_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                 ADD COLUMN IF NOT EXISTS scan_job_digest TEXT
             """)
@@ -3472,6 +3473,8 @@ async def _run_schema_migrations_once(pool) -> None:
                     )
                 )
             """)
+            await conn.execute("""ALTER TABLE hunt_actions ADD COLUMN IF NOT EXISTS
+                private_http_result TEXT CHECK (private_http_result IS NULL OR private_http_result LIKE 'enc:fernet:%')""")
             from hunt.budget_amendments import BUDGET_AMENDMENT_SCHEMA_SQL
             await conn.execute(BUDGET_AMENDMENT_SCHEMA_SQL)
             await conn.execute("""

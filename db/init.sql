@@ -137,6 +137,8 @@ CREATE TABLE scans (
     scan_continuation_applied_at TIMESTAMPTZ,
     coverage_status TEXT,
     coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Root-domain hourly test budget state (api/domain_rate.py): waits, reductions, work class.
+    domain_rate_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     run_kind TEXT NOT NULL DEFAULT 'web_dast',  -- web_dast, ai_api, ai_widget, ai_rag, ai_trace, ai_mcp, model_intake
     subject_ref TEXT,
 
@@ -1004,6 +1006,7 @@ CREATE TABLE hunt_actions (
     status TEXT NOT NULL CHECK (status IN ('running','completed','blocked','failed','partial')),
     input_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
     result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    private_http_result TEXT CHECK (private_http_result IS NULL OR private_http_result LIKE 'enc:fernet:%'),
     receipt_id UUID,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ
