@@ -127,8 +127,7 @@ shakerscan start --lan
 
 # laptop/client
 pipx install shakerscan
-shakerscan api --url http://192.168.1.50:8080 GET /health
-shakerscan mcp --url http://192.168.1.50:8080
+shakerscan connect http://192.168.1.50:8080
 ```
 
 LAN mode does not add authentication or encryption. Fresh OSS installs remain localhost-only. See
