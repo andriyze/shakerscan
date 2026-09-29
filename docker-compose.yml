@@ -484,6 +484,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # Dedicated and isolated lane for Deep Hunt scanner tools. Ordinary Web DAST
@@ -736,6 +738,10 @@ services:
       - ./README.md:/docs/README.md:ro
     depends_on:
       - api
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   # ============================================================

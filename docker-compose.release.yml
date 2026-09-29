@@ -466,6 +466,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   agent-tool-worker:
@@ -679,6 +681,10 @@ services:
       - ./README.md:/docs/README.md:ro
     depends_on:
       - api
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
 volumes:

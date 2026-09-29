@@ -154,7 +154,9 @@ RUN set -e && \
     fi && \
     chmod -R 755 /opt/nuclei-config /opt/nuclei-templates
 
-# Download immutable, checksum-verified wordlists for deep discovery.
+# Download immutable, checksum-verified wordlists for deep discovery. common.txt is from SecLists
+# (MIT); directory-list-2.3-small.txt is the OWASP DirBuster list (CC BY-SA 3.0). Attribution for
+# both is in THIRD_PARTY_NOTICES.md, which ships in /usr/share/doc/shakerscan.
 ARG SECLISTS_COMMIT=f0e9596052a4e27c073cfb452c94a0d955cb29be
 ARG SECLISTS_COMMON_SHA256=47fb86ca6fb3f97e5491161581900d6d99851fb16764eacddf16aa85617c956a
 ARG SECLISTS_DIRECTORY_SMALL_SHA256=77f7aba81570b24c30965bfc4652cf6c99ee4e5ed38f1eab96f2e102981a6d90
@@ -246,6 +248,7 @@ COPY scanner/scanner_tools /app/scanner_tools
 COPY scanner/wordlists /app/wordlists
 COPY scanner/payloads /app/payloads
 COPY scanner/data /app/data
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/shakerscan/
 ENV DEVICE_INTEL_DB_PATH=/app/data/device_advisories.json
 ENV DEVICE_INTEL_DB_SHA256=d8d614b63f39cce836938ecd3fe5e1e134efac21b7759a928eeeb7d1d7b18b13
 
