@@ -18,9 +18,7 @@ test('scan result fetches durable finding history for its exact target', () => {
 })
 
 test('scan result reconciles report evidence with durable IDs from the scan payload', () => {
-  assert.match(detail, /const scanPersistedCurrent = Array\.isArray\(scan\?\.findings\)/)
-  assert.match(detail, /const persistedByKey = new Map/)
-  assert.match(detail, /_persisted: Boolean\(persisted\?\.id \|\| finding\.id\)/)
+  assert.match(detail, /reconciledScanFindings\(scan, targetFindings\)/)
 })
 
 test('scan result separates observations from findings not observed by this run', () => {
@@ -28,7 +26,7 @@ test('scan result separates observations from findings not observed by this run'
   assert.match(detail, /observed in this scan/)
   assert.match(detail, /not observed in this scan/)
   assert.match(detail, /Open all target findings/)
-  assert.match(detail, /const rawCurrent = Array\.isArray\(scan\?\.result\?\.findings\)/)
+  assert.match(detail, /reconciledScanFindings\(scan, targetFindings\)/)
 })
 
 test('scan result does not bury the current run under historical target rows', () => {

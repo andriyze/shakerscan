@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -688,45 +688,12 @@ function ScanFindingContextCard({
   error: string | null
 }) {
   if (!scan?.target_id) return null
-  const rawCurrent = Array.isArray(scan?.result?.findings) ? scan.result.findings : []
-  const scanPersistedCurrent = Array.isArray(scan?.findings) ? scan.findings : []
-  const historyPersistedCurrent = targetFindings.filter((finding) => finding.scan_id === scan.id)
-  const persistedCurrent = [
-    ...scanPersistedCurrent,
-    ...historyPersistedCurrent.filter((finding) => (
-      !scanPersistedCurrent.some((current: Finding) => current.id === finding.id)
-    )),
-  ]
-  const persistedByKey = new Map(
-    persistedCurrent.map((finding: Finding) => [scanFindingIdentity(finding), finding]),
-  )
-  const currentKeys = new Set(rawCurrent.map(scanFindingIdentity))
-  const additionalPersistedCurrent = persistedCurrent.filter(
-    (finding: Finding) => !currentKeys.has(scanFindingIdentity(finding)),
-  )
-  const current = [
-    ...rawCurrent.map((finding: any, index: number) => {
-      const persisted = persistedByKey.get(scanFindingIdentity(finding))
-      return {
-        ...finding,
-        ...persisted,
-        _rowKey: `raw-${persisted?.id || finding.id || finding.fingerprint || index}`,
-        _origin: 'observed in this scan' as const,
-        _persisted: Boolean(persisted?.id || finding.id),
-      }
-    }),
-    ...additionalPersistedCurrent.map((finding) => ({
-      ...finding,
-      _rowKey: `persisted-${finding.id}`,
-      _origin: 'observed in this scan' as const,
-      _persisted: true,
-    })),
-  ]
+  const { current, persistedCurrentCount } = reconciledScanFindings(scan, targetFindings)
   // The list is what an operator reads first, so the proven critical must not sit under a
   // thousand informational candidates: order by proof, then severity, keeping the server's
   // order within a tier.
   current.sort((a: any, b: any) => findingPriority(a) - findingPriority(b))
-  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrent.length)
+  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrentCount)
   const provenCount = current.filter((finding: any) => (
     finding.verified === true && String(finding.proof_state || '') === 'verified'
   )).length

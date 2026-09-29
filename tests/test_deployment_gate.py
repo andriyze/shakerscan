@@ -53,7 +53,7 @@ def test_target_active_only_marks_provenance():
 
 def test_reobserved_persisted_finding_does_not_duplicate_an_unfingerprinted_report():
     scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
     history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
                         "scan_id": "old-scan", "last_seen_scan_id": scan["id"]}], "total": 1, "complete": True}
     decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
@@ -65,7 +65,7 @@ def test_reobserved_persisted_finding_does_not_duplicate_an_unfingerprinted_repo
 
 def test_same_display_text_from_an_earlier_scan_remains_a_separate_blocker():
     scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+    active = {**_crit("f1", "t:canonical", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
     history = {"rows": [{"id": "f1", "fingerprint": "t:canonical", "severity": "high",
                         "scan_id": "old-scan", "last_seen_scan_id": "old-scan"}], "total": 1, "complete": True}
     decision = api.build_deployment_decision(scan, target_active_findings=[active], target_history=history)
@@ -76,7 +76,7 @@ def test_same_display_text_from_an_earlier_scan_remains_a_separate_blocker():
 
 def test_one_unidentified_report_cannot_hide_two_reobserved_active_rows():
     scan = _scan([{"title": "Sensitive exposure", "severity": "high", "tool": "probe", "url": "http://app/.env"}])
-    active = [{**_crit(fid, f"t:{fid}", "Sensitive exposure"), "tool": "probe", "url": "http://app/.env"}
+    active = [{**_crit(fid, f"t:{fid}", "Sensitive exposure"), "severity": "high", "tool": "probe", "url": "http://app/.env"}
               for fid in ("f1", "f2")]
     history = {"rows": [{"id": fid, "fingerprint": f"t:{fid}", "severity": "high",
                         "scan_id": "old-scan", "last_seen_scan_id": scan["id"]} for fid in ("f1", "f2")],

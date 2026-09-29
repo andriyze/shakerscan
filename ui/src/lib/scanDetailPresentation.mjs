@@ -27,6 +27,65 @@ export function scanFindingIdentity(finding) {
   ].join('|')
 }
 
+function scanFindingDisplayIdentity(finding) {
+  const item = record(finding)
+  return [
+    String(item.title || '').trim().toLowerCase(),
+    String(item.url || '').trim().replace(/\/+$/, ''),
+    String(item.tool || '').trim().toLowerCase(),
+    String(item.severity || '').trim().toLowerCase(),
+  ].join('|')
+}
+
+/** Join the report to durable rows observed by this scan without counting both copies.
+ *  A display-only match needs scan linkage and is consumed once; distinct fingerprints
+ *  always remain distinct even when their visible titles and URLs are identical. */
+export function reconciledScanFindings(scan, targetFindings = []) {
+  const item = record(scan)
+  const scanId = String(item.id || '')
+  const raw = Array.isArray(record(item.result).findings) ? item.result.findings : []
+  const persisted = []
+  const persistedIds = new Set()
+  const attached = Array.isArray(item.findings) ? item.findings : []
+  const linkedHistory = (Array.isArray(targetFindings) ? targetFindings : []).filter((finding) => {
+    const row = record(finding)
+    return String(row.scan_id || '') === scanId || String(row.last_seen_scan_id || '') === scanId
+  })
+  for (const finding of [...attached, ...linkedHistory]) {
+    const row = record(finding)
+    const key = String(row.id || scanFindingIdentity(row))
+    if (persistedIds.has(key)) continue
+    persistedIds.add(key)
+    persisted.push(finding)
+  }
+  const matched = new Set()
+  const current = raw.map((finding, index) => {
+    const source = record(finding)
+    let match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex) && (
+      (source.id && String(record(row).id || '') === String(source.id))
+      || (source.fingerprint && String(record(row).fingerprint || '') === String(source.fingerprint))
+    ))
+    if (match < 0 && !source.fingerprint) {
+      match = persisted.findIndex((row, rowIndex) => !matched.has(rowIndex)
+        && scanFindingDisplayIdentity(row) === scanFindingDisplayIdentity(source))
+    }
+    if (match >= 0) matched.add(match)
+    const saved = match >= 0 ? record(persisted[match]) : null
+    return {
+      ...source, ...saved,
+      _rowKey: `raw-${saved?.id || source.id || source.fingerprint || index}`,
+      _origin: 'observed in this scan',
+      _persisted: Boolean(saved?.id),
+    }
+  })
+  for (const [index, finding] of persisted.entries()) {
+    if (matched.has(index)) continue
+    current.push({ ...record(finding), _rowKey: `persisted-${record(finding).id || index}`,
+      _origin: 'observed in this scan', _persisted: true })
+  }
+  return { current, persistedCurrentCount: persisted.length }
+}
+
 /** Local "about 16:40" for a quota resume estimate; `timeZone` is injectable for tests. */
 export function formatResumeTime(value, { timeZone } = {}) {
   const date = new Date(String(value || ''))
