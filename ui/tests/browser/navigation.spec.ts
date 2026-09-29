@@ -47,3 +47,11 @@ test('production shell sends browser security headers', async ({ page }) => {
   expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
   expect(headers['content-security-policy']).toContain("object-src 'none'")
 })
+
+
+test('README badge links have accessible image names', async ({ page }) => {
+  await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  for (const name of ['License: AGPL-3.0-only', 'Latest release', 'Python suite', 'CodeQL', 'OpenSSF Scorecard']) {
+    await expect(page.getByRole('link', { name })).toBeVisible()
+  }
+})
