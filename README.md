@@ -57,6 +57,19 @@ shakerscan scan https://app.example.test \
   --confirm-active
 ```
 
+## Use an AI agent
+
+ShakerScan ships `AGENTS.md` and task skills for Codex, Claude Code, OpenCode, and Pi. Start the
+agent through ShakerScan so runtime URLs, planner identity, and agent-specific integration are applied:
+
+```bash
+shakerscan agent             # auto-detects codex, claude, opencode, then pi
+shakerscan agent pi          # or name codex, claude, or opencode explicitly
+```
+
+Pi has no MCP client; the launcher passes the canonical ShakerScan skills and slash commands
+explicitly and Pi drives the instance through `shakerscan api`, `scan`, and `hunt`.
+
 ## What to use
 
 - **Scan** — reproducible web/API assessment with `fast`, `balanced`, and `thorough` ceilings.
@@ -114,8 +127,7 @@ shakerscan start --lan
 
 # laptop/client
 pipx install shakerscan
-shakerscan api --url http://192.168.1.50:8080 GET /health
-shakerscan mcp --url http://192.168.1.50:8080
+shakerscan connect http://192.168.1.50:8080
 ```
 
 LAN mode does not add authentication or encryption. Fresh OSS installs remain localhost-only. See

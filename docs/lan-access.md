@@ -40,7 +40,7 @@ shakerscan doctor
 shakerscan api GET /health
 shakerscan api GET /findings
 shakerscan hunt list
-shakerscan agent opencode                       # or claude, codex: the full agent workspace
+shakerscan agent opencode                       # or claude, codex, pi: the full agent workspace
 shakerscan mcp
 ```
 
@@ -71,7 +71,7 @@ shakerscan agent opencode --url http://192.168.1.50:8080
 
 After `shakerscan connect`, `["mcp"]` alone is enough: the saved address is used. `SHAKERSCAN_API_URL` (with `SHAKERSCAN_MCP_ALLOW_REMOTE_API=true` for `mcp`) remains available for scripts and CI that prefer the environment over a saved profile.
 
-API reads/writes and the instance's available MCP/Hunt capabilities run on the server; existing target authorization, budgets, credential admission and protected administrative endpoints still apply. This is not unrestricted remote shell access, and it does not add remote Docker start/stop/update commands. Those lifecycle commands still run on the server. `shakerscan agent` also works against the LAN engine: `shakerscan agent opencode --url http://192.168.1.50:8080` (or `claude`, `codex`) prepares the full agent workspace (the operating guide, the skills and the `/scan`, `/findings`, `/deep-hunt` commands) on the laptop, registers the MCP server with that address, and starts the agent. The workspace note says the engine has no login and no per-person identity. The saved, authenticated `shakerscan connect` flow is unchanged and still wins for an Enterprise instance.
+API reads/writes and the instance's available MCP/Hunt capabilities run on the server; existing target authorization, budgets, credential admission and protected administrative endpoints still apply. This is not unrestricted remote shell access, and it does not add remote Docker start/stop/update commands. Those lifecycle commands still run on the server. `shakerscan agent` also works against the LAN engine: `shakerscan agent opencode --url http://192.168.1.50:8080` (or `claude`, `codex`, `pi`) prepares the full agent workspace (the operating guide, the skills and the `/scan`, `/findings`, `/deep-hunt` commands) on the laptop, registers the MCP server with that address, and starts the agent. The workspace note says the engine has no login and no per-person identity. The saved, authenticated `shakerscan connect` flow is unchanged and still wins for an Enterprise instance.
 
 An explicit or environment-configured instance wins over the zero-config public service. Failure or an unsupported endpoint is reported as an error; it must never send the request to `pub.shakerscan.com`. The previously proposed `check` bundle still requires its server-side endpoint; LAN support does not manufacture that endpoint.
 

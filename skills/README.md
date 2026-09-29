@@ -13,13 +13,15 @@ so it can read the repository instructions and skill files:
 shakerscan agent codex
 shakerscan agent claude
 shakerscan agent opencode
+shakerscan agent pi
 ```
 
-From a source checkout:
+From a source checkout, use the launcher there too. It sets the runtime URLs and planner identity
+for every agent and applies agent-specific setup (including Pi's explicit skills/templates):
 
 ```bash
 ./scanner.sh start
-codex   # or claude, or opencode
+./scanner.sh agent        # auto-detects codex, claude, opencode, then pi
 ```
 
 For a VPS accessed over Tailscale, start with `./scanner.sh start --remote`. Remote mode may bind the
