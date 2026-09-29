@@ -14,12 +14,18 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 BODY_FIELDS = ("json_body", "form_body")
 
 
+def uses_http_workflow(values: Mapping[str, Any]) -> bool:
+    return bool(values.get("capture") or values.get("request_bindings"))
+
+
 def validate_http_request_input(values: Mapping[str, Any]) -> None:
     """Validate cross-field rules without modifying the requested experiment.
 
     The capability registry owns field/type/size validation. This helper also
     runs in the worker, so a queued request cannot evade the same shape checks.
     """
+    from .hunt_http_exchange_contract import validate_exchange_input
+    validate_exchange_input(values)
     method = values.get("method")
     if not isinstance(method, str) or method not in READ_METHODS | WRITE_METHODS:
         raise ValueError("http.request requires GET, HEAD, OPTIONS, POST, PUT, PATCH or DELETE")
@@ -59,6 +65,13 @@ def require_http_request_authority(
     """
     validate_http_request_input(values)
     writes = values["method"] in WRITE_METHODS
+    if uses_http_workflow(values):
+        if policy.get("active_testing") is not True:
+            raise ValueError("HTTP workflow bindings require this Hunt's active_testing permission")
+        if requested_budget is not None:
+            amount = requested_budget.get("active_actions")
+            if type(amount) is not int or amount < 1:
+                raise ValueError("HTTP workflow reservation lacks active_actions")
     if not writes:
         return False
     if policy.get("active_testing") is not True or policy.get("allow_state_changing_http") is not True:

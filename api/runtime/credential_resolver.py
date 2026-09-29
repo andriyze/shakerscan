@@ -266,6 +266,18 @@ class ResolvedCredential:
         if self._closed:
             raise CredentialResolutionError("resolved credential is closed")
 
+    def http_workflow_value(self, field_name: str) -> str:
+        """One explicitly bound HTTP field, never a planner-visible secret export."""
+        self._require_open()
+        if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS | {
+            "query_parameter", "form_login", "json_login", "oauth_client_credentials", "oauth_password",
+        } or field_name not in {"secret", "username", "client_id"}:
+            raise CredentialResolutionError("credential field is not available to an HTTP workflow")
+        value = self._material.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise CredentialResolutionError("selected HTTP credential field is unavailable")
+        return value
+
     def http_headers(self) -> SecretHTTPHeaders:
         self._require_open()
         if self.profile.auth_kind not in IMMEDIATE_HTTP_HEADER_KINDS:

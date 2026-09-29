@@ -103,14 +103,17 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
         "session_store.load_for_worker(",
         "authorization proof requires distinct primary and secondary profiles",
         "verify_target_bound_object_authorization(",
-        "execute_bound_http_request(",
+        "prepare_http_operation(",
         "terminalize_hunt_capability(",
         "reservation_store.persist_terminal(",
         "session_store.bind_evidence_receipt(",
         'network_binding": "runtime_target_binding"',
     ):
         assert required in handler
-    assert "allow_write=writes_http" in handler
+    workflow = (ROOT / "api/capabilities/http_workflow.py").read_text()
+    assert "execute_bound_http_request(" in workflow
+    assert "allow_write=inputs['method'] in {'POST', 'PUT', 'PATCH', 'DELETE'}" in workflow
+    assert "await revalidate(conn)" in workflow
     assert "require_http_request_authority(" in handler
     assert "requested_budget=requested_budget" in handler
     assert "capability_input=capability_input" in handler

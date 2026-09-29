@@ -19370,6 +19370,11 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             r"[0-9a-f]{64}", expected_environment_sha256
         ):
             raise ReplayExecutionError("replay job environment digest is invalid")
+        from capabilities.replay import require_hunt_replay_authority, revalidate_hunt_replay_authority, REPLAY_CAPABILITIES
+        capability_name = str(job_data.get("capability_name") or "collections.replay_safe")
+        if capability_name not in REPLAY_CAPABILITIES:
+            raise ReplayExecutionError("unknown replay capability")
+        active_replay = capability_name == "collections.replay_active"
         replay_policy = str(job_data.get("replay_policy") or "").strip()
         if replay_policy not in {"safe_reads", "confirmed_active"}:
             raise ReplayExecutionError("replay job policy is not executable")
@@ -19383,7 +19388,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             request_ids=tuple(str(item) for item in selector_raw.get("request_ids") or ()),
             methods=tuple(str(item) for item in selector_raw.get("methods") or ()),
             path_regex=str(selector_raw.get("path_regex") or "") or None,
-            safe_methods_only=True,
+            safe_methods_only=not active_replay,
             limit=max(1, min(int(selector_raw.get("limit") or 25), 25)),
         )
         credential_profile_id = str(job_data.get("credential_profile_id") or "").strip()
@@ -19425,7 +19430,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                        WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
                     uuid.UUID(action_id), uuid.UUID(hunt_id),
                 )
-                if not action or str(action["capability_name"]) != "collections.replay_safe":
+                if not action or str(action["capability_name"]) != capability_name:
                     raise ReplayExecutionError("replay action identity is not valid")
                 collection = await conn.fetchrow(
                     f"""SELECT c.id, c.encrypted_payload, c.payload_sha256,
@@ -19497,6 +19502,12 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     raise ReplayExecutionError("request collection selection changed")
                 context = _worker_json_object(run["context_pack"])
                 hunt_policy = _worker_json_object(run["policy_json"])
+                require_hunt_replay_authority(capability_name, hunt_policy, replay_policy=replay_policy)
+                if active_replay:
+                    initial_target, initial_url = _worker_hunt_web_target(run, context, hunt_policy)
+                    await revalidate_hunt_replay_authority(conn, run=run, target=initial_target,
+                        target_url=initial_url, capability_name=capability_name, replay_policy=replay_policy,
+                        revalidate=_revalidate_hunt_action_authority)
                 existing_reservation = await store.load(
                     conn, reservation_id, for_update=True,
                 )
@@ -19506,7 +19517,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                         or existing_reservation.record.owner_kind != "hunt"
                         or existing_reservation.record.owner_id != hunt_id
                         or existing_reservation.record.capability_name
-                        != "collections.replay_safe"
+                        != capability_name
                         or existing_reservation.action_digest
                         != queued_action_digest
                     ):
@@ -19592,7 +19603,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             methods=stored_selection.methods,
             path_regex=stored_selection.path_regex,
             tags=stored_selection.tags,
-            safe_methods_only=True,
+            safe_methods_only=stored_selection.safe_methods_only or not active_replay,
             limit=min(stored_selection.max_requests, 2_000),
         )
         allowed_request_ids = {
@@ -19610,7 +19621,11 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             selector,
             allowed_origins=target.allowed_origins,
             default_origin=(target.allowed_origins[0] if target.allowed_origins else None),
-            authorization=ReplayAuthorization(),
+            authorization=ReplayAuthorization(
+                active_testing=active_replay and hunt_policy.get("active_testing") is True,
+                allow_state_changing_http=active_replay and hunt_policy.get("allow_state_changing_http") is True,
+                approval_receipt_id=hunt_policy.get("approval_receipt_id") if active_replay else None,
+            ),
         )
         receipt_context = {
             "collection_id": collection_id,
@@ -19622,7 +19637,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
         if expected_environment_sha256:
             receipt_context["environment_digest"] = expected_environment_sha256
         if credential_profile_id:
-            context_ref = select_hunt_principal_reference(context, principal_slot)
+            context_ref = select_hunt_principal_reference(context, principal_slot, capability=capability_name)
             if context_ref is None or context_ref["profile_id"] != credential_profile_id:
                 raise ReplayExecutionError("managed principal queue reference changed")
             if context_ref["profile_version"] != expected_profile_version:
@@ -19635,14 +19650,14 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     target=target,
                     approval_receipt_id=hunt_policy.get("approval_receipt_id"),
                     scope_receipt_id=hunt_policy.get("scope_receipt_id"),
-                    action_name="hunt.capability:collections.replay_safe",
+                    action_name=f"hunt.capability:{capability_name}",
                 )
                 resolved = await credential_stack.enter_async_context(
                     WorkerCredentialResolver().resolve(
                         conn,
                         profile_id=credential_profile_id,
                         target=target,
-                        capability="collections.replay_safe",
+                        capability=capability_name,
                         authority=authority,
                     )
                 )
@@ -19674,12 +19689,13 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             wall_seconds=int(job_data.get("tool_wall_seconds") or 60),
             request_count=len(plan.requests),
             managed_principal=bool(credential_profile_id),
+            active_replay=active_replay,
         )
         requested_budget = replay_reservation_budget(plan, additional_budget)
         requested = DurableBudgetReservation.request(
             owner_kind="hunt",
             owner_id=hunt_id,
-            capability_name="collections.replay_safe",
+            capability_name=capability_name,
             amounts=requested_budget,
             reservation_id=reservation_id,
         )
@@ -19777,13 +19793,17 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             async with db_pool.acquire() as conn:
                 async with conn.transaction():
                     owner = await conn.fetchrow(
-                        "SELECT id, status FROM hunt_runs WHERE id=$1 FOR UPDATE",
+                        "SELECT * FROM hunt_runs WHERE id=$1 FOR UPDATE",
                         uuid.UUID(hunt_id),
                     )
                     if not owner or str(owner["status"]) not in {
                         "active", "awaiting_planner", "budget_exhausted"
                     }:
                         raise ReplayExecutionError("Hunt stopped before the next replay request")
+                    if active_replay:
+                        await revalidate_hunt_replay_authority(conn, run=owner, target=target,
+                            target_url=target_url, capability_name=capability_name, replay_policy=replay_policy,
+                            revalidate=_revalidate_hunt_action_authority)
                     latest = await store.load(
                         conn, reservation_id, for_update=True,
                     )
@@ -19871,21 +19891,15 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
 
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
         replay_spec = agent_tools.CAPABILITY_REGISTRY.require(
-            "collections.replay_safe"
+            capability_name
         )
         async with db_pool.acquire() as authority_conn:
-            await _revalidate_hunt_action_authority(
-                authority_conn,
-                run=run,
-                target=target,
-                target_url=target_url,
-                policy=ScanPolicy(
-                    active_testing=bool(hunt_policy.get("active_testing")),
-                    scope_receipt_id=target.scope_receipt_id,
-                    approval_receipt_id=hunt_policy.get("approval_receipt_id"),
-                ),
-                capability_name=replay_spec.name,
-            )
+            await revalidate_hunt_replay_authority(authority_conn, run=run, target=target,
+                target_url=target_url, capability_name=capability_name, replay_policy=replay_policy,
+                revalidate=_revalidate_hunt_action_authority)
+        from capabilities.replay import RecordedHuntReplayTransport
+        archived_calls, replay_recorder = http_archive.hunt_run_call_recorder(run, action_id=action_id,
+            capability_name=capability_name, adapter=replay_spec.adapter, target_url=target_url)
         replay_adapter = ReplayExecutionAdapter(
             specification=replay_spec,
             execution_kwargs={
@@ -19898,7 +19912,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                     _worker_json_object(run["budget_json"])
                 ),
                 "consumed": held_ledger,
-                "transport": PinnedAiohttpReplayTransport(),
+                "transport": RecordedHuntReplayTransport(PinnedAiohttpReplayTransport(), replay_recorder, principal_slot=principal_slot),
                 "timeout_seconds": max(
                     0.1,
                     min(
@@ -19925,24 +19939,28 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                 "receipt_input_digest": queued_action_digest,
             },
         )
-        execution = await _dispatch_registered_hunt_adapter(
-            hunt_id=hunt_id,
-            action_id=action_id,
-            specification=replay_spec,
-            target=target,
-            capability_input={
-                "collection_id": collection_id,
-                "request_ids": list(selector.request_ids),
-                "limit": selector.limit,
-            },
-            requested_budget=persisted.record.requested,
-            adapter=replay_adapter,
-            reservation_id=reservation_id,
-            action_digest=queued_action_digest,
-            heartbeat=lambda: asyncio.sleep(0),
-            cancelled=lambda: bool(redis_client.exists(cancel_key)),
-            adapter_managed_cancellation=True,
-        )
+        try:
+            execution = await _dispatch_registered_hunt_adapter(
+                hunt_id=hunt_id,
+                action_id=action_id,
+                specification=replay_spec,
+                target=target,
+                capability_input={
+                    "collection_id": collection_id,
+                    "request_ids": list(selector.request_ids),
+                    "limit": selector.limit,
+                },
+                requested_budget=persisted.record.requested,
+                adapter=replay_adapter,
+                reservation_id=reservation_id,
+                action_digest=queued_action_digest,
+                heartbeat=lambda: asyncio.sleep(0),
+                cancelled=lambda: bool(redis_client.exists(cancel_key)),
+                adapter_managed_cancellation=True,
+            )
+        finally:
+            async with db_pool.acquire() as archive_conn:
+                await http_archive.archive_hunt_capture(archive_conn, archived_calls, hunt_id, run["id"], RESULTS_DIR)
         outcome = replay_adapter.outcome
         if outcome is None:
             raise ReplayExecutionError(
@@ -19963,7 +19981,7 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
             "used_after_reconciliation": settled_ledger,
             "reservation_id": reservation_id,
             "receipt_id": public_receipt.get("receipt_id"), "receipt": public_receipt,
-            "safe_methods_only": True,
+            "safe_methods_only": not active_replay,
             "secret_values_visible": False,
             "durable_budget_settled": True,
             "network_binding": "runtime_target_binding",
@@ -20041,6 +20059,7 @@ def _worker_terminal_network_result(
     ]
     return {
         "verified_finding_ids": list((action_result or {}).get("verified_finding_ids") or []),
+        "captures": list((action_result or {}).get("captures") or []),
         "job_id": job_id,
         "status": status,
         "ok": status == "success",
@@ -21887,6 +21906,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
     worker_session = None
     secondary_worker_session = None
     private_session = None
+    http_exchange = None
     result: dict[str, Any] = {
         "job_id": job_id,
         "status": "failed",
@@ -21930,7 +21950,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 if not run:
                     raise CapabilityInputError("HTTP Hunt does not exist")
                 action = await conn.fetchrow(
-                    """SELECT id, capability_name, status FROM hunt_actions
+                    """SELECT id, capability_name, status, result_summary FROM hunt_actions
                        WHERE id=$1 AND hunt_run_id=$2 FOR UPDATE""",
                     action_id,
                     hunt_id,
@@ -22468,38 +22488,23 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             public_input.pop("session_ref", None)
             public_input.pop("as_principal", None)
 
-            async def execute_http() -> dict[str, Any]:
-                return await execute_bound_http_request(
-                    target_url,
-                    public_input,
-                    target=target,
-                    allow_write=writes_http,
-                    transaction_recorder=_record_call,
-                    trusted_headers=trusted_headers,
-                    # Read from the persisted hunt policy, which the start handler wrote
-                    # only after validating the target-bound approval receipt. ScanPolicy
-                    # does not carry this flag, so the row is the authority.
-                    allow_identity_headers=bool(
-                        hunt_policy.get("allow_identity_headers")
-                    ),
-                    direct_origin_addresses=tuple(
-                        hunt_policy.get("direct_origin_addresses") or ()
-                    ),
-                    principal_slot=principal_slot,
-                    timeout_seconds=min(
-                        60,
-                        max(1, int(spec.default_timeout_ms / 1000)),
-                    ),
-                    allow_bound_origin_redirects=True,
-                )
-
-            operation = execute_http
+            from functools import partial
+            from capabilities.http_workflow import prepare_http_operation
+            operation, http_exchange, workflow_headers = await prepare_http_operation(
+                pool=db_pool, run=run, context=context, policy=hunt_policy, action_id=action_id,
+                target=target, target_url=target_url, inputs=public_input, trusted_headers=trusted_headers,
+                principal_slot=principal_slot, requested_budget=persisted.record.requested,
+                timeout_seconds=min(60, max(1, int(spec.default_timeout_ms / 1000))), recorder=_record_call,
+                revalidate=partial(_revalidate_hunt_action_authority, run=run, target=target,
+                    target_url=target_url, policy=policy, capability_name=capability_name,
+                    capability_input=capability_input),
+            )
             adapter_type = HttpRequestExecutionAdapter
             redacted_execution = _redact_receipt_value({
                 **redact_http_request_body(public_input),
                 "as_principal": principal_slot,
                 "session_ref": str(supplied_session_ref or "") or None,
-                "credential_headers_injected": bool(trusted_headers),
+                "credential_headers_injected": workflow_headers,
                 "secret_values_visible": False,
             })
 
@@ -22582,6 +22587,9 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     )
                 }
                 await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status)
+                if http_exchange is not None:
+                    await http_exchange.persist(conn, run=locked, status=status)
+                    receipt_result["captures"] = http_exchange.public_result()
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -22733,6 +22741,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
                     "receipt_id": str(receipt_id),
+                    "captures": http_exchange.public_result() if http_exchange else [],
                     "session": (
                         settled_session.public_dict()
                         if settled_session is not None else None
@@ -22781,6 +22790,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             "budget_reservation_state": terminal.status,
             "receipt_id": str(receipt_id),
             "receipt": capability_receipt.public_dict(),
+            "captures": http_exchange.public_result() if http_exchange else [],
             "session": (
                 settled_session.public_dict()
                 if settled_session is not None else None

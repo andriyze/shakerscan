@@ -512,6 +512,7 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
     class Connection:
         def __init__(self):
             self.status = "active"
+            self.cleared_http_captures = False
 
         async def fetchrow(self, query, *args):
             if query.startswith("SELECT * FROM hunt_runs"):
@@ -526,6 +527,11 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
                 return None
             raise AssertionError(query)
 
+        async def execute(self, query, *args):
+            assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
+            assert args == (uuid.UUID(hunt_id),)
+            self.cleared_http_captures = True
+
     connection = Connection()
     service = HuntRunService(lambda: _Pool(connection))
     finished = asyncio.run(service.finish(
@@ -535,12 +541,16 @@ def test_hunt_run_terminal_transitions_are_idempotent_and_state_guarded():
 
     assert finished["status"] == "completed"
     assert cancelled_after_finish["status"] == "completed"
+    assert connection.cleared_http_captures is True
 
 
 def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     hunt_id = str(uuid.uuid4())
 
     class Connection:
+        def __init__(self):
+            self.cleared_http_captures = False
+
         async def fetchrow(self, query, *args):
             if query.startswith("SELECT * FROM hunt_runs"):
                 return _row(
@@ -561,7 +571,13 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
                 final_debrief=args[1],
             )
 
-    result = asyncio.run(HuntRunService(lambda: _Pool(Connection())).finish(
+        async def execute(self, query, *args):
+            assert query == "UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1"
+            assert args == (uuid.UUID(hunt_id),)
+            self.cleared_http_captures = True
+
+    connection = Connection()
+    result = asyncio.run(HuntRunService(lambda: _Pool(connection)).finish(
         hunt_id,
         summary="Budget ended after the useful checks.",
         next_actions=["Increase only the HTTP request ceiling."],
@@ -570,6 +586,7 @@ def test_budget_exhausted_hunt_accepts_debrief_without_erasing_stop_reason():
     assert result["status"] == "budget_exhausted"
     assert result["stop_reason"] == "budget_exhausted:http_requests"
     assert result["final_debrief"]["summary"].startswith("Budget ended")
+    assert connection.cleared_http_captures is True
 
 
 @pytest.mark.parametrize("source", ["action", "reservation"])

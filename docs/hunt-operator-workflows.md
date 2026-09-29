@@ -56,8 +56,10 @@ is not itself a reason to abandon explicitly authorized testing.
 ## Deferred follow-up work (not merge requirements for this frozen batch)
 
 - Executable end-to-end child-result continuation, beyond the corrected planner instructions.
-- General state-changing collection replay and multi-step browser workflows.
-- Mid-run additions or changes to principals and request collections; budget amendments do not do this.
+- Multi-step browser workflows and native protocol transports beyond the advertised capabilities.
+  Authorized HTTP writes and active collection replay are described in [HTTP workflows](hunt-http-writes.md).
+- General mid-run changes to principal slots and request collections; budget amendments do not do this.
+  HTTP workflows can explicitly bind a new same-target profile ID/version for a pairing PIN.
 - Richer investigation-frontier/freshness handling and optional legacy history reconstruction.
 - Credential transport-consequence visibility and broader synthetic transmission acceptance.
 - Independent paired efficacy evaluations, patched controls and operator-intervention measurements.

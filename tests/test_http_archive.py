@@ -794,3 +794,29 @@ def test_redacted_hunt_http_write_omits_body_and_unsalted_digest():
     raw = project(row, redaction="raw")
     assert pin in raw["request"]["body"]
     assert raw["request"]["sha256"] == raw_digest
+
+
+@pytest.mark.parametrize('capability,method,private_flag', [
+    ('http.request', 'GET', True), ('http.request', 'PUT', True),
+    ('collections.replay_active', 'POST', False), ('collections.replay_active', 'GET', False),
+])
+def test_private_workflow_archive_hides_arbitrary_headers_bodies_and_pin_hashes(capability, method, private_flag):
+    pin = '7319'
+    digest = hashlib.sha256(pin.encode()).hexdigest()
+    row = {'id': 'private-workflow', 'plane': 'hunt', 'capability_name': capability, 'method': method,
+        'request_headers': {'AUTH': pin}, 'response_headers': {'X-Obscure': pin},
+        'request_body': pin, 'response_body': pin, 'request_body_sha256': digest, 'response_body_sha256': digest,
+        'metadata_json': {'workflow_values_private': private_flag}}
+    public = project(row, redaction='redacted')
+    assert pin not in json.dumps(public) and digest not in json.dumps(public)
+    assert public['request']['headers']['AUTH'] == '[REDACTED]'
+    assert public['response']['body'] is None
+    raw = project(row, redaction='raw')
+    assert raw['response']['body'] == pin and raw['response']['sha256'] == digest
+
+
+def test_hunt_archive_recorder_preserves_workflow_privacy_marker():
+    calls, record = hunt_call_recorder(hunt_run_id='hunt', hunt_action_id='action',
+        capability_name='http.request', adapter='http', target_url='http://tv.test/')
+    record({'method': 'GET', 'workflow_values_private': True})
+    assert calls[0].metadata['workflow_values_private'] is True

@@ -1,16 +1,11 @@
 """Policy/shape regressions. No model-specific prompt or TV model exception."""
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 
 import pytest
 
-_SOURCE = Path(__file__).resolve().parents[1] / "api/runtime/hunt_http_contract.py"
-_SPEC = importlib.util.spec_from_file_location("hunt_http_contract_under_test", _SOURCE)
-contract = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(contract)
+from runtime import hunt_http_contract as contract
 
 PERMITTED = {"active_testing": True, "allow_state_changing_http": True}
 RESERVED = {"http_requests": 1, "state_changing_requests": 1, "active_actions": 1}

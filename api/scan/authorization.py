@@ -112,7 +112,8 @@ def _requires_approval(action: Any) -> bool | None:
         # Writes must not inherit http.request's passive baseline shortcut.
         return specification.requires_active_approval or (
             capability_name == "http.request"
-            and method in {"POST", "PUT", "PATCH", "DELETE"}
+            and (method in {"POST", "PUT", "PATCH", "DELETE"}
+                 or bool(_value(values, "capture") or _value(values, "request_bindings")))
         )
     except KeyError:
         return None

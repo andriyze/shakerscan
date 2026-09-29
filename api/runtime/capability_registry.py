@@ -11,6 +11,7 @@ import json
 import re
 from types import MappingProxyType
 from .hunt_http_contract import validate_http_request_input
+from .hunt_http_exchange_contract import HTTP_EXCHANGE_PROPERTIES
 from typing import Any, Iterable, Literal, Mapping
 
 
@@ -1153,7 +1154,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
                 "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]},
-                "json_body": {"type": "object", "description": "Non-secret JSON body for an authorized write. Mutually exclusive with form_body."},
+                **HTTP_EXCHANGE_PROPERTIES,
+                "json_body": {"type": "object", "description": "JSON body template for an authorized write. Use request_bindings for PINs/tokens; mutually exclusive with form_body."},
                 "form_body": {"type": "object", "description": "Non-secret form fields for an authorized write. Mutually exclusive with json_body."},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
                            "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
@@ -1698,12 +1700,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "collection_id": {"type": "string"},
                 "selection_id": {"type": "string"},
+                "request_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
+                "methods": {"type": "array", "items": {"type": "string"}},
+                "path_regex": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
                 "as_principal": {
-                    "type": "string", "enum": ["primary", "secondary", "service"],
+                    "type": "string", "enum": ["anonymous", "primary", "secondary", "service"],
                 },
-            }, required=("collection_id", "selection_id")),
+            }, required=("collection_id",)),
             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
-            planner_visible=False,
+            hunt_executor="worker_replay",
         ),
         CapabilitySpec(
             "collections.replay_authentication",

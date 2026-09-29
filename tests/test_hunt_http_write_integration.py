@@ -196,3 +196,28 @@ def test_public_hunt_write_digest_is_not_exposed_by_projection():
     })
     assert action["input_digest"] is None
     assert raw_digest not in json.dumps(action)
+
+
+@pytest.mark.parametrize('status', ['completed', 'failed', 'cancelled'])
+def test_public_action_carries_only_same_action_capture_handles(status):
+    from api.hunt.run_service import public_hunt_action
+    action_id = str(uuid.uuid4())
+    handle = {'source_action_id': action_id, 'capture_name': 'token'}
+    row = {'id': action_id, 'capability_name': 'http.request', 'status': status,
+        'result_summary': {'captures': [{**handle, 'value': 'secret-not-public'},
+            {'source_action_id': str(uuid.uuid4()), 'capture_name': 'wrong-action'}]},
+        'private_http_result': 'encrypted-not-public'}
+    public = public_hunt_action(row)
+    assert public['result']['captures'] == ([handle] if status == 'completed' else [])
+    assert 'secret-not-public' not in json.dumps(public)
+    assert 'encrypted-not-public' not in json.dumps(public)
+
+
+def test_public_trace_does_not_reintroduce_write_input_digest():
+    from api.hunt.run_service import public_hunt_action_trace
+    digest = hashlib.sha256(b'{"pin":"7319"}').hexdigest()
+    trace = public_hunt_action_trace({'id': str(uuid.uuid4()), 'capability_name': 'http.request',
+        'status': 'completed', 'input_summary': {'input': {'method': 'PUT'}, 'input_digest': digest},
+        'result_summary': {}})
+    assert trace['input_digest'] is None and trace['decision']['input_digest'] is None
+    assert digest not in json.dumps(trace)

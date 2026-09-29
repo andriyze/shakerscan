@@ -352,6 +352,7 @@ async def execute_bound_http_request(
     timeout_seconds: int = 15,
     allow_bound_origin_redirects: bool = False,
     private_response_sink: Callable[[WorkerPrivateHTTPResponse], None] | None = None,
+    private_response_headers: tuple[str, ...] = (),
     response_body_limit: int = MAX_BODY_BYTES,
 ) -> dict[str, Any]:
     """Execute one bounded request while revalidating every destination hop."""
@@ -679,6 +680,7 @@ async def execute_bound_http_request(
                 if str(name).lower() in {
                     "authorization", "content-type", "content-length",
                     "content-range", "accept-ranges", "location",
+                    *private_response_headers,
                 }
             },
             _cookies={
