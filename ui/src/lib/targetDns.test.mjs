@@ -4,7 +4,7 @@ import test from 'node:test'
 import { discoveryOutcomeMessage, scanStartFailureReasons, targetForRegisteredDnsFallback, targetWithResolvedHost } from './targetDns.ts'
 import { getApiErrorMessage } from './apiConfig.ts'
 
-const DNS_REASON = 'www.tidyhelpers.com does not resolve in DNS (no A/AAAA record), so it cannot be scanned. tidyhelpers.com does resolve; use tidyhelpers.com instead.'
+const DNS_REASON = 'www.example.net does not resolve in DNS (no A/AAAA record), so it cannot be scanned. example.net does resolve; use example.net instead.'
 
 test('the API detail of a refused scan reaches the operator', async () => {
   const response = new Response(JSON.stringify({ detail: DNS_REASON }), { status: 422 })
@@ -60,7 +60,7 @@ test('a historical target retains its URL so Scan admission reuses its ID and au
 })
 
 test('a finished discovery says how many names were skipped for having no address record', () => {
-  const skipped = discoveryOutcomeMessage('tidyhelpers.com', {
+  const skipped = discoveryOutcomeMessage('example.net', {
     status: 'completed', subdomains_found: 3, new_subdomains: 1,
     resolution: { added: 1, unresolved_count: 2 },
   })

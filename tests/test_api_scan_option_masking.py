@@ -3982,7 +3982,7 @@ def test_scheme_inferred_scan_reaches_external_tools_through_its_frozen_origin(
 ):
     """Submission -> binding -> persisted job -> worker materialization -> external-tool target.
 
-    Observed on 2.5.4: a target added as ``tidyhelpers.com`` failed every Scan 0.1 s after start
+    Observed on 2.5.4: a target added as ``example.net`` failed every Scan 0.1 s after start
     with "external Scan target must be an absolute HTTP(S) URL". Materialization hands the worker
     the bare authority when the scheme was inferred, and the external-tool binding accepted only
     absolute URLs. Each step was tested alone; nothing drove one target through all of them.

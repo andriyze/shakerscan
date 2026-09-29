@@ -13,11 +13,11 @@ def test_default_api_url_uses_persisted_remote_bind(tmp_path, monkeypatch):
     fake_script.parent.mkdir()
     fake_script.write_text("", encoding="utf-8")
     (tmp_path / ".env").write_text(
-        "SHAKERSCAN_BIND_HOST=100.121.87.22\nSHAKERSCAN_API_PORT=9080\n",
+        "SHAKERSCAN_BIND_HOST=100.100.100.100\nSHAKERSCAN_API_PORT=9080\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(fleet_acceptance, "__file__", str(fake_script))
-    assert fleet_acceptance._local_api_url() == "http://100.121.87.22:9080"
+    assert fleet_acceptance._local_api_url() == "http://100.100.100.100:9080"
 
 def test_safe_parallel_endpoints_remain_same_origin_and_bounded():
     endpoints = fleet_acceptance._safe_parallel_endpoints("https://lab.example.test/app", 8)
@@ -28,7 +28,7 @@ def test_safe_parallel_endpoints_remain_same_origin_and_bounded():
 
 def test_acceptance_target_must_not_be_the_control_plane():
     for target in (
-        "http://100.121.87.22:3000",
+        "http://100.100.100.100:3000",
         "https://fleet.example.test/app",
         "http://127.0.0.1:3000",
     ):
@@ -38,7 +38,7 @@ def test_acceptance_target_must_not_be_the_control_plane():
                 (
                     "http://localhost:8080"
                     if "127.0.0.1" in target
-                    else "http://100.121.87.22:8080"
+                    else "http://100.100.100.100:8080"
                 ),
                 "fleet.example.test",
             )
@@ -49,7 +49,7 @@ def test_acceptance_target_must_not_be_the_control_plane():
 
     fleet_acceptance._validate_external_acceptance_target(
         "https://lab.example.test",
-        "http://100.121.87.22:8080",
+        "http://100.100.100.100:8080",
         "fleet.example.test",
     )
 

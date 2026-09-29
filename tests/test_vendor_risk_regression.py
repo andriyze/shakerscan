@@ -15,7 +15,7 @@ def test_vendor_risk_handles_self_hosted_analytics_without_name_error():
     html = """
     <html>
       <head>
-        <script src="https://tidyhelpers.com/umami/script.js"></script>
+        <script src="https://example.net/umami/script.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/example@1.0.0/index.js"></script>
       </head>
     </html>
@@ -23,7 +23,7 @@ def test_vendor_risk_handles_self_hosted_analytics_without_name_error():
 
     result = asyncio.run(
         vendor_risk_assessment(
-            "https://tidyhelpers.com",
+            "https://example.net",
             page_content=html,
             check_security=False,
         )

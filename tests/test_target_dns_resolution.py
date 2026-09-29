@@ -1,7 +1,7 @@
 """Names without an address record are explained, skipped by discovery, and traded for their twin.
 
-Observed on a 2.5.4 deployment: ``tidyhelpers.com`` resolves, subdomain discovery then added
-``www.tidyhelpers.com`` -- a name certificate transparency knows but DNS has no A/AAAA record for.
+Observed on a 2.5.4 deployment: ``example.net`` resolves, subdomain discovery then added
+``www.example.net`` -- a name certificate transparency knows but DNS has no A/AAAA record for.
 It showed as an ordinary target with a Scan button; Scan admission refused it with
 "Scan target DNS resolution failed" and the targets page said only "Failed to start scan".
 
@@ -118,11 +118,11 @@ def test_dns_alias_lookup_uses_the_targets_table_host_and_port_identity():
 
 
 def test_the_message_names_the_host_and_the_twin_that_works():
-    assert target_resolution.unresolvable_message("www.tidyhelpers.com") == (
-        "www.tidyhelpers.com does not resolve in DNS (no A/AAAA record), so it cannot be scanned."
+    assert target_resolution.unresolvable_message("www.example.net") == (
+        "www.example.net does not resolve in DNS (no A/AAAA record), so it cannot be scanned."
     )
-    message = target_resolution.unresolvable_message("www.tidyhelpers.com", twin="tidyhelpers.com")
-    assert message.endswith("tidyhelpers.com does resolve; use tidyhelpers.com instead.")
+    message = target_resolution.unresolvable_message("www.example.net", twin="example.net")
+    assert message.endswith("example.net does resolve; use example.net instead.")
 
 
 # ------------------------------------------------------------------------- www/apex on creation
@@ -189,34 +189,34 @@ class _DiscoveryConn:
 
 def test_discovery_skips_names_without_an_address_record():
     lookup = _lookup({
-        "tidyhelpers.com": ["203.0.113.10"],
-        "api.tidyhelpers.com": ["203.0.113.12"],
-        "old.tidyhelpers.com": ["203.0.113.13"],
-        "flaky.tidyhelpers.com": RESOLVER_DOWN,
-        # www.tidyhelpers.com and mail.tidyhelpers.com: no record.
+        "example.net": ["203.0.113.10"],
+        "api.example.net": ["203.0.113.12"],
+        "old.example.net": ["203.0.113.13"],
+        "flaky.example.net": RESOLVER_DOWN,
+        # www.example.net and mail.example.net: no record.
     })
     names = [
-        "www.tidyhelpers.com", "api.tidyhelpers.com", "mail.tidyhelpers.com",
-        "flaky.tidyhelpers.com", "old.tidyhelpers.com", "API.tidyhelpers.com",
+        "www.example.net", "api.example.net", "mail.example.net",
+        "flaky.example.net", "old.example.net", "API.example.net",
     ]
     plan = asyncio.run(target_resolution.plan_discovered_targets(names, lookup=lookup))
-    conn = _DiscoveryConn(existing={"https://old.tidyhelpers.com"})
-    outcome = asyncio.run(target_resolution.store_discovered_targets(conn, plan, "tidyhelpers.com"))
+    conn = _DiscoveryConn(existing={"https://old.example.net"})
+    outcome = asyncio.run(target_resolution.store_discovered_targets(conn, plan, "example.net"))
 
     inserted = [args[0] for args in conn.inserted]
-    assert "https://www.tidyhelpers.com" not in inserted
-    assert "https://mail.tidyhelpers.com" not in inserted
+    assert "https://www.example.net" not in inserted
+    assert "https://mail.example.net" not in inserted
     # A resolver fault keeps the name, as before: a broken resolver must not empty the inventory.
     assert inserted == [
-        "https://api.tidyhelpers.com", "https://flaky.tidyhelpers.com", "https://old.tidyhelpers.com",
+        "https://api.example.net", "https://flaky.example.net", "https://old.example.net",
     ]
-    assert all(args[1:] == ("tidyhelpers.com", "subfinder") for args in conn.inserted)
+    assert all(args[1:] == ("example.net", "subfinder") for args in conn.inserted)
     assert outcome == {
         "checked": 5,
         "scannable": 3,
         "added": 2,
         "unresolved_count": 2,
-        "unresolved": ["www.tidyhelpers.com", "mail.tidyhelpers.com"],
+        "unresolved": ["www.example.net", "mail.example.net"],
         "unknown_count": 1,
         "insert_failed": 0,
     }
@@ -289,34 +289,34 @@ def _admission_detail(url, *, subject="Scan target", environment="production"):
 
 
 def test_admission_names_the_host_and_the_twin_that_resolves(monkeypatch):
-    _patch_system_resolver(monkeypatch, {"tidyhelpers.com": ["203.0.113.10"]})
-    assert _admission_detail("https://www.tidyhelpers.com") == (
-        "www.tidyhelpers.com does not resolve in DNS (no A/AAAA record), so it cannot be scanned. "
-        "tidyhelpers.com does resolve; use tidyhelpers.com instead."
+    _patch_system_resolver(monkeypatch, {"example.net": ["203.0.113.10"]})
+    assert _admission_detail("https://www.example.net") == (
+        "www.example.net does not resolve in DNS (no A/AAAA record), so it cannot be scanned. "
+        "example.net does resolve; use example.net instead."
     )
 
 
 def test_admission_without_a_twin_still_says_why(monkeypatch):
     _patch_system_resolver(monkeypatch, {})
-    assert _admission_detail("https://www.tidyhelpers.com") == (
-        "www.tidyhelpers.com does not resolve in DNS (no A/AAAA record), so it cannot be scanned."
+    assert _admission_detail("https://www.example.net") == (
+        "www.example.net does not resolve in DNS (no A/AAAA record), so it cannot be scanned."
     )
-    assert _admission_detail("https://www.tidyhelpers.com", subject="Hunt target").endswith(
+    assert _admission_detail("https://www.example.net", subject="Hunt target").endswith(
         "so it cannot be tested."
     )
 
 
 def test_admission_never_suggests_a_twin_the_destination_policy_refuses(monkeypatch):
     """A twin that resolves only to the metadata address is not offered as the way forward."""
-    _patch_system_resolver(monkeypatch, {"tidyhelpers.com": ["169.254.169.254"]})
-    detail = _admission_detail("https://www.tidyhelpers.com")
-    assert "use tidyhelpers.com" not in detail
-    assert detail.startswith("www.tidyhelpers.com does not resolve in DNS")
+    _patch_system_resolver(monkeypatch, {"example.net": ["169.254.169.254"]})
+    detail = _admission_detail("https://www.example.net")
+    assert "use example.net" not in detail
+    assert detail.startswith("www.example.net does not resolve in DNS")
 
 
 def test_a_resolver_fault_keeps_the_old_refusal(monkeypatch):
-    _patch_system_resolver(monkeypatch, {"www.tidyhelpers.com": RESOLVER_DOWN})
-    assert _admission_detail("https://www.tidyhelpers.com") == "Scan target DNS resolution failed"
+    _patch_system_resolver(monkeypatch, {"www.example.net": RESOLVER_DOWN})
+    assert _admission_detail("https://www.example.net") == "Scan target DNS resolution failed"
 
 
 def test_the_destination_policy_is_unchanged(monkeypatch):
@@ -363,9 +363,9 @@ def test_the_discovery_job_inserts_only_resolving_names_and_records_the_rest(mon
             return None
 
     async def run_discovery(root_domain):
-        assert root_domain == "tidyhelpers.com"
+        assert root_domain == "example.net"
         return {
-            "subdomains": ["www.tidyhelpers.com", "shop.tidyhelpers.com"],
+            "subdomains": ["www.example.net", "shop.example.net"],
             "by_source": {"subfinder": 2},
             "total": 2,
         }
@@ -374,24 +374,24 @@ def test_the_discovery_job_inserts_only_resolving_names_and_records_the_rest(mon
     monkeypatch.setattr(worker, "get_redis", lambda: Redis())
     monkeypatch.setattr(worker, "run_discovery", run_discovery)
     monkeypatch.setattr(
-        target_resolution, "system_lookup", _lookup({"shop.tidyhelpers.com": ["203.0.113.20"]}),
+        target_resolution, "system_lookup", _lookup({"shop.example.net": ["203.0.113.20"]}),
     )
 
     discovery_id = str(uuid.uuid4())
     asyncio.run(worker.process_discovery_job({
-        "job_id": "job-discovery-1", "discovery_id": discovery_id, "root_domain": "tidyhelpers.com",
+        "job_id": "job-discovery-1", "discovery_id": discovery_id, "root_domain": "example.net",
     }))
 
     inserts = [args for query, args in executed if query.startswith("INSERT INTO targets")]
-    assert inserts == [("https://shop.tidyhelpers.com", "tidyhelpers.com", "subfinder")]
+    assert inserts == [("https://shop.example.net", "example.net", "subfinder")]
     completed = [args for query, args in executed if "status = 'completed'" in query]
     assert len(completed) == 1
     found, added, result_json, sources_json = completed[0][:4]
     assert (found, added) == (2, 1)
-    assert json.loads(result_json) == ["www.tidyhelpers.com", "shop.tidyhelpers.com"]
+    assert json.loads(result_json) == ["www.example.net", "shop.example.net"]
     sources = json.loads(sources_json)
     assert sources["subfinder"] == 2
-    assert sources["dns_resolution"]["unresolved"] == ["www.tidyhelpers.com"]
+    assert sources["dns_resolution"]["unresolved"] == ["www.example.net"]
     assert sources["dns_resolution"]["added"] == 1
 
 
