@@ -21,7 +21,7 @@ description = "Exact inert fixture values and the RFC 6455 sample WebSocket key"
 regexTarget = "secret"
 regexes = [
   "^0123456789abcdef0123456789abcdef$",
-  "^AKIAABCDEFGHIJKLMNOP$",
+  "^AKIA[A]BCDEFGHIJKLMNOP$",
   "^AbCdEf0123456789AbCdEf0123456789$",
   "^PLANTEDcs5678$",
   "^aabbccddeeff00112233445566778899$",
