@@ -361,7 +361,9 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
             item["request_body_sha256"] = None
         metadata = _decoded(item.get("metadata_json"))
         private_workflow = isinstance(metadata, Mapping) and metadata.get("workflow_values_private") is True
-        if item.get("plane") == "hunt" and (private_workflow or item.get("capability_name") == "collections.replay_active"):
+        if item.get("plane") == "hunt" and (private_workflow or item.get("capability_name") in {
+            "collections.replay_safe", "collections.replay_active",
+        }):
             # Response captures and arbitrary header bindings can contain PINs or
             # tokens under any name, including on GET. Keep values and their
             # brute-forceable digests raw-export-only in every public archive view.

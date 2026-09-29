@@ -798,6 +798,7 @@ def test_redacted_hunt_http_write_omits_body_and_unsalted_digest():
 
 @pytest.mark.parametrize('capability,method,private_flag', [
     ('http.request', 'GET', True), ('http.request', 'PUT', True),
+    ('collections.replay_safe', 'GET', False),
     ('collections.replay_active', 'POST', False), ('collections.replay_active', 'GET', False),
 ])
 def test_private_workflow_archive_hides_arbitrary_headers_bodies_and_pin_hashes(capability, method, private_flag):

@@ -663,7 +663,9 @@ async def execute_replay_plan(
                 raise ReplayExecutionError("transport returned an invalid result type")
             _validate_transport_result(result, plan=plan, target=target)
             observations.append(_observation(request, result,
-                private_body=owner_kind == "hunt" and normalized_receipt_capability == "collections.replay_active"))
+                private_body=owner_kind == "hunt" and normalized_receipt_capability in {
+                    "collections.replay_safe", "collections.replay_active",
+                }))
             if result.error_code:
                 errors.append(f"{request.request_id}:{result.error_code}")
             any_timeout = any_timeout or result.timed_out
