@@ -1,0 +1,22 @@
+# Secret-scanning configuration for gitleaks (https://github.com/gitleaks/gitleaks).
+#
+# ShakerScan detects exposed secrets in the applications it assesses, so its test suite and
+# fixtures deliberately contain planted, non-functional credentials in realistic formats. Those
+# paths are allowlisted here; everything else is scanned with the default rules.
+title = "ShakerScan gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Planted test fixtures, generated contract hashes, and protocol examples"
+paths = [
+  '''^tests/''',
+  '''^client/tests/''',
+  '''^ui/src/.*\.test\.mjs$''',
+  '''^ui/tests/''',
+  '''^docs/generated/''',
+  '''^ui/src/lib/publicApi\.generated\.ts$''',
+  '''^scanner/scanner_tools/websocket_security\.py$''',
+  '''(^|/)__pycache__/''',
+]

@@ -1,6 +1,5 @@
-# Release and supply-chain controls. CODEOWNERS routes review requests; the main ruleset
-# (.github/rulesets/main.json) does not require an approving review, so the required
-# checks (commit-policy, python-suite, smoke) are the enforced gate.
+# Release and supply-chain controls. Changes to main are gated by the required checks in
+# .github/rulesets/main.json (commit-policy, python-suite, smoke).
 /.github/workflows/ @andriyze
 /.github/rulesets/ @andriyze
 /.github/dependabot.yml @andriyze
