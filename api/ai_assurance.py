@@ -11,6 +11,11 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from redirect_policy import same_origin_opener
+except ModuleNotFoundError:  # package import in host-side tests
+    from .redirect_policy import same_origin_opener
+
 
 AI_PATH_HINTS: tuple[tuple[str, str, float], ...] = (
     ("mcp_trace", r"(^|[/_.-])mcp([/_.-]|$)", 0.90),
@@ -668,7 +673,8 @@ def _fetch_url_metadata(
     request = urllib.request.Request(url, method=method, headers=request_headers, data=data)
     started = _utc_now()
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured target
+        # Redirects leaving the operator-configured origin are reported, never followed.
+        with same_origin_opener().open(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured target
             body = response.read(100_000).decode("utf-8", errors="replace")
             headers = dict(response.headers.items())
             status = int(response.status)
@@ -690,8 +696,9 @@ def _fetch_url_metadata(
         parsed_json = json.loads(body) if body.strip() else None
     except json.JSONDecodeError:
         parsed_json = None
+    redirect_response = 300 <= status < 400
     return {
-        "ok": 200 <= status < 400,
+        "ok": 200 <= status < 300,
         "url": url,
         "method": method,
         "status_code": status,
@@ -701,7 +708,7 @@ def _fetch_url_metadata(
             for key, value in headers.items()
             if key.lower() in {"www-authenticate", "content-type", "server"}
         },
-        "json": parsed_json if isinstance(parsed_json, dict) else None,
+        "json": parsed_json if isinstance(parsed_json, dict) and not redirect_response else None,
         "body_excerpt": body[:1000],
     }
 

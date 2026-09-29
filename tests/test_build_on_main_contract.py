@@ -10,6 +10,7 @@ build steps the release path uses -- so a later change cannot quietly turn it in
 from __future__ import annotations
 
 import pathlib
+import re
 
 import yaml
 
@@ -67,7 +68,16 @@ def test_build_on_main_calls_the_shared_build_and_grants_it_attestation_rights()
     document = _doc(BUILD_ON_MAIN)
     build = document["jobs"]["build"]
     assert build["uses"] == "./.github/workflows/_build-images.yml"
-    assert build["secrets"] == "inherit"
+    # Only the Docker Hub push credential crosses into the shared build, never every repository
+    # secret (`secrets: inherit` would also hand it deploy keys it has no use for).
+    assert build["secrets"] == {
+        "DOCKERHUB_USERNAME": "${{ secrets.DOCKERHUB_USERNAME }}",
+        "DOCKERHUB_TOKEN": "${{ secrets.DOCKERHUB_TOKEN }}",
+    }
+    declared = _on(_doc(REUSABLE))["workflow_call"]["secrets"]
+    assert set(declared) == set(build["secrets"])
+    referenced = set(re.findall(r"secrets\.([A-Z0-9_]+)", REUSABLE.read_text(encoding="utf-8")))
+    assert referenced <= set(declared)
     # Provenance attestation needs id-token and attestations write, granted by the caller.
     for permission in ("id-token", "attestations"):
         assert build["permissions"][permission] == "write"

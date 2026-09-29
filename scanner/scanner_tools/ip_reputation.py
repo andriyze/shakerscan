@@ -26,10 +26,10 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-# Disable SSL verification for API calls (corporate proxies)
+# These calls carry the operator's AbuseIPDB / VirusTotal API keys to fixed third-party hosts,
+# so the certificate is always verified. Behind a TLS-intercepting proxy, point SSL_CERT_FILE
+# (or SSL_CERT_DIR) at the proxy CA instead of disabling verification.
 ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE
 
 # Set global socket timeout
 socket.setdefaulttimeout(10)

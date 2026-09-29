@@ -895,14 +895,14 @@ async def update_target(target_id: str, request: TargetUpdate):
             params.append(json.dumps(request.scan_options))
             param_idx += 1
 
-        if request.metadata_json is not None:
-            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
-            params.append(json.dumps(request.metadata_json))
-            param_idx += 1
-
+        # metadata_json and cohort both merge into the same column, so they share one assignment:
+        # PostgreSQL rejects an UPDATE that assigns a column twice.
+        metadata_patch = dict(request.metadata_json or {})
         if request.cohort is not None:
+            metadata_patch["cohort"] = request.cohort
+        if request.metadata_json is not None or request.cohort is not None:
             updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
-            params.append(json.dumps({"cohort": request.cohort}))
+            params.append(json.dumps(metadata_patch))
             param_idx += 1
 
         if not updates:
