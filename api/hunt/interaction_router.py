@@ -35,6 +35,10 @@ try:
 except ModuleNotFoundError:
     from ..capabilities.browser_login_worker import prepare_hunt_browser_action
 from .run_service import agent_tools
+try:
+    from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
+except ModuleNotFoundError:
+    from ..runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from .worker_accounting import worker_replay_settlement_matches
 from .boundary_context import BoundaryContextError, inspect_candidate_boundary_context
 from .boundary_handoff import compile_candidate_boundary_handoff
@@ -1568,10 +1572,23 @@ async def _execute_hunt_capability_lifecycle(
             allowed = {item["name"] for item in _hunt_public(run, include_context=False)["capabilities"]}
             if name not in allowed:
                 raise HTTPException(status_code=403, detail="Capability is not allowed by this Hunt policy")
+            writes_http = False
+            workflow_http = name == "http.request" and bool(request.input.get("capture") or request.input.get("request_bindings"))
+            if name == "http.request":
+                try:
+                    writes_http = require_http_request_authority(request.input, policy)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
+            if name == "collections.replay_active":
+                from capabilities.replay import require_hunt_replay_authority
+                try:
+                    require_hunt_replay_authority(name, policy)
+                except ValueError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             principal_slot = (
                 agent_tools.normalize_principal_slot(request.input.get("as_principal"))
                 if name in {
-                    "http.request", "collections.replay_safe", "auth.session.establish",
+                    "http.request", "collections.replay_safe", "collections.replay_active", "auth.session.establish",
                 }
                 else "anonymous"
             )
@@ -1592,9 +1609,9 @@ async def _execute_hunt_capability_lifecycle(
                         )
                 except CredentialReferenceError as exc:
                     raise HTTPException(status_code=403, detail=str(exc)) from exc
-            if name == "collections.replay_safe":
+            if name in {"collections.replay_safe", "collections.replay_active"}:
                 principal = _hunt_managed_principal_reference(
-                    _hunt_json(run["context_pack"], {}), principal_slot,
+                    _hunt_json(run["context_pack"], {}), principal_slot, capability=name,
                 )
                 principal_slot = (
                     str(principal["principal_slot"]) if principal is not None else "anonymous"
@@ -1656,7 +1673,7 @@ async def _execute_hunt_capability_lifecycle(
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
                 uses_service_origin = selected.allowed_origins != original.allowed_origins
-            elif name == "collections.replay_safe":
+            elif name in {"collections.replay_safe", "collections.replay_active"}:
                 # Replay takes no planner origin; it follows the operator's collection
                 # binding, which may name another port on the same host. Anonymous replay
                 # to such a port is the same active act as http.request with an origin.
@@ -1666,6 +1683,7 @@ async def _execute_hunt_capability_lifecycle(
                 )
             requires_call_approval = (
                 spec.requires_active_approval
+                or writes_http or workflow_http
                 or principal_slot != "anonymous"
                 or uses_session
                 or forges_identity
@@ -1681,7 +1699,7 @@ async def _execute_hunt_capability_lifecycle(
                     target_id=run["target_id"] or run["device_target_id"], action_name=f"hunt.capability:{name}",
                     command=name, risk_tier=(
                         "credential" if principal_slot != "anonymous" or uses_session
-                        else "active" if forges_identity or uses_direct_origin or uses_service_origin
+                        else "active" if forges_identity or uses_direct_origin or uses_service_origin or writes_http or workflow_http
                         else str(spec.risk_tier)
                     ), always_require_receipt=True,
                     require_target_binding=True,
@@ -1837,9 +1855,19 @@ async def _execute_hunt_capability_lifecycle(
                             None,
                         )
                         charges[transport_dimension] = 1
+            if writes_http:
+                charges["state_changing_requests"] = 1
             charges["agent_actions"] = 1
             if requires_call_approval:
                 charges["active_actions"] = 1
+            if spec.hunt_executor == "worker_replay":
+                from hunt.replay_selection import select_hunt_replay
+                selected_replay = await select_hunt_replay(conn, run=run, context=context,
+                    values=request.input, capability_name=name, load_collection=_hunt_bound_collection)
+                charges["http_requests"] = len(selected_replay.request_ids)
+                charges["tool_wall_seconds"] = 60
+                if name == "collections.replay_active":
+                    charges["state_changing_requests"] = selected_replay.writes
             reserve_device_traffic(run, spec, charges)
             if is_device_adapter or (run["device_target_id"] and spec.placement_requirements.get("network_reachability")):
                 try:
@@ -2319,7 +2347,7 @@ async def _execute_hunt_capability_lifecycle(
             result = collection_adapter.result
             if collection_adapter.blocked_exception is not None:
                 raise collection_adapter.blocked_exception
-        elif name == "collections.replay_safe":
+        elif name in {"collections.replay_safe", "collections.replay_active"}:
             if durable_action_digest is None:
                 raise RuntimeError("Replay action digest was not initialized")
             result = await _enqueue_hunt_replay_capability(
@@ -2328,6 +2356,7 @@ async def _execute_hunt_capability_lifecycle(
                 request.input,
                 action_id=action_id,
                 action_digest=durable_action_digest,
+                capability_name=name,
             )
         elif device_adapter_name is not None and validated_device_input is not None:
             # Chosen above by the capability's placement, so a web capability in a device Hunt
@@ -2716,7 +2745,7 @@ async def _execute_hunt_capability_lifecycle(
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), 1 + followed,
                 )
-            elif name == "collections.replay_safe" and not worker_managed_budget and isinstance(receipt_payload, dict):
+            elif name in {"collections.replay_safe", "collections.replay_active"} and not worker_managed_budget and isinstance(receipt_payload, dict):
                 actual_charges["http_requests"] = min(
                     int(charges.get("http_requests") or 0), max(0, int(receipt_payload.get("replayed") or 0)),
                 )
@@ -3772,14 +3801,17 @@ def _hunt_redacted_capability_input(
     capability_input: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return the bounded planner/audit projection of one capability input."""
-    redacted = _arsenal_routes._redact_agent_payload(dict(capability_input or {}))
+    values = dict(capability_input or {})
+    if capability_name == "http.request":
+        values = redact_http_request_body(values)
+    redacted = _arsenal_routes._redact_agent_payload(values)
     if isinstance(redacted, dict) and redacted.get("path"):
         redacted["path"] = _devices._redact_hunt_path_query(redacted["path"])
     return redacted if isinstance(redacted, dict) else {}
 
 
 async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
-    selector = _hunt_collection_selector(values, hard_limit=200)
+    selector = _hunt_collection_selector(values, hard_limit=200, safe_methods_only=False)
     async with _pool().acquire() as conn:
         row, ref = await _hunt_bound_collection(
             conn, run, context, values.get("collection_id")
@@ -3791,7 +3823,7 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
             row["id"],
         )
     base_selected = _select_request_collection_index_rows(
-        index_rows, _hunt_bound_selector(ref, hard_limit=2_000),
+        index_rows, _hunt_bound_selector(ref, hard_limit=2_000, safe_methods_only=False),
     )
     selected = []
     ids, folders = set(selector.request_ids), set(selector.folders)
@@ -3816,13 +3848,13 @@ async def _hunt_select_collection(run: Any, context: Mapping[str, Any], values: 
 
 
 def _hunt_managed_principal_reference(
-    context: Mapping[str, Any], value: Any,
+    context: Mapping[str, Any], value: Any, *, capability: str = "collections.replay_safe",
 ) -> dict[str, Any] | None:
     try:
         return select_hunt_principal_reference(
             context,
             value,
-            capability="collections.replay_safe",
+            capability=capability,
         )
     except CredentialReferenceError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -3835,54 +3867,15 @@ async def _enqueue_hunt_replay_capability(
     *,
     action_id: uuid.UUID,
     action_digest: str,
+    capability_name: str = "collections.replay_safe",
 ) -> dict[str, Any]:
     """Place replay on a worker that executes the shared execute_replay_plan engine."""
-    selector = _hunt_collection_selector(values, hard_limit=25)
-    principal = _hunt_managed_principal_reference(
-        context, values.get("as_principal"),
-    )
+    from hunt.replay_selection import select_hunt_replay
+    principal = _hunt_managed_principal_reference(context, values.get("as_principal"), capability=capability_name)
     async with _pool().acquire() as conn:
-        row, ref = await _hunt_bound_collection(
-            conn, run, context, values.get("collection_id")
-        )
-        if not ref.get("selection_id"):
-            raise HTTPException(
-                status_code=403,
-                detail="Safe replay requires a saved request collection selection",
-            )
-        if str(ref.get("replay_policy") or "") == "discovery_only":
-            raise HTTPException(
-                status_code=403,
-                detail="This request collection selection is discovery-only",
-            )
-        index_rows = await conn.fetch(
-            """SELECT request_id, ordinal, folder, name, method, redacted_url,
-                      normalized_path, body_mode, auth_type, tags_json,
-                      safe_method, supported
-               FROM request_collection_requests
-               WHERE collection_id=$1 ORDER BY ordinal LIMIT 20000""",
-            row["id"],
-        )
-    base_selected = _select_request_collection_index_rows(
-        index_rows, _hunt_bound_selector(ref, hard_limit=25),
-    )
-    narrowed_ids = set(selector.request_ids)
-    narrowed_folders = set(selector.folders)
-    narrowed_methods = set(selector.methods)
-    narrowed_tags = set(selector.tags)
-    replay_ids = [
-        str(item["request_id"]) for item in base_selected
-        if (not narrowed_ids or str(item["request_id"]) in narrowed_ids)
-        and (not narrowed_folders or str(item.get("folder") or "") in narrowed_folders)
-        and (not narrowed_methods or str(item["method"]) in narrowed_methods)
-        and (
-            not narrowed_tags
-            or narrowed_tags.intersection(str(tag) for tag in item.get("tags") or [])
-        )
-        and selector.matches_path(str(item.get("normalized_path") or ""))
-    ][:selector.limit]
-    if not replay_ids:
-        raise HTTPException(status_code=422, detail="Safe replay selection is empty")
+        selection = await select_hunt_replay(conn, run=run, context=context, values=values,
+            capability_name=capability_name, load_collection=_hunt_bound_collection)
+    row, ref, replay_ids = selection.collection, selection.reference, list(selection.request_ids)
     redis_client = get_redis()
     job_id = str(uuid.uuid4())
     await record_cancellable_job_durable(_pool(), redis_client, str(run["id"]), job_id)
@@ -3892,6 +3885,7 @@ async def _enqueue_hunt_replay_capability(
     payload = {
         "job_id": job_id,
         "type": "request_collection_replay",
+        "capability_name": capability_name,
         "hunt_id": str(run["id"]),
         "action_id": str(action_id),
         "action_digest": action_digest,
@@ -3924,7 +3918,7 @@ async def _enqueue_hunt_replay_capability(
     redis_client.hset(f"job:{job_id}", mapping={
         "status": "queued",
         "current_phase": "request_collection_replay_queued",
-        "tool": "collections.replay_safe",
+        "tool": capability_name,
     })
     redis_client.expire(f"job:{job_id}", timeout_seconds + 300)
     enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
@@ -4025,7 +4019,7 @@ def _hunt_device_adapter_execution_state(value: Mapping[str, Any]) -> dict[str, 
     return {}
 
 
-def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> RequestSelector:
+def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int, safe_methods_only: bool = True) -> RequestSelector:
     try:
         return RequestSelector(
             request_ids=tuple(str(item) for item in values.get("request_ids") or [])[:2_000],
@@ -4033,7 +4027,7 @@ def _hunt_collection_selector(values: Mapping[str, Any], *, hard_limit: int) -> 
             methods=tuple(str(item) for item in values.get("methods") or [])[:20],
             path_regex=str(values.get("path_regex") or "").strip() or None,
             tags=tuple(str(item) for item in values.get("tags") or [])[:200],
-            safe_methods_only=True,
+            safe_methods_only=safe_methods_only,
             limit=max(1, min(int(values.get("limit") or hard_limit), hard_limit)),
         )
     except (TypeError, ValueError) as exc:
@@ -4074,7 +4068,7 @@ async def _hunt_bound_collection(
     return row, ref
 
 
-def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestCollectionSelection:
+def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int, safe_methods_only: bool = True) -> RequestCollectionSelection:
     try:
         selector = RequestCollectionSelection.from_mapping(
             ref.get("selector") if isinstance(ref.get("selector"), Mapping) else {}
@@ -4087,6 +4081,6 @@ def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int) -> RequestC
         methods=selector.methods,
         path_regex=selector.path_regex,
         tags=selector.tags,
-        safe_methods_only=True,
+        safe_methods_only=selector.safe_methods_only or safe_methods_only,
         max_requests=min(selector.max_requests, hard_limit),
     )

@@ -1006,6 +1006,7 @@ CREATE TABLE hunt_actions (
     status TEXT NOT NULL CHECK (status IN ('running','completed','blocked','failed','partial')),
     input_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
     result_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    private_http_result TEXT CHECK (private_http_result IS NULL OR private_http_result LIKE 'enc:fernet:%'),
     receipt_id UUID,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ

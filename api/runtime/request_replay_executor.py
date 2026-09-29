@@ -277,7 +277,7 @@ def _validate_transport_result(
         raise ReplayExecutionError("transport final URL escaped the replay origin binding")
 
 
-def _observation(request: ReplayRequest, result: ReplayTransportResult) -> dict[str, Any]:
+def _observation(request: ReplayRequest, result: ReplayTransportResult, *, private_body: bool = False) -> dict[str, Any]:
     public_request = request.public_dict()
     return {
         "kind": "request_replay",
@@ -289,7 +289,7 @@ def _observation(request: ReplayRequest, result: ReplayTransportResult) -> dict[
         "attempted_addresses": list(result.attempted_addresses),
         "status_code": result.status_code,
         "response_header_names": sorted(str(name)[:200] for name in result.response_headers),
-        "response_body_sha256": hashlib.sha256(result.response_body).hexdigest(),
+        "response_body_sha256": None if private_body else hashlib.sha256(result.response_body).hexdigest(),
         "response_body_size": len(result.response_body),
         "elapsed_ms": result.elapsed_ms,
         "error_code": result.error_code,
@@ -662,7 +662,10 @@ async def execute_replay_plan(
             if not isinstance(result, ReplayTransportResult):
                 raise ReplayExecutionError("transport returned an invalid result type")
             _validate_transport_result(result, plan=plan, target=target)
-            observations.append(_observation(request, result))
+            observations.append(_observation(request, result,
+                private_body=owner_kind == "hunt" and normalized_receipt_capability in {
+                    "collections.replay_safe", "collections.replay_active",
+                }))
             if result.error_code:
                 errors.append(f"{request.request_id}:{result.error_code}")
             any_timeout = any_timeout or result.timed_out

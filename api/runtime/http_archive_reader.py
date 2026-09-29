@@ -349,6 +349,28 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
         item[key] = _decoded(item.get(key))
     if redaction != "raw":
         item = redact_sensitive(item, redact_strings=True, scrub_text=True)
+        # State-changing Hunt bodies can contain low-entropy pairing PINs or newly
+        # issued credentials. Key-name redaction and an unsalted body digest are
+        # insufficient: both the body and digest stay raw-export-only.
+        if (
+            item.get("plane") == "hunt"
+            and item.get("capability_name") == "http.request"
+            and str(item.get("method") or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        ):
+            item["request_body"] = None
+            item["request_body_sha256"] = None
+        metadata = _decoded(item.get("metadata_json"))
+        private_workflow = isinstance(metadata, Mapping) and metadata.get("workflow_values_private") is True
+        if item.get("plane") == "hunt" and (private_workflow or item.get("capability_name") in {
+            "collections.replay_safe", "collections.replay_active",
+        }):
+            # Response captures and arbitrary header bindings can contain PINs or
+            # tokens under any name, including on GET. Keep values and their
+            # brute-forceable digests raw-export-only in every public archive view.
+            for prefix in ("request", "response"):
+                item[prefix + "_body"] = None
+                item[prefix + "_body_sha256"] = None
+                item[prefix + "_headers"] = {key: "[REDACTED]" for key in (item.get(prefix + "_headers") or {})}
     return {
         "schema_version": ARCHIVE_SCHEMA,
         "id": str(item.get("id")),
@@ -411,7 +433,8 @@ def export_document(
         "URL credentials may contain secrets. Treat this export as sensitive."
         if redaction == "raw"
         else "Known credential keys, headers, URL parameters, and common token shapes are masked; "
-        "arbitrary target-controlled bodies may still contain secrets."
+        "state-changing Hunt request bodies and their digests are omitted because they may contain "
+        "low-entropy pairing secrets. Other arbitrary target-controlled bodies may still contain secrets."
     )
     if export_format == "har":
         entries = [

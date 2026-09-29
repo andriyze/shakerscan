@@ -71,6 +71,7 @@ _TRANSPORT_HEADERS: frozenset[str] = frozenset(
         # to describe the bound path/method. They require a dedicated capability and proof
         # contract rather than a normal request header, even with identity-forgery approval.
         "x-original-url", "x-rewrite-url", "x-http-method-override",
+        "x-http-method", "x-method-override",
     }
 )
 # Headers that assert who the client is. Forging one is a legitimate and important test --

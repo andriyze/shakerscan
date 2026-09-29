@@ -26,6 +26,11 @@ from .skills import (
 )
 
 try:
+    from runtime.hunt_http_exchange_contract import public_capture_references
+except ModuleNotFoundError:
+    from ..runtime.hunt_http_exchange_contract import public_capture_references
+
+try:
     from redaction import redact_sensitive
 except ModuleNotFoundError:  # package import layout
     from scanner.redaction import redact_sensitive
@@ -348,7 +353,13 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         "action_id": str(item.get("id")) if item.get("id") else None,
         "capability_name": item.get("capability_name"),
         "status": item.get("status"),
-        "input_digest": input_summary.get("input_digest"),
+        "input_digest": (
+            None
+            if item.get("capability_name") == "http.request"
+            and str((input_summary.get("input") or {}).get("method") or "").upper()
+                in {"POST", "PUT", "PATCH", "DELETE"}
+            else input_summary.get("input_digest")
+        ),
         "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
         "experiment_key": experiment_key,
         "receipt_id": str(item.get("receipt_id")) if item.get("receipt_id") else None,
@@ -389,6 +400,8 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
                 ),
             },
             "reference_ids": _action_reference_ids(result_summary),
+            "captures": public_capture_references(result_summary.get("captures"), source_action_id=item.get("id"))
+                if item.get("status") == "completed" and item.get("capability_name") == "http.request" else [],
         },
     }
 
@@ -460,14 +473,15 @@ def public_hunt_action_trace(row: Any) -> dict[str, Any]:
     decision_input = input_summary.get("input")
     if not isinstance(decision_input, Mapping):
         decision_input = {}
+    public = public_hunt_action(row)
     return {
-        **public_hunt_action(row),
+        **public,
         "decision": {
             "kind": "explicit_capability_selection",
             "input": redact_sensitive(
                 dict(decision_input), redact_strings=True, scrub_text=True,
             ),
-            "input_digest": input_summary.get("input_digest"),
+            "input_digest": public["input_digest"],
             "idempotency_key_sha256": input_summary.get("idempotency_key_sha256"),
         },
         "outcome": redact_sensitive(
@@ -1166,6 +1180,7 @@ class HuntRunService:
                     run_uuid,
                     json.dumps({"summary": summary, "next_actions": next_actions}),
                 )
+                await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
         return public_hunt_run(row)
 
     async def cancel(self, hunt_id: str) -> dict[str, Any]:
@@ -1194,6 +1209,8 @@ class HuntRunService:
                    RETURNING *""",
                 run_uuid,
             )
+            if row:
+                await connection.execute("UPDATE hunt_actions SET private_http_result=NULL WHERE hunt_run_id=$1", run_uuid)
             if not row:
                 row = await hunt_run_or_404(connection, run_uuid)
                 if row["status"] != "cancelled":

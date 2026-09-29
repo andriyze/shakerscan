@@ -69,6 +69,11 @@ class DeviceStore(AdmissionStore):
 
 
 async def admit(store, name="http.request", values=None, key="device-attempt-1"):
+    values = dict(values or {})
+    if name == "http.request":
+        values.setdefault("method", "GET")
+        values.setdefault("path", "/")
+        values = CAPABILITY_REGISTRY.validate_hunt_input(name, values)
     fn = admission(store)
     fn.__globals__.update(
         reserve_device_traffic=reserve_device_traffic,
@@ -184,3 +189,29 @@ def test_shared_binding_prepares_device_browser_with_exact_origin_and_identity()
         browser_capability_adapter("browser.navigate").prepare(
             target=replace(target, allowed_origins=()), base_url=url, args={"path": "/"},
         )
+
+
+def test_authorized_device_put_is_admitted_and_idempotent_without_extra_write_charge():
+    async def scenario():
+        store = DeviceStore()
+        store.run["policy_json"]["allow_state_changing_http"] = True
+        store.run["budget_json"]["max_state_changing_requests"] = 5
+        values = {"method": "PUT", "path": "/pairing/start", "json_body": {"name": "lab-client"}}
+        first = await admit(store, values=values)
+        second = await admit(store, values=values)
+        assert second["idempotent_replay"] is True
+        assert first["action_id"] == second["action_id"]
+        assert len(store.actions) == 1
+        used = store.run["budget_used_json"]
+        assert used["state_changing_requests"] == used["http_requests"] == used["active_actions"] == 1
+        summary = next(iter(store.actions.values()))["input_summary"]["input"]
+        assert "json_body" not in summary and summary["body_values_visible"] is False
+    asyncio.run(scenario())
+
+
+def test_device_put_missing_write_authority_is_rejected_before_reservation():
+    store = DeviceStore()
+    with pytest.raises(HTTPException, match="allow_state_changing_http"):
+        asyncio.run(admit(store, values={"method": "PUT", "path": "/pairing/start", "json_body": {}}))
+    assert not store.actions
+    assert store.run["budget_used_json"].get("state_changing_requests", 0) == 0

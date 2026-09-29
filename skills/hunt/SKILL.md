@@ -64,6 +64,44 @@ If the server says additional authority is genuinely absent, explain the missing
 Do not repeatedly prompt for authority already represented by standing authorization, and do not
 convert a recoverable capability/budget shortage into failure of the whole investigation.
 
+## Authorized HTTP workflows
+
+`http.request` supports GET/HEAD/OPTIONS and authorized POST/PUT/PATCH/DELETE with
+one `json_body` or `form_body`. Read the running server's schema; do not declare
+PUT or pairing unavailable from an older read-only description. The same capability
+and saved principal references apply across web, API, network and device Hunts.
+
+For an operator-requested workflow such as TV pairing, request
+`allow_state_changing_http: true` when creating the Hunt and reuse the target's
+standing authorization. Do not ask again for each HTTP verb, port, or pairing step.
+An already-admitted passive Hunt has not gained write authority; start an appropriately
+configured Hunt using the existing target authorization rather than inventing a receipt.
+
+Keep inline bodies non-secret. `request_bindings` inserts worker-resolved values from a saved
+principal, an explicitly selected same-target profile ID/version, or an earlier action's capture.
+Use `capture` with an exact JSON pointer or response-header name for a pairing challenge or issued
+token. The result exposes only `source_action_id` and `capture_name`; pass these references to a
+later body/header binding. A `prefix` such as `Bearer ` can format an authorization header without
+exposing the token. Do not infer a secret field's name: use the protocol or retained evidence.
+
+A newly supplied PIN goes through the existing encrypted credential-profile workflow, not the
+Hunt input, log or shell history. Bind that profile's returned ID/version without restarting the
+Hunt or re-asking permission already granted. Captures stay on this Hunt's action, expire after
+one hour, and are cleared on finish/cancel; they are not permanent credentials for another Hunt.
+A returned reference proves capture, not accepted application identity. Follow the protocol's
+pairing confirmation with a relevant authenticated request before reporting pairing complete.
+
+For a bound `confirmed_active` collection, use the advertised `collections.replay_active` to
+replay the approved request selection. Safe replay still excludes writes. Reuse the same saved
+write authorization; a workflow action does not require a vulnerability-specific verifier.
+
+Write redirects are observations; do not replay them automatically. Follow a necessary next step
+explicitly under the same authority and budget. A missing permission, unsupported protocol,
+transport failure, and model refusal are different diagnoses. Continue other useful authorized
+work rather than ending the Hunt because one operation is unavailable.
+
+See `docs/hunt-http-writes.md` for the reference-only HTTP pairing sequence and validation limits.
+
 ## Investigate
 
 Choose the next smallest action that can answer or falsify a useful hypothesis:
@@ -108,7 +146,8 @@ Choose the next smallest action that can answer or falsify a useful hypothesis:
   Use an opaque `session_ref` returned by `auth.session.establish` for authenticated pages;
   its profile must explicitly allow the browser capability. Never type credentials into fields.
   Browsers still block writes, cross-origin traffic, uploads, downloads, and realtime sockets;
-  state-changing tests require the existing separately authorized typed verification paths.
+  use `http.request` or `collections.replay_active` for supported authorized workflow writes,
+  and the registered verifier for vulnerability proof. Browser limitations do not ban HTTP pairing.
 - Execute only a capability returned by the run at
   `POST /hunts/{hunt_id}/capabilities/{capability_name}`. Supply a fresh opaque
   `idempotency_key` for each intended action and reuse that same key only when retrying the exact
@@ -131,9 +170,10 @@ Request collections are redacted inventories. Postman scripts, HAR responses, an
 OpenAPI references never execute. Use only collection/request IDs returned by ShakerScan; do not
 reconstruct headers, cookies, tokens, bodies, or environment values. Use `collections.select` to
 narrow the redacted index and `collections.replay_safe` for bounded GET/HEAD/OPTIONS replay on web,
-API, or device HTTP targets; encrypted values are injected only inside the runtime. Mutations
-require a separate typed, approval-gated verifier and are never enabled by the safe replay
-capability.
+API, network or device HTTP targets; encrypted values are injected only inside the runtime.
+For writes, use `collections.replay_active` with an already bound `confirmed_active` selection
+and saved state-changing authority. A safe-only saved selector is never silently widened.
+This executes workflow steps; it does not turn their results into verified vulnerabilities.
 
 ## Operator-requested budget extension
 

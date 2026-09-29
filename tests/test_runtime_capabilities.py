@@ -135,7 +135,7 @@ def test_auth_session_registry_contract_is_target_bound_and_worker_private():
     }
 
 
-def test_active_collection_replay_has_an_approval_bound_hidden_contract():
+def test_active_collection_replay_has_an_approval_bound_worker_contract():
     specification = CAPABILITY_REGISTRY.require("collections.replay_active")
 
     assert specification.risk_tier == "active"
@@ -146,7 +146,11 @@ def test_active_collection_replay_has_an_approval_bound_hidden_contract():
         "state_changing_requests": 2_000,
         "tool_wall_seconds": 300,
     }
-    assert specification.planner_visible is False
+    assert specification.planner_visible is True
+    assert specification.hunt_executor == "worker_replay"
+    schema = specification.planner_contract()["input_schema"]
+    assert "collection_id" in schema["required"]
+    assert schema["properties"]["limit"]["maximum"] == 25
 
 
 def test_authz_verification_is_read_only_proof_gated_and_worker_bound():
