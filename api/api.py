@@ -52,7 +52,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import load_release_identity
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
-from scan.carried_over import gate_findings_from_rows, load_target_history, summarize_carried_over
+from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -8115,42 +8115,12 @@ def build_deployment_decision(
     # findings in, deduped by id/fingerprint, for the DAST product only (AI Gate and
     # Model Intake carry their own decision objects). Exceptions below still apply.
     if product == "dast" and target_active_findings:
-        observed_active_ids = {
-            str(row.get("id")) for row in (target_history or {}).get("rows", [])
-            if isinstance(row, dict) and row.get("id")
-            and (str(row.get("scan_id") or "") == str(scan.get("id") or "")
-                 or str(row.get("last_seen_scan_id") or "") == str(scan.get("id") or ""))
-        }
-        seen_keys = {str(f.get("id") or "") for f in blocking_findings if f.get("id")}
-        seen_keys |= {str(f.get("fingerprint") or "") for f in blocking_findings if f.get("fingerprint")}
-        matched_unidentified_reports: set[int] = set()
-        for extra in _deployment_gate_findings(
-            target_active_findings,
-            minimum=str(policy_profile.get("minimum_block_severity") or "high"),
-        ):
-            fid = str(extra.get("id") or "")
-            ffp = str(extra.get("fingerprint") or "")
-            if (fid and fid in seen_keys) or (ffp and ffp in seen_keys):
-                continue
-            # Scanner reports can omit both identifiers while persistence assigns a
-            # canonical fingerprint. Link an exact report match only when the durable
-            # row says this scan re-observed it; display similarity alone is insufficient.
-            if fid in observed_active_ids:
-                match = next((index for index, current in enumerate(blocking_findings)
-                              if index not in matched_unidentified_reports
-                              and not current.get("id") and not current.get("fingerprint")
-                              and all(current.get(field) == extra.get(field)
-                                      for field in ("title", "severity", "tool", "url"))), None)
-                if match is not None:
-                    matched_unidentified_reports.add(match)
-                    continue
-            if fid not in observed_active_ids:
-                extra["from_target_active"] = True
-            blocking_findings.append(extra)
-            if fid:
-                seen_keys.add(fid)
-            if ffp:
-                seen_keys.add(ffp)
+        blocking_findings = merge_target_active_blockers(
+            blocking_findings,
+            _deployment_gate_findings(target_active_findings,
+                                      minimum=str(policy_profile.get("minimum_block_severity") or "high")),
+            target_history, scan.get("id"),
+        )
     exceptions = _exception_records(scan, result if isinstance(result, dict) else {}, db_exceptions=db_exceptions)
     # A policy-scoped exception (non-null policy_id) only applies when the scan is
     # evaluated under that exact policy profile — so a lenient-policy waiver cannot

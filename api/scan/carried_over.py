@@ -99,9 +99,53 @@ def summarize_carried_over(
     }
 
 
+def merge_target_active_blockers(
+    blocking: list[dict[str, Any]],
+    active: list[dict[str, Any]],
+    history: Mapping[str, Any] | None,
+    scan_id: Any,
+) -> list[dict[str, Any]]:
+    """Merge durable blockers without double-counting a finding re-observed by this scan."""
+    observed_ids = {
+        str(row.get("id")) for row in (history or {}).get("rows", [])
+        if isinstance(row, Mapping) and row.get("id")
+        and (str(row.get("scan_id") or "") == str(scan_id or "")
+             or str(row.get("last_seen_scan_id") or "") == str(scan_id or ""))
+    }
+    seen_keys = {str(value) for finding in blocking
+                 for value in (finding.get("id"), finding.get("fingerprint")) if value}
+    matched_unidentified_reports: set[int] = set()
+    for extra in active:
+        fid = str(extra.get("id") or "")
+        fingerprint = str(extra.get("fingerprint") or "")
+        if (fid and fid in seen_keys) or (fingerprint and fingerprint in seen_keys):
+            continue
+        # Reports can omit both identifiers while persistence assigns a canonical
+        # fingerprint. An exact display match is usable only with durable scan linkage.
+        if fid in observed_ids:
+            match = next((index for index, current in enumerate(blocking)
+                          if index not in matched_unidentified_reports
+                          and not current.get("id") and not current.get("fingerprint")
+                          and all(current.get(field) == extra.get(field)
+                                  for field in ("title", "severity", "tool", "url"))), None)
+            if match is not None:
+                matched_unidentified_reports.add(match)
+                continue
+        merged = dict(extra)
+        if fid not in observed_ids:
+            merged["from_target_active"] = True
+        blocking.append(merged)
+        if fid:
+            seen_keys.add(fid)
+        if fingerprint:
+            seen_keys.add(fingerprint)
+    return blocking
+
+
 __all__ = [
     "HISTORY_ROW_CAP",
     "gate_findings_from_rows",
     "load_target_history",
+    "merge_target_active_blockers",
     "summarize_carried_over",
 ]
