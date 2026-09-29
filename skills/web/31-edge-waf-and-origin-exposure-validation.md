@@ -5,7 +5,7 @@ title: 31. Edge WAF and Origin Exposure Validation (Cloudflare and equivalents)
 description: Validate that a CDN/WAF edge such as Cloudflare is one layer rather than the security
   boundary, by finding routes to the application that never traverse the edge and representations the
   edge and the origin disagree about.
-version: 1.0.0
+version: 1.0.1
 kind: specialist
 phase: active_testing
 risk: medium
@@ -58,6 +58,7 @@ techniques:
 - certificate-and-sni-correlation
 - path-normalization-differential
 - preflight-and-verb-surface
+- authorized-json-and-form-method-comparison
 - cache-identity-confusion
 - client-ip-header-trust
 promotion_gate: direct_origin_response_matches_application_without_edge_headers_or_edge_origin_disagreement
@@ -66,8 +67,8 @@ requires_skills:
 deferred_techniques:
 - technique: historical-and-aaaa-dns-enumeration
   requires: a planner-visible dns.resolve capability; dns.inspect exists but is server-only
-- technique: method-and-content-type-switching
-  requires: a request capability carrying a body; http.request is limited to GET, HEAD and OPTIONS
+- technique: raw-body-and-multipart-content-type-switching
+  requires: a raw-byte or multipart request capability; authorized JSON/form writes use http.request
 - technique: body-inspection-boundary-probing
   requires: a body-carrying request capability and a payload-size budget dimension
 - technique: request-smuggling-and-desync
@@ -221,8 +222,13 @@ sensitive processing and discloses nothing in its headers.
 misses the other, and a `HEAD` that returns a different status than a blocked `GET` is a rule-scope
 defect.
 
-The remaining method work — `POST`, `PUT`, `DELETE`, and the `X-HTTP-Method-Override` and `_method`
-conventions — is deferred; this runtime's `http.request` carries no body.
+For an explicitly authorized state-changing investigation, `http.request` also supports
+`POST`, `PUT`, `PATCH` and `DELETE` with one `json_body` or `form_body`. Read the live schema
+and use the Hunt's saved state-changing authority; do not request a new authorization per verb.
+Compare only endpoints and effects the operator placed in scope, and retain the actual method,
+body kind and response evidence. Method-override headers are executor-owned and blocked on this path because they would make the
+recorded method disagree with the effective method. Arbitrary raw encodings,
+multipart uploads and synchronized exchanges still require their own implemented transport.
 
 ### 7. Cache and identity confusion
 

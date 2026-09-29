@@ -22,6 +22,7 @@ import uuid
 from fastapi import HTTPException
 import pytest
 from hunt.device_traffic import reserve_device_traffic
+from runtime.hunt_http_contract import require_http_request_authority, redact_http_request_body
 from runtime.credential_refs import (
     CredentialReferenceError, select_hunt_immediate_principal_reference,
 )
@@ -159,10 +160,12 @@ def admission(store):
         "web_candidate_budget": lambda family: {}, "_AGENT_MUTATING_VERIFY_FAMILIES": frozenset(),
         "PostgresBudgetReservationStore": ReservationStore,
         "reserve_device_traffic": reserve_device_traffic,
+        "require_http_request_authority": require_http_request_authority,
         "DurableBudgetReservation": SimpleNamespace(request=lambda **kwargs: Reservation(kwargs["amounts"])),
         "hunt_capability_action_digest": lambda **kwargs: "a" * 64,
         "hunt_capability_lease_seconds": lambda _: 120,
-        "_hunt_redacted_capability_input": lambda name, values: dict(values),
+        "_hunt_redacted_capability_input": lambda name, values: (
+            redact_http_request_body(values) if name == "http.request" else dict(values)),
         "HuntActionResult": lambda **kwargs: SimpleNamespace(public_dict=lambda: dict(kwargs)),
     }
     exec(compile(selected, str(source), "exec"), context)
@@ -172,7 +175,8 @@ def admission(store):
 async def call(store, name="authz.verify", key="attempt-0001", values=None):
     lifecycle = Lifecycle(name)
     inputs = values if values is not None else (
-        {"candidate_id": str(uuid.UUID(int=3))} if name == "candidate.verify" else {})
+        {"candidate_id": str(uuid.UUID(int=3))} if name == "candidate.verify" else
+        {"method": "GET", "path": "/"} if name == "http.request" else {})
     result = await admission(store)(str(HUNT), name,
         SimpleNamespace(input=inputs, idempotency_key=key), lifecycle)
     return result, lifecycle

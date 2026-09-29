@@ -1493,3 +1493,18 @@ def test_worker_prefers_proxy_wire_evidence_over_an_unavailable_settlement():
     class Quiet:
         http_requests_observed = 0
     assert w.wire_evidence_settlement(unavailable, Quiet()) == unavailable
+
+
+def test_method_override_aliases_are_executor_owned_even_with_identity_authority():
+    headers = {
+        "X-HTTP-Method-Override": "DELETE",
+        "X-HTTP-Method": "DELETE",
+        "X-Method-Override": "DELETE",
+    }
+    accepted, rejected = at.classify_request_headers(headers, allow_identity_headers=True)
+    assert accepted == {}
+    assert rejected == {
+        "x-http-method-override": "executor_owned_header",
+        "x-http-method": "executor_owned_header",
+        "x-method-override": "executor_owned_header",
+    }

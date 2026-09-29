@@ -24,12 +24,12 @@ not an authority grant or proof that execution will succeed on a particular targ
 
 | Operation | Actual ShakerScan path | Important limit |
 |---|---|---|
-| Baseline request | `http.request` | Read-only request; not arbitrary body replay or a raw connection |
+| HTTP request / workflow step | `http.request` | GET/HEAD/OPTIONS are baseline requests; POST/PUT/PATCH/DELETE plus JSON/form bodies require saved state-changing authority and are metered. Opaque captures and profile bindings support pairing; not a raw socket or secret-value export. |
 | Paired object access | `authz.verify` | Read-only, evidence-backed principal comparison; not a generic diff engine |
 | Login session | `auth.session.establish` | Managed opaque references; never submit secret values in planner inputs |
 | Browser discovery | `browser.navigate`, `browser.interact` | Fresh context per call; up to eight read-only steps; no general writes, uploads or realtime sockets |
 | Client artifacts | `artifact.inspect`, `javascript.analyze` | Bounded redacted/static analysis, not arbitrary code or DOM execution |
-| Captured traffic | `collections.inspect`, `collections.select`, `collections.replay_safe` | Saved IDs; safe-method replay is not mutation or authentication replay |
+| Captured traffic | `collections.inspect`, `collections.select`, `collections.replay_safe`, `collections.replay_active` | Saved IDs; writes use a bound `confirmed_active` selection and existing write authority; safe replay stays read-only |
 | SQL/XSS proof | `sqli.verify`, `xss.verify` | Use the specific live verifier contract; a scanner signal alone is not proof |
 | Candidate verification | `candidate.verify` | Only candidate families/contracts actually supported by the server |
 | Service discovery | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect` | Registered/frozen asset and selected operation; NSE observations are not vulnerability proof |

@@ -703,6 +703,7 @@ def hunt_call_recorder(
             metadata={
                 "fidelity": captured.get("fidelity") or "wire_request",
                 "response_digest_scope": captured.get("response_digest_scope"),
+                **({"workflow_values_private": True} if captured.get("workflow_values_private") is True else {}),
             },
         ))
 

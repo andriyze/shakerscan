@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 import json
 import re
 from types import MappingProxyType
+from .hunt_http_contract import validate_http_request_input
+from .hunt_http_exchange_contract import HTTP_EXCHANGE_PROPERTIES
 from typing import Any, Iterable, Literal, Mapping
 
 
@@ -280,6 +282,11 @@ class CapabilityRegistry:
                 "capability input exceeds the 65536-byte limit"
             )
         _validate_schema_value(spec.input_schema, value, path="input", depth=0)
+        if spec.name == "http.request":
+            try:
+                validate_http_request_input(value)
+            except ValueError as exc:
+                raise CapabilityInputContractError(str(exc)) from exc
         return dict(value)
 
     def validate_hunt_input(self, name: str, value: Any) -> dict[str, Any]:
@@ -1139,12 +1146,17 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=False,
         ),
         CapabilitySpec(
-            "http.request", "Send one target-pinned read-only request, optionally as a managed principal.",
+            "http.request", "Send one target-pinned request, optionally as a managed principal. "
+            "POST/PUT/PATCH/DELETE require the Hunt's existing state-changing authority; "
+            "GET/HEAD/OPTIONS remain available without it.",
             "http", "passive", _HTTP_TARGETS, "agent.http_request", "1",
             None, {"http_requests": 1, "tool_wall_seconds": 15},
             {"network_reachability": True, "credentials_resolved_server_side": True},
             _http_principal_schema({
-                "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS"]},
+                "method": {"type": "string", "enum": ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]},
+                **HTTP_EXCHANGE_PROPERTIES,
+                "json_body": {"type": "object", "description": "JSON body template for an authorized write. Use request_bindings for PINs/tokens; mutually exclusive with form_body."},
+                "form_body": {"type": "object", "description": "Non-secret form fields for an authorized write. Mutually exclusive with json_body."},
                 "origin": {"type": "string", "minLength": 1, "maxLength": 2048,
                            "description": "HTTP(S) service origin on the same authorized target host. Any valid port is allowed under the Hunt's active target authorization; a different host is never admitted."},
                 "path": {"type": "string"},
@@ -1688,12 +1700,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             _schema({
                 "collection_id": {"type": "string"},
                 "selection_id": {"type": "string"},
+                "request_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
+                "methods": {"type": "array", "items": {"type": "string"}},
+                "path_regex": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
                 "as_principal": {
-                    "type": "string", "enum": ["primary", "secondary", "service"],
+                    "type": "string", "enum": ["anonymous", "primary", "secondary", "service"],
                 },
-            }, required=("collection_id", "selection_id")),
+            }, required=("collection_id",)),
             "request-collection-replay/v2", ("http_observation", "tool_receipt"),
-            planner_visible=False,
+            hunt_executor="worker_replay",
         ),
         CapabilitySpec(
             "collections.replay_authentication",

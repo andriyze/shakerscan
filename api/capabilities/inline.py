@@ -103,6 +103,13 @@ class HttpRequestExecutionAdapter(_InlineAdapter):
                 int(self._requested_budget["http_requests"]),
                 1 + followed if execution_started else 0,
             )
+        if "state_changing_requests" in self._requested_budget:
+            # Charge an attempted write even if its response was lost.
+            request_view = result.get("request") if execution_started else {}
+            request_method = str(request_view.get("method") or "").upper()
+            actual["state_changing_requests"] = (
+                1 if execution_started and request_method in {"POST", "PUT", "PATCH", "DELETE"} else 0
+            )
         error = str(result.get("error") or "").strip()
         blocked = bool(
             result.get("needs_approval")

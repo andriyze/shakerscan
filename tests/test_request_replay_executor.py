@@ -450,6 +450,25 @@ def test_canonical_action_can_bind_the_public_replay_adapter_identity():
     assert outcome.receipt.adapter_version == "1"
 
 
+def test_hunt_safe_replay_does_not_publish_low_entropy_response_digest():
+    response = _result(response_body=b"7319")
+    outcome = asyncio.run(execute_replay_plan(
+        _plan(),
+        target=_target(),
+        owner_kind="hunt",
+        owner_id="hunt-1",
+        worker_id="worker-1",
+        limits={"http_requests": 10},
+        consumed={"http_requests": 0},
+        transport=FakeTransport([response]),
+        receipt_capability_name="collections.replay_safe",
+        clock=Clock(),
+    ))
+
+    assert outcome.receipt.observations[0]["response_body_sha256"] is None
+    assert "7319" not in repr(outcome.receipt.public_dict())
+
+
 def test_replay_receipt_preserves_content_free_source_authority_provenance():
     context = {
         "collection_id": "10000000-0000-4000-8000-000000000001",
