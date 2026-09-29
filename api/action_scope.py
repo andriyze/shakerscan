@@ -188,11 +188,19 @@ def destination_refusal_explanation(host: str, environment: str) -> str:
     else:
         kind = "a loopback"
     setting = deployment_policy.PRIVATE_NETWORK_TARGETS_ENV
+    # The policy environment comes from the target's stored environment or cohort and defaults
+    # to production. The target list derives an "internal" cohort from a private address for
+    # display only, so "judged as 'production'" beside a target shown as internal read as a
+    # contradiction. Name the environment, and say that the address or cohort does not change it.
+    judged = str(environment or "").strip().lower()
+    if not judged or judged == "unknown":
+        judged = "production"
     return (
         f"{lowered} is {kind} address; this deployment does not allow private-network targets "
-        f"(judged as '{environment or 'production'}'). To scan your own network, set "
-        f"{setting}=allow for the API and workers ({PRIVATE_NETWORK_TARGETS_DOC}). Lab targets "
-        "are admitted without it."
+        f"outside a Lab environment. The target is evaluated under the '{judged}' environment; "
+        "a private address or an 'internal' cohort does not make it a Lab target. To scan your "
+        f"own network, set {setting}=allow for the API and workers "
+        f"({PRIVATE_NETWORK_TARGETS_DOC}), or set the target's cohort to Lab."
     )
 
 
