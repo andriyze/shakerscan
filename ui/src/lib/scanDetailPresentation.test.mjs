@@ -68,6 +68,29 @@ test('a shallow clean scan leads with an honest conclusion instead of a perfect 
   assert.deepEqual(result.missingHeaders, ['content-security-policy'])
 })
 
+test('selected active families without candidate actions are named as examination gaps', () => {
+  const result = scanResultPresentation({
+    status: 'completed',
+    options: { scan_execution_plan: {
+      budget_profile: 'thorough',
+      policy: { active_testing: true },
+      resolved_families: ['recon', 'xss', 'sqli', 'bola', 'sensitive_exposure'],
+    } },
+    result: {
+      findings: [],
+      result: { risk_score: 100, risk_grade: 'A', grade_reliable: true },
+      coverage: { family_coverage: [
+        { family: 'bola', planned_candidates: 0, attempted_candidates: 0, coverage_status: 'complete', reason: 'no_candidates' },
+        { family: 'sensitive_exposure', planned_candidates: 12, attempted_candidates: 12, coverage_status: 'complete' },
+      ] },
+    },
+  }, { band: 'strong', label: 'Strong coverage' })
+
+  assert.deepEqual(result.candidateGapFamilies, ['xss', 'sqli', 'bola'])
+  assert.equal(result.coverageIncomplete, true)
+  assert.doesNotMatch(result.confidence, /supports this run-level conclusion/)
+})
+
 test('an unobservable application leads with not examined instead of clean', () => {
   const result = scanResultPresentation({
     result: {

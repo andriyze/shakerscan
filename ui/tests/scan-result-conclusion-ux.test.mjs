@@ -27,7 +27,8 @@ test('risk, examination strength, and release status are kept distinct', () => {
 test('result scope and deterministic posture weaknesses are visible', () => {
   assert.match(detail, /Identity assurance/)
   assert.match(detail, /HTTP requests used/)
-  assert.match(detail, /Check families run/)
+  assert.match(detail, /Selected check families/)
+  assert.match(detail, /Selected check families with no testable candidates recorded/)
   assert.match(detail, /Baseline posture needs attention/)
   assert.match(detail, /historical score predates posture-aware scoring/)
 })

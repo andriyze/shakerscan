@@ -435,12 +435,22 @@ export function scanResultPresentation(scan, assurance) {
   const incompleteFamilies = Array.isArray(coverage.selected_family_gaps)
     ? coverage.selected_family_gaps.map((family) => String(family || '').replaceAll('_', ' ')).filter(Boolean)
     : []
+  const candidateRows = Array.isArray(coverage.family_coverage) ? coverage.family_coverage : null
+  const candidateGapFamilies = candidateRows ? resolvedFamilies
+    .filter((family) => ACTIVE_FAMILIES.has(String(family)))
+    .filter((family) => {
+      const row = candidateRows.find((item) => record(item).family === family)
+      return !row || (Number(record(row).planned_candidates || 0) === 0
+        && Number(record(row).attempted_candidates || 0) === 0)
+    })
+    .map((family) => String(family).replaceAll('_', ' ')) : []
   const assuranceGaps = Array.isArray(assurance?.gaps) ? assurance.gaps : []
   // A strong examination score describes the work that ran. When the run stopped before its
   // plan completed, or the scorer itself marked the grade unreliable, the conclusion is only as
   // wide as the completed work, and the supporting sentence must say so instead of endorsing it.
   const coverageIncomplete = coverageWarnings.length > 0
     || incompleteFamilies.length > 0
+    || candidateGapFamilies.length > 0
     || assuranceGaps.length > 0
     || result.grade_reliable === false
     || authenticationRequested
@@ -475,6 +485,7 @@ export function scanResultPresentation(scan, assurance) {
     coverageIncomplete,
     coverageGapReasons,
     incompleteFamilies,
+    candidateGapFamilies,
     observedCount: findings.length,
     observedRiskScore: notExamined ? null : finiteNumber(result.risk_score ?? result.score ?? scanRecord.score, null),
     observedRiskGrade: notExamined ? '' : String(result.risk_grade || result.grade || scanRecord.grade || '').replace(/\*+$/, ''),

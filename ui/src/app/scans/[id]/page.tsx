@@ -173,6 +173,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
     + resultPresentation.coverageGapReasons.length
     + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
+    + (resultPresentation.candidateGapFamilies.length > 0 ? 1 : 0)
   const assuranceGaps = (assurance?.gaps || [])
     .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
 
@@ -327,7 +328,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           <div><dt className="inline text-gray-500">Identity assurance </dt><dd className="inline text-gray-200">{resultPresentation.authenticationAssurance}</dd></div>
           <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
           {resultPresentation.resolvedFamilies.length > 0 && (
-            <div><dt className="inline text-gray-500">Check families run </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
+            <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
           )}
         </dl>
         {resultPresentation.testingWarning && (
@@ -365,6 +366,13 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 <li>
                   • Check {resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} that did not finish:{' '}
                   <span className="font-medium text-amber-100">{resultPresentation.incompleteFamilies.join(', ')}</span>.
+                </li>
+              )}
+              {resultPresentation.candidateGapFamilies.length > 0 && (
+                <li>
+                  • Selected check families with no testable candidates recorded:{' '}
+                  <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.join(', ')}</span>.
+                  Their absence of findings does not establish that those vulnerability classes were tested.
                 </li>
               )}
               {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}
