@@ -391,7 +391,7 @@ async def session_test_endpoint(session_id: str, request: EndpointTestRequest):
     )
 
     # Don't raise exception on request failure - return the result
-    # so Claude can analyze the access control behavior
+    # so the planner can analyze the access-control behavior
     return result
 
 

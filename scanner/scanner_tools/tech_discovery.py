@@ -680,13 +680,13 @@ async def collect_signals(
         url=url,
         status_code=status_code,
         headers=normalized_headers,
-        cookies={},  # TODO: Extract from browser_res if available
+        cookies={},  # This path does not collect cookies.
         html=html,
         meta_tags=meta_tags,
         script_srcs=script_srcs,
         link_hrefs=link_hrefs,
         js_globals=js_globals,
-        dom_markers=[],  # TODO: Pass from Playwright if available
+        dom_markers=[],  # DOM markers come only from the browser-backed path.
         dns_cname=dns_cname,
         cert_issuer=cert_issuer
     )
