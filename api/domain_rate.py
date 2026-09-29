@@ -16,7 +16,8 @@ Which work it governs
   the parallel children of those Scans. Nobody watches this work start, so it may wait for
   headroom. A wait is visible (``current_phase=waiting_for_domain_rate`` plus the ``domain_rate``
   object with an estimated resume time). A Scan's immutable plan cannot be lowered at runtime, so
-  a background Scan is admitted whole (holding at most one hour's cap as its token) or waits; only
+  a background Scan holds its full immutable endpoint plan or waits. A plan larger than the
+  configured hourly cap fails with an actionable reason; only
   an ASM batch can be reduced, by releasing claimed endpoints back to the inventory, and that
   reduction is recorded on the Scan (``domain_rate.reduction``) and in its report metadata.
 * **Operator work** is never delayed or shrunk by the quota: Scans an operator submits through
@@ -44,6 +45,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import json
 import logging
 import uuid
 from contextlib import contextmanager
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 3600
 HOLD_TTL_SECONDS = 3600
+SETTLED_TTL_SECONDS = 86400
 WORK_OPERATOR = "operator"
 WORK_BACKGROUND = "background"
 ADMISSION_ORIGIN_KEY = "admission_origin"
@@ -115,19 +118,29 @@ keep_keys()
 return {total, used - existing + total}
 """
 
-# ARGV: entry id, consumed units (-1 = unknown: keep what was held), window ms.
+# ARGV: entry id, consumed units (-1 = unknown: keep what was held), window ms,
+# settled-marker ttl ms, final-execution flag. A zero-unit marker prevents a late duplicate settlement from
+# restarting the rolling window after its consumption entry has expired.
 # Returns {units the hold had, units recorded as consumption}.
 SETTLE_LUA = "-- shakerscan:domain_rate:settle" + _PRUNE + """
 local hold = 'h:' .. ARGV[1]
+local done = 'd:' .. ARGV[1]
+local used = 'c:' .. ARGV[1]
+if redis.call('HEXISTS', KEYS[2], done) == 1 then
+  return {0, tonumber(redis.call('HGET', KEYS[2], used) or '0') or 0}
+end
 local held = tonumber(redis.call('HGET', KEYS[2], hold) or '0') or 0
 local consumed = tonumber(ARGV[2]) or -1
 if consumed < 0 then consumed = held end
 redis.call('HDEL', KEYS[2], hold)
 redis.call('ZREM', KEYS[1], hold)
 if consumed > 0 then
-  local used = 'c:' .. ARGV[1]
   redis.call('HSET', KEYS[2], used, consumed)
   redis.call('ZADD', KEYS[1], now + tonumber(ARGV[3]), used)
+end
+if ARGV[5] == '1' then
+  redis.call('HSET', KEYS[2], done, 0)
+  redis.call('ZADD', KEYS[1], now + tonumber(ARGV[4]), done)
 end
 keep_keys()
 return {held, consumed}
@@ -232,6 +245,7 @@ def settle(
     entry_id: str,
     consumed: int | None,
     window_seconds: int = WINDOW_SECONDS,
+    finalized: bool = True,
 ) -> tuple[int, int] | None:
     """Release a hold, recording ``consumed`` units (``None`` = unknown: keep what was held)."""
     if not root_domain or not entry_id:
@@ -240,6 +254,7 @@ def settle(
         held, recorded = redis_client.eval(
             SETTLE_LUA, 2, *ledger_keys(root_domain), str(entry_id),
             -1 if consumed is None else max(0, int(consumed)), int(window_seconds) * 1000,
+            SETTLED_TTL_SECONDS * 1000, "1" if finalized else "0",
         )
         return _int(held), _int(recorded)
     except Exception as exc:
@@ -286,9 +301,13 @@ def admit(
         "all_or_nothing": bool(all_or_nothing),
     }
     headroom = max(0, int(cap) - int(db_used or 0))
-    # Whole-or-nothing work (a Scan's immutable plan cannot be lowered at runtime) is admitted
-    # with a token of at most one hour's cap, so a plan larger than the cap is not parked forever.
-    token = min(amount, max(1, int(cap))) if all_or_nothing and work != WORK_OPERATOR else amount
+    # An immutable Scan plan must hold every endpoint it may execute. A smaller token
+    # would admit a 10,000-endpoint plan against a 1,000-endpoint hourly cap.
+    token = amount
+    if all_or_nothing and work != WORK_OPERATOR and amount > cap:
+        return {**base, "granted": 0, "held": 0, "limited": True,
+                "reserved": usage(redis_client, root_domain), "reason": "plan_exceeds_domain_cap",
+                "unadmittable": True}
     held, ledger = reserve(
         redis_client, root_domain, entry_id=entry, requested=token, headroom=headroom,
         enforce=work != WORK_OPERATOR, all_or_nothing=all_or_nothing,
@@ -370,6 +389,52 @@ def waiting_record(decision: Mapping[str, Any], *, wait_cycles: int, since: str 
             "by background testing or recent Scans."
         ),
     }
+
+
+def unadmittable_record(decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Explain an immutable background plan larger than its configured hourly cap."""
+    root = str(decision.get("root_domain") or "this domain")
+    cap = int(decision.get("cap") or 0)
+    requested = int(decision.get("requested") or 0)
+    return {
+        "schema": "domain_rate/v1", "state": "blocked", "work_class": WORK_BACKGROUND,
+        "root_domain": root, "cap_per_hour": cap, "requested": requested,
+        "reason": (
+            f"Background Scan plan allows {requested} endpoints, exceeding {root}'s "
+            f"{cap}-endpoint hourly test budget. Lower the Scan's max_endpoints limit "
+            "or increase the domain budget before scheduling it again."
+        ),
+    }
+
+
+async def fail_oversized_scan(pool: Any, redis_client: Any, *, job_id: str,
+                              scan_id: str, decision: Mapping[str, Any]) -> None:
+    record = unadmittable_record(decision)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE scans SET status='failed', progress=100,
+                      current_phase='domain_rate_plan_exceeds_cap', error_message=$2,
+                      domain_rate_json=$3::jsonb, completed_at=NOW()
+               WHERE id=$1 AND status IN ('pending','queued','running')""",
+            uuid.UUID(str(scan_id)), record["reason"], json.dumps(record),
+        )
+    redis_client.hset(f"job:{job_id}", mapping={
+        "status": "failed", "current_phase": "domain_rate_plan_exceeds_cap",
+        "error_message": record["reason"], "progress": "100",
+    })
+    redis_client.expire(f"job:{job_id}", 86400)
+
+
+async def track_dispatch_hold(pool: Any, job_data: Mapping[str, Any]) -> None:
+    """Register an API-dispatcher hold before any worker early return can strand it."""
+    hold_id, target_id = job_data.get("domain_rate_hold_id"), job_data.get("target_id")
+    if not hold_id or not target_id:
+        return
+    async with pool.acquire() as conn:
+        root = await conn.fetchval("SELECT root_domain FROM targets WHERE id=$1",
+                                   uuid.UUID(str(target_id)))
+    if root:
+        track(str(root).strip().lower(), str(hold_id))
 
 
 def admitted_record(decision: Mapping[str, Any], reduction: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -485,7 +550,8 @@ def settlement_scope(redis_factory: Callable[[], Any]) -> Iterator[None]:
                 consumed = item["consumed"]
                 if not item["executing"]:
                     consumed = 0
-                settle(client, item["root_domain"], entry_id=item["entry_id"], consumed=consumed)
+                settle(client, item["root_domain"], entry_id=item["entry_id"],
+                       consumed=consumed, finalized=bool(item["executing"]))
 
 
 def track(root_domain: str, entry_id: str, *, executing: bool = False) -> None:

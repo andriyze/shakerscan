@@ -27,7 +27,8 @@ class DomainRateLedgerFake:
     def entries(self, root_domain: str) -> dict[str, int]:
         from domain_rate import ledger_keys
 
-        return dict(self.units.get(ledger_keys(root_domain)[1], {}))
+        return {key: value for key, value in self.units.get(ledger_keys(root_domain)[1], {}).items()
+                if value > 0}
 
     def eval(self, script: str, _numkeys: int, *args: Any) -> Any:
         zkey, hkey, *argv = args
@@ -59,16 +60,23 @@ class DomainRateLedgerFake:
                 expiry[hold] = now + int(ttl_ms)
             return [total, used - existing + total]
         if "shakerscan:domain_rate:settle" in script:
-            entry, consumed, window_ms = argv
+            entry, consumed, window_ms, settled_ms, finalized = argv
             hold = f"h:{entry}"
+            done = f"d:{entry}"
+            used_entry = f"c:{entry}"
+            if done in units:
+                return [0, units.get(used_entry, 0)]
             held = units.pop(hold, 0)
             expiry.pop(hold, None)
             consumed = int(consumed)
             if consumed < 0:
                 consumed = held
             if consumed > 0:
-                units[f"c:{entry}"] = consumed
-                expiry[f"c:{entry}"] = now + int(window_ms)
+                units[used_entry] = consumed
+                expiry[used_entry] = now + int(window_ms)
+            if str(finalized) == "1":
+                units[done] = 0
+                expiry[done] = now + int(settled_ms)
             return [held, consumed]
         if "shakerscan:domain_rate:usage" in script:
             schedule: list[int] = []

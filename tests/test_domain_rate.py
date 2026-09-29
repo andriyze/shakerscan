@@ -38,7 +38,7 @@ class _RealRedis:
 
     def entries(self, root_domain: str) -> dict[str, int]:
         raw = self.client.hgetall(dr.ledger_keys(root_domain)[1])
-        return {k.decode(): int(v) for k, v in raw.items()}
+        return {k.decode(): int(v) for k, v in raw.items() if int(v) > 0}
 
 
 def _backends():
@@ -103,9 +103,15 @@ def test_settle_releases_the_unused_remainder_and_records_use_once(ledger):
     assert dr.settle(ledger, root, entry_id="scan", consumed=100) == (600, 100)
     assert dr.usage(ledger, root) == 100
     # A repeated settlement (retry, second scope) neither adds nor re-counts.
-    assert dr.settle(ledger, root, entry_id="scan", consumed=None) == (0, 0)
+    assert dr.settle(ledger, root, entry_id="scan", consumed=None) == (0, 100)
     assert dr.settle(ledger, root, entry_id="scan", consumed=100) == (0, 100)
     assert dr.usage(ledger, root) == 100
+    ledger.advance(50 * 60)
+    assert dr.settle(ledger, root, entry_id="scan", consumed=100) == (0, 100)
+    ledger.advance(11 * 60)
+    assert dr.usage(ledger, root) == 0
+    assert dr.settle(ledger, root, entry_id="scan", consumed=100) == (0, 0)
+    assert dr.usage(ledger, root) == 0
     assert dr.reserve(ledger, root, entry_id="next", requested=900, headroom=1000)[0] == 900
 
 
@@ -114,6 +120,15 @@ def test_settle_of_an_unmeasured_run_keeps_what_it_held(ledger):
     dr.reserve(ledger, root, entry_id="crashed", requested=300, headroom=1000)
     assert dr.settle(ledger, root, entry_id="crashed", consumed=None) == (300, 300)
     assert dr.usage(ledger, root) == 300
+
+
+def test_preexecution_release_allows_the_same_waiting_scan_to_retry(ledger):
+    root = _root()
+    assert dr.reserve(ledger, root, entry_id="scan", requested=100, headroom=100)[0] == 100
+    assert dr.settle(ledger, root, entry_id="scan", consumed=0, finalized=False) == (100, 0)
+    assert dr.reserve(ledger, root, entry_id="scan", requested=100, headroom=100)[0] == 100
+    assert dr.settle(ledger, root, entry_id="scan", consumed=40) == (100, 40)
+    assert dr.usage(ledger, root) == 40
 
 
 def test_abandoned_hold_expires_on_its_own(ledger):
@@ -136,7 +151,8 @@ def test_busy_domain_decays_entry_by_entry(ledger):
     assert dr.usage(ledger, root) == 1000
     ledger.advance(11 * 60)
     assert dr.usage(ledger, root) == 400
-    assert ledger.entries(root) == {"c:b": 400}
+    assert ledger.entries(root)["c:b"] == 400
+    assert "c:a" not in ledger.entries(root)
 
 
 def test_completed_asm_work_is_counted_once_not_in_both_windows(ledger):
@@ -224,7 +240,7 @@ def test_settlement_scope_settles_however_the_job_ends():
         asyncio.run(run("failed"))
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run("cancelled"))
-    assert ledger.entries(root) == {
+    assert {key: value for key, value in ledger.entries(root).items() if value > 0} == {
         # never-started released everything; measured recorded exactly 7; a failed or
         # cancelled run with no measurement keeps what it held (it may have sent traffic).
         "c:measured": 7, "c:failed": 100, "c:cancelled": 100,
@@ -246,12 +262,16 @@ def test_waiting_record_and_public_view_explain_the_wait():
     assert dr.public_view('{"state": "admitted"}', status="running") == {"state": "admitted"}
 
 
-def test_whole_or_nothing_work_is_admitted_with_at_most_one_hours_cap(ledger):
+def test_whole_or_nothing_work_requires_its_full_plan_to_fit_the_hourly_cap(ledger):
     root = _root()
     decision = dr.admit(ledger, root_domain=root, cap=1000, db_used=0, entry_id="scheduled",
                         amount=10_000, work=dr.WORK_BACKGROUND, all_or_nothing=True)
-    assert decision["granted"] == 10_000 and decision["limited"] is False
-    assert decision["held"] == 1000
+    assert decision["granted"] == 0 and decision["unadmittable"] is True
+    assert decision["held"] == 0
+    assert "Lower the Scan's max_endpoints" in dr.unadmittable_record(decision)["reason"]
+    admitted = dr.admit(ledger, root_domain=root, cap=1000, db_used=0, entry_id="within-cap",
+                        amount=1000, work=dr.WORK_BACKGROUND, all_or_nothing=True)
+    assert admitted["granted"] == 1000 and admitted["held"] == 1000
     blocked = dr.admit(ledger, root_domain=root, cap=1000, db_used=0, entry_id="next",
                        amount=5, work=dr.WORK_BACKGROUND, all_or_nothing=True)
     assert blocked["granted"] == 0 and blocked["limited"] is True

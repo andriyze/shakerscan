@@ -1064,6 +1064,9 @@ async def lease_broker_job(node_id: str, body: BrokerLeaseRequest, request: Requ
                 ) from exc
     if budget_reservation is None:
         _broker_release_slot(redis_client, slot_id)
+        if payload.pop("_domain_rate_unadmittable", False):
+            await asyncio.to_thread(acknowledge_lease, redis_client, lease)
+            return Response(status_code=204)
         if durable_scan_terminal is not None:
             if durable_scan_terminal.record.status == "committed" and scan_id:
                 async with _pool().acquire() as conn:
@@ -2606,15 +2609,11 @@ async def _broker_reserve_request_budget(
     is never reduced by the root-domain quota; ``domain_rate`` records the endpoint units held on
     the root domain's hourly ledger (``domain_rate`` module). Operator Scans are recorded there
     without limit. A background Scan's immutable plan cannot be lowered at runtime, so it is
-    admitted whole with a token of at most its fair share of the cap, or waits (``None``) with the
-    reason recorded on the Scan. The hold is keyed by the Scan id so a re-lease tops it up instead
+    admitted whole with a hold for its complete plan, or waits (``None``) with the
+    reason recorded on the Scan. An over-cap plan fails with an actionable reason. The hold is keyed by the Scan id so a re-lease tops it up instead
     of taking a second one, and the ingest worker settles it with the measured result.
     """
     options = dict(payload.get("options") or {})
-    immutable_actions = bool(
-        str(options.get("scan_action_plan_digest") or "").strip()
-        or str(options.get("scan_execution_plan_digest") or "").strip()
-    )
     mode = str(options.get("request_budget_mode") or "compatibility").strip().lower()
     if mode == "off":
         return {}
@@ -2655,7 +2654,7 @@ async def _broker_reserve_request_budget(
         )
     except Exception:  # legacy/non-canonical payloads carry no endpoint plan to hold
         endpoints = 0
-    reservation_request = min(endpoints, cap) if cap > 0 else endpoints
+    reservation_request = endpoints
     pending_sibling_count = 1
     endpoint_grant = endpoints
     if root_domain and cap > 0 and endpoints > 0 and work == domain_rate.WORK_OPERATOR:
@@ -2664,40 +2663,25 @@ async def _broker_reserve_request_budget(
             headroom=cap, enforce=False,
         )
     elif root_domain and cap > 0 and endpoints > 0:
+        if endpoints > cap:
+            record = domain_rate.unadmittable_record({
+                "root_domain": root_domain, "cap": cap, "requested": endpoints,
+            })
+            await conn.execute(
+                """UPDATE scans SET status='failed', progress=100,
+                          current_phase='domain_rate_plan_exceeds_cap', error_message=$2,
+                          domain_rate_json=$3::jsonb, completed_at=NOW()
+                   WHERE id=$1 AND status IN ('pending','queued')""",
+                scan_id, record["reason"], json.dumps(record),
+            )
+            payload["_domain_rate_unadmittable"] = True
+            return None
         used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
         remaining = max(0, cap - int(used or 0))
         wait = {"root_domain": root_domain, "cap": cap, "used": int(used or 0),
                 "requested": endpoints, "work_class": work, "all_or_nothing": True}
-        parent_scan_id = (target or {}).get("parent_scan_id")
-        if parent_scan_id and not immutable_actions:
-            # A parallel parent owns one logical per-domain allowance. Without
-            # fair sharing, the first broker child can reserve the entire cap
-            # and leave every sibling parked for the reservation TTL. Include
-            # running siblings in the divisor: a child can transition to running
-            # between this query and the Redis reservation, and COUNT=0 must not
-            # silently become "give this child the full remaining cap".
-            try:
-                sibling_count_value = await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM scans
-                    WHERE parent_scan_id=$1
-                      AND status IN ('pending','queued','running')
-                    """,
-                    parent_scan_id,
-                )
-                if sibling_count_value is None:
-                    return None
-                pending_sibling_count = max(1, int(sibling_count_value))
-            except Exception:
-                return None
-            reserved = asm_inventory.reserved_domain_rate_count(redis_client, root_domain)
-            unreserved = max(0, remaining - reserved)
-            if unreserved <= 0:
-                payload["_domain_rate_wait"] = {**wait, "reserved": reserved}
-                return None
-            fair_share = max(1, unreserved // pending_sibling_count)
-            reservation_request = min(reservation_request, fair_share)
+        # Parallel children carry separate immutable plans. A fair-share token
+        # smaller than one child's plan would let that child exceed the quota.
         try:
             endpoint_grant = asm_inventory.reserve_domain_rate(
                 redis_client,
@@ -2709,7 +2693,7 @@ async def _broker_reserve_request_budget(
             )
         except Exception:
             return None
-        if endpoint_grant <= 0:
+        if endpoint_grant < reservation_request:
             payload["_domain_rate_wait"] = {
                 **wait, "reserved": asm_inventory.reserved_domain_rate_count(redis_client, root_domain),
             }

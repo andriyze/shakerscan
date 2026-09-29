@@ -13377,6 +13377,9 @@ async def _admit_scan_on_domain_rate(
         rate = {"granted": reserve_amount if operator else 0, "limited": not operator,
                 "requested": reserve_amount, "reason": str(exc), "work_class": work}
     granted = max(0, int(rate.get("granted") or 0))
+    if rate.get("unadmittable"):
+        await domain_rate.fail_oversized_scan(db_pool, r, job_id=job_id, scan_id=scan_id, decision=rate)
+        return None
     if granted <= 0 and rate.get("limited"):
         async with db_pool.acquire() as conn:
             await _record_domain_rate_wait(
@@ -16326,6 +16329,11 @@ async def process_scan_shard_job(job_data: dict):
             operator = work == domain_rate.WORK_OPERATOR
             rate = {"granted": endpoint_count if operator else 0, "limited": not operator,
                     "requested": endpoint_count, "reason": str(exc), "work_class": work}
+        if rate.get("unadmittable"):
+            _release_parallel_shard_slot(r, parent_id, job_id)
+            await domain_rate.fail_oversized_scan(db_pool, r, job_id=job_id, scan_id=scan_id, decision=rate)
+            await _reconcile_parallel_child_completion(parent_id, r, f"shard {job_id[:8]}")
+            return
         if rate.get("limited"):
             _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
@@ -17386,6 +17394,9 @@ async def process_exploit_batch_job(job_data: dict):
     r = get_redis()
     now = utc_now()
     slot_acquired = False
+
+    # Register the dispatcher's hold before any early return can strand it.
+    await domain_rate.track_dispatch_hold(db_pool, job_data)
 
     if parent_id:
         async with db_pool.acquire() as conn:

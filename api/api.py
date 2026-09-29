@@ -3775,7 +3775,7 @@ async def run_asm_dispatch(pool: asyncpg.Pool):
                             domain_rate_reserved=dispatch_batch_size, domain_rate_hold_id=hold_id,
                         )
                     except Exception:
-                        domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0)
+                        domain_rate.settle(r, root_domain, entry_id=hold_id, consumed=0, finalized=False)
                         raise
                     await conn.execute("UPDATE targets SET asm_last_test_at = NOW() WHERE id = $1", t['id'])
                     await _persist_asm_decision(
