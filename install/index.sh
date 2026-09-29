@@ -141,7 +141,7 @@ download() {
             ;;
     esac
     tmp="${staged_dst}.tmp"
-    if ! curl -fsSL "$src" -o "$tmp"; then
+    if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$src" -o "$tmp"; then
         rm -f "$tmp"
         fail "failed to download $src"
     fi
@@ -442,6 +442,15 @@ print_next_steps() {
 }
 
 install_bootstrap_deps
+
+# Installer sources must be HTTPS (or a local file:// tree for development). A plain-HTTP base
+# would let anyone on the network path replace the files this installer verifies and runs.
+for base in "$REPO_RAW_BASE" "$RELEASE_ASSET_ROOT"; do
+    case "$base" in
+        ""|https://*|file://*) ;;
+        *) fail "installer source must be an https:// or file:// URL: $base" ;;
+    esac
+done
 
 # The stable install channel advances only after every release image exists.
 # Runtime files are then downloaded from the matching immutable tag, avoiding
