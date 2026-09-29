@@ -13,7 +13,6 @@ belong in Git history or immutable release notes rather than the active document
 
 - [Product model](product-model.md) — canonical product names and boundaries.
 - [Functionality reference](functionality-reference.md) — exhaustive generated/current product map.
-- [AI-native architecture](ai-native-architecture-rfc.md) — Scan/Hunt architecture direction.
 - [Hunt architecture](hunt-architecture.md) — adaptive investigation model.
 - [DAST and ASM architecture](dast-asm-architecture.md) — deterministic Scan and attack-surface model.
 - [Service intelligence](service-intelligence.md) — service observations and investigation handoff.
@@ -36,8 +35,15 @@ belong in Git history or immutable release notes rather than the active document
 
 - [Connected-device security](connected-device-security.md)
 - [AI test workflows](AI_TEST_WORKFLOWS.md)
-- [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction, not a completed release claim.
 - [AI Boundary regression handoff](ai-boundary-regression-handoff.md) — versioned artifact and offline legitimate-control comparison.
+
+## Design notes and proposals
+
+These describe direction and design rationale. They are not release claims; the live API
+contracts and release notes describe what ships.
+
+- [AI-native architecture](ai-native-architecture-rfc.md) — Scan/Hunt architecture direction.
+- [Agent authorization direction](agent-authorization-workflow-direction.md) — proposed AI Gate/Hunt direction.
 - [Model Intake security roadmap](model-intake-security-review-roadmap.md)
 
 ## Operations
