@@ -38,7 +38,7 @@ expected:
     proof: verified
   - id: sqli-coupon
     family: sqli
-    route: /community/api/v2/coupon
+    route: /workshop/api/shop/apply_coupon
     min_severity: high
     proof: verified
 

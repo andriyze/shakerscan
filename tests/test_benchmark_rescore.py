@@ -10,10 +10,24 @@ import base64
 import json
 import os
 import sys
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import benchmark_targets as b  # noqa: E402
+
+
+def test_crapi_sqli_expectation_matches_sql_backend_route_only():
+    with open(os.path.join(b.FIXTURE_DIR, "crapi.yaml"), encoding="utf-8") as fixture_file:
+        fixture = yaml.safe_load(fixture_file)
+    expectation = next(item for item in fixture["expected"] if item["id"] == "sqli-coupon")
+    finding = {
+        "finding_id": "coupon-sqli", "classes": {"sqli"}, "severity": "high",
+        "verified": True, "hay": "sql injection at /workshop/api/shop/apply_coupon",
+    }
+    assert b.match_expectation(expectation, [finding], set()) == finding
+    finding["hay"] = "sql injection at /community/api/v2/coupon"
+    assert b.match_expectation(expectation, [finding], set()) is None
 
 
 def _jwt(**claims):

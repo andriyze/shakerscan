@@ -266,3 +266,14 @@ claim instead of deleting it.
   `principal_identities_validated=false` and `authenticated_responses_accepted=false`.
 - This correction reduces the current accepted crAPI recall claim back to no valid passing artifact.
   It is a proof-discipline correction, not a detector recall regression and not benchmark fitting.
+
+### 2026-09-29 — Correct crAPI SQL injection answer key
+
+- The historical `sqli-coupon` expectation pointed to `/community/api/v2/coupon`, whose pinned
+  crAPI implementation uses MongoDB. The crAPI SQL injection regression test exercises
+  `POST /workshop/api/shop/apply_coupon` instead. The benchmark fixture now requires a verified
+  SQL injection finding at that workshop route. Historical scorecards remain historical and do
+  not become passes by changing the answer key.
+- The authenticated unseeded crAPI scan `1763470d-c4f5-41c4-b708-7c18a6b263e3` still failed
+  the quality gate: no SQL injection request candidate and no object-authorization candidate
+  were tested. This correction does not claim either detector or authenticated discovery works.
