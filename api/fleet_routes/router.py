@@ -45,6 +45,7 @@ try:
     )
     from operator_auth import _fleet_bearer_credential, _require_fleet_operator
     import asm_inventory
+    import domain_rate
     import parallel_scan
     from artifact_storage import ArtifactStorageError, object_key as artifact_object_key, store_bytes as store_artifact_bytes, upsert_manifest as upsert_artifact_manifest
     from constants import resolve_or_consume_budget
@@ -94,6 +95,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from .. import target_resolution
     from ..operator_auth import _fleet_bearer_credential, _require_fleet_operator
     from .. import asm_inventory
+    from .. import domain_rate
     from .. import parallel_scan
     from ..artifact_storage import ArtifactStorageError, object_key as artifact_object_key, store_bytes as store_artifact_bytes, upsert_manifest as upsert_artifact_manifest
     from scanner.constants import resolve_or_consume_budget
@@ -2598,7 +2600,16 @@ async def _broker_reserve_request_budget(
     redis_client: Any,
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Reserve the same root-domain request budget before remote execution."""
+    """Fix the lease's HTTP request budget and admit its endpoints on the domain ledger.
+
+    Two units, never mixed: ``granted``/``request_max`` is the Scan's own HTTP request budget and
+    is never reduced by the root-domain quota; ``domain_rate`` records the endpoint units held on
+    the root domain's hourly ledger (``domain_rate`` module). Operator Scans are recorded there
+    without limit. A background Scan's immutable plan cannot be lowered at runtime, so it is
+    admitted whole with a token of at most its fair share of the cap, or waits (``None``) with the
+    reason recorded on the Scan. The hold is keyed by the Scan id so a re-lease tops it up instead
+    of taking a second one, and the ingest worker settles it with the measured result.
+    """
     options = dict(payload.get("options") or {})
     immutable_actions = bool(
         str(options.get("scan_action_plan_digest") or "").strip()
@@ -2635,12 +2646,28 @@ async def _broker_reserve_request_budget(
     root_domain = str((target or {}).get("root_domain") or "").strip().lower()
     config = asm_inventory.merge_asm_config(parse_json_field((target or {}).get("asm_config")) or {})
     cap = int(config.get("max_requests_per_hour_per_domain") or 0)
-    granted = requested
-    reservation_request = requested
+    adjusted_budget = dict(custom_budget)
+    adjusted_budget["request_max"] = requested
+    work = domain_rate.work_class(options)
+    try:
+        endpoints = domain_rate.planned_endpoints(
+            options, prepare=prepare_worker_dispatch, is_dast=is_deterministic_dast,
+        )
+    except Exception:  # legacy/non-canonical payloads carry no endpoint plan to hold
+        endpoints = 0
+    reservation_request = min(endpoints, cap) if cap > 0 else endpoints
     pending_sibling_count = 1
-    if root_domain and cap > 0:
+    endpoint_grant = endpoints
+    if root_domain and cap > 0 and endpoints > 0 and work == domain_rate.WORK_OPERATOR:
+        domain_rate.reserve(
+            redis_client, root_domain, entry_id=str(scan_id), requested=endpoints,
+            headroom=cap, enforce=False,
+        )
+    elif root_domain and cap > 0 and endpoints > 0:
         used = await asm_inventory.domain_tested_recently_count(conn, root_domain, hours=1)
         remaining = max(0, cap - int(used or 0))
+        wait = {"root_domain": root_domain, "cap": cap, "used": int(used or 0),
+                "requested": endpoints, "work_class": work, "all_or_nothing": True}
         parent_scan_id = (target or {}).get("parent_scan_id")
         if parent_scan_id and not immutable_actions:
             # A parallel parent owns one logical per-domain allowance. Without
@@ -2667,44 +2694,86 @@ async def _broker_reserve_request_budget(
             reserved = asm_inventory.reserved_domain_rate_count(redis_client, root_domain)
             unreserved = max(0, remaining - reserved)
             if unreserved <= 0:
+                payload["_domain_rate_wait"] = {**wait, "reserved": reserved}
                 return None
             fair_share = max(1, unreserved // pending_sibling_count)
-            reservation_request = min(requested, fair_share)
+            reservation_request = min(reservation_request, fair_share)
         try:
-            granted = asm_inventory.reserve_domain_rate(
+            endpoint_grant = asm_inventory.reserve_domain_rate(
                 redis_client,
                 root_domain,
                 remaining,
                 reservation_request,
-                all_or_nothing=immutable_actions,
+                entry_id=str(scan_id),
+                all_or_nothing=True,
             )
         except Exception:
             return None
-        if granted <= 0:
+        if endpoint_grant <= 0:
+            payload["_domain_rate_wait"] = {
+                **wait, "reserved": asm_inventory.reserved_domain_rate_count(redis_client, root_domain),
+            }
             return None
-    adjusted_budget = dict(custom_budget)
-    adjusted_budget["request_max"] = granted
     options["custom_budget"] = adjusted_budget
-    options["request_budget_reserved"] = granted
+    options["request_budget_reserved"] = requested
     if root_domain:
         options["request_budget_domain"] = root_domain
     payload["options"] = options
+    if root_domain and cap > 0 and endpoints > 0:
+        await conn.execute(
+            "UPDATE scans SET domain_rate_json=$2::jsonb WHERE id=$1",
+            scan_id, json.dumps(domain_rate.admitted_record({
+                "work_class": work, "root_domain": root_domain, "cap": cap,
+                "requested": endpoints, "granted": endpoints,
+            })),
+        )
     return {
         "requested": requested,
         "reservation_request": reservation_request,
-        "granted": granted,
+        "granted": requested,
         "root_domain": root_domain,
         "pending_sibling_count": pending_sibling_count,
         "custom_budget": adjusted_budget,
         "request_budget_mode": mode,
+        "domain_rate": {
+            "work_class": work,
+            "endpoints_requested": endpoints,
+            "endpoints_held": endpoint_grant,
+            "cap": cap,
+        },
     }
 
 
 async def _mark_broker_budget_wait(conn: Any, payload: Mapping[str, Any]) -> None:
-    """Expose a transient broker budget deferral without failing or bypassing it."""
+    """Expose a transient broker budget deferral without failing or bypassing it.
+
+    A root-domain quota wait carries its reason and estimated resume time on the Scan row.
+    """
     try:
         scan_id = uuid.UUID(str(payload.get("scan_id") or ""))
     except ValueError:
+        return
+    wait = payload.get("_domain_rate_wait") if isinstance(payload, dict) else None
+    if isinstance(payload, dict):
+        payload.pop("_domain_rate_wait", None)
+    if isinstance(wait, Mapping):
+        decision = dict(wait)
+        try:
+            decision["resume_at"] = await domain_rate.resume_estimate(conn, get_redis(), decision)
+        except Exception as exc:  # advisory only; the wait itself is still recorded
+            logger.warning("broker domain-rate resume estimate unavailable: %s", exc)
+        record = domain_rate.waiting_record(decision, wait_cycles=1, since=utc_now_iso())
+        await conn.execute(
+            """
+            UPDATE scans
+            SET current_phase=$2,
+                domain_rate_json=$3::jsonb || jsonb_build_object('waiting_since', COALESCE(
+                    CASE WHEN domain_rate_json->>'state' = 'waiting'
+                         THEN domain_rate_json->>'waiting_since' END, $4))
+            WHERE id=$1 AND status IN ('pending','queued')
+            """,
+            scan_id, domain_rate.WAITING_PHASE, json.dumps(record), record["waiting_since"],
+        )
         return
     await conn.execute(
         """

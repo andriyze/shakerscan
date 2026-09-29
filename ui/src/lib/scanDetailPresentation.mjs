@@ -27,12 +27,55 @@ export function scanFindingIdentity(finding) {
   ].join('|')
 }
 
-export function scanPhasePresentation(scan) {
+/** Local "about 16:40" for a quota resume estimate; `timeZone` is injectable for tests. */
+export function formatResumeTime(value, { timeZone } = {}) {
+  const date = new Date(String(value || ''))
+  if (!value || Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone }).format(date)
+}
+
+/** Plain-language explanation of the root domain's hourly test budget for one Scan.
+ *
+ *  The server's `domain_rate` object is authoritative: `state: 'waiting'` is only reported while
+ *  the Scan is still queued, and a `reduction` records exactly how a background Scan's budget was
+ *  lowered. Operator-submitted Scans are never waiting or reduced by this quota. */
+export function domainRatePresentation(scan, options = {}) {
+  const rate = record(record(scan).domain_rate)
+  const root = String(rate.root_domain || '').trim() || 'this domain'
+  const cap = finiteNumber(rate.cap_per_hour)
+  if (rate.state === 'waiting') {
+    const resume = formatResumeTime(rate.resume_estimate, options)
+    return {
+      kind: 'waiting',
+      label: `Waiting for ${root}'s hourly test budget${resume ? ` (resumes about ${resume})` : ''}`,
+      description: `This is background work. ${root} allows ${cap} tested endpoints per hour across its targets, `
+        + 'and that budget is in use by background testing or recent Scans. '
+        + (resume
+          ? `Testing resumes automatically when budget frees up, estimated about ${resume}.`
+          : 'Testing resumes automatically when budget frees up.'),
+    }
+  }
+  const reduction = record(rate.reduction)
+  if (Object.keys(reduction).length) {
+    return {
+      kind: 'reduced',
+      label: `Budget reduced by ${root}'s hourly test budget`,
+      description: String(reduction.reason || `Granted ${finiteNumber(reduction.granted)} of ${finiteNumber(reduction.requested)} endpoints.`),
+    }
+  }
+  return null
+}
+
+export function scanPhasePresentation(scan, options = {}) {
   const status = String(record(scan).status || 'pending').toLowerCase()
   const rawPhase = String(record(scan).current_phase || '').trim().toLowerCase()
   const progress = Math.max(0, Math.min(100, finiteNumber(record(scan).progress)))
 
   if (status === 'pending' || status === 'queued') {
+    const quota = domainRatePresentation(scan, options)
+    if (quota?.kind === 'waiting') {
+      return { label: quota.label, description: quota.description, progress }
+    }
     return {
       label: 'Waiting for a worker',
       description: 'The scan is queued. Testing will begin as soon as a compatible worker is available.',

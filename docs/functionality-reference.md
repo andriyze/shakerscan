@@ -565,7 +565,7 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
 
 - Endpoint identity includes auth state, HTTP method, normalized path, and parameter location/shape,
   so the same path under anonymous/user1/user2 is tracked as distinct coverage obligations.
-- The dispatcher reserves per-root-domain rate budget in Redis before queueing, claims rows with
+- The dispatcher holds per-root-domain test budget (see below) before queueing, claims rows with
   `FOR UPDATE SKIP LOCKED` under durable leases, and never stacks load on a target.
 - Coverage derives from a normalized **attempt ledger** (`asm_endpoint_attempts`): an endpoint is only
   marked `tested` when scanner telemetry proves it was attempted/completed. Timeouts/partial results
@@ -580,6 +580,33 @@ coverage over time within safe budgets and allowed windows (`api/asm_inventory.p
   target-scoped hypothesis situation report. The embedded hypothesis report surfaces proof leads and
   missing preconditions next to coverage state, but it does not queue work, create findings, or change
   proof state.
+
+#### Per-root-domain hourly test budget
+
+`max_requests_per_hour_per_domain` in a target's ASM config (default
+`ASM_DEFAULT_DOMAIN_RATE_PER_HOUR`, 1000; `0` = unlimited) is, despite its historical name, a
+count of **endpoints tested per rolling hour across every target that shares a root domain**
+(`api/domain_rate.py`). It exists so auto-enabled Continuous ASM on many subdomains cannot
+collectively hammer one domain. The unit is always endpoints; a Scan's HTTP request budget is a
+separate ceiling that this quota never reserves or lowers.
+
+| Work | Examples | Treatment |
+|---|---|---|
+| **Background** (governed) | Continuous ASM endpoint batches (dispatcher, scheduled "ASM improve" waves, manually queued ASM test batches), ASM recon Scans, scheduled Scans (`options.admission_origin = "schedule"`), and the parallel children of those Scans | Admitted only while the domain has headroom. Otherwise the Scan stays `queued`/`pending` with `current_phase = waiting_for_domain_rate` and a `domain_rate` object on `GET /scans/{id}` carrying the reason and `resume_estimate`; the UI shows "Waiting for example.com's hourly test budget (resumes about 16:40)". A Scan's immutable plan cannot be lowered at runtime, so a background Scan is admitted whole, holding at most one hour's cap (or its fair share among parallel siblings) as its token, or waits. An ASM batch can be reduced: unadmitted claimed endpoints return to the inventory and the reduction is recorded as `domain_rate.reduction`, `scan_metadata.domain_rate_reduction` and a coverage reason, shown on the Scan page. |
+| **Operator** (never limited) | Scans submitted through `POST /scans` or `POST /targets/{id}/scan` (UI, API, client, MCP and Hunt-dispatched Scans), their parallel children, device web children (finding retests never passed through this quota and stay outside it) | Never delayed or reduced by this quota: they are explicit, authorized and already bounded by their budget profile and the engine's per-host request pacing. Their planned endpoints are still held while they run and their tested endpoints (`coverage.active_execution.endpoints_tested`) are recorded when they finish, so background work on the same domain backs off afterwards. `domain_rate.work_class = "operator"` records this on the Scan. |
+
+The ledger is two Redis keys per root domain, mutated only by Lua scripts that use the Redis server
+clock, so the API dispatcher, local workers and HTTPS-broker leases share one atomic view. Each
+reservation is its own entry (keyed by Scan id or the dispatcher's hold id): a retry tops up the
+same hold instead of taking a second one; when the job ends (success, failure or cancellation) the
+unused remainder is released and only the used part stays for one window. Work that never started
+releases everything; work that ran without a measurement keeps what it held. ASM batches stamp their
+tested endpoints in `target_endpoints.last_tested_at` and record only the unstamped remainder, so
+completed work is counted once (database window + ledger). Every entry expires on its own (an
+abandoned hold after one hour), so a busy domain decays continuously instead of being kept locked by
+a refreshed shared TTL. The ASM scheduler state in `GET /targets/{id}/asm/policy`, `/asm/gaps` and `/asm/activity` reports `domain_rate_cap`,
+`domain_rate_used` (database window) and `domain_rate_reserved` (ledger). A waiting background job
+re-checks every `DOMAIN_RATE_REQUEUE_DELAY_SECONDS` (default 60).
 
 Current execution design: [`docs/dast-asm-architecture.md`](dast-asm-architecture.md).
 
