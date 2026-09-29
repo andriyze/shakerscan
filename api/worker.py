@@ -5702,35 +5702,6 @@ async def _reserve_target_domain_endpoint_budget(
     return rate
 
 
-def _domain_rate_wait_cycles(r, job_data: dict[str, Any], job_id: str) -> int:
-    if isinstance(job_data.get("_canonical_queue_payload"), Mapping):
-        previous = _redis_scalar_text(r.hget(f"job:{job_id}", "domain_rate_wait_cycles"))
-    else:
-        previous = job_data.get("domain_rate_wait_cycles")
-    return int(previous or 0) + 1
-
-
-async def _record_domain_rate_wait(
-    conn, r, job_data: dict[str, Any], *, job_id: str, scan_id: str, rate: dict[str, Any],
-    status: str, from_statuses: tuple[str, ...],
-) -> str:
-    """Park the Scan row with the quota reason and estimated resume time (API and UI read it)."""
-    record = domain_rate.waiting_record(
-        rate, wait_cycles=_domain_rate_wait_cycles(r, job_data, job_id), since=utc_now_iso(),
-    )
-    return await conn.execute(
-        """UPDATE scans
-           SET status=$2, current_phase=$3, started_at=NULL,
-               progress=LEAST(COALESCE(progress, 0), 5),
-               domain_rate_json=$4::jsonb || jsonb_build_object('waiting_since', COALESCE(
-                   CASE WHEN domain_rate_json->>'state' = 'waiting'
-                        THEN domain_rate_json->>'waiting_since' END, $5))
-           WHERE id=$1 AND status = ANY($6::text[])""",
-        uuid.UUID(str(scan_id)), status, domain_rate.WAITING_PHASE, json.dumps(record),
-        record["waiting_since"], list(from_statuses),
-    )
-
-
 async def _requeue_for_domain_rate(
     r,
     job_data: dict[str, Any],
@@ -5742,7 +5713,7 @@ async def _requeue_for_domain_rate(
     rate: dict[str, Any],
 ) -> None:
     canonical_queue = isinstance(job_data.get("_canonical_queue_payload"), Mapping)
-    wait_cycles = _domain_rate_wait_cycles(r, job_data, job_id)
+    wait_cycles = domain_rate.wait_cycles(r, job_data, job_id)
     requeued = _safe_requeue_payload(job_data)
     if not canonical_queue:
         requeued["domain_rate_wait_cycles"] = wait_cycles
@@ -13382,7 +13353,7 @@ async def _admit_scan_on_domain_rate(
         return None
     if granted <= 0 and rate.get("limited"):
         async with db_pool.acquire() as conn:
-            await _record_domain_rate_wait(
+            await domain_rate.record_wait(
                 conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
                 status="queued", from_statuses=("pending", "queued", "running"),
             )
@@ -16338,7 +16309,7 @@ async def process_scan_shard_job(job_data: dict):
             _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
             async with db_pool.acquire() as conn:
-                await _record_domain_rate_wait(
+                await domain_rate.record_wait(
                     conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
                     status="queued", from_statuses=("pending", "queued"),
                 )
@@ -17667,7 +17638,7 @@ async def process_exploit_batch_job(job_data: dict):
             _release_parallel_shard_slot(r, parent_id, job_id)
             slot_acquired = False
         async with db_pool.acquire() as conn:
-            released_claim = await _record_domain_rate_wait(
+            released_claim = await domain_rate.record_wait(
                 conn, r, job_data, job_id=job_id, scan_id=scan_id, rate=rate,
                 status="pending", from_statuses=("running",),
             )

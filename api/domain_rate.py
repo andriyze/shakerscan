@@ -391,6 +391,34 @@ def waiting_record(decision: Mapping[str, Any], *, wait_cycles: int, since: str 
     }
 
 
+def wait_cycles(redis_client: Any, job_data: Mapping[str, Any], job_id: str) -> int:
+    if isinstance(job_data.get("_canonical_queue_payload"), Mapping):
+        previous = redis_client.hget(f"job:{job_id}", "domain_rate_wait_cycles")
+    else:
+        previous = job_data.get("domain_rate_wait_cycles")
+    return _int(previous) + 1
+
+
+async def record_wait(conn: Any, redis_client: Any, job_data: Mapping[str, Any], *,
+                      job_id: str, scan_id: str, rate: Mapping[str, Any], status: str,
+                      from_statuses: tuple[str, ...]) -> str:
+    """Park a Scan with a durable quota reason and estimated resume time."""
+    since = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    record = waiting_record(rate, wait_cycles=wait_cycles(redis_client, job_data, job_id),
+                            since=since)
+    return await conn.execute(
+        """UPDATE scans
+           SET status=$2, current_phase=$3, started_at=NULL,
+               progress=LEAST(COALESCE(progress, 0), 5),
+               domain_rate_json=$4::jsonb || jsonb_build_object('waiting_since', COALESCE(
+                   CASE WHEN domain_rate_json->>'state' = 'waiting'
+                        THEN domain_rate_json->>'waiting_since' END, $5))
+           WHERE id=$1 AND status = ANY($6::text[])""",
+        uuid.UUID(str(scan_id)), status, WAITING_PHASE, json.dumps(record),
+        record["waiting_since"], list(from_statuses),
+    )
+
+
 def unadmittable_record(decision: Mapping[str, Any]) -> dict[str, Any]:
     """Explain an immutable background plan larger than its configured hourly cap."""
     root = str(decision.get("root_domain") or "this domain")
