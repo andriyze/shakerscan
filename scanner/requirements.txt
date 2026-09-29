@@ -11,7 +11,7 @@ asyncpg>=0.29.0
 redis>=5.0.0
 
 # Scanner dependencies
-playwright==1.62.0
+playwright==1.63.0
 PyJWT>=2.8.0
 httpx>=0.26.0
 aiohttp>=3.14.3
@@ -23,9 +23,9 @@ defusedxml>=0.7.1
 
 # Python security tools and their direct runtime integrations. Keep scanner
 # executables exact; the generated lock pins every transitive dependency.
-sqlmap==1.10.5
+sqlmap==1.10.9
 certifi>=2026.6.17
-cryptography>=50.0.0
+cryptography>=50.0.1
 dnspython>=2.8.0
 pyOpenSSL>=26.0.0
 python-whois>=0.9.6
