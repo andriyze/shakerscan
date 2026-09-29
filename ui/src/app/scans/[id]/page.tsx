@@ -256,7 +256,9 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 {resultPresentation.coverageIncomplete
                   ? resultPresentation.incompleteFamilies.length > 0
                     ? `Scores the work that ran; ${resultPresentation.incompleteFamilies.length} selected check ${resultPresentation.incompleteFamilies.length === 1 ? 'family' : 'families'} did not finish.`
-                    : 'Scores the work that ran; the run did not finish everything it planned.'
+                    : resultPresentation.candidateGapFamilies.length > 0
+                      ? 'Scores the work that ran; some selected checks had no testable candidates.'
+                      : 'Scores the work that ran; review the coverage limits below.'
                   : 'How much planned work, candidate testing, identity coverage and verification ran.'}
               </p>
             </>
@@ -378,7 +380,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
               {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}
               {resultPresentation.coverageIncomplete && (
                 <li className="text-amber-100/60">
-                  Findings above are real; absence of a finding in an unfinished family is not evidence of safety. Coverage details are in the execution section below.
+                  Findings above are real; missing or incomplete coverage does not establish absence of vulnerabilities. Coverage details are in the execution section below.
                 </li>
               )}
             </ul>

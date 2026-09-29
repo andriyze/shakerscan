@@ -462,7 +462,9 @@ export function scanResultPresentation(scan, assurance) {
     : weakExamination
     ? `${assuranceLabel} — this is not a clean bill of health.`
     : coverageIncomplete
-      ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+      ? incompleteFamilies.length > 0
+        ? `${assuranceLabel} for the work that ran, but the run did not finish everything it planned; the conclusion is limited to what completed.`
+        : `${assuranceLabel} for the work that ran; the listed coverage gaps limit what can be concluded from this run.`
       : `${assuranceLabel} supports this run-level conclusion.`
   const coverageGapReasons = coverageReasons.map((reason) => COVERAGE_REASON_LABELS[String(reason)] || String(reason || '').replaceAll('_', ' ')).filter(Boolean)
   const nextSteps = nextStepsFor({

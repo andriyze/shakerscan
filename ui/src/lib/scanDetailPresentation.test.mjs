@@ -89,6 +89,8 @@ test('selected active families without candidate actions are named as examinatio
   assert.deepEqual(result.candidateGapFamilies, ['xss', 'sqli', 'bola'])
   assert.equal(result.coverageIncomplete, true)
   assert.doesNotMatch(result.confidence, /supports this run-level conclusion/)
+  assert.doesNotMatch(result.confidence, /did not finish everything it planned/)
+  assert.match(result.confidence, /listed coverage gaps limit/)
 })
 
 test('an unobservable application leads with not examined instead of clean', () => {
