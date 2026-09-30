@@ -25,7 +25,7 @@ export class ErrorBoundary extends Component<Props, { hasError: boolean }> {
     if (this.state.hasError) {
       if (this.props.fallback !== undefined) return this.props.fallback
       return (
-        <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200">
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/6 px-4 py-3 text-sm text-amber-200">
           Couldn’t load {this.props.label || 'this section'}. The rest of the page is unaffected.
         </div>
       )

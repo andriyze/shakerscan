@@ -38,7 +38,7 @@ export function LastUpdated({
           onClick={onRefresh}
           disabled={refreshing}
           aria-label="Refresh"
-          className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
+          className="rounded-sm p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
         </button>

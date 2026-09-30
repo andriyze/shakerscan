@@ -613,7 +613,7 @@ export default function NewScanPage() {
                   ['standard_active', 'Standard active', 'Passive coverage plus XSS and SQLi'],
                   ['custom', 'Custom', 'Choose an exact family set'],
                 ] as const).map(([value, label, description]) => (
-                  <label key={value} className={`rounded border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>
+                  <label key={value} className={`rounded-sm border p-3 ${familyPreset === value ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800'}`}>
                     <span className="flex items-start gap-2">
                       <input type="radio" name="family-preset" value={value} checked={familyPreset === value} disabled={value === 'standard_active' && !activeTesting} onChange={() => setFamilyPreset(value)} />
                       <span><span className="block text-sm font-medium text-gray-200">{label}</span><span className="mt-1 block text-xs text-gray-500">{description}</span></span>
@@ -624,7 +624,7 @@ export default function NewScanPage() {
               {familyPreset === 'custom' && (
                 <div className="mt-3 grid gap-2 md:grid-cols-2">
                   {scanContract.families.map((family) => (
-                    <label key={family.name} className={`flex items-start gap-3 rounded border border-gray-800 p-3 text-xs ${family.requires_active_testing && !activeTesting ? 'text-gray-600' : 'text-gray-300'}`}>
+                    <label key={family.name} className={`flex items-start gap-3 rounded-sm border border-gray-800 p-3 text-xs ${family.requires_active_testing && !activeTesting ? 'text-gray-600' : 'text-gray-300'}`}>
                       <input
                         type="checkbox"
                         disabled={family.requires_active_testing && !activeTesting}
@@ -636,7 +636,7 @@ export default function NewScanPage() {
                   ))}
                 </div>
               )}
-              <div className="mt-3 rounded border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
+              <div className="mt-3 rounded-sm border border-gray-800 bg-black/20 p-3 text-xs text-gray-400">
                 <span className="font-medium text-gray-200">Resolved families:</span> {resolvedFamilies.length ? resolvedFamilies.join(', ') : 'none'}
                 {contractPreview && Object.keys(contractPreview.minimum_family_quotas).length > 0 && (
                   <span className="mt-1 block">Minimum attempts: {Object.entries(contractPreview.minimum_family_quotas).map(([family, quota]) => `${family} ${quota}`).join(' · ')}</span>
@@ -675,7 +675,7 @@ export default function NewScanPage() {
               </span>
             </label>}
           </div>
-          <div className="mt-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
+          <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
             <p>Placement preview: {workerStats ? placementPreviewLabel(topology, currentWorkerCount) : 'checking compatible current workers…'}.</p>
             <p className="mt-1">Compatible current workers: <strong className="font-medium text-gray-300">{workerStats ? currentWorkerCount : '—'}</strong>{workerStats && <> · stale {staleWorkers} · identity pending {pendingWorkers}</>}</p>
             <p className="mt-1 break-all">Expected build: <span className="font-mono text-gray-300">{workerStats?.expected_build_fingerprint || 'unavailable'}</span></p>

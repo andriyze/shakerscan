@@ -97,7 +97,7 @@ function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => 
       type="button"
       onClick={onClear}
       aria-label={`Remove filter: ${label}`}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
     >
       <span className="max-w-64 truncate">{label}</span>
       <span aria-hidden="true">×</span>
@@ -536,7 +536,7 @@ function FindingsContent() {
           list defaulting to every historical row buried this scan's real
           results among months-old ones. */}
       <div className="flex flex-wrap items-center gap-3">
-        <div className="inline-flex rounded border border-gray-800 bg-gray-900/60 p-0.5" role="group" aria-label="Finding freshness">
+        <div className="inline-flex rounded-sm border border-gray-800 bg-gray-900/60 p-0.5" role="group" aria-label="Finding freshness">
           {([
             ['current', 'Current', `Seen by a scan in the last ${STALE_AFTER_DAYS} days`],
             ['stale', 'Not seen recently', `Not observed by any scan in the last ${STALE_AFTER_DAYS} days`],
@@ -699,7 +699,7 @@ function FindingsContent() {
                 <input
                   type="checkbox"
                   aria-label="Select findings on this page"
-                  className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500"
+                  className="h-4 w-4 rounded-sm border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500"
                   checked={allOnPageSelected}
                   onChange={(event) => setSelectedIds(new Set(event.target.checked ? selectableFindings.map((finding) => finding.id) : []))}
                 />

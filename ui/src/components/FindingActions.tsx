@@ -86,7 +86,7 @@ export default function FindingActions({
             setIsExpanded(true)
           }}
           aria-label="Finding status"
-          className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
+          className="bg-gray-800 border border-gray-700 rounded-sm px-2 py-1 text-xs focus:outline-hidden focus:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50"
         >
           {STATUS_OPTIONS.map(option => (
             <option key={option.value} value={option.value}>
@@ -98,7 +98,7 @@ export default function FindingActions({
           type="button"
           onClick={() => setIsExpanded(!isExpanded)}
           aria-expanded={isExpanded}
-          className="rounded text-gray-500 text-xs hover:text-gray-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm text-gray-500 text-xs hover:text-gray-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           {isExpanded ? 'Hide' : 'Add notes'}
         </button>
@@ -110,7 +110,7 @@ export default function FindingActions({
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Add notes about this finding..."
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-none"
+            className="w-full bg-gray-800 border border-gray-700 rounded-sm px-3 py-2 text-sm text-gray-300 placeholder-gray-500 focus:outline-hidden focus:border-blue-500 resize-none"
             rows={2}
           />
           <div className="flex gap-2">
@@ -118,7 +118,7 @@ export default function FindingActions({
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-sm disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {saving ? 'Saving...' : 'Save'}
             </button>
@@ -130,7 +130,7 @@ export default function FindingActions({
                 setIsExpanded(false)
               }}
               disabled={saving}
-              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-sm disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               Cancel
             </button>

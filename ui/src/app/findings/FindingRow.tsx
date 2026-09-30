@@ -53,7 +53,7 @@ export function FindingRow({
               aria-label={`Select finding ${finding.title}`}
               checked={selected}
               onChange={(event) => onToggle(event.target.checked)}
-              className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500"
+              className="h-4 w-4 rounded-sm border-gray-600 bg-gray-900 text-blue-600 focus:ring-blue-500"
             />
           )}
         </div>
@@ -62,7 +62,7 @@ export function FindingRow({
         href={href}
         className={cn(
           'block min-w-0 flex-1 py-3.5 pr-4 transition-colors hover:bg-gray-800/50',
-          'focus:outline-none focus-visible:bg-gray-800/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500',
+          'focus:outline-hidden focus-visible:bg-gray-800/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500',
           selecting ? 'pl-1' : 'pl-4'
         )}
       >

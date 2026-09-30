@@ -440,7 +440,7 @@ function renderFindingEvidence(finding: any) {
   const evidence = finding.evidence || finding.description
   const text = renderGenericEvidence(evidence)
   if (!text) return null
-  return <p className="text-gray-300 text-sm mt-1 whitespace-pre-wrap break-words">{text}</p>
+  return <p className="text-gray-300 text-sm mt-1 whitespace-pre-wrap wrap-break-word">{text}</p>
 }
 
 // Keep the engineer-facing AIBOM prominent; generic package-manager exports
@@ -492,28 +492,28 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
             type="button"
             onClick={() => download('aibom')}
             disabled={busy === 'aibom'}
-            className="inline-flex items-center gap-2 rounded border border-cyan-700 px-3 py-1.5 text-sm font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-sm border border-cyan-700 px-3 py-1.5 text-sm font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
           >
             <Download className="h-4 w-4" />
             {busy === 'aibom' ? 'Exporting…' : 'AIBOM'}
           </button>
         )}
-        <details className="rounded border border-gray-600 px-3 py-1.5 text-left text-sm text-gray-200">
+        <details className="rounded-sm border border-gray-600 px-3 py-1.5 text-left text-sm text-gray-200">
           <summary className="cursor-pointer select-none">More inventory exports</summary>
           <div className="mt-3 grid gap-2">
-            <button type="button" onClick={() => download('cyclonedx')} disabled={busy === 'cyclonedx'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+            <button type="button" onClick={() => download('cyclonedx')} disabled={busy === 'cyclonedx'} className="inline-flex items-center gap-2 rounded-sm border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
               <Download className="h-4 w-4" />
               {busy === 'cyclonedx' ? 'Exporting…' : `SBOM (CycloneDX ${summary.spec_version || '1.5'})`}
             </button>
-            <button type="button" onClick={() => download('spdx')} disabled={busy === 'spdx'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+            <button type="button" onClick={() => download('spdx')} disabled={busy === 'spdx'} className="inline-flex items-center gap-2 rounded-sm border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
               <Download className="h-4 w-4" />
               {busy === 'spdx' ? 'Exporting…' : 'SBOM (SPDX 2.3)'}
             </button>
-            <button type="button" onClick={() => downloadLicense('license-bom')} disabled={busy === 'license-bom'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+            <button type="button" onClick={() => downloadLicense('license-bom')} disabled={busy === 'license-bom'} className="inline-flex items-center gap-2 rounded-sm border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
               <Download className="h-4 w-4" />
               {busy === 'license-bom' ? 'Exporting…' : 'License BOM'}
             </button>
-            <button type="button" onClick={() => downloadLicense('third-party-notices')} disabled={busy === 'third-party-notices'} className="inline-flex items-center gap-2 rounded border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
+            <button type="button" onClick={() => downloadLicense('third-party-notices')} disabled={busy === 'third-party-notices'} className="inline-flex items-center gap-2 rounded-sm border border-gray-600 px-3 py-1.5 hover:bg-gray-700 disabled:opacity-50">
               <Download className="h-4 w-4" />
               {busy === 'third-party-notices' ? 'Exporting…' : 'Notices draft'}
             </button>
@@ -1003,7 +1003,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="min-w-0">
             {isModelIntakeScan ? (
               <>
-                <h1 className="text-2xl sm:text-3xl font-bold mb-1 break-words">{modelIntakeArtifactLabel}</h1>
+                <h1 className="text-2xl sm:text-3xl font-bold mb-1 wrap-break-word">{modelIntakeArtifactLabel}</h1>
                 {fullArtifactUrl && (
                   <details className="mb-2">
                     <summary className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer select-none">
@@ -1041,16 +1041,16 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <ExportPDFButton />
               {isAuthenticated && (isAIScan || isModelIntakeScan) && (
                 <>
-                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('markdown')} className="px-3 py-2 rounded-sm border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
                     AI Report MD
                   </button>
-                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={() => handleDownloadAIRedTeamReport('json')} className="px-3 py-2 rounded-sm border border-purple-500/60 text-purple-300 text-sm hover:bg-purple-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
                     AI Report JSON
                   </button>
                 </>
               )}
               {isAuthenticated && (
-                <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded-sm border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
                   Download JSON
                 </button>
               )}
@@ -1149,19 +1149,19 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           {deviceDecision.rationale && <p className="mt-3 text-sm text-gray-300">{String(deviceDecision.rationale)}</p>}
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/40 p-3">
               <div className="text-xl font-semibold text-white">{deviceServices.length}</div>
               <div className="text-xs text-gray-500">Confirmed services</div>
             </div>
-            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/40 p-3">
               <div className="text-xl font-semibold text-white">{deviceWebOrigins.length}</div>
               <div className="text-xs text-gray-500">Web interfaces</div>
             </div>
-            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/40 p-3">
               <div className="text-xl font-semibold text-amber-200">{deviceObservations.length}</div>
               <div className="text-xs text-gray-500">Inconclusive observations</div>
             </div>
-            <div className="rounded border border-gray-700 bg-gray-950/40 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/40 p-3">
               <div className={`text-xl font-semibold ${deviceCompleteness.complete ? 'text-green-300' : 'text-amber-300'}`}>
                 {deviceCompleteness.complete ? 'Complete' : 'Partial'}
               </div>
@@ -1170,7 +1170,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
 
           <div className="mt-4 grid gap-4 xl:grid-cols-2">
-            <div className="rounded border border-gray-700 bg-gray-950/30 p-4">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/30 p-4">
               <h3 className="text-sm font-semibold text-gray-200">Confirmed listening services</h3>
               {deviceServices.length === 0 ? (
                 <p className="mt-3 text-sm text-gray-500">No service was confirmed open.</p>
@@ -1195,18 +1195,18 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               )}
             </div>
 
-            <div className="rounded border border-gray-700 bg-gray-950/30 p-4">
+            <div className="rounded-sm border border-gray-700 bg-gray-950/30 p-4">
               <h3 className="text-sm font-semibold text-gray-200">Inconclusive network observations</h3>
               {deviceObservations.length === 0 ? (
                 <p className="mt-3 text-sm text-gray-500">No ambiguous port states were returned.</p>
               ) : (
                 <div className="mt-3 space-y-2">
                   {deviceObservations.map((observation: any) => (
-                    <div key={`${observation.transport}-${observation.port}`} className="rounded border border-amber-500/20 bg-amber-950/10 p-3">
+                    <div key={`${observation.transport}-${observation.port}`} className="rounded-sm border border-amber-500/20 bg-amber-950/10 p-3">
                       <div className="flex flex-wrap items-center gap-2 text-sm">
                         <span className="font-mono text-amber-100">{observation.port}/{observation.transport}</span>
                         <span className="text-gray-300">{observation.service_name || 'unknown'}</span>
-                        <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-xs text-amber-200">{observation.state || 'inconclusive'}</span>
+                        <span className="rounded-sm bg-amber-900/40 px-1.5 py-0.5 text-xs text-amber-200">{observation.state || 'inconclusive'}</span>
                         {observation.state_reason && <span className="text-xs text-gray-500">{observation.state_reason}</span>}
                       </div>
                       <p className="mt-1 text-xs text-gray-500">{observation.observation_reason || 'No response confirmed whether a service is listening.'}</p>
@@ -1217,7 +1217,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
           </div>
 
-          <details className="mt-4 rounded border border-gray-700 bg-gray-950/30">
+          <details className="mt-4 rounded-sm border border-gray-700 bg-gray-950/30">
             <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-200">Inventory stage evidence</summary>
             <div className="border-t border-gray-800 p-4">
               <div className="mb-3 flex flex-wrap gap-2 text-xs text-gray-400">
@@ -1230,7 +1230,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
               <div className="grid gap-2 md:grid-cols-2">
                 {deviceToolReceipts.map((receipt: any, index: number) => (
-                  <div key={`${receipt.stage || receipt.transport}-${index}`} className="rounded border border-gray-800 bg-black/20 p-3 text-xs">
+                  <div key={`${receipt.stage || receipt.transport}-${index}`} className="rounded-sm border border-gray-800 bg-black/20 p-3 text-xs">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium text-gray-200">{String(receipt.stage || receipt.transport || 'stage').replace(/_/g, ' ')}</span>
                       <span className={receipt.complete ? 'text-green-300' : receipt.required === false ? 'text-gray-400' : 'text-amber-300'}>
@@ -1284,19 +1284,19 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {scanCompletionStatus.complete === false ? 'Scan Coverage Incomplete' : 'Scan Coverage Limited'}
                 </h2>
                 {scanCompletionStatus.coverage_status && (
-                  <span className="rounded bg-gray-900 px-2 py-0.5 text-xs text-gray-300">
+                  <span className="rounded-sm bg-gray-900 px-2 py-0.5 text-xs text-gray-300">
                     Module coverage: {formatScanToken(scanCompletionStatus.coverage_status)}
                   </span>
                 )}
                 {scanCompletionStatus.budget_exhausted && (
-                  <span className="rounded bg-yellow-900 px-2 py-0.5 text-xs text-yellow-100">
+                  <span className="rounded-sm bg-yellow-900 px-2 py-0.5 text-xs text-yellow-100">
                     Budget exhausted{scanCompletionStatus.budget_exhausted_at ? `: ${formatScanToken(scanCompletionStatus.budget_exhausted_at)}` : ''}
                   </span>
                 )}
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 {completionCappedEntries.length > 0 && (
-                  <div className="rounded border border-gray-800 bg-black/20 p-3">
+                  <div className="rounded-sm border border-gray-800 bg-black/20 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Capped Coverage</div>
                     <div className="space-y-1">
                       {completionCappedEntries.map(([name, cap]: [string, any]) => (
@@ -1312,17 +1312,17 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   </div>
                 )}
                 {completionSkippedModules.length > 0 && (
-                  <div className="rounded border border-gray-800 bg-black/20 p-3">
+                  <div className="rounded-sm border border-gray-800 bg-black/20 p-3">
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Skipped Modules</div>
                     <div className="flex flex-wrap gap-2">
                       {completionSkipViews.items.map((skip) => (
-                        <span key={skip.key} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">
+                        <span key={skip.key} className="rounded-sm bg-gray-900 px-2 py-1 text-xs text-gray-300">
                           {formatScanToken(skip.label)}
                           {skip.reason ? `: ${formatScanToken(skip.reason)}` : ''}
                         </span>
                       ))}
                       {completionSkipViews.remaining > 0 && (
-                        <span className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-500">
+                        <span className="rounded-sm bg-gray-900 px-2 py-1 text-xs text-gray-500">
                           +{completionSkipViews.remaining} more
                         </span>
                       )}
@@ -1347,15 +1347,15 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {aiGateDecisionText && (
-                <span className={`rounded px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
+                <span className={`rounded-sm px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
                   {aiGateDecisionText.replace('_', ' ')}
                 </span>
               )}
               {ai_gate.probe_pack && (
-                <span className="rounded bg-blue-900/40 px-3 py-1 text-sm text-blue-200">Probe pack: {formatAIProbePack(ai_gate.probe_pack)}</span>
+                <span className="rounded-sm bg-blue-900/40 px-3 py-1 text-sm text-blue-200">Probe pack: {formatAIProbePack(ai_gate.probe_pack)}</span>
               )}
               {ai_gate.scan_profile && (
-                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">Depth: {formatAIProfile(ai_gate.scan_profile)}</span>
+                <span className="rounded-sm bg-gray-700 px-3 py-1 text-sm text-gray-200">Depth: {formatAIProfile(ai_gate.scan_profile)}</span>
               )}
             </div>
           </div>
@@ -1384,12 +1384,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {aiGateTopFinding?.title ? ` · top issue: ${aiGateTopFinding.title}` : ''}
                 </p>
               </div>
-              <span className={`rounded px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
+              <span className={`rounded-sm px-3 py-1 text-sm font-medium ${aiGateDecisionClass}`}>
                 {aiGateDecision.decision || 'unknown'}
               </span>
             </div>
             {aiGateRecommendedFixes.length > 0 && (
-              <div className="mt-4 rounded border border-gray-800 bg-black/20 p-3">
+              <div className="mt-4 rounded-sm border border-gray-800 bg-black/20 p-3">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Fix first</div>
                 <div className="grid gap-2 md:grid-cols-2">
                   {aiGateRecommendedFixes.slice(0, 6).map((fix) => (
@@ -1430,7 +1430,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <div className="mb-5 flex flex-wrap gap-2">
               {Object.entries(aiGateSeverityCounts).map(([severity, count]) => (
                 Number(count) > 0 && (
-                  <span key={severity} className={`rounded px-2 py-1 text-xs font-medium ${getSeverityPill(severity)}`}>
+                  <span key={severity} className={`rounded-sm px-2 py-1 text-xs font-medium ${getSeverityPill(severity)}`}>
                     {severity}: {Number(count)}
                   </span>
                 )
@@ -1450,13 +1450,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     {aiGateControlEvidence.summary.present || 0} present / {aiGateControlEvidence.summary.required || 0} required controls
                   </p>
                 </div>
-                <span className={`rounded px-2 py-1 text-xs font-medium ${aiGateControlEvidence.summary.evidence_ready ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+                <span className={`rounded-sm px-2 py-1 text-xs font-medium ${aiGateControlEvidence.summary.evidence_ready ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                   {aiGateControlEvidence.summary.evidence_ready ? 'evidence ready' : `${aiGateControlEvidence.summary.missing || 0} missing`}
                 </span>
               </div>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {(aiGateControlEvidence.controls || []).slice(0, 12).map((control: any) => (
-                  <div key={control.id} className="rounded border border-gray-800 bg-black/20 p-2">
+                  <div key={control.id} className="rounded-sm border border-gray-800 bg-black/20 p-2">
                     <div className="text-xs font-medium text-gray-200">{control.label}</div>
                     <div className={`mt-1 text-xs ${control.status === 'present' ? 'text-green-300' : 'text-yellow-300'}`}>
                       {control.status}
@@ -1476,7 +1476,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     {aiGateCoverageSummary.executed ?? 0} executed / {aiGateCoverageSummary.planned ?? 0} planned probes
                   </p>
                 </div>
-                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">
+                <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">
                   skipped {aiGateCoverageSummary.skipped ?? 0}
                 </span>
               </div>
@@ -1484,7 +1484,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {Object.entries(asRecord(aiGateCoverage.by_family)).slice(0, 8).map(([family, stats]) => {
                   const familyStats = asRecord(stats)
                   return (
-                    <div key={family} className="rounded border border-gray-800 bg-black/20 p-2">
+                    <div key={family} className="rounded-sm border border-gray-800 bg-black/20 p-2">
                       <div className="truncate text-xs font-medium text-gray-200">{family}</div>
                       <div className="mt-1 text-xs text-gray-500">
                         {familyStats.executed ?? 0}/{familyStats.planned ?? 0} run · {familyStats.with_findings ?? 0} findings
@@ -1503,20 +1503,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <h3 className="text-sm font-semibold text-gray-300">Findings by Probe</h3>
                   <p className="mt-1 text-xs text-gray-500">What failed, grouped by the probe that produced accepted attack evidence.</p>
                 </div>
-                <span className="rounded bg-red-900/40 px-2 py-1 text-xs text-red-200">
+                <span className="rounded-sm bg-red-900/40 px-2 py-1 text-xs text-red-200">
                   {aiGateFailedProbeCount} failed probe{aiGateFailedProbeCount === 1 ? '' : 's'}
                 </span>
               </div>
               <div className="grid gap-3 lg:grid-cols-3">
                 {aiGateProbeSummaries.filter((probe) => probe.findings.length > 0).map((probe) => (
-                  <div key={probe.probeId} className="rounded border border-red-500/30 bg-red-950/10 p-3">
+                  <div key={probe.probeId} className="rounded-sm border border-red-500/30 bg-red-950/10 p-3">
                     <div className="font-mono text-xs text-red-200">{probe.probeId}</div>
                     <div className="mt-1 text-xs text-gray-500">{probe.family} · {probe.findings.length} finding{probe.findings.length === 1 ? '' : 's'}</div>
                     <div className="mt-3 space-y-2">
                       {probe.findings.slice(0, 4).map((finding: any) => (
-                        <div key={finding.id || finding.title} className="rounded bg-black/20 p-2">
+                        <div key={finding.id || finding.title} className="rounded-sm bg-black/20 p-2">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${getSeverityPill(finding.severity)}`}>
+                            <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${getSeverityPill(finding.severity)}`}>
                               {finding.severity || 'info'}
                             </span>
                             <span className="text-xs font-medium text-gray-100">{finding.title || 'Finding'}</span>
@@ -1549,7 +1549,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <h3 className="mb-2 text-sm font-semibold text-red-300">Errors</h3>
               <ul className="space-y-1 text-sm text-red-200">
                 {aiGateErrors.slice(0, 5).map((error: string, idx: number) => (
-                  <li key={idx} className="break-words">{error}</li>
+                  <li key={idx} className="wrap-break-word">{error}</li>
                 ))}
               </ul>
             </div>
@@ -1567,20 +1567,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {(Object.keys(aiGateSemanticJudge).length > 0 || aiGateJudgingGateDisplay) && (
                   <div className="flex flex-wrap gap-2 text-xs text-gray-300">
                     {aiGateJudgingGateDisplay && (
-                      <span className={`rounded px-2 py-1 ${aiGateJudgingGateDisplay.className}`} title={aiGateJudgingGateDisplay.title}>
+                      <span className={`rounded-sm px-2 py-1 ${aiGateJudgingGateDisplay.className}`} title={aiGateJudgingGateDisplay.title}>
                         {aiGateJudgingGateDisplay.label}
                       </span>
                     )}
-                    <span className="rounded bg-gray-800 px-2 py-1">
+                    <span className="rounded-sm bg-gray-800 px-2 py-1">
                       semantic judge: {aiGateSemanticJudge.enabled ? 'on' : 'off'}
                     </span>
                     {aiGateSemanticJudge.provider_configured !== undefined && (
-                      <span className="rounded bg-gray-800 px-2 py-1">
+                      <span className="rounded-sm bg-gray-800 px-2 py-1">
                         provider: {aiGateSemanticJudge.provider_configured ? 'configured' : 'not configured'}
                       </span>
                     )}
                     {aiGateSemanticJudge.reviewed_count !== undefined && (
-                      <span className="rounded bg-gray-800 px-2 py-1">
+                      <span className="rounded-sm bg-gray-800 px-2 py-1">
                         reviewed: {aiGateSemanticJudge.reviewed_count}
                       </span>
                     )}
@@ -1589,7 +1589,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               </div>
               <div className="mb-3 rounded-lg border border-gray-700 bg-gray-950 p-3 text-sm text-gray-300">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className={`rounded px-2 py-1 text-xs font-medium ${aiGateDecisionClass}`}>
+                  <span className={`rounded-sm px-2 py-1 text-xs font-medium ${aiGateDecisionClass}`}>
                     scan verdict: {aiGateDecision.decision || 'unknown'}
                   </span>
                   <span className="text-gray-500">
@@ -1641,23 +1641,23 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         </div>
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           {probeFindings.length > 0 && (
-                            <span className="rounded bg-orange-900/40 px-2 py-1 text-orange-200">
+                            <span className="rounded-sm bg-orange-900/40 px-2 py-1 text-orange-200">
                               {probeFindings.length} finding{probeFindings.length === 1 ? '' : 's'}
                             </span>
                           )}
                           {detectorHits.length > 0 && (
-                            <span className="rounded bg-red-900/40 px-2 py-1 text-red-200">
+                            <span className="rounded-sm bg-red-900/40 px-2 py-1 text-red-200">
                               {detectorHits.length} detector hit{detectorHits.length === 1 ? '' : 's'}
                             </span>
                           )}
                           {wasSemanticallyReviewed && (
-                            <span className="rounded bg-purple-900/40 px-2 py-1 text-purple-200">semantic reviewed</span>
+                            <span className="rounded-sm bg-purple-900/40 px-2 py-1 text-purple-200">semantic reviewed</span>
                           )}
                           <button
                             type="button"
                             onClick={() => toggleAIDetails(transcriptKey)}
                             aria-expanded={isExpanded}
-                            className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            className="rounded-sm border border-gray-700 px-2 py-1 text-gray-300 hover:bg-gray-800 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                           >
                             {isExpanded ? 'Collapse' : 'Open chat'}
                           </button>
@@ -1670,20 +1670,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                             type="button"
                             onClick={() => toggleAIRubric(transcriptKey)}
                             aria-expanded={isRubricExpanded}
-                            className="rounded text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            className="rounded-sm text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                           >
                             {isRubricExpanded ? 'Hide expected/fail behavior' : 'Show expected/fail behavior'}
                           </button>
                           {isRubricExpanded && (
                             <div className="mt-2 grid gap-2 md:grid-cols-2">
                               {transcript.expected_safe_behavior && (
-                                <div className="rounded border border-gray-800 bg-black/20 p-3">
+                                <div className="rounded-sm border border-gray-800 bg-black/20 p-3">
                                   <div className="mb-1 text-xs font-medium text-green-300">Expected safe behavior</div>
                                   <p className="text-xs text-gray-400">{transcript.expected_safe_behavior}</p>
                                 </div>
                               )}
                               {transcript.expected_attack_success && (
-                                <div className="rounded border border-gray-800 bg-black/20 p-3">
+                                <div className="rounded-sm border border-gray-800 bg-black/20 p-3">
                                   <div className="mb-1 text-xs font-medium text-red-300">Attack success condition</div>
                                   <p className="text-xs text-gray-400">{transcript.expected_attack_success}</p>
                                 </div>
@@ -1702,7 +1702,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                                   <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-blue-300">
                                     Probe {turn.turn_index ? `turn ${turn.turn_index}` : ''}
                                   </div>
-                                  <p className="whitespace-pre-wrap break-words text-sm text-blue-50">{turn.prompt}</p>
+                                  <p className="whitespace-pre-wrap wrap-break-word text-sm text-blue-50">{turn.prompt}</p>
                                 </div>
                               </div>
                             )}
@@ -1714,7 +1714,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                                     {turn.latency_ms !== undefined && <span>{Math.round(Number(turn.latency_ms))} ms</span>}
                                     {turn.refusal_detected && <span className="text-green-300">refusal detected</span>}
                                   </div>
-                                  <p className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm text-gray-100">{turn.response_excerpt}</p>
+                                  <p className="max-h-80 overflow-auto whitespace-pre-wrap wrap-break-word text-sm text-gray-100">{turn.response_excerpt}</p>
                                 </div>
                               </div>
                             )}
@@ -1724,7 +1724,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                                 <div className="space-y-2">
                                   {turn.detector_hits.map((hit: any, hitIdx: number) => (
                                     <div key={`${transcriptKey}-hit-${turnIdx}-${hitIdx}`} className="text-xs text-red-100">
-                                      <span className={`mr-2 rounded px-1.5 py-0.5 ${getSeverityPill(hit.severity)}`}>
+                                      <span className={`mr-2 rounded-sm px-1.5 py-0.5 ${getSeverityPill(hit.severity)}`}>
                                         {hit.severity || 'info'}
                                       </span>
                                       <span className="font-medium">{hit.title || hit.type || hit.id}</span>
@@ -1746,7 +1746,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           type="button"
                           onClick={() => toggleAIDetails(transcriptKey)}
                           aria-expanded={isExpanded}
-                          className="mt-3 rounded text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                          className="mt-3 rounded-sm text-xs text-blue-300 hover:text-blue-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Show {turns.length - 1} more turn{turns.length - 1 === 1 ? '' : 's'}
                         </button>
@@ -1761,22 +1761,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                               const semanticResult = asRecord(evidenceRecord.semantic_result)
                               const confidence = formatConfidence(finding.confidence)
                               return (
-                                <div key={`${transcriptKey}-finding-${findingIdx}`} className="rounded border border-gray-800 bg-gray-950 p-3">
+                                <div key={`${transcriptKey}-finding-${findingIdx}`} className="rounded-sm border border-gray-800 bg-gray-950 p-3">
                                   <div className="flex flex-wrap items-center gap-2">
-                                    <span className={`rounded px-2 py-0.5 text-xs font-medium ${getSeverityPill(finding.severity)}`}>
+                                    <span className={`rounded-sm px-2 py-0.5 text-xs font-medium ${getSeverityPill(finding.severity)}`}>
                                       {finding.severity || 'info'}
                                     </span>
                                     <span className="text-sm font-medium text-white">{finding.title}</span>
                                     {confidence && <span className="text-xs text-gray-400">{confidence} confidence</span>}
-                                    {evidenceRecord.judge_layer && <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{evidenceRecord.judge_layer}</span>}
+                                    {evidenceRecord.judge_layer && <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{evidenceRecord.judge_layer}</span>}
                                   </div>
                                   {finding.description && (
                                     <p className="mt-2 text-xs text-gray-400">{finding.description}</p>
                                   )}
                                   {Object.keys(semanticResult).length > 0 && (
-                                    <div className="mt-2 rounded bg-purple-950/20 p-2 text-xs text-purple-100">
+                                    <div className="mt-2 rounded-sm bg-purple-950/20 p-2 text-xs text-purple-100">
                                       <div className="mb-1 font-medium">Semantic judge</div>
-                                      <pre className="whitespace-pre-wrap break-words">{compactJson(semanticResult)}</pre>
+                                      <pre className="whitespace-pre-wrap wrap-break-word">{compactJson(semanticResult)}</pre>
                                     </div>
                                   )}
                                 </div>
@@ -1800,7 +1800,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
             <div>
               <div className="text-xs font-semibold uppercase tracking-wide text-cyan-300">{modelIntakeIsPreflight ? 'Static inspection' : 'Model Intake report'}</div>
-              <h2 className="mt-1 text-2xl font-bold break-words">{modelIntakeArtifactLabel}</h2>
+              <h2 className="mt-1 text-2xl font-bold wrap-break-word">{modelIntakeArtifactLabel}</h2>
               <p className="mt-1 text-sm text-gray-400">Reviewed {new Date(scan.created_at).toLocaleString()}</p>
               {fullArtifactUrl && (
                 <details className="mt-2">
@@ -1811,7 +1811,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {modelIntakeDisplayFormatPosture && (
-                <span className="rounded bg-gray-700 px-3 py-1 text-sm text-gray-200">
+                <span className="rounded-sm bg-gray-700 px-3 py-1 text-sm text-gray-200">
                   {String(modelIntakeDisplayFormatPosture).replace(/_/g, ' ')}
                 </span>
               )}
@@ -1819,7 +1819,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div className="no-print flex flex-wrap items-center gap-2">
                 <ExportPDFButton />
                 {isAuthenticated && (
-                  <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <button type="button" onClick={handleDownloadJson} className="px-3 py-2 rounded-sm border border-blue-500/60 text-blue-300 text-sm hover:bg-blue-500/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">
                     Download JSON
                   </button>
                 )}
@@ -1833,7 +1833,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <p className="mt-1 max-w-4xl text-sm text-cyan-100/80">
                 This page records the pinned revision, complete acquisition, hashes, format checks, repository scanners, and inventory artifacts. It does not contain the later Firecracker result. If this scan was started by Automatic Review, return there for the end-to-end technical result.
               </p>
-              <Link href="/model-intake" className="mt-3 inline-flex rounded border border-cyan-600/60 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-900/30">Open Automatic Review</Link>
+              <Link href="/model-intake" className="mt-3 inline-flex rounded-sm border border-cyan-600/60 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:bg-cyan-900/30">Open Automatic Review</Link>
             </div>
           )}
 
@@ -1866,7 +1866,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         ? 'text-red-300'
                         : 'text-yellow-300'
                     return (
-                      <div key={control.id} className="rounded border border-white/10 bg-black/20 p-3">
+                      <div key={control.id} className="rounded-sm border border-white/10 bg-black/20 p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="text-xs font-medium text-gray-200">{control.label}</div>
                           <div className={`text-xs font-semibold ${statusClass}`}>{status}</div>
@@ -1916,7 +1916,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {(modelIntakeControlGroups.failed.length > 0 || modelIntakeControlGroups.notTested.length > 0) && (
               <div className="mt-4 grid gap-3 lg:grid-cols-2">
                 {modelIntakeControlGroups.failed.length > 0 && (
-                  <div className="rounded border border-red-800/50 bg-red-950/20 p-3">
+                  <div className="rounded-sm border border-red-800/50 bg-red-950/20 p-3">
                     <div className="text-xs font-semibold uppercase tracking-wide text-red-200">Failed</div>
                     <ul className="mt-2 space-y-1 text-sm text-red-100/90">
                       {modelIntakeControlGroups.failed.slice(0, 6).map((control: any) => (
@@ -1926,7 +1926,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   </div>
                 )}
                 {modelIntakeControlGroups.notTested.length > 0 && (
-                  <div className="rounded border border-orange-800/50 bg-orange-950/20 p-3">
+                  <div className="rounded-sm border border-orange-800/50 bg-orange-950/20 p-3">
                     <div className="text-xs font-semibold uppercase tracking-wide text-orange-200">Not tested or incomplete</div>
                     <ul className="mt-2 space-y-1 text-sm text-orange-100/90">
                       {modelIntakeControlGroups.notTested.slice(0, 6).map((control: any) => (
@@ -1940,7 +1940,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
 
           {modelIntakeRequiredActions.length > 0 && !modelIntakeIsPreflight && (
-            <div className="mb-5 rounded border border-yellow-600/40 bg-yellow-950/20 p-4">
+            <div className="mb-5 rounded-sm border border-yellow-600/40 bg-yellow-950/20 p-4">
               <div className="text-sm font-semibold text-yellow-100">What to do next</div>
               <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-yellow-50/90">
                 {modelIntakeRequiredActions.slice(0, 8).map((action, index) => (
@@ -1979,7 +1979,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {Object.entries(modelIntakeChecks || {}).map(([check, passed]) => {
               const status = getModelIntakeCheckStatus(check, passed, modelIntakeSummary, modelIntakeSupplyChain)
               return (
-                <div key={check} className="rounded border border-gray-700 bg-gray-900 p-3">
+                <div key={check} className="rounded-sm border border-gray-700 bg-gray-900 p-3">
                   <div className="text-xs text-gray-400">{formatModelIntakeCheckName(check)}</div>
                   <div className={`mt-1 text-sm font-semibold ${status.className}`}>{status.label}</div>
                 </div>
@@ -1989,7 +1989,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
           {(modelIntakeExecutionControls.length > 0 || modelIntakeActivity.length > 0) && (
             <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.65fr)]">
-              <div className="min-w-0 overflow-hidden rounded border border-gray-700 bg-gray-900">
+              <div className="min-w-0 overflow-hidden rounded-sm border border-gray-700 bg-gray-900">
                 <div className="border-b border-gray-800 px-3 py-2">
                   <div className="text-sm font-semibold text-gray-200">Control execution</div>
                   <div className="mt-0.5 text-xs text-gray-500">PASS means the control actually ran; missing, incomplete, unsupported, and skipped controls remain visible.</div>
@@ -2012,20 +2012,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     return (
                       <div key={`${control.name}-${index}`} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[minmax(10rem,0.45fr)_auto_minmax(0,1fr)] sm:items-center">
                         <div className="truncate text-sm text-gray-200" title={String(control.name)}>{String(control.name).replace(/_/g, ' ')}</div>
-                        <span className={`w-fit rounded px-2 py-0.5 text-[11px] font-semibold ${statusClass}`}>{status}</span>
-                        <div className="min-w-0 break-words text-xs text-gray-500">{control.detail || coverage || 'No additional detail reported.'}</div>
+                        <span className={`w-fit rounded-sm px-2 py-0.5 text-[11px] font-semibold ${statusClass}`}>{status}</span>
+                        <div className="min-w-0 wrap-break-word text-xs text-gray-500">{control.detail || coverage || 'No additional detail reported.'}</div>
                       </div>
                     )
                   })}
                 </div>
               </div>
 
-              <div className="min-w-0 rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="min-w-0 rounded-sm border border-gray-700 bg-gray-900 p-3">
                 <div className="text-sm font-semibold text-gray-200">Intake phase timeline</div>
                 {modelIntakeActivity.length ? (
                   <ol className="mt-3 space-y-2">
                     {modelIntakeActivity.map((event: any, index: number) => (
-                      <li key={`${event?.phase || 'phase'}-${index}`} className="rounded border border-gray-800 bg-gray-950/60 p-2">
+                      <li key={`${event?.phase || 'phase'}-${index}`} className="rounded-sm border border-gray-800 bg-gray-950/60 p-2">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs font-medium text-gray-200">{String(event?.phase || 'phase').replace(/_/g, ' ')}</span>
                           <span className="text-[11px] text-gray-500">{event?.progress ?? 0}% · {String(event?.status || 'unknown')}</span>
@@ -2043,7 +2043,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
 
           {(modelIntakeAibom || modelIntakeSupplyChain || modelIntakeSbom) && (
             <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-4">
-              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">AIBOM completeness</div>
                 <div className="mt-1 text-lg font-semibold text-cyan-300">
                   {modelIntakeAibom?.completeness?.score !== undefined ? `${Math.round(Number(modelIntakeAibom.completeness.score) * 100)}%` : 'generated'}
@@ -2052,13 +2052,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   {(modelIntakeAibom?.components || []).length || 0} component{((modelIntakeAibom?.components || []).length || 0) === 1 ? '' : 's'}
                 </div>
               </div>
-              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">Signature verification</div>
                 <div className="mt-1 text-sm font-semibold text-white">
                   {modelIntakeSupplyChain?.signature?.status || modelIntakeSummary?.signature_verification_status || 'unknown'}
                 </div>
               </div>
-              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">License evidence</div>
                 <div className={`mt-1 text-sm font-semibold ${modelIntakeSupplyChain?.license_compliance?.legal_review_required ? 'text-yellow-300' : 'text-white'}`}>
                   {modelIntakeSupplyChain?.license_compliance?.legal_review_required
@@ -2071,7 +2071,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </div>
                 <div className="mt-1 text-xs text-gray-500">Component-level evidence and any policy triggers are available in the License BOM.</div>
               </div>
-              <div className="rounded border border-gray-700 bg-gray-900 p-3">
+              <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
                 <div className="text-xs text-gray-400">CycloneDX SBOM</div>
                 <div className="mt-1 text-lg font-semibold text-cyan-300">
                   {modelIntakeSbom ? `${modelIntakeSbomSummary.component_count || 0} components` : 'not generated'}
@@ -2081,7 +2081,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     <div className="mt-1 text-xs text-gray-500">
                       {modelIntakeSbomSummary.dependency_files || 0} dependency files · {modelIntakeSbomSummary.unpinned_dependencies || 0} unpinned
                     </div>
-                    <button type="button" onClick={handleDownloadModelIntakeSbom} className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                    <button type="button" onClick={handleDownloadModelIntakeSbom} className="mt-2 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                       Download SBOM
                     </button>
                   </>
@@ -2091,7 +2091,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           {modelIntakeEvaluation && modelIntakeEvaluation.status !== 'SKIPPED_BY_POLICY' && (
-            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="mt-5 rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-xs text-gray-400">Embedding and data-plane evaluation</div>
@@ -2099,7 +2099,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     {modelIntakeEvaluation.suite_id || 'provider-neutral suite'} {modelIntakeEvaluation.suite_version ? `v${modelIntakeEvaluation.suite_version}` : ''}
                   </div>
                 </div>
-                <span className={`rounded px-2 py-1 text-xs font-semibold ${modelIntakeEvaluation.status === 'PASS' ? 'bg-green-950/50 text-green-300' : modelIntakeEvaluation.status === 'WARNING' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>
+                <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${modelIntakeEvaluation.status === 'PASS' ? 'bg-green-950/50 text-green-300' : modelIntakeEvaluation.status === 'WARNING' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>
                   {modelIntakeEvaluation.status}
                 </span>
               </div>
@@ -2119,7 +2119,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           {modelIntakeFormatInspection && (
-            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="mt-5 rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="text-xs text-gray-400">Format inspection</div>
               <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div>
@@ -2150,7 +2150,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               {Array.isArray(modelIntakeSafetensorsHeader?.metadata_keys) && modelIntakeSafetensorsHeader.metadata_keys.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-2">
                   {modelIntakeSafetensorsHeader.metadata_keys.slice(0, 12).map((key: string) => (
-                    <span key={key} className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{key}</span>
+                    <span key={key} className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{key}</span>
                   ))}
                 </div>
               )}
@@ -2158,7 +2158,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           {modelIntakeSummary?.sha256 && (
-            <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="mt-5 rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="text-xs text-gray-400">
                 Observed SHA-256{modelIntakeFetch?.truncated ? ' of inspected bytes' : ''}
               </div>
@@ -2167,7 +2167,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           {modelIntakeSummary?.expected_sha256 && modelIntakeSummary.expected_sha256 !== modelIntakeSummary?.sha256 && (
-            <div className="mt-3 rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="mt-3 rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="text-xs text-gray-400">Expected full-artifact SHA-256</div>
               <div className="mt-1 break-all font-mono text-xs text-gray-300">{modelIntakeSummary.expected_sha256}</div>
               {modelIntakeSummary?.checksum_status && (
@@ -2177,7 +2177,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           )}
 
           <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
-            <div className="rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="text-xs text-gray-400">Artifact fetch</div>
               <div className="mt-2 grid gap-3 sm:grid-cols-2">
                 <div>
@@ -2201,11 +2201,11 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 </div>
               </div>
               {modelIntakeFetch?.error && (
-                <div className="mt-3 rounded bg-red-950/30 p-2 text-xs text-red-200">{modelIntakeFetch.error}</div>
+                <div className="mt-3 rounded-sm bg-red-950/30 p-2 text-xs text-red-200">{modelIntakeFetch.error}</div>
               )}
             </div>
 
-            <div className="rounded border border-gray-700 bg-gray-900 p-3">
+            <div className="rounded-sm border border-gray-700 bg-gray-900 p-3">
               <div className="text-xs text-gray-400">Platform metadata</div>
               <div className="mt-2 grid gap-3 sm:grid-cols-2">
                 <div>
@@ -2238,14 +2238,14 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               {Array.isArray(modelIntakeMetadata.tags) && modelIntakeMetadata.tags.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-2">
                   {modelIntakeMetadata.tags.slice(0, 10).map((tag: string) => (
-                    <span key={tag} className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{tag}</span>
+                    <span key={tag} className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{tag}</span>
                   ))}
                 </div>
               )}
             </div>
           </div>
 
-          <div className="mt-5 rounded border border-gray-700 bg-gray-900 p-3">
+          <div className="mt-5 rounded-sm border border-gray-700 bg-gray-900 p-3">
             <div className="text-xs text-gray-400">Verification scope</div>
             <div className="mt-2 grid gap-2 text-sm text-gray-300 md:grid-cols-3">
               <div>Runtime execution: {String(model_intake?.dynamic_sandbox?.status || 'NOT_RUN').replace(/_/g, ' ')}</div>
@@ -2476,7 +2476,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <h3 className="text-sm font-semibold text-gray-400 mb-2">Subject Alternative Names (SANs)</h3>
               <div className="flex flex-wrap gap-2">
                 {tls.certificate.sans.map((san: string, i: number) => (
-                  <span key={i} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs font-mono rounded">
+                  <span key={i} className="px-2 py-1 bg-gray-900 text-gray-300 text-xs font-mono rounded-sm">
                     {san}
                   </span>
                 ))}
@@ -2533,9 +2533,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                         <p className="text-gray-500 text-xs truncate">Issued by: {issuerDisplay}</p>
                       </div>
                       <div className="text-right text-xs text-gray-500">
-                        {idx === 0 && <span className="px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded">Leaf</span>}
-                        {idx === tls.sslyze.certificate_chain.length - 1 && idx > 0 && <span className="px-2 py-0.5 bg-green-900/50 text-green-300 rounded">Root/Intermediate</span>}
-                        {idx > 0 && idx < tls.sslyze.certificate_chain.length - 1 && <span className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded">Intermediate</span>}
+                        {idx === 0 && <span className="px-2 py-0.5 bg-blue-900/50 text-blue-300 rounded-sm">Leaf</span>}
+                        {idx === tls.sslyze.certificate_chain.length - 1 && idx > 0 && <span className="px-2 py-0.5 bg-green-900/50 text-green-300 rounded-sm">Root/Intermediate</span>}
+                        {idx > 0 && idx < tls.sslyze.certificate_chain.length - 1 && <span className="px-2 py-0.5 bg-gray-700 text-gray-400 rounded-sm">Intermediate</span>}
                       </div>
                     </div>
                   )
@@ -2644,7 +2644,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           {ciphers.map((cipher: any, i: number) => (
                             <div key={i} className="flex items-center gap-2 text-xs">
                               {/* Grade badge */}
-                              <span className={`px-1.5 py-0.5 rounded font-bold min-w-[24px] text-center bg-gray-800 ${gradeTextColor(cipher.grade)}`}>
+                              <span className={`px-1.5 py-0.5 rounded-sm font-bold min-w-[24px] text-center bg-gray-800 ${gradeTextColor(cipher.grade)}`}>
                                 {cipher.grade || '?'}
                               </span>
                               {/* Security indicator */}
@@ -2736,22 +2736,22 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           {/* OCSP and other indicators */}
           <div className="flex flex-wrap items-center gap-3">
             {tls.ocsp && (
-              <span className={`px-3 py-1 rounded text-sm ${tls.ocsp.stapled ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+              <span className={`px-3 py-1 rounded-sm text-sm ${tls.ocsp.stapled ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                 OCSP Stapling: {tls.ocsp.stapled ? 'Enabled' : 'Not Detected'}
               </span>
             )}
             {tls.protocol && (
-              <span className={`px-3 py-1 rounded text-sm ${tls.protocol === 'TLSv1.3' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+              <span className={`px-3 py-1 rounded-sm text-sm ${tls.protocol === 'TLSv1.3' ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                 {tls.protocol}{tls.cipher ? ` · ${tls.cipher}` : ''}
               </span>
             )}
             {tls.weak_cipher !== undefined && (
-              <span className={`px-3 py-1 rounded text-sm ${tls.weak_cipher ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
+              <span className={`px-3 py-1 rounded-sm text-sm ${tls.weak_cipher ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
                 Cipher strength: {tls.weak_cipher ? 'Weak' : 'Strong'}{tls.cipher_bits ? ` (${tls.cipher_bits}-bit)` : ''}
               </span>
             )}
             {tls.alpn_protocol && (
-              <span className="px-3 py-1 rounded text-sm bg-gray-700 text-gray-300">
+              <span className="px-3 py-1 rounded-sm text-sm bg-gray-700 text-gray-300">
                 ALPN: {tls.alpn_protocol}
               </span>
             )}
@@ -2759,12 +2759,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 null -- and the body then dereferenced it unguarded, so one missing
                 sub-object took down the entire report page. */}
             {tls.testssl?.supports_tls13 != null && (
-              <span className={`px-3 py-1 rounded text-sm ${tls.testssl.supports_tls13 ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
+              <span className={`px-3 py-1 rounded-sm text-sm ${tls.testssl.supports_tls13 ? 'bg-green-900 text-green-200' : 'bg-yellow-900 text-yellow-200'}`}>
                 TLS 1.3: {tls.testssl.supports_tls13 ? 'Supported' : 'Not Supported'}
               </span>
             )}
             {tls.sslyze?.session_resumption?.session_id_resumption !== undefined && (
-              <span className={`px-3 py-1 rounded text-sm ${tls.sslyze.session_resumption.session_id_resumption ? 'bg-green-900 text-green-200' : 'bg-gray-700 text-gray-400'}`}>
+              <span className={`px-3 py-1 rounded-sm text-sm ${tls.sslyze.session_resumption.session_id_resumption ? 'bg-green-900 text-green-200' : 'bg-gray-700 text-gray-400'}`}>
                 Session Resumption: {tls.sslyze.session_resumption.session_id_resumption ? 'Enabled' : 'Disabled'}
               </span>
             )}
@@ -2786,7 +2786,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <div key={i} className="bg-gray-900 rounded-lg p-3">
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-mono text-lg text-white">{port.port}</span>
-                  <span className="px-2 py-0.5 text-xs rounded bg-blue-900 text-blue-200">
+                  <span className="px-2 py-0.5 text-xs rounded-sm bg-blue-900 text-blue-200">
                     {port.protocol || 'tcp'}
                   </span>
                 </div>
@@ -2808,7 +2808,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     <div>
                       <span className="text-white font-medium">{svc.name || 'unknown'}</span>
                       {svc.product && <span className="text-gray-400 ml-2">{svc.product}</span>}
-                      {svc.version && <span className="px-1.5 py-0.5 bg-blue-900 text-blue-200 text-xs rounded ml-2">v{svc.version}</span>}
+                      {svc.version && <span className="px-1.5 py-0.5 bg-blue-900 text-blue-200 text-xs rounded-sm ml-2">v{svc.version}</span>}
                     </div>
                     <span className="text-gray-500 font-mono text-sm">:{svc.port}</span>
                   </div>
@@ -2897,7 +2897,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 <div key={header.key} className="bg-gray-900 rounded-lg p-3">
                   <div className="flex items-center justify-between">
                     <span className="text-gray-300 text-sm">{header.name}</span>
-                    <span className={`px-2 py-1 text-xs rounded ${isSet ? 'bg-green-900 text-green-200' : header.critical ? 'bg-red-900 text-red-200' : 'bg-gray-700 text-gray-400'}`}>
+                    <span className={`px-2 py-1 text-xs rounded-sm ${isSet ? 'bg-green-900 text-green-200' : header.critical ? 'bg-red-900 text-red-200' : 'bg-gray-700 text-gray-400'}`}>
                       {isSet ? (typeof value === 'string' && value.length < 20 ? value : 'Set') : 'Missing'}
                     </span>
                   </div>
@@ -2944,7 +2944,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                     <h4 className="text-xs font-mono text-blue-400 mb-1">{directive}</h4>
                     <div className="flex flex-wrap gap-1">
                       {Array.isArray(values) && values.map((v: string, i: number) => (
-                        <span key={i} className={`px-1.5 py-0.5 text-xs rounded font-mono ${v.includes('unsafe') ? 'bg-red-900/50 text-red-300' : v === "'self'" ? 'bg-green-900/50 text-green-300' : v === "'none'" ? 'bg-green-900/50 text-green-300' : 'bg-gray-700 text-gray-300'}`}>
+                        <span key={i} className={`px-1.5 py-0.5 text-xs rounded-sm font-mono ${v.includes('unsafe') ? 'bg-red-900/50 text-red-300' : v === "'self'" ? 'bg-green-900/50 text-green-300' : v === "'none'" ? 'bg-green-900/50 text-green-300' : 'bg-gray-700 text-gray-300'}`}>
                           {v}
                         </span>
                       ))}
@@ -2971,7 +2971,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                 {js_dependencies.vulnerable_libraries.map((lib: any, i: number) => (
                   <div key={i} className={`bg-gray-900/60 rounded-lg p-3 border-l-4 ${getSeverityBorderClass(lib.severity)}`}>
                     <span className="text-white font-medium">{lib.library}</span>
-                    {lib.version && <span className="px-2 py-0.5 bg-red-900 text-red-200 text-xs rounded font-mono ml-2">v{lib.version}</span>}
+                    {lib.version && <span className="px-2 py-0.5 bg-red-900 text-red-200 text-xs rounded-sm font-mono ml-2">v{lib.version}</span>}
                     {lib.cve && <a href={`https://nvd.nist.gov/vuln/detail/${lib.cve}`} target="_blank" rel="noopener noreferrer" className="text-blue-400 text-xs hover:underline ml-2">{lib.cve}</a>}
                     <p className="text-gray-400 text-sm mt-1">{lib.summary}</p>
                   </div>
@@ -2986,9 +2986,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-white font-medium">{tech.name}</span>
-                      {tech.version && <span className="px-1.5 py-0.5 bg-blue-900 text-blue-200 text-xs rounded font-mono">v{tech.version}</span>}
+                      {tech.version && <span className="px-1.5 py-0.5 bg-blue-900 text-blue-200 text-xs rounded-sm font-mono">v{tech.version}</span>}
                     </div>
-                    <span className={`px-2 py-0.5 text-xs rounded ${tech.confidence >= 75 ? 'bg-green-900/50 text-green-300' : tech.confidence >= 50 ? 'bg-yellow-900/50 text-yellow-300' : 'bg-gray-700 text-gray-400'}`}>
+                    <span className={`px-2 py-0.5 text-xs rounded-sm ${tech.confidence >= 75 ? 'bg-green-900/50 text-green-300' : tech.confidence >= 50 ? 'bg-yellow-900/50 text-yellow-300' : 'bg-gray-700 text-gray-400'}`}>
                       {tech.confidence_label || `${tech.confidence}%`}
                     </span>
                   </div>
@@ -2999,7 +2999,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           ) : discovery.tech_stack_guess?.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {discovery.tech_stack_guess.map((tech: string, i: number) => (
-                <span key={i} className="px-3 py-1 bg-blue-500/20 text-blue-400 rounded text-sm">{tech}</span>
+                <span key={i} className="px-3 py-1 bg-blue-500/20 text-blue-400 rounded-sm text-sm">{tech}</span>
               ))}
             </div>
           )}
@@ -3014,13 +3014,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             {discovery.browser_api_endpoints.map((endpoint: any, i: number) => (
               <div key={i} className="bg-gray-900 rounded-lg p-3 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <span className={`px-2 py-0.5 text-xs font-mono rounded ${endpoint.method === 'GET' ? 'bg-green-900 text-green-200' : endpoint.method === 'POST' ? 'bg-blue-900 text-blue-200' : 'bg-gray-700 text-gray-300'}`}>
+                  <span className={`px-2 py-0.5 text-xs font-mono rounded-sm ${endpoint.method === 'GET' ? 'bg-green-900 text-green-200' : endpoint.method === 'POST' ? 'bg-blue-900 text-blue-200' : 'bg-gray-700 text-gray-300'}`}>
                     {endpoint.method || 'GET'}
                   </span>
                   <span className="font-mono text-sm text-gray-300">{endpoint.path || endpoint.url}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  {endpoint.has_auth && <span className="px-2 py-0.5 text-xs bg-yellow-900/50 text-yellow-300 rounded">Auth</span>}
+                  {endpoint.has_auth && <span className="px-2 py-0.5 text-xs bg-yellow-900/50 text-yellow-300 rounded-sm">Auth</span>}
                 </div>
               </div>
             ))}
@@ -3146,7 +3146,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           <td className="px-3 py-2">
                             <div className="flex flex-wrap gap-1">
                               {(families.length ? families : ['unknown']).map((family) => (
-                                <span key={family} className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-300">
+                                <span key={family} className="rounded-sm bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-300">
                                   {formatCheckFamilyName(family)}
                                 </span>
                               ))}
@@ -3154,10 +3154,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                           </td>
                           <td className="px-3 py-2">
                             <div className="whitespace-nowrap text-gray-300">{activeAttemptParamSummary(attempt)}</div>
-                            {paramPreview && <div className="mt-1 max-w-[260px] break-words font-mono text-[11px] text-gray-500">{paramPreview}</div>}
+                            {paramPreview && <div className="mt-1 max-w-[260px] wrap-break-word font-mono text-[11px] text-gray-500">{paramPreview}</div>}
                           </td>
                           <td className="px-3 py-2">
-                            <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${activeAttemptStatusClass(attempt.status)}`}>
+                            <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${activeAttemptStatusClass(attempt.status)}`}>
                               {formatScanToken(attempt.status || 'unknown')}
                             </span>
                             {reason && <div className="mt-1 max-w-[220px] text-[11px] text-gray-500">{reason}</div>}
@@ -3302,7 +3302,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                       type="button"
                       onClick={() => setFbShowAllFindings(!fbShowAllFindings)}
                       aria-expanded={fbShowAllFindings}
-                      className="flex items-center gap-2 rounded text-xs text-gray-500 hover:text-gray-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      className="flex items-center gap-2 rounded-sm text-xs text-gray-500 hover:text-gray-300 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       <svg className={`w-3 h-3 transition-transform ${fbShowAllFindings ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -3323,7 +3323,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                                 })
                               }}
                               aria-expanded={fbExpandedCategories.has(cat)}
-                              className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-gray-700/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="w-full flex items-center justify-between px-3 py-2 text-xs hover:bg-gray-700/30 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                             >
                               <span className="text-gray-400 font-medium">{categoryLabels[cat] || cat}</span>
                               <span className="flex items-center gap-2">
@@ -3476,7 +3476,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               if (count === 0) return null
               const isActive = severityFilter.has(severity)
               return (
-                <button key={severity} type="button" onClick={() => toggleSeverityFilter(severity)} aria-pressed={isActive} className={`px-2 py-1 rounded text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${isActive ? SEVERITY_BADGE_STYLES[severity] : 'bg-gray-700/50 text-gray-500 line-through'}`}>
+                <button key={severity} type="button" onClick={() => toggleSeverityFilter(severity)} aria-pressed={isActive} className={`px-2 py-1 rounded-sm text-xs font-medium transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${isActive ? SEVERITY_BADGE_STYLES[severity] : 'bg-gray-700/50 text-gray-500 line-through'}`}>
                   {severity} ({count})
                 </button>
               )
@@ -3536,13 +3536,13 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                   <span className="text-yellow-400 font-medium">
                     {finding.type?.replace(/_/g, ' ')}
                   </span>
-                  <span className={`text-xs px-2 py-1 rounded ${getSeverityPill(finding.severity)}`}>
+                  <span className={`text-xs px-2 py-1 rounded-sm ${getSeverityPill(finding.severity)}`}>
                     {finding.severity}
                   </span>
                 </div>
                 <p className="text-gray-500 text-sm truncate">{finding.file}</p>
                 {finding.evidence && (
-                  <code className="text-xs text-gray-400 mt-2 block bg-gray-950 p-2 rounded overflow-x-auto">
+                  <code className="text-xs text-gray-400 mt-2 block bg-gray-950 p-2 rounded-sm overflow-x-auto">
                     {finding.evidence.substring(0, 100)}...
                   </code>
                 )}
@@ -3711,7 +3711,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       {discovery.katana_sample?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Discovery</h2>
-          <div className="max-h-48 overflow-y-auto bg-gray-700/30 rounded p-3">
+          <div className="max-h-48 overflow-y-auto bg-gray-700/30 rounded-sm p-3">
             {discovery.katana_sample.map((url: string, i: number) => (
               <div key={i} className="text-xs font-mono text-gray-300 py-1">{url}</div>
             ))}
@@ -3745,7 +3745,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
             <div className="flex flex-wrap items-center gap-3">
               <label className="text-sm text-gray-400">Min confidence</label>
               <select
-                className="bg-gray-900 text-gray-200 text-sm rounded px-2 py-1 border border-gray-700"
+                className="bg-gray-900 text-gray-200 text-sm rounded-sm px-2 py-1 border border-gray-700"
                 value={minChainConfidence}
                 onChange={(e) => setMinChainConfidence(parseFloat(e.target.value))}
               >
@@ -3758,7 +3758,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <label className="flex items-center gap-2 text-sm text-gray-400">
                 <input
                   type="checkbox"
-                  className="rounded bg-gray-900 border-gray-700"
+                  className="rounded-sm bg-gray-900 border-gray-700"
                   checked={showPartialChains}
                   onChange={(e) => setShowPartialChains(e.target.checked)}
                 />
@@ -3819,8 +3819,8 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                       <div className="flex items-center justify-between mb-2">
                         <h4 className="font-semibold text-white">{chain.chain_type?.replace(/_/g, ' ').toUpperCase()}</h4>
                         <div className="flex items-center gap-2">
-                          <span className={`px-2 py-1 rounded text-xs font-bold ${getSeverityPill(chain.severity)}`}>{chain.severity?.toUpperCase()}</span>
-                          <span className="px-2 py-1 rounded text-xs bg-gray-800 text-gray-300">
+                          <span className={`px-2 py-1 rounded-sm text-xs font-bold ${getSeverityPill(chain.severity)}`}>{chain.severity?.toUpperCase()}</span>
+                          <span className="px-2 py-1 rounded-sm text-xs bg-gray-800 text-gray-300">
                             Confidence {Math.round(getChainConfidence(chain) * 100)}%
                           </span>
                         </div>
@@ -3931,7 +3931,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
                       <div key={idx} className="bg-gray-900/50 rounded-lg p-3 border border-gray-700">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-gray-300 font-medium">{chain.name || chain.chain_type?.replace(/_/g, ' ')}</span>
-                          <span className={`text-xs px-2 py-1 rounded ${getSeverityPill(chain.severity)}`}>
+                          <span className={`text-xs px-2 py-1 rounded-sm ${getSeverityPill(chain.severity)}`}>
                             {chain.severity} ({Math.round(getChainConfidence(chain) * 100)}% conf)
                           </span>
                         </div>
@@ -4057,7 +4057,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               <h3 className="text-sm font-semibold text-gray-400 mb-2">Modules Completed</h3>
               <div className="flex flex-wrap gap-2">
                 {coverage.modules_completed.map((mod: string, i: number) => (
-                  <span key={i} className="px-2 py-1 bg-green-900/30 text-green-400 rounded text-xs">{mod}</span>
+                  <span key={i} className="px-2 py-1 bg-green-900/30 text-green-400 rounded-sm text-xs">{mod}</span>
                 ))}
               </div>
             </div>

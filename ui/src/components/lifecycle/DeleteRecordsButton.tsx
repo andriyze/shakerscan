@@ -90,7 +90,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
       <p>This permanently removes the following database records. This cannot be undone.</p>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
         {Object.entries(preview.records.delete).map(([table, value]) => <div key={table} className="contents">
-          <dt className="break-words">{table.replaceAll('_', ' ')}</dt><dd>{value.count}</dd>
+          <dt className="wrap-break-word">{table.replaceAll('_', ' ')}</dt><dd>{value.count}</dd>
         </div>)}
       </dl>
       <p className="font-medium text-gray-200">Not a complete data erasure</p>

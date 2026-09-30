@@ -165,7 +165,7 @@ function LeadInspector({ lead, contracts, target, busy, onTransition }: {
   return (
     <div className="grid gap-4 lg:sticky lg:top-5">
       <Card className="overflow-hidden">
-        <div className="border-b border-gray-800 bg-gradient-to-br from-blue-500/10 to-transparent p-5">
+        <div className="border-b border-gray-800 bg-linear-to-br from-blue-500/10 to-transparent p-5">
           <div className="flex items-center justify-between gap-3">
             <Badge className="bg-blue-500/15 text-blue-300">Work order</Badge>
             <span className="text-xs text-gray-500">~{lead.request_cost || 1} requests</span>
@@ -178,7 +178,7 @@ function LeadInspector({ lead, contracts, target, busy, onTransition }: {
             <Badge className="bg-gray-800 text-gray-300"><Route className="mr-1 h-3 w-3" />{h.source.replaceAll('_', ' ')}</Badge>
             {h.cwe ? <Badge className="bg-gray-800 text-gray-300">{h.cwe}</Badge> : null}
           </div>
-          <div className="mt-4 rounded-xl border border-blue-500/25 bg-blue-500/[0.08] p-3">
+          <div className="mt-4 rounded-xl border border-blue-500/25 bg-blue-500/8 p-3">
             <div className="text-xs font-medium text-blue-200">Recommended next step</div>
             <p className="mt-1 text-xs leading-5 text-gray-400">{action.description}</p>
             <Link href={action.href} className={`${buttonClasses('primary', 'md')} mt-3 w-full`}>
@@ -191,7 +191,7 @@ function LeadInspector({ lead, contracts, target, busy, onTransition }: {
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">Decision rule</h3>
             <div className="mt-2 grid gap-2">
-              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] p-3">
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/6 p-3">
                 <div className="text-xs font-medium text-emerald-300">Signal to look for</div>
                 <p className="mt-1 text-sm text-gray-300">{expected || 'A repeatable difference between the control and test request.'}</p>
               </div>
@@ -301,7 +301,7 @@ export default function InvestigationWorkspacePage() {
         <InvestigatorTabs />
       </header>
 
-      <Card className="mt-5 border-blue-500/20 bg-blue-500/[0.04] p-4">
+      <Card className="mt-5 border-blue-500/20 bg-blue-500/4 p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="mr-3"><div className="text-xs font-semibold uppercase tracking-wider text-blue-300">Start here</div><p className="mt-1 text-sm text-gray-400">This page helps you choose and prepare one investigation. It does not automatically run every lead.</p></div>
           <div className="grid flex-1 gap-2 sm:grid-cols-3">
@@ -325,7 +325,7 @@ export default function InvestigationWorkspacePage() {
       </Card>
 
       {notice ? <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/[0.07] px-4 py-3 text-sm text-blue-200">{notice}</div> : null}
-      {transitionError ? <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">{transitionError}</div> : null}
+      {transitionError ? <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/8 px-4 py-3 text-sm text-red-200">{transitionError}</div> : null}
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_430px]">
         <section>

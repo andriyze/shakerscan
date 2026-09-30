@@ -1,7 +1,7 @@
 import { Card } from './Card'
 
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-gray-800 ${className}`} aria-hidden="true" />
+  return <div className={`animate-pulse rounded-sm bg-gray-800 ${className}`} aria-hidden="true" />
 }
 
 export function TableSkeleton({ rows = 8, cols = 5 }: { rows?: number; cols?: number }) {

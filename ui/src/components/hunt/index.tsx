@@ -41,7 +41,7 @@ export const PROFILES: Record<Intensity, {
     detail: 'Runs bounded recon, focused tests, and deterministic retests. The everyday choice.',
     mode: 'gated', maxSteps: 15, risk: 'active',
     budget: { steps: 15, actions: 14, active_actions: 6, requests: 250, seconds: 1800, model_tokens: 150000 },
-    accent: 'text-blue-300', selected: 'border-blue-500/60 bg-blue-500/[0.09]',
+    accent: 'text-blue-300', selected: 'border-blue-500/60 bg-blue-500/9',
   },
   relentless: {
     name: 'Relentless',
@@ -57,7 +57,7 @@ export const PROFILES: Record<Intensity, {
     detail: 'Designs app-specific control/test workflows across two logins to prove access-control, field, and business-logic flaws. Credentials never enter the model.',
     mode: 'gated', maxSteps: 25, risk: 'credential',
     budget: { steps: 25, actions: 24, active_actions: 12, requests: 500, seconds: 3600, model_tokens: 500000 },
-    accent: 'text-fuchsia-300', selected: 'border-fuchsia-500/60 bg-fuchsia-500/[0.09]',
+    accent: 'text-fuchsia-300', selected: 'border-fuchsia-500/60 bg-fuchsia-500/9',
   },
 }
 
@@ -246,13 +246,13 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
 
       {/* Attention banners */}
       {episode.autopilot_error ? (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/[0.08] p-3 text-sm text-red-200">Autopilot error: {episode.autopilot_error}</div>
+        <div className="rounded-lg border border-red-500/30 bg-red-500/8 p-3 text-sm text-red-200">Autopilot error: {episode.autopilot_error}</div>
       ) : null}
       {episode.requested_input ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-sm text-amber-200">{episode.requested_input}</div>
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200">{episode.requested_input}</div>
       ) : null}
       {detail.waiting_on?.length ? (
-        <div className="rounded-lg border border-blue-500/25 bg-blue-500/[0.06] p-3 text-sm text-blue-100">
+        <div className="rounded-lg border border-blue-500/25 bg-blue-500/6 p-3 text-sm text-blue-100">
           Waiting on evidence:{' '}
           {detail.waiting_on.map((work, index) => (
             <span key={`${work.kind}-${work.id}`}>
@@ -267,7 +267,7 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
 
       {/* A freshly proven finding — the payoff */}
       {typeof familyProof.verdict === 'string' && familyProof.verdict === 'verified' ? (
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.08] p-4">
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/8 p-4">
           <div className="flex items-center gap-2">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
             <p className="text-xs font-semibold uppercase tracking-wider text-emerald-300">Verified finding</p>
@@ -278,7 +278,7 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
             {familyProof.restoration_verified === true ? <Badge className="bg-blue-500/10 text-blue-300">state restored</Badge> : null}
           </div>
           {provenFindingId ? (
-            <Link href={`/findings/${encodeURIComponent(provenFindingId)}`} className="mt-3 inline-flex items-center rounded border border-emerald-400/30 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10">
+            <Link href={`/findings/${encodeURIComponent(provenFindingId)}`} className="mt-3 inline-flex items-center rounded-sm border border-emerald-400/30 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10">
               Open finding <ArrowRight className="ml-1 h-3.5 w-3.5" />
             </Link>
           ) : null}
@@ -303,7 +303,7 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
               <div key={decision.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium text-gray-200">{sentence.verb}</span>
-                  {sentence.detail ? <code className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-gray-400">{sentence.detail}</code> : null}
+                  {sentence.detail ? <code className="rounded-sm bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-gray-400">{sentence.detail}</code> : null}
                   <Badge className={`ml-auto ${episodeStatusClass(decision.status)}`}>{blocked ? 'blocked' : decision.status.replace(/_/g, ' ')}</Badge>
                 </div>
                 {(decision.reason || blocked) ? (
@@ -338,7 +338,7 @@ export function LiveActivity({ detail, now }: { detail: ResearchEpisodeDetail; n
                     <span className="text-gray-500">{key === 'requests' ? 'request units remaining' : `${key.replace(/_/g, ' ')} remaining`}</span>
                     <span className="tabular-nums text-gray-300">{remaining} of {limit}</span>
                   </div>
-                  <div className="mt-1.5 h-1.5 overflow-hidden rounded bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${pct}%` }} /></div>
+                  <div className="mt-1.5 h-1.5 overflow-hidden rounded-sm bg-gray-800"><div className="h-full bg-cyan-400" style={{ width: `${pct}%` }} /></div>
                 </div>
               )
             })}

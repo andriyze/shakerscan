@@ -63,7 +63,7 @@ export default function WorkersPage() {
                   <h2 className="font-medium text-white">{label}</h2>
                   <p className="mt-1 text-xs text-gray-500">{detail}</p>
                 </div>
-                <span className={`rounded px-2 py-1 text-xs font-medium ${badge ? badge.className : 'bg-gray-800 text-gray-400'}`}>
+                <span className={`rounded-sm px-2 py-1 text-xs font-medium ${badge ? badge.className : 'bg-gray-800 text-gray-400'}`}>
                   {loading && !pool ? 'loading' : badge?.text || 'unknown'}
                 </span>
               </div>

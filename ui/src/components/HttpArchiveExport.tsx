@@ -52,7 +52,7 @@ function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }
   return (
     <details className="rounded-lg border border-gray-800 bg-gray-950/60">
       <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-2 text-xs">
-        <span className="w-14 shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 text-center font-mono text-blue-300">
+        <span className="w-14 shrink-0 rounded-sm bg-blue-500/10 px-1.5 py-0.5 text-center font-mono text-blue-300">
           {transaction.method || 'HTTP'}
         </span>
         <span className="w-10 shrink-0 font-mono text-gray-400">{status}</span>
@@ -64,7 +64,7 @@ function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }
       <div className="grid gap-3 border-t border-gray-800 p-3 lg:grid-cols-2">
         <div className="min-w-0">
           <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Request</p>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 text-[11px] text-gray-300">
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-black/30 p-2 text-[11px] text-gray-300">
             {pretty({ headers: transaction.request?.headers || {}, body: transaction.request?.body ?? null })}
           </pre>
           <p className="mt-1 break-all text-[10px] text-gray-600">
@@ -73,7 +73,7 @@ function TransactionDetail({ transaction }: { transaction: ArchivedTransaction }
         </div>
         <div className="min-w-0">
           <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Response</p>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 text-[11px] text-gray-300">
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm bg-black/30 p-2 text-[11px] text-gray-300">
             {pretty({ headers: transaction.response?.headers || {}, body: transaction.response?.body ?? null })}
           </pre>
           <p className="mt-1 break-all text-[10px] text-gray-600">
@@ -215,7 +215,7 @@ export default function HttpArchiveExport({
           </p>
           {archive && (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-              <span className={`rounded px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
+              <span className={`rounded-sm px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
               <span>{archive.fidelity_detail}</span>
             </div>
           )}
@@ -255,12 +255,12 @@ export default function HttpArchiveExport({
           {archive && (
             <>
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                <span className={`rounded px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
+                <span className={`rounded-sm px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
                 <span>{archive.fidelity_detail}</span>
                 <span>· {archive.total} match{archive.total === 1 ? '' : 'es'} in {archive.archive_total ?? archive.total} recorded call{(archive.archive_total ?? archive.total) === 1 ? '' : 's'}</span>
               </div>
               {archive.transactions.length === 0 ? (
-                <p className="mt-3 rounded bg-gray-950 p-3 text-xs text-gray-500">
+                <p className="mt-3 rounded-sm bg-gray-950 p-3 text-xs text-gray-500">
                   {archive.fidelity === 'unavailable' ? 'No request archive is available for this historical run.' : 'No recorded calls match these filters.'}
                 </p>
               ) : (

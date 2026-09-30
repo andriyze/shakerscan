@@ -33,7 +33,7 @@ const WORKERS_REFRESH_MS = 30000
 const GUNGNIR_REFRESH_MS = 30000
 const OVERVIEW_REFRESH_MS = 60000
 
-const FOCUS_RING = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+const FOCUS_RING = 'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
 type CohortView = 'operational' | 'production' | 'staging' | 'non_operational' | 'all'
 
 export default function Dashboard() {
@@ -316,7 +316,7 @@ export default function Dashboard() {
                 <Link
                   href="/scans?status=pending"
                   title={`${queuePending} pending scans`}
-                  className={`flex items-center gap-1.5 rounded text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                  className={`flex items-center gap-1.5 rounded-sm text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
                 >
                   <span className={`h-2 w-2 rounded-full bg-amber-400 ${queuePending !== '--' && queuePending > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queuePending}</span>
@@ -325,7 +325,7 @@ export default function Dashboard() {
                 <Link
                   href="/scans?status=running"
                   title={`${queueRunning} running scans`}
-                  className={`flex items-center gap-1.5 rounded text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
+                  className={`flex items-center gap-1.5 rounded-sm text-xs text-gray-300 hover:text-white ${FOCUS_RING}`}
                 >
                   <span className={`h-2 w-2 rounded-full bg-blue-500 ${queueRunning !== '--' && queueRunning > 0 ? 'animate-pulse' : ''}`} />
                   <span className="font-medium tabular-nums">{queueRunning}</span>
@@ -333,7 +333,7 @@ export default function Dashboard() {
                 </Link>
                 {(workPending !== queuePending || workRunning !== queueRunning) && (
                   <span
-                    className="hidden rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 lg:inline"
+                    className="hidden rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300 lg:inline"
                     title={`${workPending} queued and ${workRunning} running worker jobs, including parallel shards`}
                   >
                     {workRunning} work unit{workRunning === 1 ? '' : 's'} running
@@ -346,7 +346,7 @@ export default function Dashboard() {
               onClick={() => { setClearRetests(false); setShowClearQueue(true) }}
               aria-label="Emergency clear pending jobs"
               title="Emergency clear pending jobs"
-              className={`ml-1 flex h-7 items-center justify-center gap-1 rounded border border-red-950/70 px-2 text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300 ${FOCUS_RING}`}
+              className={`ml-1 flex h-7 items-center justify-center gap-1 rounded-sm border border-red-950/70 px-2 text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300 ${FOCUS_RING}`}
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="text-[10px]">Emergency clear</span>
@@ -369,27 +369,27 @@ export default function Dashboard() {
             </span>
             <span className="text-xs text-gray-500">{fleetEnabled ? 'ready across fleet' : 'ready to scan'}</span>
             {fleetEnabled && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
+              <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={workerCountLabel(workerCount ?? 0)}>
                 {localAvailable} local
               </span>
             )}
             {staleCount > 0 && (
-              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
+              <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Workers running an outdated build">
                 {staleCount} stale
               </span>
             )}
             {pendingWorkerCount > 0 && (
-              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
+              <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300" title="Running worker processes that have not reported a current build identity yet">
                 {pendingWorkerCount} starting
               </span>
             )}
             {unavailableWorkerCount > 0 && (
-              <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300" title="Worker containers that are stopped, restarting, or otherwise unavailable">
+              <span className="rounded-sm bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300" title="Worker containers that are stopped, restarting, or otherwise unavailable">
                 {unavailableWorkerCount} unavailable
               </span>
             )}
             {!fleetEnabled && workersKnown && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
+              <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-gray-300" title={`${workerCount} running worker processes; configured safety maximum ${maxWorkers}`}>
                 {workerCount} running · max {maxWorkers}
               </span>
             )}
@@ -400,7 +400,7 @@ export default function Dashboard() {
               disabled={scaling || !workersKnown || (workerCount || 0) <= 1}
               aria-label={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
               title={fleetEnabled ? 'Decrease local worker count' : 'Decrease worker count'}
-              className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
+              className={`flex h-7 w-7 items-center justify-center rounded-sm text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Minus className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
@@ -412,14 +412,14 @@ export default function Dashboard() {
               title={(workerCount || 0) >= maxWorkers
                 ? `Worker safety limit reached (${maxWorkers})`
                 : fleetEnabled ? 'Increase local worker count' : 'Increase worker count'}
-              className={`flex h-7 w-7 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
+              className={`flex h-7 w-7 items-center justify-center rounded-sm text-gray-400 transition-colors hover:bg-gray-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 ${FOCUS_RING}`}
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
             </WorkspaceFeature>{fleetEnabled && (
               <Link
                 href="/fleet"
-                className="rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
+                className="rounded-sm bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-300 hover:bg-blue-500/20"
                 title={`${executionCapacity?.remote_nodes_available ?? 0} remote nodes available`}
               >
                 {remoteAvailable} remote

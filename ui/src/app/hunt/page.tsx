@@ -133,7 +133,7 @@ function HuntHistory({
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm font-medium text-gray-200">{run.objective}</span>
-                <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{huntStatusLabel(run.status)}</span>
+                <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{huntStatusLabel(run.status)}</span>
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 {run.target_kind} · {run.budget_profile} · {run.budget_used.agent_actions || 0} capability calls
@@ -814,20 +814,20 @@ function HuntContent() {
                   <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
                   <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
                 </div>
-                <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{huntStatusLabel(hunt.status)}</span>
+                <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{huntStatusLabel(hunt.status)}</span>
               </div>
               <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="rounded bg-gray-950 p-3">
+                <div className="rounded-sm bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Budget</span>
                   <span className="text-white">{hunt.budget_profile}{(hunt.budget_revision ?? 0) > 0 ? ' (amended)' : ''}</span>
                 </div>
-                <div className="rounded bg-gray-950 p-3">
+                <div className="rounded-sm bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Capability calls</span>
                   <span className="text-white">
                     {hunt.budget_used.agent_actions || 0} / {hunt.budget.max_capability_calls || 0}
                   </span>
                 </div>
-                <div className="col-span-2 rounded bg-gray-950 p-3">
+                <div className="col-span-2 rounded-sm bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Run ID</span>
                   <code className="break-all text-xs text-gray-300">{hunt.hunt_id}</code>
                 </div>
@@ -939,7 +939,7 @@ function HuntContent() {
                   <summary className="cursor-pointer text-sm text-gray-300">Methodology activity</summary>
                   <ol className="mt-3 space-y-2 text-xs">
                     {[...(hunt.skill_activity || [])].reverse().slice(0, 20).map((event) => (
-                      <li key={event.event_id} className="rounded bg-gray-950 p-2">
+                      <li key={event.event_id} className="rounded-sm bg-gray-950 p-2">
                         <span className="text-violet-200">{event.event_type.replaceAll('_', ' ')}</span>
                         <span className="ml-2 break-all text-gray-400">{event.skill_id.replace('skill.web.', '')} · v{event.skill_version}</span>
                         {event.action_id && <p className="mt-1 break-all font-mono text-gray-500">Action {event.action_id}</p>}
@@ -979,7 +979,7 @@ function HuntContent() {
                       <span className="text-xs text-gray-500">Expires {new Date(plan.expires_at).toLocaleString()}</span>
                     </div>
                     <p className="text-xs text-gray-300">{plan.purpose}</p>
-                    <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-gray-950 p-3 text-xs text-blue-200">
+                    <pre className="overflow-x-auto whitespace-pre-wrap rounded-sm bg-gray-950 p-3 text-xs text-blue-200">
                       {plan.commands.join('\n')}
                     </pre>
                     <div className="space-y-1 text-xs text-gray-400">
@@ -1028,7 +1028,7 @@ function HuntContent() {
                       <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <code className="text-sm text-blue-300">{action.capability_name}</code>
-                          <span className={`rounded px-2 py-1 text-xs ${huntActionStatusClass(action.status)}`}>
+                          <span className={`rounded-sm px-2 py-1 text-xs ${huntActionStatusClass(action.status)}`}>
                             {action.status.replaceAll('_', ' ')}
                           </span>
                         </div>

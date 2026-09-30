@@ -28,7 +28,7 @@ function Receipt({ requestId }: { requestId: string }) {
   }, [open, requestId, refresh])
   return <div className="mt-1">
     <button type="button" className="underline focus:ring-2 focus:ring-blue-400" aria-expanded={open} onClick={() => setOpen(!open)}>Execution receipt</button>
-    {open && <div className="mt-1 rounded border border-gray-700 p-2">
+    {open && <div className="mt-1 rounded-sm border border-gray-700 p-2">
       <button type="button" className="mb-1 underline focus:ring-2 focus:ring-blue-400" onClick={() => setRefresh(value => value + 1)}>Refresh receipt</button>
       {failed ? <p role="status">Receipt unavailable. Try refreshing it.</p> : !value ? <p role="status">Loading receipt…</p> : <>
         <p>Execution: {value.status}</p>
@@ -66,7 +66,7 @@ export default function AuthenticationHistory({ profileId }: { profileId: string
   }, [profileId, open, page, refresh])
   return <div className="mt-2 text-sm">
     <button type="button" className="underline focus:ring-2 focus:ring-blue-400" aria-expanded={open} onClick={() => setOpen(!open)}>Validation history</button>
-    {open && <div className="mt-2 rounded border border-gray-700 p-3">
+    {open && <div className="mt-2 rounded-sm border border-gray-700 p-3">
       <p className="text-gray-400">Historical checks are individual observations. They do not prove authentication between checks.</p>
       <button type="button" className="my-2 underline focus:ring-2 focus:ring-blue-400" disabled={loading} onClick={() => { setPage(null); setRefresh(value => value + 1) }}>Refresh history</button>
       {error && <p role="alert">{error}</p>}

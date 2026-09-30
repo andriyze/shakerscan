@@ -55,7 +55,7 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
       <div className={`text-lg font-semibold ${tone}`}>{category.count}</div>
       <div className="text-[10px] uppercase tracking-wide text-gray-600">{category.label}</div>
       {first && category.count > 0 && (
-        <div className="mt-0.5 line-clamp-2 break-words text-[11px] leading-4 text-gray-500">{first.label}</div>
+        <div className="mt-0.5 line-clamp-2 wrap-break-word text-[11px] leading-4 text-gray-500">{first.label}</div>
       )}
     </>
   )
@@ -64,7 +64,7 @@ function ChangeTile({ category }: { category: ExposureChangeCategory }) {
       <Link
         href={category.href}
         title={exampleTitle(category)}
-        className="min-w-0 rounded px-2.5 py-2 transition-colors hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="min-w-0 rounded-sm px-2.5 py-2 transition-colors hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         {body}
       </Link>
@@ -107,7 +107,7 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
       type="button"
       aria-pressed={mode === value}
       onClick={() => setMode(value)}
-      className={`rounded px-2 py-0.5 text-[11px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+      className={`rounded px-2 py-0.5 text-[11px] transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
         mode === value ? 'bg-teal-500/15 text-teal-200 ring-1 ring-teal-400/40' : 'text-gray-500 hover:bg-gray-800/60 hover:text-gray-300'
       }`}
     >
@@ -135,7 +135,7 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
             <button
               type="button"
               onClick={load}
-              className="rounded px-2 py-0.5 text-teal-300 hover:bg-gray-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="rounded-sm px-2 py-0.5 text-teal-300 hover:bg-gray-800/60 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               Retry
             </button>
@@ -143,7 +143,7 @@ export function ChangesStrip({ rootDomain, storageKey = 'exposure' }: { rootDoma
         ) : loading && !data ? (
           <div className="flex gap-3">
             {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-10 w-24 animate-pulse rounded bg-gray-800/50" />
+              <div key={i} className="h-10 w-24 animate-pulse rounded-sm bg-gray-800/50" />
             ))}
           </div>
         ) : data && data.total_changes === 0 ? (

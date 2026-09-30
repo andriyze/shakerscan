@@ -76,7 +76,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={api}>
       {children}
       <div
-        className="fixed bottom-4 right-4 z-[100] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+        className="fixed bottom-4 right-4 z-100 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
         role="region"
         aria-label="Notifications"
       >
@@ -93,7 +93,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 aria-hidden="true"
               />
               <div className="min-w-0 flex-1 text-sm text-gray-200">
-                <p className="break-words">{t.message}</p>
+                <p className="wrap-break-word">{t.message}</p>
                 {t.link && (
                   <Link
                     href={t.link.href}
@@ -108,7 +108,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 type="button"
                 onClick={() => dismiss(t.id)}
                 aria-label="Dismiss notification"
-                className="rounded text-gray-500 hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="rounded-sm text-gray-500 hover:text-gray-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <X className="h-4 w-4" aria-hidden="true" />
               </button>

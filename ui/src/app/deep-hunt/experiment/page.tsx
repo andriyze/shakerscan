@@ -87,7 +87,7 @@ function StepEditor({ step, index, steps, update, remove }: {
           <select value={step.role} onChange={(e) => update({ role: e.target.value as StepRole })} aria-label={`Role for step ${index + 1}`} className="rounded-lg border border-gray-700 bg-gray-950 px-2 py-1.5 text-xs text-gray-300">
             {(Object.keys(ROLE_INFO) as StepRole[]).map((key) => <option key={key} value={key}>{ROLE_INFO[key].label}</option>)}
           </select>
-          {steps.length > 2 ? <button type="button" onClick={remove} className="rounded p-1.5 text-gray-500 hover:bg-red-500/10 hover:text-red-300" aria-label={`Remove step ${index + 1}`}><Trash2 className="h-4 w-4" /></button> : null}
+          {steps.length > 2 ? <button type="button" onClick={remove} className="rounded-sm p-1.5 text-gray-500 hover:bg-red-500/10 hover:text-red-300" aria-label={`Remove step ${index + 1}`}><Trash2 className="h-4 w-4" /></button> : null}
         </div>
       </div>
 
@@ -101,7 +101,7 @@ function StepEditor({ step, index, steps, update, remove }: {
           <label className="text-xs font-medium text-gray-400">Relative path
             <div className="mt-1.5 flex items-center rounded-lg border border-gray-700 bg-gray-950 focus-within:border-blue-500">
               <Route className="ml-3 h-4 w-4 flex-none text-gray-600" />
-              <input value={step.path} onChange={(e) => update({ path: e.target.value })} placeholder="/api/resource" className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm font-mono text-gray-200 outline-none" />
+              <input value={step.path} onChange={(e) => update({ path: e.target.value })} placeholder="/api/resource" className="min-w-0 flex-1 bg-transparent px-2 py-2 text-sm font-mono text-gray-200 outline-hidden" />
             </div>
           </label>
         </div>
@@ -216,7 +216,7 @@ export default function ExperimentBuilderPage() {
         </div>
         <div className="flex flex-col items-start gap-2 sm:items-end">
           <InvestigatorTabs />
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2 text-xs text-emerald-200"><ShieldCheck className="h-4 w-4" />Same-origin · bounded · approval-gated</div>
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/6 px-3 py-2 text-xs text-emerald-200"><ShieldCheck className="h-4 w-4" />Same-origin · bounded · approval-gated</div>
         </div>
       </header>
 
@@ -237,7 +237,7 @@ export default function ExperimentBuilderPage() {
               </label>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="text-xs font-medium text-emerald-300">Evidence that supports the lead
-                  <textarea value={expected} onChange={(e) => setExpected(e.target.value)} rows={3} placeholder="The test request returns another user's object while the control is denied." className="mt-1.5 w-full rounded-lg border border-emerald-500/20 bg-emerald-500/[0.04] px-3 py-2.5 text-sm text-gray-300 placeholder:text-gray-700" />
+                  <textarea value={expected} onChange={(e) => setExpected(e.target.value)} rows={3} placeholder="The test request returns another user's object while the control is denied." className="mt-1.5 w-full rounded-lg border border-emerald-500/20 bg-emerald-500/4 px-3 py-2.5 text-sm text-gray-300 placeholder:text-gray-700" />
                 </label>
                 <label className="text-xs font-medium text-gray-400">Evidence that disproves the lead
                   <textarea value={falsifier} onChange={(e) => setFalsifier(e.target.value)} rows={3} placeholder="Both requests are denied or return only the current user's object." className="mt-1.5 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 text-sm text-gray-300 placeholder:text-gray-700" />
@@ -278,7 +278,7 @@ export default function ExperimentBuilderPage() {
           </Card>
 
           {error ? <ErrorState message={error} /> : null}
-          {result ? <Card className="border-blue-500/30 bg-blue-500/[0.05] p-5">
+          {result ? <Card className="border-blue-500/30 bg-blue-500/5 p-5">
             <div className="flex items-center gap-2 text-blue-200"><FileCheck2 className="h-5 w-5" /><h2 className="font-semibold">Plan recorded</h2></div>
             <p className="mt-2 text-sm leading-6 text-gray-400">No requests were sent. This screen validates and records the plan only; an authorized agent or Hunt must initiate execution.</p>
             {result.execution_blocked_reason ? <div className="mt-3 rounded-lg bg-gray-950/60 p-3 text-xs text-gray-400"><span className="font-medium text-amber-300">Execution gate:</span> {result.execution_blocked_reason}</div> : null}

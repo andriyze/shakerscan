@@ -40,8 +40,11 @@ export default async function SettingsPage({
         description="Organization-wide defaults. Settings on an individual scan or target take priority."
       />
 
+      {/* Tabs is inline-flex: Tailwind v4's space-y puts the gap on the preceding sibling,
+          where PageHeader's own mb-6 overrides it, so keep the strip's top gap explicitly. */}
       <Tabs
         ariaLabel="Settings sections"
+        className="mt-6"
         active={activeSection}
         items={SECTIONS.map((section) => ({
           key: section.id,

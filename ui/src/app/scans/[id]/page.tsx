@@ -89,7 +89,7 @@ function formatRollupKeys(values: any, formatter: (value: string) => string = (v
 
 function CoverageMetric({ label, value, accent = 'text-white' }: { label: string; value: any; accent?: string }) {
   return (
-    <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+    <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
       <div className={`text-lg font-semibold ${accent}`}>{value}</div>
       <div className="mt-0.5 text-xs text-gray-500">{label}</div>
     </div>
@@ -189,7 +189,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             <p className="mt-2 text-sm text-gray-300">{resultPresentation.explanation}</p>
             {release && (
               <p className="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-200" data-testid="release-line">
-                <span className={`rounded px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
+                <span className={`rounded-sm px-2 py-0.5 text-xs font-semibold uppercase ${releaseClass}`}>{release.verdict.replace(/_/g, ' ')}</span>
                 <span>{release.text}</span>
               </p>
             )}
@@ -203,7 +203,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                   <Link
                     key={step.key}
                     href={step.href}
-                    className="rounded border border-blue-400/40 bg-blue-500/10 px-3 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/20"
+                    className="rounded-sm border border-blue-400/40 bg-blue-500/10 px-3 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/20"
                   >
                     {step.label} →
                   </Link>
@@ -275,7 +275,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
                 key={severity}
                 href={`/findings?scan_id=${scan.id}&severity=${severity}&freshness=all`}
                 title={`View ${count} ${severity} finding${count === 1 ? '' : 's'} from this scan`}
-                className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
+                className={`inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${SEVERITY_BADGE_STYLES[severity]}`}
               >
                 {count} {severity}
               </Link>
@@ -303,7 +303,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <Link
                   href={`/findings?target_id=${scan.target_id}&status=active&freshness=all`}
-                  className={`inline-flex items-center rounded px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest as SeverityLevel] : 'bg-gray-800 text-gray-300'}`}
+                  className={`inline-flex items-center rounded-sm px-2 py-1 text-xs font-medium uppercase transition hover:ring-1 hover:ring-white/25 ${carried.highest ? SEVERITY_BADGE_STYLES[carried.highest as SeverityLevel] : 'bg-gray-800 text-gray-300'}`}
                 >
                   {carried.complete ? '' : 'at least '}{carried.count} unresolved{carried.highest ? ` · up to ${carried.highest}` : ''}
                 </Link>
@@ -334,12 +334,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
           )}
         </dl>
         {resultPresentation.testingWarning && (
-          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
+          <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
             {resultPresentation.testingWarning}
           </p>
         )}
         {quota?.kind === 'reduced' && (
-          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
+          <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
             {quota.label}: {quota.description}
           </p>
         )}
@@ -457,12 +457,12 @@ function DeploymentDecisionCard({
         <div>
           <h2 className="text-sm font-semibold text-gray-300">Overall release decision</h2>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <span className={`rounded px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
+            <span className={`rounded-sm px-2 py-1 font-medium uppercase ${verdictClass}`}>{verdict.replace(/_/g, ' ')}</span>
             {decision?.policy_profile && (
-              <span className="rounded bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
+              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">profile</span> {String(decision.policy_profile)}</span>
             )}
             {decision?.policy_name && (
-              <span className="rounded bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>
+              <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300"><span className="text-gray-500">policy</span> {String(decision.policy_name)}</span>
             )}
           </div>
         </div>
@@ -470,7 +470,7 @@ function DeploymentDecisionCard({
           type="button"
           onClick={onRefresh}
           disabled={loading}
-          className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+          className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
         >
           {loading ? 'Refreshing...' : 'Refresh'}
         </button>
@@ -488,14 +488,14 @@ function DeploymentDecisionCard({
         {decision?.expires_at && <span>expires {formatDate(String(decision.expires_at))}</span>}
       </div>
       {requiredEvidenceMissing.length > 0 && (
-        <div className="mt-3 rounded border border-amber-500/20 bg-amber-500/10 p-3">
+        <div className="mt-3 rounded-sm border border-amber-500/20 bg-amber-500/10 p-3">
           <div className="text-xs font-semibold uppercase tracking-wide text-amber-200">Required evidence missing</div>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
             {requiredEvidenceMissing.slice(0, 6).map((item, index) => (
-              <div key={`${item.id || 'evidence'}-${index}`} className="rounded border border-amber-500/20 bg-gray-950/40 p-2 text-xs">
+              <div key={`${item.id || 'evidence'}-${index}`} className="rounded-sm border border-amber-500/20 bg-gray-950/40 p-2 text-xs">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium text-amber-100">{String(item.label || item.id || 'Evidence')}</span>
-                  {item.status && <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-amber-200">{String(item.status).replace(/_/g, ' ')}</span>}
+                  {item.status && <span className="rounded-sm bg-amber-900/40 px-1.5 py-0.5 text-amber-200">{String(item.status).replace(/_/g, ' ')}</span>}
                 </div>
                 {item.id === 'policy_required_trust_anchors' && (
                   <div className="mt-1 space-y-1 text-gray-400">
@@ -515,22 +515,22 @@ function DeploymentDecisionCard({
         </div>
       )}
       {exceptionSummary && (
-        <div className="mt-3 rounded border border-gray-800 bg-gray-950/40 p-3">
+        <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950/40 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Exception hygiene</div>
             {exceptionSummary.profile_disables_exceptions && (
-              <span className="rounded bg-red-900/40 px-2 py-0.5 text-xs text-red-200">disabled by profile</span>
+              <span className="rounded-sm bg-red-900/40 px-2 py-0.5 text-xs text-red-200">disabled by profile</span>
             )}
           </div>
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
-            <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{Number(exceptionSummary.applied_count || 0)} applied</span>
-            {Number(exceptionSummary.expired || 0) > 0 && <span className="rounded bg-red-900/40 px-2 py-1 text-red-200">{exceptionSummary.expired} expired</span>}
-            {Number(exceptionSummary.expiring_soon || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.expiring_soon} expiring soon</span>}
-            {Number(exceptionSummary.missing_owner || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_owner} missing owner</span>}
-            {Number(exceptionSummary.missing_approver || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_approver} missing approver</span>}
-            {Number(exceptionSummary.missing_compensating_controls || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_compensating_controls} missing controls</span>}
-            {Number(exceptionSummary.missing_expiry || 0) > 0 && <span className="rounded bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_expiry} missing expiry</span>}
-            {Number(exceptionSummary.inactive_or_revoked || 0) > 0 && <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{exceptionSummary.inactive_or_revoked} inactive/revoked</span>}
+            <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300">{Number(exceptionSummary.applied_count || 0)} applied</span>
+            {Number(exceptionSummary.expired || 0) > 0 && <span className="rounded-sm bg-red-900/40 px-2 py-1 text-red-200">{exceptionSummary.expired} expired</span>}
+            {Number(exceptionSummary.expiring_soon || 0) > 0 && <span className="rounded-sm bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.expiring_soon} expiring soon</span>}
+            {Number(exceptionSummary.missing_owner || 0) > 0 && <span className="rounded-sm bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_owner} missing owner</span>}
+            {Number(exceptionSummary.missing_approver || 0) > 0 && <span className="rounded-sm bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_approver} missing approver</span>}
+            {Number(exceptionSummary.missing_compensating_controls || 0) > 0 && <span className="rounded-sm bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_compensating_controls} missing controls</span>}
+            {Number(exceptionSummary.missing_expiry || 0) > 0 && <span className="rounded-sm bg-amber-900/40 px-2 py-1 text-amber-200">{exceptionSummary.missing_expiry} missing expiry</span>}
+            {Number(exceptionSummary.inactive_or_revoked || 0) > 0 && <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300">{exceptionSummary.inactive_or_revoked} inactive/revoked</span>}
           </div>
           {Number(exceptionSummary.review_required || 0) > 0 && (
             <p className="mt-2 text-xs text-amber-200">
@@ -560,7 +560,7 @@ function DeploymentDecisionCard({
               const persistedFindingId = typeof persistedFinding?.id === 'string' ? persistedFinding.id : null
               return (
               <li key={`${f.id || 'finding'}-${i}`} className="flex items-center gap-2 text-xs">
-                <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${deploySeverityClass(f.severity)}`}>
+                <span className={`shrink-0 rounded-sm px-1.5 py-0.5 font-medium ${deploySeverityClass(f.severity)}`}>
                   {String(f.severity || 'finding')}
                 </span>
                 {persistedFindingId ? (
@@ -572,7 +572,7 @@ function DeploymentDecisionCard({
                 )}
                 {f.from_target_active && (
                   <span
-                    className="shrink-0 rounded bg-amber-900/40 px-1.5 py-0.5 text-amber-300"
+                    className="shrink-0 rounded-sm bg-amber-900/40 px-1.5 py-0.5 text-amber-300"
                     title="Unresolved on this target from another scan"
                   >
                     on target
@@ -653,7 +653,7 @@ function ScanFindingRow({ finding }: { finding: any }) {
   return (
     <li className="grid gap-x-3 gap-y-1 px-3 py-2 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center">
       <div className="flex items-center justify-between gap-2 sm:contents">
-        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
+        <span className={`rounded-sm px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
           {String(finding.severity || 'info')}
         </span>
         <span className={`text-xs sm:order-last ${proof.className}`}>{proof.label}</span>
@@ -712,8 +712,8 @@ function ScanFindingContextCard({
         </Link>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="rounded bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
-        <span className="rounded bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} not observed in this scan</span>
+        <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
+        <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} not observed in this scan</span>
         {current.length > 0 && (
           <span className="text-gray-500">
             {provenCount} proven · {current.length - provenCount} {current.length - provenCount === 1 ? 'needs' : 'need'} verification
@@ -884,11 +884,11 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {review.decision && (
-            <span className={`rounded px-2 py-1 text-xs ${decisionClass}`}>{formatAiGateLabel(review.decision)}</span>
+            <span className={`rounded-sm px-2 py-1 text-xs ${decisionClass}`}>{formatAiGateLabel(review.decision)}</span>
           )}
-          {review.environment && <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{formatAiGateLabel(review.environment)}</span>}
+          {review.environment && <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{formatAiGateLabel(review.environment)}</span>}
           {judgingGate && (
-            <span className={`rounded px-2 py-1 text-xs ${judgingGate.className}`} title={judgingGate.title}>
+            <span className={`rounded-sm px-2 py-1 text-xs ${judgingGate.className}`} title={judgingGate.title}>
               {judgingGate.label}
             </span>
           )}
@@ -896,7 +896,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             type="button"
             onClick={() => setCollapsed((v) => !v)}
             aria-expanded={!collapsed}
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {collapsed ? 'Show details' : 'Hide details'}
           </button>
@@ -907,7 +907,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         <>
       {review.rationale && <p className="mt-3 text-sm text-gray-300">{review.rationale}</p>}
 
-      <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign History</div>
@@ -916,7 +916,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             </p>
           </div>
           {campaignHistory?.previous_run && (
-            <Link href={campaignHistory.previous_run.ui_url || `/scans/${campaignHistory.previous_run.id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+            <Link href={campaignHistory.previous_run.ui_url || `/scans/${campaignHistory.previous_run.id}`} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
               Previous run
             </Link>
           )}
@@ -972,7 +972,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         )}
       </div>
 
-      <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-xs font-medium uppercase tracking-wide text-gray-500">Campaign replay</div>
@@ -986,7 +986,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                 type="checkbox"
                 checked={confirmProductionReplay}
                 onChange={(event) => setConfirmProductionReplay(event.target.checked)}
-                className="h-4 w-4 rounded border-gray-700 bg-gray-800"
+                className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800"
               />
               Confirm production replay
             </label>
@@ -997,7 +997,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             type="button"
             onClick={() => queueReplay('Skipped probes', 'skipped')}
             disabled={replayLoading !== null || review.skipped === 0 || (isProduction && !confirmProductionReplay)}
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+            className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
             {replayLoading === 'skipped:' ? 'Queueing...' : 'Rerun skipped'}
           </button>
@@ -1005,7 +1005,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             type="button"
             onClick={() => queueReplay('Errored families', 'errors')}
             disabled={replayLoading !== null || review.errors === 0 || (isProduction && !confirmProductionReplay)}
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+            className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
             {replayLoading === 'errors:' ? 'Queueing...' : 'Rerun errors'}
           </button>
@@ -1013,7 +1013,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             type="button"
             onClick={() => queueReplay('Full campaign', 'all')}
             disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+            className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
             {replayLoading === 'all:' ? 'Queueing...' : 'Rerun all'}
           </button>
@@ -1039,19 +1039,19 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       </div>
 
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
-        <div className="min-w-0 rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Coverage Matrix</div>
           {review.families.length ? (
             <div className="space-y-2">
               {review.families.slice(0, 8).map((family) => (
-                <div key={family.family} className="rounded border border-gray-800 bg-gray-900/60 p-2">
+                <div key={family.family} className="rounded-sm border border-gray-800 bg-gray-900/60 p-2">
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="font-medium text-gray-200">{formatAiGateLabel(family.family)}</span>
                     <span className="text-gray-500">{family.executed}/{family.planned} executed</span>
                   </div>
-                  <div className="mt-2 h-1.5 rounded bg-gray-800">
+                  <div className="mt-2 h-1.5 rounded-sm bg-gray-800">
                     <div
-                      className="h-1.5 rounded bg-purple-500"
+                      className="h-1.5 rounded-sm bg-purple-500"
                       style={{ width: `${family.planned ? Math.min(100, Math.round((family.executed / family.planned) * 100)) : 0}%` }}
                     />
                   </div>
@@ -1065,7 +1065,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                     type="button"
                     onClick={() => queueReplay(formatAiGateLabel(family.family), 'family', { probeFamily: family.family })}
                     disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
-                    className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                    className="mt-2 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
                   >
                     {replayLoading === `family:${family.family}` ? 'Queueing...' : 'Rerun family'}
                   </button>
@@ -1078,17 +1078,17 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
         </div>
 
         <div className="min-w-0 space-y-3">
-          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Skipped / Blocked</div>
             {review.skipped_reasons.length ? (
               <div className="space-y-2">
                 {review.skipped_reasons.slice(0, 6).map((reason) => (
-                  <div key={reason.reason} className="rounded bg-gray-900/70 p-2 text-xs">
+                  <div key={reason.reason} className="rounded-sm bg-gray-900/70 p-2 text-xs">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-gray-200">{formatAiGateLabel(reason.reason)}</span>
                       <span className="text-yellow-300">{reason.count}</span>
                     </div>
-                    <div className="mt-1 break-words text-gray-500">{reason.families.map(formatAiGateLabel).join(', ')}</div>
+                    <div className="mt-1 wrap-break-word text-gray-500">{reason.families.map(formatAiGateLabel).join(', ')}</div>
                   </div>
                 ))}
               </div>
@@ -1097,7 +1097,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
             )}
           </div>
 
-          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Evidence Pack</div>
             <div className="space-y-1 text-xs text-gray-500">
               {review.planned_hash && <div className="truncate">planned: <span className="font-mono text-gray-300">{review.planned_hash}</span></div>}
@@ -1107,24 +1107,24 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
               {review.evidence_manifest_hash && <div className="truncate">manifest: <span className="font-mono text-gray-300">{review.evidence_manifest_hash}</span></div>}
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <a href={transcriptUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              <a href={transcriptUrl} target="_blank" rel="noreferrer" className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                 Transcripts
               </a>
-              <a href={reportUrl} target="_blank" rel="noreferrer" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+              <a href={reportUrl} target="_blank" rel="noreferrer" className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                 Export report
               </a>
             </div>
           </div>
 
-          <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Transcript Replay</div>
             {review.transcripts.length ? (
               <div className="space-y-2">
                 {review.transcripts.slice(0, 6).map((transcript) => (
-                  <div key={`${transcript.index}-${transcript.probe_id}`} className="rounded bg-gray-900/70 p-2 text-xs">
+                  <div key={`${transcript.index}-${transcript.probe_id}`} className="rounded-sm bg-gray-900/70 p-2 text-xs">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="min-w-0 break-all font-mono text-gray-200">{transcript.probe_id}</span>
-                      {transcript.error && <span className="rounded bg-red-900/50 px-1.5 py-0.5 text-[11px] text-red-200">error</span>}
+                      {transcript.error && <span className="rounded-sm bg-red-900/50 px-1.5 py-0.5 text-[11px] text-red-200">error</span>}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-gray-500">
                       {transcript.probe_family && <span>{formatAiGateLabel(transcript.probe_family)}</span>}
@@ -1139,7 +1139,7 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
                         transcriptIndex: transcript.index,
                       })}
                       disabled={replayLoading !== null || (isProduction && !confirmProductionReplay)}
-                      className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                      className="mt-2 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50"
                     >
                       {replayLoading === `transcript:${transcript.probe_id || transcript.index}` ? 'Queueing...' : 'Replay transcript'}
                     </button>
@@ -1154,25 +1154,25 @@ function AiGateCampaignReviewCard({ scan }: { scan: any }) {
       </div>
 
       {review.findings.length > 0 && (
-        <div className="mt-4 rounded border border-gray-800 bg-gray-950/50 p-3">
+        <div className="mt-4 rounded-sm border border-gray-800 bg-gray-950/50 p-3">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Replay / Rerun Findings</div>
           <div className="grid gap-2 lg:grid-cols-2">
             {review.findings.map((finding) => {
               const persistedFinding = linkedPersistedFinding(finding as unknown as Record<string, unknown>, persistedFindingIndex)
               const persistedFindingId = typeof persistedFinding?.id === 'string' ? persistedFinding.id : null
               return (
-              <div key={finding.id || `${finding.title}-${finding.probe_id}`} className="rounded border border-gray-800 bg-gray-900/60 p-2">
+              <div key={finding.id || `${finding.title}-${finding.probe_id}`} className="rounded-sm border border-gray-800 bg-gray-900/60 p-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${deploySeverityClass(finding.severity)}`}>
+                  <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${deploySeverityClass(finding.severity)}`}>
                     {finding.severity}
                   </span>
-                  <span className="min-w-0 flex-1 break-words text-xs text-gray-200">{finding.title}</span>
+                  <span className="min-w-0 flex-1 wrap-break-word text-xs text-gray-200">{finding.title}</span>
                 </div>
                 <div className="mt-1 text-[11px] text-gray-500">
                   {finding.probe_id || 'probe unknown'}{finding.probe_family ? ` · ${formatAiGateLabel(finding.probe_family)}` : ''}
                 </div>
                 {persistedFindingId && (
-                  <Link href={`/findings/${persistedFindingId}`} className="mt-2 inline-block rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                  <Link href={`/findings/${persistedFindingId}`} className="mt-2 inline-block rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                     Review / replay
                   </Link>
                 )}
@@ -1226,12 +1226,12 @@ function ParentCoverageRollup({ scan }: { scan: any }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {allocation && (
-            <span className="rounded bg-blue-500/10 px-2 py-1 text-xs text-blue-300">
+            <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-xs text-blue-300">
               {allocation} allocation
             </span>
           )}
           {basis && (
-            <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">
+            <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">
               {basis}
             </span>
           )}
@@ -1278,7 +1278,7 @@ function ParallelShardRollup({ scan }: { scan: any }) {
   const discovery = scan?.parallel_discovery
   const strategy = scan.options?.parallel_strategy || scan.options?.shard_strategy
   const strategyBadge = strategy ? (
-    <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
+    <span className="px-2 py-1 rounded-sm bg-blue-500/10 text-xs text-blue-300">
       {String(strategy)} strategy
     </span>
   ) : null
@@ -1325,13 +1325,13 @@ function ParallelShardRollup({ scan }: { scan: any }) {
           </p>
         </div>
         {scan.options?.parallel_strategy && (
-          <span className="px-2 py-1 rounded bg-blue-500/10 text-xs text-blue-300">
+          <span className="px-2 py-1 rounded-sm bg-blue-500/10 text-xs text-blue-300">
             {String(scan.options.parallel_strategy)} strategy
           </span>
         )}
       </div>
       {discovery && (
-        <div className="mb-3 rounded border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
+        <div className="mb-3 rounded-sm border border-gray-800 bg-gray-950/50 p-3 text-xs text-gray-400">
           <span className="font-medium text-gray-200">Discovery</span>
           {' · '}{String(discovery.status || 'unknown')}
           {discovery.executing_node_id ? ` · node ${String(discovery.executing_node_id).slice(0, 8)}` : ''}
@@ -1372,7 +1372,7 @@ function ShardContributionRollup({ rollup, settled }: { rollup: any; settled: bo
 
   return (
     <div className="mb-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Endpoint work</div>
         <div className="mt-1 text-gray-200">
           {attemptTelemetryAvailable
@@ -1383,7 +1383,7 @@ function ShardContributionRollup({ rollup, settled }: { rollup: any; settled: bo
         </div>
         {statusSummary && <div className="mt-1 text-gray-500">{statusSummary}</div>}
       </div>
-      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Runtime / active cap</div>
         <div className="mt-1 text-gray-200">
           {/* Shard runtime is summed from settled shards, so during a run it is
@@ -1398,14 +1398,14 @@ function ShardContributionRollup({ rollup, settled }: { rollup: any; settled: bo
           <div className="mt-1 text-gray-500">{formatPct(contribution.active_budget_utilization)} of cap</div>
         )}
       </div>
-      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Families</div>
         <div className="mt-1 text-gray-200">
           {formatRollupKeys(contribution.by_check_family, formatShardFamily)}
         </div>
         {telemetry ? <div className="mt-1 text-gray-500">{telemetry} shard telemetry</div> : null}
       </div>
-      <div className="rounded border border-gray-800 bg-gray-950/50 p-3">
+      <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-3">
         <div className="text-gray-500">Auth states</div>
         <div className="mt-1 text-gray-200">
           {formatRollupKeys(contribution.by_auth_state, (value) => value.replace(/_/g, ' '))}
@@ -1447,15 +1447,15 @@ function ShardCard({ shard }: { shard: any }) {
   return (
     <Link
       href={`/scans/${shard.id}`}
-      className="block rounded border border-gray-800 bg-gray-900/60 p-3 hover:border-gray-700"
+      className="block rounded-sm border border-gray-800 bg-gray-900/60 p-3 hover:border-gray-700"
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm text-white">Shard {Number(shard.shard_index ?? 0) + 1}</span>
         <span className="text-xs uppercase text-gray-400">{shard.status}</span>
       </div>
-      <div className="mt-2 h-1.5 rounded bg-gray-800">
+      <div className="mt-2 h-1.5 rounded-sm bg-gray-800">
         <div
-          className="h-1.5 rounded bg-blue-500"
+          className="h-1.5 rounded-sm bg-blue-500"
           style={{ width: `${Math.max(0, Math.min(100, Number(shard.progress || 0)))}%` }}
         />
       </div>
@@ -1465,23 +1465,23 @@ function ShardCard({ shard }: { shard: any }) {
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
         {endpointSummary && (
-          <div className="rounded bg-gray-950/60 px-2 py-1">
+          <div className="rounded-sm bg-gray-950/60 px-2 py-1">
             <div className="text-gray-500">Endpoints</div>
             <div className="text-gray-200">{endpointSummary}</div>
           </div>
         )}
-        <div className="rounded bg-gray-950/60 px-2 py-1">
+        <div className="rounded-sm bg-gray-950/60 px-2 py-1">
           <div className="text-gray-500">Family</div>
           <div className="text-gray-200">{formatShardFamily(contribution.check_family)}</div>
         </div>
         {contribution.auth_state && (
-          <div className="rounded bg-gray-950/60 px-2 py-1">
+          <div className="rounded-sm bg-gray-950/60 px-2 py-1">
             <div className="text-gray-500">Auth</div>
             <div className="truncate text-gray-200">{String(contribution.auth_state).replace(/_/g, ' ')}</div>
           </div>
         )}
         {(endpointBudget > 0 || activeSeconds > 0) && (
-          <div className="rounded bg-gray-950/60 px-2 py-1">
+          <div className="rounded-sm bg-gray-950/60 px-2 py-1">
             <div className="text-gray-500">Active budget</div>
             <div className="text-gray-200">
               {endpointBudget ? `${endpointBudget} ep` : 'auto'}
@@ -1562,7 +1562,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
   return (
     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-5 mb-6">
       <div className="flex items-start gap-3">
-        <svg className="w-5 h-5 text-red-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg className="w-5 h-5 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
         <div className="min-w-0">
@@ -1578,7 +1578,7 @@ function FailedScanPanel({ scan, hasPartialResults }: { scan: any; hasPartialRes
               <summary className="cursor-pointer text-xs font-medium text-red-100/80">
                 Historical failure log excerpt
               </summary>
-              <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-red-100/70">
+              <pre className="mt-2 whitespace-pre-wrap wrap-break-word text-xs text-red-100/70">
                 {legacyLogExcerpt}
               </pre>
             </details>
@@ -1678,14 +1678,14 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`rounded px-2 py-1 text-xs ${parity.consistent === false ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-300'}`}>
+          <span className={`rounded-sm px-2 py-1 text-xs ${parity.consistent === false ? 'bg-red-500/10 text-red-300' : 'bg-green-500/10 text-green-300'}`}>
             {parity.consistent === false ? 'Execution record mismatch' : 'Same local / fleet contract'}
           </span>
           <a
             href={apiRecordUrl}
             target="_blank"
             rel="noreferrer"
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+            className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
           >
             Open execution record
           </a>
@@ -1693,17 +1693,17 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
       </div>
 
       <div className="mt-3 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Plan:</span>{' '}
           <span className="font-mono">{String(explanation?.plan_digest || 'pending')}</span>
         </div>
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Plan version:</span>{' '}
           {String(planRevision.schema_version || explanation?.schema_version || 'unknown')}
           {planRevision.revision !== undefined ? ` · revision ${Number(planRevision.revision)}` : ''}
         </div>
         {planRevision.continuation_plan_digest && (
-          <div className="rounded border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2 md:col-span-2">
             <span className="text-gray-400">Continuation:</span>{' '}
             <span className="font-mono">{String(planRevision.continuation_plan_digest)}</span>
           </div>
@@ -1711,7 +1711,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
       </div>
 
       {reliability.reliable === false && (
-        <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/10 p-3">
+        <div className="mt-3 rounded-sm border border-amber-500/25 bg-amber-500/10 p-3">
           <div className="text-sm font-medium text-amber-200">
             {hasFinalGrade ? 'Observed posture is provisional' : 'Execution coverage is incomplete'}
           </div>
@@ -1727,20 +1727,20 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
       )}
 
       <div className="mt-4 grid gap-2 text-[11px] text-gray-500 md:grid-cols-2">
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Plan limit:</span> {formatExecutionBudget(budget.limit)}
         </div>
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Allocated:</span> {formatExecutionBudget(budget.allocated)}
         </div>
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Used:</span> {formatExecutionBudget(budget.consumed)}
         </div>
-        <div className="rounded border border-gray-800 bg-gray-950/50 p-2">
+        <div className="rounded-sm border border-gray-800 bg-gray-950/50 p-2">
           <span className="text-gray-400">Unused:</span> {formatExecutionBudget(budget.unallocated)}
         </div>
         {formatExecutionBudget(budget.uncertain) !== 'None' && (
-          <div className="rounded border border-amber-500/25 bg-amber-500/10 p-2 text-amber-200 md:col-span-2">
+          <div className="rounded-sm border border-amber-500/25 bg-amber-500/10 p-2 text-amber-200 md:col-span-2">
             Uncertain after interrupted execution: {formatExecutionBudget(budget.uncertain)}
           </div>
         )}
@@ -1748,10 +1748,10 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
       <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
         {stages.map((stage: any) => (
-          <div key={String(stage.stage)} className="min-w-36 rounded border border-gray-800 bg-gray-950/50 p-2">
+          <div key={String(stage.stage)} className="min-w-36 rounded-sm border border-gray-800 bg-gray-950/50 p-2">
             <div className="text-xs font-medium text-gray-300">{String(stage.label || stage.stage)}</div>
             <div className="mt-1 flex items-center justify-between gap-2">
-              <span className={`rounded px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(stage.status || 'pending'))}`}>
+              <span className={`rounded-sm px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(stage.status || 'pending'))}`}>
                 {String(stage.status || 'pending').replace(/_/g, ' ')}
               </span>
               <span className="text-[11px] text-gray-600">{Number(stage.action_count || 0)}</span>
@@ -1760,7 +1760,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
         ))}
       </div>
 
-      <details className="mt-4 rounded border border-gray-800 bg-gray-950/40">
+      <details className="mt-4 rounded-sm border border-gray-800 bg-gray-950/40">
         <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white">
           Capability details ({actions.length})
         </summary>
@@ -1776,10 +1776,10 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
               <div id={occurrenceId} key={occurrenceId} className="p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-medium text-gray-200">{String(action.label || action.action_id)}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>
+                  <span className={`rounded-sm px-1.5 py-0.5 text-[11px] ${executionStatusClass(String(action.status || 'planned'))}`}>
                     {String(action.status || 'planned').replace(/_/g, ' ')}
                   </span>
-                  {action.required && <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-400">required</span>}
+                  {action.required && <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[11px] text-gray-400">required</span>}
                 </div>
                 {action.reason && <p className="mt-1 text-xs text-amber-300/80">{String(action.reason)}</p>}
                 <div className="mt-2 grid gap-1 text-[11px] text-gray-500 md:grid-cols-2">
@@ -1788,9 +1788,9 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
                     {placement.worker_id ? ` · ${String(placement.worker_id)}` : ''}
                   </div>
                   <div>Evidence observations: {observationCount.toLocaleString()}</div>
-                  <div className="break-words">Allocated: {formatExecutionBudget(allocated)}</div>
-                  <div className="break-words">Reserved: {formatExecutionBudget(reserved)}</div>
-                  <div className="break-words">Used: {formatExecutionBudget(consumed)}</div>
+                  <div className="wrap-break-word">Allocated: {formatExecutionBudget(allocated)}</div>
+                  <div className="wrap-break-word">Reserved: {formatExecutionBudget(reserved)}</div>
+                  <div className="wrap-break-word">Used: {formatExecutionBudget(consumed)}</div>
                 </div>
               </div>
             )
@@ -2021,7 +2021,7 @@ function ScanDetailContent() {
                 type="button"
                 onClick={copyVisibleLogs}
                 disabled={filteredLogs.length === 0}
-                className="rounded border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-sm border border-gray-700 px-2 py-1 text-gray-300 hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Copy shown
               </button>
@@ -2052,7 +2052,7 @@ function ScanDetailContent() {
                 value={logSearch}
                 onChange={(event) => setLogSearch(event.target.value)}
                 placeholder="Search logs"
-                className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 focus:border-blue-500 focus:outline-none"
+                className="w-full rounded-sm border border-gray-700 bg-gray-950 px-3 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 focus:border-blue-500 focus:outline-hidden"
               />
             </label>
             {live && (
@@ -2072,16 +2072,16 @@ function ScanDetailContent() {
         <div
           ref={logsRef}
           aria-live={live ? 'polite' : 'off'}
-          className="max-h-[30rem] space-y-1 overflow-y-auto bg-black/25 p-3 font-mono text-xs"
+          className="max-h-120 space-y-1 overflow-y-auto bg-black/25 p-3 font-mono text-xs"
         >
           {filteredLogs.length > 0 ? (
             filteredLogs.map((entry: any, idx: number) => (
-              <div key={`${idx}-${entry.raw}`} className={`rounded border px-3 py-2 ${scanLogTone(entry.kind)}`}>
+              <div key={`${idx}-${entry.raw}`} className={`rounded-sm border px-3 py-2 ${scanLogTone(entry.kind)}`}>
                 <div className="flex flex-wrap items-start gap-2">
-                  <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${scanLogBadgeTone(entry.kind)}`}>
+                  <span className={`mt-0.5 shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${scanLogBadgeTone(entry.kind)}`}>
                     {entry.label}
                   </span>
-                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-5">{entry.message}</span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap wrap-break-word leading-5">{entry.message}</span>
                   {entry.meta && <span className="shrink-0 text-[10px] text-gray-500">{entry.meta}</span>}
                 </div>
               </div>
@@ -2153,7 +2153,7 @@ function ScanDetailContent() {
     return (
       <div className="space-y-6">
         <PageHeader title={boundedDisplayText(scan.target_url, 200)} backHref={backUrl} backLabel="Back to scans" />
-        <section aria-labelledby="scan-progress-heading" className="overflow-hidden rounded-xl border border-blue-500/25 bg-gradient-to-br from-blue-500/10 to-gray-950">
+        <section aria-labelledby="scan-progress-heading" className="overflow-hidden rounded-xl border border-blue-500/25 bg-linear-to-br from-blue-500/10 to-gray-950">
           <div className="p-6">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
@@ -2166,7 +2166,7 @@ function ScanDetailContent() {
                 <h1 id="scan-progress-heading" className="text-xl font-semibold text-white">{phase.label}</h1>
                 <p className="mt-1 max-w-2xl text-sm text-gray-400">{phase.description}</p>
                 {quota?.kind === 'reduced' && (
-                  <p className="mt-2 max-w-2xl rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
+                  <p className="mt-2 max-w-2xl rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
                     {quota.description}
                   </p>
                 )}
@@ -2185,7 +2185,7 @@ function ScanDetailContent() {
               className="mt-5 h-3 overflow-hidden rounded-full bg-blue-500/15"
             >
               <div
-                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500"
+                className="h-full rounded-full bg-linear-to-r from-blue-500 to-cyan-400 transition-all duration-500"
                 style={{ width: `${phase.progress}%` }}
               />
             </div>

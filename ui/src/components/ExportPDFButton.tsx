@@ -18,7 +18,7 @@ export default function ExportPDFButton() {
     <button
       onClick={handleExport}
       disabled={exporting}
-      className="px-3 py-2 rounded border border-gray-600 text-gray-300 text-sm hover:bg-gray-700 disabled:opacity-50 no-print"
+      className="px-3 py-2 rounded-sm border border-gray-600 text-gray-300 text-sm hover:bg-gray-700 disabled:opacity-50 no-print"
       aria-label="Export PDF"
     >
       {exporting ? 'Exporting...' : 'Export PDF'}

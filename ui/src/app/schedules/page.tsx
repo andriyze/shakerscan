@@ -343,7 +343,7 @@ function SchedulesContent() {
         <button
           type="button"
           onClick={() => setHealthFilter(value => !value)}
-          className={`rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+          className={`rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
             healthFilter
               ? 'border-amber-500/50 bg-amber-500/15 text-amber-200'
               : 'border-gray-800 bg-gray-900 text-gray-300 hover:border-gray-700'
@@ -395,13 +395,13 @@ function SchedulesContent() {
                   role="switch"
                   aria-checked={schedule.is_active}
                   aria-label={legacyRetention ? 'Legacy retention schedule is disabled' : 'Schedule enabled'}
-                  className={`mt-1 relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`mt-1 relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     schedule.is_active ? 'bg-blue-600' : 'bg-gray-700'
                   } ${legacyRetention ? 'cursor-not-allowed opacity-50' : ''}`}
                   title={legacyRetention ? 'Legacy retention schedules cannot be enabled' : schedule.is_active ? 'Disable schedule' : 'Enable schedule'}
                 >
                   <span
-                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
                       schedule.is_active ? 'translate-x-4' : 'translate-x-0'
                     }`}
                   />
@@ -421,15 +421,15 @@ function SchedulesContent() {
                   </div>
                   <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
                     {scheduleKind === 'asm_improve' ? (
-                      <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
+                      <span className="px-2 py-0.5 bg-purple-500/15 text-purple-300 rounded-sm text-xs" title="Continuous-ASM coverage wave: picks recon vs test batch from current gaps">
                         ASM coverage wave
                       </span>
                     ) : scheduleKind === 'evidence_retention_sweep' ? (
-                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded text-xs" title="Retired evidence retention schedule">
+                      <span className="px-2 py-0.5 bg-amber-500/15 text-amber-300 rounded-sm text-xs" title="Retired evidence retention schedule">
                         Legacy retention schedule
                       </span>
                     ) : (
-                      <span className="px-2 py-0.5 bg-gray-800 rounded text-xs">
+                      <span className="px-2 py-0.5 bg-gray-800 rounded-sm text-xs">
                         {getScanTypeLabel(schedule.scan_type)}
                       </span>
                     )}
@@ -491,7 +491,7 @@ function SchedulesContent() {
                           {health.latest_failed_scan_id && (
                             <a
                               href={`/scans/${health.latest_failed_scan_id}`}
-                              className="inline-flex items-center rounded border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="inline-flex items-center rounded-sm border border-amber-500/40 bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                             >
                               Failed scan
                             </a>
@@ -500,7 +500,7 @@ function SchedulesContent() {
                             <button
                               type="button"
                               onClick={() => openEdit(schedule)}
-                              className="inline-flex items-center rounded border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-200 hover:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                              className="inline-flex items-center rounded-sm border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-200 hover:border-gray-600 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                             >
                               Edit budget
                             </button>
@@ -515,7 +515,7 @@ function SchedulesContent() {
                 <button
                   type="button"
                   onClick={() => openEdit(schedule)}
-                  className="text-gray-500 hover:text-blue-300 transition-colors p-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
+                  className="text-gray-500 hover:text-blue-300 transition-colors p-1 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
                   title="Edit schedule"
                   aria-label="Edit schedule"
                 >
@@ -527,7 +527,7 @@ function SchedulesContent() {
                   type="button"
                   onClick={() => setConfirmDelete(schedule)}
                   disabled={deleting === schedule.id}
-                  className="text-gray-500 hover:text-red-400 transition-colors p-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
+                  className="text-gray-500 hover:text-red-400 transition-colors p-1 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
                   title="Delete schedule"
                   aria-label="Delete schedule"
                 >
@@ -566,7 +566,7 @@ function SchedulesContent() {
                     id="schedule-target"
                     value={formTargetId}
                     onChange={(e) => setFormTargetId(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                     required
                   >
                     <option value="">Select target...</option>
@@ -588,7 +588,7 @@ function SchedulesContent() {
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
                   placeholder="Weekly prod scan"
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-hidden focus:border-blue-500"
                 />
               </div>
 
@@ -629,7 +629,7 @@ function SchedulesContent() {
                     id="schedule-day"
                     value={formDayOfWeek}
                     onChange={(e) => setFormDayOfWeek(Number(e.target.value))}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                   >
                     {DAYS_OF_WEEK.map((day) => (
                       <option key={day.value} value={day.value}>{day.label}</option>
@@ -646,7 +646,7 @@ function SchedulesContent() {
                   type="time"
                   value={formTime}
                   onChange={(e) => setFormTime(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                   required
                 />
                 {formLocalTime && (
@@ -661,7 +661,7 @@ function SchedulesContent() {
                   id="schedule-kind"
                   value={formKind}
                   onChange={(e) => setFormKind(e.target.value as ScheduleKind)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                 >
                   <option value="normal_scan">Scan each run</option>
                   <option value="asm_improve">Keep this target covered (ASM coverage wave)</option>
@@ -693,7 +693,7 @@ function SchedulesContent() {
                       max={1000}
                       value={formAsmBatchSize}
                       onChange={(e) => setFormAsmBatchSize(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                     />
                   </div>
                   <div>
@@ -704,7 +704,7 @@ function SchedulesContent() {
                       min={0}
                       value={formAsmStaleDays}
                       onChange={(e) => setFormAsmStaleDays(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                     />
                   </div>
                   <div>
@@ -713,7 +713,7 @@ function SchedulesContent() {
                       id="schedule-asm-endpoint-filter"
                       value={formAsmEndpointFilter}
                       onChange={(e) => setFormAsmEndpointFilter(e.target.value as AsmEndpointFilter)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                     >
                       <option value="all">All endpoints</option>
                       <option value="api">API-like endpoints only</option>
@@ -725,7 +725,7 @@ function SchedulesContent() {
                       id="schedule-asm-family"
                       value={formAsmFamily}
                       onChange={(e) => setFormAsmFamily(e.target.value as AsmFamily)}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                     >
                       {ASM_FAMILIES.map((family) => (
                         <option key={family.value} value={family.value}>
@@ -741,7 +741,7 @@ function SchedulesContent() {
                       aria-label="Enable Lab/deep checks"
                       checked={formAsmExploitDepth}
                       onChange={(e) => setFormAsmExploitDepth(e.target.checked)}
-                      className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
+                      className="mt-1 h-4 w-4 rounded-sm border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
                     />
                     <span>
                       <span className="block text-sm font-medium text-gray-200">Enable Lab/deep checks</span>
@@ -760,7 +760,7 @@ function SchedulesContent() {
                       required
                       placeholder="Target-bound approval receipt UUID"
                       autoComplete="off"
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono text-sm focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white font-mono text-sm focus:outline-hidden focus:border-blue-500"
                     />
                     <p className="mt-1 text-xs text-gray-500">
                       Revalidated before every wave. Expired or revoked receipts disable the schedule.
@@ -777,7 +777,7 @@ function SchedulesContent() {
                   id="schedule-budget-profile"
                   value={formBudgetProfile}
                   onChange={(e) => setFormBudgetProfile(e.target.value as 'fast' | 'balanced' | 'thorough' | 'deep')}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-hidden focus:border-blue-500"
                 >
                   <option value="fast">Fast — 30 minutes / 5,000 requests</option>
                   <option value="balanced">Balanced — 60 minutes / 20,000 requests</option>

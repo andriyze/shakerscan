@@ -76,7 +76,7 @@ function Breakdown({
         {Object.entries(values).map(([label, count]) => (
           <span
             key={label}
-            className={`rounded px-2 py-1 font-mono text-xs ${classes[label] || 'bg-gray-700 text-gray-300'}`}
+            className={`rounded-sm px-2 py-1 font-mono text-xs ${classes[label] || 'bg-gray-700 text-gray-300'}`}
           >
             {label}: {count}
           </span>
@@ -152,7 +152,7 @@ export default function ScanCoverageSection({ coverage }: Props) {
             <p className="flex items-center gap-2 text-xs text-gray-500">
               <span>{templates.matched || 0} matched / {approximate ? '~' : ''}{templates.run || 0} run</span>
               {approximate && (
-                <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                <span className="rounded-sm bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
                   estimated
                 </span>
               )}
@@ -171,7 +171,7 @@ export default function ScanCoverageSection({ coverage }: Props) {
           <h3 className="mb-3 text-sm font-semibold text-gray-400">Templates by Category</h3>
           <div className="flex flex-wrap gap-2">
             {categories.slice(0, 12).map(([category, count]) => (
-              <span key={category} className="rounded bg-gray-900 px-2 py-1 text-xs text-gray-300">{category}: {count}</span>
+              <span key={category} className="rounded-sm bg-gray-900 px-2 py-1 text-xs text-gray-300">{category}: {count}</span>
             ))}
             {categories.length > 12 && <span className="px-2 py-1 text-xs text-gray-500">+{categories.length - 12} more</span>}
           </div>
@@ -184,7 +184,7 @@ export default function ScanCoverageSection({ coverage }: Props) {
             <h3 className="mb-2 text-sm font-semibold text-gray-400">Auth States Tested</h3>
             <div className="flex flex-wrap gap-2">
               {coverage.auth_states_tested.map((state) => (
-                <span key={state} className="rounded bg-yellow-900/30 px-2 py-1 text-xs text-yellow-400">{state}</span>
+                <span key={state} className="rounded-sm bg-yellow-900/30 px-2 py-1 text-xs text-yellow-400">{state}</span>
               ))}
             </div>
           </div>
@@ -194,7 +194,7 @@ export default function ScanCoverageSection({ coverage }: Props) {
             <h3 className="mb-2 text-sm font-semibold text-gray-400">Discovery Sources</h3>
             <div className="flex flex-wrap gap-2">
               {coverage.discovery_sources.map((source) => (
-                <span key={source} className="rounded bg-blue-900/30 px-2 py-1 text-xs text-blue-400">{source}</span>
+                <span key={source} className="rounded-sm bg-blue-900/30 px-2 py-1 text-xs text-blue-400">{source}</span>
               ))}
             </div>
           </div>

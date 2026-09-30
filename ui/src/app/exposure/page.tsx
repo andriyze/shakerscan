@@ -213,7 +213,7 @@ function NodePill({ node, onFocus }: { node: ExposureNode; onFocus?: (node: Expo
         {nodeIcon(node.type)}
         <span className="truncate text-sm font-medium">{node.label}</span>
         {node.severity && (
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(node.severity)}`}>
+          <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(node.severity)}`}>
             {node.severity}
           </span>
         )}
@@ -227,7 +227,7 @@ function NodePill({ node, onFocus }: { node: ExposureNode; onFocus?: (node: Expo
       <button
         type="button"
         onClick={() => onFocus(node)}
-        className="block w-full text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="block w-full text-left rounded-lg focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         {body}
       </button>
@@ -318,7 +318,7 @@ function PostureSummary({
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      className={`min-w-0 rounded px-2 py-1 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+      className={`min-w-0 rounded px-2 py-1 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
         active ? 'bg-teal-500/15 ring-1 ring-teal-400/40' : 'hover:bg-gray-800/60'
       }`}
     >
@@ -343,7 +343,7 @@ function PostureSummary({
           <button
             type="button"
             onClick={() => { onKind('all'); onPosture('all') }}
-            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-sm px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <X className="h-3 w-3" aria-hidden="true" /> Clear
           </button>
@@ -377,9 +377,9 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
     <Link
       key={finding.id}
       href={`/findings/${finding.id}`}
-      className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 hover:bg-gray-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
     >
-      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>{finding.severity}</span>
+      <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(finding.severity)}`}>{finding.severity}</span>
       <span className="min-w-0 truncate text-xs text-gray-200">{finding.title}</span>
     </Link>
   )
@@ -390,7 +390,7 @@ function AgentFindingsSection({ targetId }: { targetId: string }) {
         <span>Hunt findings</span>
         <Link
           href={`/hunt?target=${encodeURIComponent(targetId)}`}
-          className="ml-auto rounded text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="ml-auto rounded-sm text-[11px] normal-case text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Open Hunt →
         </Link>
@@ -442,7 +442,7 @@ function NodeDetailPanel({
           type="button"
           onClick={onClear}
           aria-label="Clear selection"
-          className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm p-1 text-gray-400 hover:bg-gray-800 hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -453,17 +453,17 @@ function NodeDetailPanel({
             <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: NODE_HEX[node.type] || '#9ca3af' }} aria-hidden="true" />
             {NODE_SINGULAR[node.type] || node.type}
           </div>
-          <div className="mt-1 break-words text-sm font-medium text-white">{node.label}</div>
-          {node.subtitle && <div className="mt-0.5 break-words text-xs text-gray-500">{node.subtitle}</div>}
+          <div className="mt-1 wrap-break-word text-sm font-medium text-white">{node.label}</div>
+          {node.subtitle && <div className="mt-0.5 wrap-break-word text-xs text-gray-500">{node.subtitle}</div>}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {node.severity && (
-              <span className={`rounded px-2 py-0.5 text-[10px] uppercase ${severityClass(node.severity)}`}>{node.severity}</span>
+              <span className={`rounded-sm px-2 py-0.5 text-[10px] uppercase ${severityClass(node.severity)}`}>{node.severity}</span>
             )}
-            {node.status && <span className="rounded bg-gray-800 px-2 py-0.5 text-[10px] text-gray-300">{node.status}</span>}
+            {node.status && <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-[10px] text-gray-300">{node.status}</span>}
             {node.href && (
               <Link
                 href={node.href}
-                className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 Open <ExternalLink className="h-3 w-3" aria-hidden="true" />
               </Link>
@@ -490,11 +490,11 @@ function NodeDetailPanel({
                 <Link
                   key={m.id}
                   href={m.href || '#'}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 hover:bg-gray-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  className="flex items-center justify-between gap-2 rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 hover:bg-gray-800/50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
                   <span className="truncate text-xs text-gray-200">{m.title}</span>
                   {m.severity && (
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(m.severity)}`}>{m.severity}</span>
+                    <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(m.severity)}`}>{m.severity}</span>
                   )}
                 </Link>
               ))}
@@ -1082,7 +1082,7 @@ function ExposureView() {
                     key={match.id}
                     type="button"
                     onMouseDown={(event) => { event.preventDefault(); focusById(match.id); setSearchQuery(''); setSearchOpen(false) }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-800 focus:outline-none focus-visible:bg-gray-800"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-gray-800 focus:outline-hidden focus-visible:bg-gray-800"
                   >
                     <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: NODE_HEX[match.type] || '#9ca3af' }} aria-hidden="true" />
                     <span className="truncate text-gray-200">{match.label}</span>
@@ -1120,7 +1120,7 @@ function ExposureView() {
             aria-selected={lens === l.value}
             aria-controls={`lens-panel-${l.value}`}
             onClick={() => setLens(l.value)}
-            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+            className={`inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
               lens === l.value ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800/60 hover:text-white'
             }`}
           >
@@ -1184,7 +1184,7 @@ function ExposureView() {
                       ? applyTriage({ kind: 'all', posture: 'all', sort: 'priority' })
                       : applyTriage({ kind: preset.kind, posture: preset.posture, sort: preset.sort })
                   }
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
                       ? 'border-teal-400/40 bg-teal-500/15 text-teal-200'
                       : empty
@@ -1265,7 +1265,7 @@ function ExposureView() {
                 <button
                   type="button"
                   onClick={handleClear}
-                  className="inline-flex items-center gap-1 rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  className="inline-flex items-center gap-1 rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
                   Back to overview
@@ -1289,7 +1289,7 @@ function ExposureView() {
                     type="checkbox"
                     checked={showEndpoints}
                     onChange={(event) => setFilter('endpoints', event.target.checked ? '1' : undefined)}
-                    className="rounded border-gray-700 bg-gray-800"
+                    className="rounded-sm border-gray-700 bg-gray-800"
                   />
                   All endpoints
                 </label>
@@ -1299,7 +1299,7 @@ function ExposureView() {
                   type="checkbox"
                   checked={includeResolved}
                   onChange={(event) => changeScope({ resolved: event.target.checked ? '1' : undefined })}
-                  className="rounded border-gray-700 bg-gray-800"
+                  className="rounded-sm border-gray-700 bg-gray-800"
                 />
                 Include resolved
               </label>
@@ -1342,7 +1342,7 @@ function ExposureView() {
                   <button
                     type="button"
                     onClick={() => setFilter('highlight', undefined)}
-                    className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-blue-500/40 bg-blue-500/10 px-3 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                   >
                     Highlighting {NODE_LABELS[highlightType] || highlightType}
                     <X className="h-3 w-3" aria-hidden="true" />
@@ -1375,7 +1375,7 @@ function ExposureView() {
                         key={asset.node_id}
                         type="button"
                         onClick={() => focusById(asset.node_id)}
-                        className="flex w-full gap-3 p-4 text-left hover:bg-gray-800/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        className="flex w-full gap-3 p-4 text-left hover:bg-gray-800/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                       >
                         <span className={`${styles.rank} pt-1`}>{String(index + 1).padStart(2, '0')}</span>
                         <div className="min-w-0 flex-1">
@@ -1414,7 +1414,7 @@ function ExposureView() {
                           type="button"
                           aria-pressed={active}
                           onClick={() => setFilter('highlight', active ? undefined : type)}
-                          className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                          className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                             active ? 'border-blue-500 bg-blue-500/10' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                           }`}
                         >

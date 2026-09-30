@@ -54,7 +54,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
   useEffect(() => { panel.current?.focus({ preventScroll: true }); panel.current?.scrollIntoView({ block: 'nearest' }) }, [service.id])
   const tabs = ['overview', 'weaknesses', 'activities', 'evidence']
   return (
-    <div ref={panel} tabIndex={-1} aria-label="Selected service" className="outline-none">
+    <div ref={panel} tabIndex={-1} aria-label="Selected service" className="outline-hidden">
     <Card className="mt-4 p-5" data-testid="service-details">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -64,9 +64,9 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
         </div>
         <Button onClick={onClose}>Close details</Button>
       </div>
-      {service.binding_status === 'historical_locator' && <p role="status" className="mt-3 rounded border border-amber-500/30 p-3 text-sm text-amber-200">Historical or unbound target locator. These observations are not rebound to the current target address.</p>}
+      {service.binding_status === 'historical_locator' && <p role="status" className="mt-3 rounded-sm border border-amber-500/30 p-3 text-sm text-amber-200">Historical or unbound target locator. These observations are not rebound to the current target address.</p>}
       <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Service details">
-        {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} id={`service-tab-${item}`} aria-controls={`service-panel-${item}`} onClick={() => setTab(item)} className={`rounded px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 ${tab === item ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800'}`}>{item === 'evidence' ? 'Evidence / history' : item[0].toUpperCase() + item.slice(1)}</button>)}
+        {tabs.map((item) => <button key={item} type="button" role="tab" aria-selected={tab === item} id={`service-tab-${item}`} aria-controls={`service-panel-${item}`} onClick={() => setTab(item)} className={`rounded-sm px-3 py-2 text-sm focus-visible:outline-solid focus-visible:outline-2 ${tab === item ? 'bg-teal-500/15 text-teal-200' : 'text-gray-400 hover:bg-gray-800'}`}>{item === 'evidence' ? 'Evidence / history' : item[0].toUpperCase() + item.slice(1)}</button>)}
       </div>
       <div role="tabpanel" id={`service-panel-${tab}`} aria-labelledby={`service-tab-${tab}`} className="mt-4 space-y-3 text-sm">
         {tab === 'overview' && <>
@@ -81,7 +81,7 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
               ['Last observed', when(service.last_seen_at)],
               ['Identity observed', when(service.identity_observed_at)],
               ['Source execution', readable(service.observation_status)],
-            ].map(([label, value]) => <div key={label}><dt className="text-xs text-gray-500">{label}</dt><dd className="mt-1 break-words text-gray-200">{value}</dd></div>)}
+            ].map(([label, value]) => <div key={label}><dt className="text-xs text-gray-500">{label}</dt><dd className="mt-1 wrap-break-word text-gray-200">{value}</dd></div>)}
           </dl>
           {service.cpes.length > 0 && <p className="break-all text-xs text-gray-500">Observed CPE hints: {service.cpes.join(', ')}</p>}
           <p className="text-gray-400">{service.cve_candidates.length} CVE candidates · {service.cve_candidates.reduce((sum, candidate) => sum + candidate.exploit_references.length, 0)} public exploit references · {service.findings.length} exactly linked active findings.</p>
@@ -90,9 +90,9 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
         {tab === 'weaknesses' && <>
           <p className="text-gray-400">{STATUS[service.intelligence_status] || readable(service.intelligence_status)}. Matching a banner or version never verifies a vulnerability.</p>
           {service.candidates_truncated && <p className="text-amber-300">Candidate list truncated; inspect the pinned snapshot for further matches.</p>}
-          {service.cve_candidates.map((candidate) => <div key={candidate.id} className="rounded border border-gray-800 p-3">
+          {service.cve_candidates.map((candidate) => <div key={candidate.id} className="rounded-sm border border-gray-800 p-3">
             <a href={candidate.advisory_url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-300 hover:underline">{candidate.id}</a>
-            <span className="ml-2 rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Candidate · {candidate.severity}</span>
+            <span className="ml-2 rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-200">Candidate · {candidate.severity}</span>
             <p className="mt-2 text-gray-200">{candidate.title}</p>
             <p className="mt-1 text-xs text-gray-400">{readable(candidate.match_type)} · identity confidence: {candidate.confidence} · {readable(candidate.local_validation)}</p>
             <p className="mt-2 text-gray-400">Prerequisites: {candidate.prerequisites.join('; ')}.</p>
@@ -105,16 +105,16 @@ function ServiceDetails({ service, target, onClose }: { service: ServiceRecord; 
         </>}
         {tab === 'activities' && <>
           <p className="text-gray-400">Suggestions only. Opening Hunt does not start testing or approve any action. Hunt requires an active planner session.</p>
-          {service.activities.map((activity) => <div key={activity.id} className="rounded border border-gray-800 p-3">
+          {service.activities.map((activity) => <div key={activity.id} className="rounded-sm border border-gray-800 p-3">
             <div className="flex flex-wrap justify-between gap-2"><h4 className="font-medium text-gray-200">{activity.title}</h4><span className="text-xs text-amber-200">{STATUS[activity.status] || readable(activity.status)}</span></div>
             <p className="mt-1 text-gray-400">{activity.reason}</p>
             {activity.capability && <p className="mt-2 text-xs text-gray-500">Canonical capability: {activity.capability} · risk: {activity.risk_tier} · approval: {activity.required_approval || 'Current run policy'}</p>}
           </div>)}
-          {service.hunt_href && <Link href={service.hunt_href} className="inline-block rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500">Prepare investigation in Hunt</Link>}
+          {service.hunt_href && <Link href={service.hunt_href} className="inline-block rounded-sm bg-blue-600 px-4 py-2 text-white hover:bg-blue-500">Prepare investigation in Hunt</Link>}
         </>}
         {tab === 'evidence' && <>
           {service.evidence_truncated && <p className="text-amber-300">Only the most recent evidence/history entries are shown.</p>}
-          {service.evidence.map((evidence, index) => <div key={`${evidence.ref}:${index}`} className="rounded border border-gray-800 p-3">
+          {service.evidence.map((evidence, index) => <div key={`${evidence.ref}:${index}`} className="rounded-sm border border-gray-800 p-3">
             <p className="break-all font-mono text-xs text-gray-300">{evidence.ref}</p>
             <p className="mt-1 text-gray-500">{when(evidence.observed_at)} · {evidence.vantage || 'Runner not retained'} · {evidence.status}</p>
             {evidence.sha256 && <p className="mt-1 break-all text-xs text-gray-500">SHA-256: {evidence.sha256}</p>}
@@ -164,8 +164,8 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
         <h2 className="font-semibold text-white">Service Intelligence</h2>
         <p className="mt-1 text-sm text-gray-400">Domain → target → listener → service/version → candidate weaknesses → investigation activities.</p>
         <form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={(event) => { event.preventDefault(); updateFilters({ service_query: search.trim() || undefined }) }}>
-          <label className="text-xs text-gray-400">Target kind<select aria-label="Service target kind" value={kind} onChange={(event) => updateFilters({ service_kind: event.target.value === 'all' ? undefined : event.target.value })} className="mt-1 block rounded border border-gray-700 bg-gray-900 p-2 text-sm text-white"><option value="all">Web and devices</option><option value="web">Web targets</option><option value="device">Devices</option></select></label>
-          <label className="text-xs text-gray-400">Target name or locator<input aria-label="Search service targets" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} className="mt-1 block w-64 rounded border border-gray-700 bg-gray-900 p-2 text-sm text-white" placeholder="Search targets" /></label>
+          <label className="text-xs text-gray-400">Target kind<select aria-label="Service target kind" value={kind} onChange={(event) => updateFilters({ service_kind: event.target.value === 'all' ? undefined : event.target.value })} className="mt-1 block rounded-sm border border-gray-700 bg-gray-900 p-2 text-sm text-white"><option value="all">Web and devices</option><option value="web">Web targets</option><option value="device">Devices</option></select></label>
+          <label className="text-xs text-gray-400">Target name or locator<input aria-label="Search service targets" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} className="mt-1 block w-64 rounded-sm border border-gray-700 bg-gray-900 p-2 text-sm text-white" placeholder="Search targets" /></label>
           <Button type="submit">Search</Button>
         </form>
       </Card>
@@ -173,11 +173,11 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
       {error && <ErrorState message={error} onRetry={() => setRetry((value) => value + 1)} />}
       {data && <>
         <p className="text-sm text-gray-400">{data.total_targets} matching targets · {data.targets.reduce((sum, target) => sum + target.services.length, 0)} service observations on this page. Counts are separate from web vulnerability scores.</p>
-        <details className="rounded border border-gray-800 p-3 text-xs text-gray-400"><summary className="cursor-pointer">Intelligence: {data.intelligence.status} · {data.intelligence.record_count} curated records · snapshot {when(data.intelligence.generated_at)}</summary><div className="mt-2 space-y-1">{[...data.intelligence.limitations, ...data.limitations].map((item) => <p key={item}>{item}</p>)}</div></details>
+        <details className="rounded-sm border border-gray-800 p-3 text-xs text-gray-400"><summary className="cursor-pointer">Intelligence: {data.intelligence.status} · {data.intelligence.record_count} curated records · snapshot {when(data.intelligence.generated_at)}</summary><div className="mt-2 space-y-1">{[...data.intelligence.limitations, ...data.limitations].map((item) => <p key={item}>{item}</p>)}</div></details>
         {data.intelligence.status !== 'available' && <p role="status" className="text-sm text-amber-200">Intelligence is unavailable or failed integrity checks. Empty candidate lists must not be read as a clean result.</p>}
         {data.targets.length === 0 && <EmptyState message="No targets on this page" hint="Clear a filter or return to the first page. Missing service evidence is not a clean scan." />}
         {data.targets.map((target) => <Card key={`${target.kind}:${target.id}`} className="overflow-hidden">
-          <div className="border-b border-gray-800 p-4"><h3 className="break-words font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
+          <div className="border-b border-gray-800 p-4"><h3 className="wrap-break-word font-medium text-white">{target.root_domain ? `${target.root_domain} → ` : ''}{target.label}</h3><p className="mt-1 break-all text-xs text-gray-500">{target.kind} · {target.locator} · {target.source_count} evidence sources</p>{target.warnings.map((warning) => <p key={warning} className="mt-2 text-xs text-amber-200">{warning}</p>)}{target.unlinked_findings_count > 0 && <p role="status" className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-200"><strong className="font-semibold">{target.unlinked_findings_count} active findings are not shown below.</strong> They are scoped to this target but could not be tied to one listener, so the table understates what is known. Open Findings for this target to see them.</p>}{target.findings_truncated && <p className="mt-2 text-xs text-amber-200">Active-finding association window is truncated.</p>}</div>
           {target.services.length === 0 ? <p className="p-4 text-sm text-gray-500">No positive service evidence retained in this window. Run an authorized Scan or Hunt with the relevant discovery policy to collect evidence.</p> : (() => {
             const services = [...target.services].sort(byConsequence)
             const notable = services.filter((service) => service.findings.length > 0 || service.cve_candidates.length > 0).length
@@ -194,7 +194,7 @@ export function ServicesView({ rootDomain, revision, onBusyChange }: { rootDomai
                   <td className="px-4 py-3 text-gray-300">{service.product ? <>{service.product}{service.version && <> {service.version}</>}</> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{readable(service.identity_basis)}{service.identity_stale && <> · <span className="text-gray-400">identity stale</span></>}</p></td>
                   <td className="px-4 py-3">{linked > 0 ? <span className="font-medium text-amber-200">{linked} finding{linked === 1 ? '' : 's'}</span> : <span className="text-gray-600">&mdash;</span>}<p className="mt-1 text-xs text-gray-500">{candidates > 0 ? `${candidates} CVE candidate${candidates === 1 ? '' : 's'}` : ''}</p></td>
                   <td className="px-4 py-3 text-gray-400">{seen || readable(service.freshness)}<p className="mt-1 text-xs text-gray-500">{readable(service.observation_status)}</p></td>
-                  <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline focus-visible:outline-2">Inspect</button></td>
+                  <td className="px-4 py-3"><button type="button" aria-label={`Inspect ${service.transport}/${service.port} on ${target.label}`} aria-expanded={selectedId === service.id} onClick={() => setFilters({ service_id: selectedId === service.id ? undefined : service.id })} className="rounded-sm px-2 py-1 text-blue-300 hover:bg-gray-700 focus-visible:outline-solid focus-visible:outline-2">Inspect</button></td>
                 </tr>
               })}</tbody></table></div>
             </>

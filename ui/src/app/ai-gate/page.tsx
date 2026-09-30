@@ -126,9 +126,9 @@ type RunConfig = {
 }
 
 const inputClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
 const textareaClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
 
 function jsonText(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -325,7 +325,7 @@ function CampaignTrendBars({
 }) {
   if (!points || points.length === 0) return null
   return (
-    <div className={compact ? 'mt-2 border-t border-gray-800 pt-2' : 'rounded border border-gray-800 bg-gray-950 p-2'}>
+    <div className={compact ? 'mt-2 border-t border-gray-800 pt-2' : 'rounded-sm border border-gray-800 bg-gray-950 p-2'}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className="font-medium text-gray-200">{title}</span>
         <span className="text-gray-500">{points.length} point{points.length === 1 ? '' : 's'}</span>
@@ -342,8 +342,8 @@ function CampaignTrendBars({
           const label = `${formatShortDate(point.completed_at)} score ${score}, coverage ${point.coverage_pct ?? 0}%, findings ${point.findings_count ?? 0}, errors ${point.errors ?? 0}`
           return (
             <div key={`${point.scan_id || 'run'}-${index}`} className="flex min-w-[14px] flex-1 flex-col items-center justify-end gap-1">
-              <div className="flex h-full w-full items-end rounded-sm bg-gray-900" title={label} aria-label={label}>
-                <div className={`w-full rounded-sm ${tone}`} style={{ height: `${height}%` }} />
+              <div className="flex h-full w-full items-end rounded-xs bg-gray-900" title={label} aria-label={label}>
+                <div className={`w-full rounded-xs ${tone}`} style={{ height: `${height}%` }} />
               </div>
               {!compact && <span className="max-w-full truncate text-[10px] text-gray-500">{point.coverage_pct ?? 0}%</span>}
             </div>
@@ -883,7 +883,7 @@ export default function AIGateSettingsPage() {
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-100">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span>Calibration Lab mode is enabled. Demo controls and lab targets are separated from normal AI targets.</span>
-            <Link href="/settings" className="rounded border border-amber-400/30 px-2 py-1 text-xs text-amber-100 hover:bg-amber-500/10">
+            <Link href="/settings" className="rounded-sm border border-amber-400/30 px-2 py-1 text-xs text-amber-100 hover:bg-amber-500/10">
               Manage in Settings
             </Link>
           </div>
@@ -898,7 +898,7 @@ export default function AIGateSettingsPage() {
                 <Bot className="h-4 w-4 text-purple-300" />
                 <h2 className="text-sm font-semibold">AI Inventory</h2>
               </div>
-              <p role="alert" className="mt-2 break-words text-xs text-red-400">{inventoryError}</p>
+              <p role="alert" className="mt-2 wrap-break-word text-xs text-red-400">{inventoryError}</p>
             </div>
             <button onClick={loadInventory} className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800">
               <RefreshCw className="h-4 w-4" />
@@ -917,15 +917,15 @@ export default function AIGateSettingsPage() {
                 <h2 className="text-sm font-semibold">AI Inventory</h2>
               </div>
               <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-400">
-                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.asset_count} assets</span>
-                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} corroborated candidates</span>
-                <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.lead_count || 0} speculative leads</span>
+                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.asset_count} assets</span>
+                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.candidate_count} corroborated candidates</span>
+                <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.lead_count || 0} speculative leads</span>
                 {!!inventory.summary.quarantined_scan_count && (
-                  <span className="rounded bg-gray-950 px-2 py-1">{inventory.summary.quarantined_scan_count} fixture scans quarantined</span>
+                  <span className="rounded-sm bg-gray-950 px-2 py-1">{inventory.summary.quarantined_scan_count} fixture scans quarantined</span>
                 )}
-                <span className="rounded bg-gray-950 px-2 py-1">blast radius {inventory.summary.highest_blast_radius_score}</span>
+                <span className="rounded-sm bg-gray-950 px-2 py-1">blast radius {inventory.summary.highest_blast_radius_score}</span>
                 {inventory.summary.coverage_gaps.slice(0, 3).map((gap) => (
-                  <span key={gap} className="rounded bg-yellow-500/10 px-2 py-1 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
+                  <span key={gap} className="rounded-sm bg-yellow-500/10 px-2 py-1 text-yellow-200">{gap.replaceAll('_', ' ')}</span>
                 ))}
               </div>
             </div>
@@ -951,12 +951,12 @@ export default function AIGateSettingsPage() {
                   >
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="min-w-0 break-all text-sm font-medium text-white">{candidate.method} {candidate.endpoint_url}</span>
-                      <span className="rounded bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
+                      <span className="rounded-sm bg-purple-500/10 px-2 py-0.5 text-xs text-purple-200">{candidate.target_type}</span>
                       {confidencePct !== null && (
-                        <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{confidencePct}%</span>
+                        <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{confidencePct}%</span>
                       )}
                     </div>
-                    <div className="mt-2 break-words text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
+                    <div className="mt-2 wrap-break-word text-xs text-gray-500">{candidate.evidence.slice(0, 3).join(' · ')}</div>
                     <div className="mt-2 text-xs text-amber-300">Response extraction still requires verification before save.</div>
                   </button>
                 )
@@ -972,7 +972,7 @@ export default function AIGateSettingsPage() {
                   <div key={lead.candidate_id} className="min-w-0 rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="min-w-0 break-all text-sm font-medium text-gray-200">{lead.method} {lead.endpoint_url}</span>
-                      <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">path hint only</span>
+                      <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">path hint only</span>
                     </div>
                     <div className="mt-2 text-xs text-gray-500">Needs request-schema or observed behavior evidence before it can become an AI target candidate.</div>
                   </div>
@@ -1147,7 +1147,7 @@ export default function AIGateSettingsPage() {
                 </label>
 
                 <label className="flex items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={productionMode} onChange={(e) => setProductionMode(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={productionMode} onChange={(e) => setProductionMode(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Production target
                 </label>
               </div>
@@ -1216,7 +1216,7 @@ export default function AIGateSettingsPage() {
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="text-sm font-medium text-gray-200">Governance readiness</div>
                   {formControlSummary && (
-                    <span className={`rounded px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
+                    <span className={`rounded-sm px-2 py-1 text-xs ${formControlSummary.missing.length ? 'bg-yellow-900/50 text-yellow-200' : 'bg-green-900/50 text-green-200'}`}>
                       {formControlSummary.present}/{formControlSummary.required}
                     </span>
                   )}
@@ -1227,7 +1227,7 @@ export default function AIGateSettingsPage() {
                     return (
                       <div key={control.id} className="flex min-w-0 items-center gap-2 text-xs">
                         <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
-                        <span className={`min-w-0 break-words ${present ? 'text-gray-300' : 'text-yellow-200'}`}>{control.label}</span>
+                        <span className={`min-w-0 wrap-break-word ${present ? 'text-gray-300' : 'text-yellow-200'}`}>{control.label}</span>
                       </div>
                     )
                   })}
@@ -1252,7 +1252,7 @@ export default function AIGateSettingsPage() {
                     type="checkbox"
                     checked={showDemoTargets}
                     onChange={(event) => setShowDemoTargets(event.target.checked)}
-                    className="h-4 w-4 rounded border-gray-700 bg-gray-800"
+                    className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800"
                   />
                   Show demo/lab targets
                 </label>
@@ -1297,10 +1297,10 @@ export default function AIGateSettingsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-medium text-white">{target.name}</h3>
-                        <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
-                        {isDemoTarget && <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
-                        {target.production_mode && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
-                        {isControlRemediationTarget && <span className="rounded bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-200">control gap</span>}
+                        <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
+                        {isDemoTarget && <span className="rounded-sm bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
+                        {target.production_mode && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
+                        {isControlRemediationTarget && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-200">control gap</span>}
                       </div>
                       <div className="mt-1 break-all text-sm text-gray-500">{target.method} {target.endpoint_url}</div>
                       <div className="mt-1 text-xs text-gray-500">
@@ -1320,29 +1320,29 @@ export default function AIGateSettingsPage() {
                       {targetControlSummary && targetControlSummary.missing.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {targetControlSummary.missing.slice(0, 4).map((control) => (
-                            <span key={control.id} className="rounded bg-yellow-900/30 px-2 py-0.5 text-xs text-yellow-200">{control.label}</span>
+                            <span key={control.id} className="rounded-sm bg-yellow-900/30 px-2 py-0.5 text-xs text-yellow-200">{control.label}</span>
                           ))}
                           {targetControlSummary.missing.length > 4 && (
-                            <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">+{targetControlSummary.missing.length - 4}</span>
+                            <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-400">+{targetControlSummary.missing.length - 4}</span>
                           )}
                         </div>
                       )}
                       <div className="mt-3 grid gap-2 text-xs grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Endpoint</div>
                           <div className="mt-1 break-all text-gray-200">{target.method} {target.endpoint_url}</div>
                         </div>
-                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Prompt field</div>
-                          <div className="mt-1 break-words text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
+                          <div className="mt-1 wrap-break-word text-gray-200">{summarizeRequestTemplate(target.request_template)}</div>
                         </div>
-                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Response field</div>
                           <div className="mt-1 break-all font-mono text-gray-200">{target.response_path || '$'}</div>
                         </div>
-                        <div className="min-w-0 rounded border border-gray-800 bg-gray-950 p-2">
+                        <div className="min-w-0 rounded-sm border border-gray-800 bg-gray-950 p-2">
                           <div className="text-gray-500">Last scan</div>
-                          <div className="mt-1 break-words text-gray-200">
+                          <div className="mt-1 wrap-break-word text-gray-200">
                             {target.last_scan_id ? (
                               <Link className="text-blue-400 hover:text-blue-300" href={`/scans/${target.last_scan_id}`}>Open result</Link>
                             ) : (
@@ -1410,10 +1410,10 @@ export default function AIGateSettingsPage() {
                         {connectivityResults[target.id].stage && <span>stage: {connectivityResults[target.id].stage}</span>}
                       </div>
                       {connectivityResults[target.id].error && (
-                        <p className="mt-2 break-words text-yellow-100">{connectivityResults[target.id].error}</p>
+                        <p className="mt-2 wrap-break-word text-yellow-100">{connectivityResults[target.id].error}</p>
                       )}
                       {connectivityResults[target.id].response?.extracted_text && (
-                        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded bg-gray-950/50 p-2 text-gray-200">
+                        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap rounded-sm bg-gray-950/50 p-2 text-gray-200">
                           {connectivityResults[target.id].response?.extracted_text}
                         </pre>
                       )}
@@ -1435,7 +1435,7 @@ export default function AIGateSettingsPage() {
                         {(mcpReadinessResults[target.id].checks || []).slice(0, 8).map((check) => (
                           <div key={check.id} className="flex min-w-0 items-center gap-2">
                             <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${check.status === 'pass' ? 'text-emerald-300' : 'text-yellow-300'}`} />
-                            <span className="min-w-0 break-words text-gray-200">{check.label}</span>
+                            <span className="min-w-0 wrap-break-word text-gray-200">{check.label}</span>
                           </div>
                         ))}
                       </div>
@@ -1472,37 +1472,37 @@ export default function AIGateSettingsPage() {
                       </div>
                     </div>
                     {campaignHistoryError && (
-                      <p role="alert" className="mt-2 break-words text-xs text-amber-300">{campaignHistoryError}</p>
+                      <p role="alert" className="mt-2 wrap-break-word text-xs text-amber-300">{campaignHistoryError}</p>
                     )}
                     {campaignHistory && (
                       <div className="mt-3 space-y-3">
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="text-gray-500">Runs</div>
                             <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.total_runs}</div>
                           </div>
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="text-gray-500">Contexts</div>
                             <div className="mt-1 text-lg font-semibold text-white">{campaignHistory.summary.contexts}</div>
                           </div>
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="text-gray-500">Blocked</div>
                             <div className="mt-1 text-lg font-semibold text-red-300">{campaignHistory.summary.blocked_runs}</div>
                           </div>
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="text-gray-500">Errored</div>
                             <div className="mt-1 text-lg font-semibold text-yellow-200">{campaignHistory.summary.errored_runs}</div>
                           </div>
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="text-gray-500">Budget stopped</div>
                             <div className="mt-1 text-lg font-semibold text-blue-200">{campaignHistory.summary.budget_stopped_runs}</div>
                           </div>
                         </div>
                         {campaignHistory.readiness_trends?.overall && (
-                          <div className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                          <div className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="text-gray-500">Readiness trend</span>
-                              <span className="rounded bg-gray-800 px-2 py-0.5 text-gray-200">{formatCampaignLabel(campaignHistory.readiness_trends.overall.state)}</span>
+                              <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-gray-200">{formatCampaignLabel(campaignHistory.readiness_trends.overall.state)}</span>
                               {campaignHistory.readiness_trends.overall.coverage_delta !== null && campaignHistory.readiness_trends.overall.coverage_delta !== undefined && (
                                 <span className="text-gray-400">coverage {formatDelta(campaignHistory.readiness_trends.overall.coverage_delta)}</span>
                               )}
@@ -1522,17 +1522,17 @@ export default function AIGateSettingsPage() {
                             {campaignHistory.contexts.slice(0, 4).map((context) => (
                               <div
                                 key={`${context.probe_pack || 'pack'}-${context.scan_profile || 'profile'}-${context.environment || 'env'}`}
-                                className="rounded border border-gray-800 bg-gray-950 p-2 text-xs"
+                                className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs"
                               >
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                   <span className="font-medium text-gray-200">
                                     {formatCampaignLabel(context.probe_pack)} · {formatCampaignLabel(context.scan_profile)} · {formatCampaignLabel(context.environment)}
                                   </span>
-                                  <span className="rounded bg-gray-800 px-2 py-0.5 text-gray-300">{context.runs_count} run{context.runs_count === 1 ? '' : 's'}</span>
+                                  <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-gray-300">{context.runs_count} run{context.runs_count === 1 ? '' : 's'}</span>
                                 </div>
                                 {context.latest_run && (
                                   <div className="mt-2 flex flex-wrap gap-2 text-gray-400">
-                                    <span className={`rounded px-2 py-0.5 ${decisionPillClass(context.latest_run.decision)}`}>{formatCampaignLabel(context.latest_run.decision)}</span>
+                                    <span className={`rounded-sm px-2 py-0.5 ${decisionPillClass(context.latest_run.decision)}`}>{formatCampaignLabel(context.latest_run.decision)}</span>
                                     <span>{context.latest_run.findings_count} finding{context.latest_run.findings_count === 1 ? '' : 's'}</span>
                                     <span>{context.latest_run.coverage_pct}% coverage</span>
                                     {context.deltas && (
@@ -1545,7 +1545,7 @@ export default function AIGateSettingsPage() {
                                 )}
                                 {context.readiness_trend && (
                                   <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-gray-800 pt-2 text-gray-400">
-                                    <span className={`rounded px-2 py-0.5 ${readinessTrendClass(context.readiness_trend.state)}`}>
+                                    <span className={`rounded-sm px-2 py-0.5 ${readinessTrendClass(context.readiness_trend.state)}`}>
                                       {formatCampaignLabel(context.readiness_trend.state)}
                                     </span>
                                     {context.readiness_trend.coverage_delta !== null && context.readiness_trend.coverage_delta !== undefined && (
@@ -1589,7 +1589,7 @@ export default function AIGateSettingsPage() {
                                       {formatCampaignLabel(run.probe_pack)} · {formatCampaignLabel(run.scan_profile)} · {formatCampaignLabel(run.environment)}
                                     </td>
                                     <td className="py-1 pr-3">
-                                      <span className={`rounded px-2 py-0.5 ${decisionPillClass(run.decision)}`}>{formatCampaignLabel(run.decision)}</span>
+                                      <span className={`rounded-sm px-2 py-0.5 ${decisionPillClass(run.decision)}`}>{formatCampaignLabel(run.decision)}</span>
                                     </td>
                                     <td className="py-1 pr-3 text-gray-300">{run.findings_count}</td>
                                     <td className="py-1 pr-3 text-gray-300">{run.coverage_pct}%</td>
@@ -1686,7 +1686,7 @@ export default function AIGateSettingsPage() {
                   <Link
                     key={item.scan_id}
                     href={`/scans/${item.scan_id}`}
-                    className="rounded border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
+                    className="rounded-sm border border-emerald-500/20 bg-gray-950/50 px-3 py-2 text-sm text-emerald-100 hover:bg-gray-900"
                   >
                     <div className="font-medium">{item.name}</div>
                     <div className="mt-1 text-xs text-emerald-100/60">
@@ -1696,9 +1696,9 @@ export default function AIGateSettingsPage() {
                 ))}
               </div>
               {(demoResult.failed?.length || 0) > 0 && (
-                <div className="rounded border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-200">
+                <div className="rounded-sm border border-red-500/30 bg-red-950/30 p-3 text-xs text-red-200">
                   {demoResult.failed?.map((item) => (
-                    <div key={item.scenario_id} className="break-words">
+                    <div key={item.scenario_id} className="wrap-break-word">
                       {item.scenario_id}: {item.error}
                     </div>
                   ))}

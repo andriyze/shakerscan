@@ -99,7 +99,7 @@ const markdownComponents: Components = {
     const block = Boolean(className)
     return (
       <code
-        className={block ? `text-sm text-gray-200 ${className}` : 'rounded bg-gray-800 px-1.5 py-0.5 text-[0.9em] text-blue-200'}
+        className={block ? `text-sm text-gray-200 ${className}` : 'rounded-sm bg-gray-800 px-1.5 py-0.5 text-[0.9em] text-blue-200'}
         {...props}
       >
         {children}
@@ -138,7 +138,7 @@ export default async function DocsPage() {
             href={`${SHAKERSCAN_DOCUMENTATION_BLOB_URL}/README.md`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-300 transition-colors hover:border-gray-600 hover:bg-gray-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-sm text-gray-300 transition-colors hover:border-gray-600 hover:bg-gray-800 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             View on GitHub <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
           </a>

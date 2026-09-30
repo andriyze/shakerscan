@@ -118,7 +118,7 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     <button
       type="button"
       onClick={handleCopy}
-      className="p-1.5 rounded hover:bg-gray-700 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      className="p-1.5 rounded-sm hover:bg-gray-700 transition-colors group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       title={label || 'Copy to clipboard'}
       aria-label={label || 'Copy to clipboard'}
     >
@@ -150,7 +150,7 @@ function CollapsibleSection({
         type="button"
         onClick={() => setIsOpen(!isOpen)}
         aria-expanded={isOpen}
-        className="w-full flex items-center justify-between py-3 px-1 text-left hover:bg-gray-800/30 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="w-full flex items-center justify-between py-3 px-1 text-left hover:bg-gray-800/30 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <div className="flex items-center gap-2">
           {isOpen ? (
@@ -180,7 +180,7 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
       {displayUrls.map((url, i) => {
         const endpoint = extractEndpoint(url)
         return (
-          <div key={i} className="bg-gray-900/60 rounded p-2 flex items-start justify-between gap-2">
+          <div key={i} className="bg-gray-900/60 rounded-sm p-2 flex items-start justify-between gap-2">
             <div className="flex-1 min-w-0">
               <code className="text-xs text-blue-300 break-all">{endpoint}</code>
             </div>
@@ -190,7 +190,7 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="p-1.5 rounded hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="p-1.5 rounded-sm hover:bg-gray-700 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                 title="Open in new tab"
                 aria-label="Open in new tab"
                 onClick={(e) => e.stopPropagation()}
@@ -206,7 +206,7 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
           type="button"
           onClick={() => setShowAll(true)}
           aria-expanded={false}
-          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show all {urls.length} URLs
         </button>
@@ -216,7 +216,7 @@ function UrlList({ urls, parameter }: { urls: string[]; parameter?: string }) {
           type="button"
           onClick={() => setShowAll(false)}
           aria-expanded={true}
-          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show less
         </button>
@@ -234,7 +234,7 @@ function PayloadList({ payloads }: { payloads: string[] }) {
       {displayPayloads.map((payload, i) => {
         const decoded = decodePayload(payload)
         return (
-          <div key={i} className="bg-gray-900/60 rounded p-2 flex items-start justify-between gap-2">
+          <div key={i} className="bg-gray-900/60 rounded-sm p-2 flex items-start justify-between gap-2">
             <code className="text-xs text-yellow-300 break-all flex-1">{decoded}</code>
             <CopyButton text={decoded} label="Copy payload" />
           </div>
@@ -245,7 +245,7 @@ function PayloadList({ payloads }: { payloads: string[] }) {
           type="button"
           onClick={() => setShowAll(true)}
           aria-expanded={false}
-          className="rounded text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm text-sm text-blue-400 hover:text-blue-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           Show all {payloads.length} payloads
         </button>
@@ -259,7 +259,7 @@ function RemediationList({ steps }: { steps: string[] }) {
     <div className="space-y-2">
       {steps.map((step, i) => (
         <div key={i} className="flex items-start gap-3 text-sm">
-          <div className="w-5 h-5 rounded border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
+          <div className="w-5 h-5 rounded-sm border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
             <span className="text-xs text-gray-500">{i + 1}</span>
           </div>
           <span className="text-gray-300">{step}</span>
@@ -313,10 +313,10 @@ function RawEvidence({ value }: { value: object }) {
       )}
 
       <details className="group">
-        <summary className="cursor-pointer text-xs text-blue-400 hover:text-blue-300 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+        <summary className="cursor-pointer text-xs text-blue-400 hover:text-blue-300 select-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm">
           Show raw evidence
         </summary>
-        <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap break-all max-h-96">
+        <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded-sm p-3 overflow-x-auto whitespace-pre-wrap break-all max-h-96">
           {displayRaw}
         </pre>
       </details>
@@ -357,7 +357,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
           <div className="flex-1 min-w-0">
             {/* Severity + Title */}
             <div className="flex items-center gap-3 mb-2">
-              <span className={`px-2.5 py-1 text-xs font-semibold rounded flex items-center gap-1.5 ${severityConfig.badge}`}>
+              <span className={`px-2.5 py-1 text-xs font-semibold rounded-sm flex items-center gap-1.5 ${severityConfig.badge}`}>
                 <SeverityIcon className="w-3.5 h-3.5" />
                 {finding.severity?.toUpperCase()}
               </span>
@@ -380,33 +380,33 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
                 <span className="text-gray-400">{finding.owasp}</span>
               )}
               {finding.cvss_score !== undefined && finding.cvss_score > 0 && (
-                <span className="px-2 py-0.5 rounded bg-gray-700 text-gray-300 text-xs">
+                <span className="px-2 py-0.5 rounded-sm bg-gray-700 text-gray-300 text-xs">
                   CVSS: {finding.cvss_score}
                 </span>
               )}
               {triage?.verified && (
-                <span className="px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 text-xs font-medium">
+                <span className="px-2 py-0.5 rounded-sm bg-emerald-900/60 text-emerald-300 text-xs font-medium">
                   verified
                 </span>
               )}
               {triage?.suspected && !triage?.verified && (
-                <span className="px-2 py-0.5 rounded bg-amber-900/60 text-amber-300 text-xs font-medium">
+                <span className="px-2 py-0.5 rounded-sm bg-amber-900/60 text-amber-300 text-xs font-medium">
                   suspected lead
                 </span>
               )}
               {triage?.needs_verification && !triage?.verified && (
-                <span className="px-2 py-0.5 rounded bg-yellow-900/60 text-yellow-300 text-xs font-medium">
+                <span className="px-2 py-0.5 rounded-sm bg-yellow-900/60 text-yellow-300 text-xs font-medium">
                   needs verification
                 </span>
               )}
               {freshness.badge && (
-                <span className={`px-2 py-0.5 rounded text-xs font-medium ${freshnessTone}`}>
+                <span className={`px-2 py-0.5 rounded-sm text-xs font-medium ${freshnessTone}`}>
                   {freshness.badge}
                 </span>
               )}
               {finding.last_verification_verdict && (
                 <span
-                  className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs"
+                  className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs"
                   title="The most recent retest verdict. A verdict does not change the finding's triage status on its own."
                 >
                   retest: {String(finding.last_verification_verdict).replaceAll('_', ' ')}
@@ -414,7 +414,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               )}
               {triage?.precision_policy?.severity_downgraded && triage?.precision_policy?.original_severity && (
                 <span
-                  className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs"
+                  className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs"
                   title={triage.precision_policy.confidence_cap_reason
                     ? `Reason: ${triage.precision_policy.confidence_cap_reason.replaceAll('_', ' ')}`
                     : undefined}
@@ -425,7 +425,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
             </div>
             <div className="mb-3 text-xs text-gray-500">{freshness.detail}</div>
             {(triage?.verification_reason || triage?.precision_policy?.confidence_cap_reason) && (
-              <div className="mb-3 rounded border border-gray-800 bg-gray-950/60 p-2 text-xs text-gray-300">
+              <div className="mb-3 rounded-sm border border-gray-800 bg-gray-950/60 p-2 text-xs text-gray-300">
                 {triage.verification_reason && (
                   <div>{triage.verification_reason}</div>
                 )}
@@ -442,7 +442,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               {evidence.parameter && (
                 <div className="flex items-center gap-1.5">
                   <span className="text-gray-500">Parameter:</span>
-                  <code className="px-2 py-0.5 rounded bg-purple-900/50 text-purple-300 text-xs font-mono">
+                  <code className="px-2 py-0.5 rounded-sm bg-purple-900/50 text-purple-300 text-xs font-mono">
                     {evidence.parameter}
                   </code>
                 </div>
@@ -466,7 +466,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               {evidence.context && (
                 <div className="flex items-center gap-1.5">
                   <span className="text-gray-500">Context:</span>
-                  <span className="px-2 py-0.5 rounded bg-green-900/50 text-green-300 text-xs">
+                  <span className="px-2 py-0.5 rounded-sm bg-green-900/50 text-green-300 text-xs">
                     {evidence.context}
                   </span>
                 </div>
@@ -507,7 +507,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
           {/* Tool badge and expand button */}
           <div className="flex flex-col items-end gap-2 shrink-0">
             {finding.tool && (
-              <span className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-400">
+              <span className="px-2 py-1 text-xs rounded-sm bg-gray-800 text-gray-400">
                 {finding.tool}
               </span>
             )}
@@ -515,7 +515,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
               type="button"
               onClick={() => setIsExpanded(!isExpanded)}
               aria-expanded={isExpanded}
-              className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-blue-900/50 text-blue-300 hover:bg-blue-800/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="flex items-center gap-1 px-2 py-1 text-xs rounded-sm bg-blue-900/50 text-blue-300 hover:bg-blue-800/50 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               {isExpanded ? (
                 <>
@@ -566,7 +566,7 @@ export default function FindingCard({ finding, defaultExpanded = false }: Findin
                 </ul>
               )}
               {finding.ai_recommendations && !Array.isArray(finding.ai_recommendations) && (
-                <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded p-3 overflow-x-auto whitespace-pre-wrap">
+                <pre className="mt-2 text-xs text-gray-300 bg-gray-800 rounded-sm p-3 overflow-x-auto whitespace-pre-wrap">
                   {JSON.stringify(finding.ai_recommendations, null, 2)}
                 </pre>
               )}

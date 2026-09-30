@@ -49,7 +49,7 @@ export function Modal({
         // Focusable so useModalA11y can move focus here on open (a plain div is
         // not, which would leave focus in the now-inert page until first Tab).
         tabIndex={-1}
-        className={cn('flex max-h-[90vh] w-full flex-col rounded-lg border border-gray-800 bg-gray-900 shadow-xl focus:outline-none', SIZES[size])}
+        className={cn('flex max-h-[90vh] w-full flex-col rounded-lg border border-gray-800 bg-gray-900 shadow-xl focus:outline-hidden', SIZES[size])}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-gray-800 p-4">
@@ -58,7 +58,7 @@ export function Modal({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="rounded-sm p-1 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>

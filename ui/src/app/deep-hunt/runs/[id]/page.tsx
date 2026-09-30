@@ -282,7 +282,7 @@ export default function RunDetailPage() {
         </div>
       ) : null}
       {plannerMode !== 'configured_ai' && detail && !detail.episode.terminal ? (
-        <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] p-3 text-sm text-blue-100">
+        <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/6 p-3 text-sm text-blue-100">
           Waiting for {plannerMode === 'local_codex' ? 'the local Codex runner' : 'your coding agent'} to choose the next bounded action. This run will not advance by itself.
           {plannerMode === 'local_codex' ? (
             <code className="mt-1 block text-xs text-blue-200">shakerscan research {detail.episode.id} 5</code>
@@ -306,7 +306,7 @@ export default function RunDetailPage() {
       </div>
 
       {found > 0 ? (
-        <Link href={`/findings?research_campaign_id=${encodeURIComponent(campaign?.id || '')}&status=active`} className="mt-3 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-sm hover:bg-emerald-500/[0.1]">
+        <Link href={`/findings?research_campaign_id=${encodeURIComponent(campaign?.id || '')}&status=active`} className="mt-3 flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/6 p-3 text-sm hover:bg-emerald-500/10">
           <span className="text-emerald-200">{found} active finding{found === 1 ? '' : 's'} linked to this run</span>
           <span className="text-xs text-emerald-300">View findings →</span>
         </Link>
@@ -322,7 +322,7 @@ export default function RunDetailPage() {
           </div>
           <div className="divide-y divide-gray-800">
             {runFindings.slice(0, 8).map((finding) => (
-              <Link key={finding.id} href={`/findings/${finding.id}`} className="flex items-center gap-3 py-2 hover:bg-gray-800/40 -mx-2 px-2 rounded">
+              <Link key={finding.id} href={`/findings/${finding.id}`} className="flex items-center gap-3 py-2 hover:bg-gray-800/40 -mx-2 px-2 rounded-sm">
                 <SeverityBadge severity={finding.severity} />
                 <span className="min-w-0 flex-1 truncate text-sm text-gray-200">{finding.title}</span>
                 {finding.last_verification_verdict === 'exploited' ? (

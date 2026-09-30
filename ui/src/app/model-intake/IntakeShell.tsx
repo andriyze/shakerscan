@@ -53,11 +53,11 @@ function Chip({
       <span className="min-w-0 truncate font-medium">{value}</span>
     </>
   )
-  const base = `inline-flex min-w-0 items-center gap-1.5 rounded px-2 py-1 text-xs ${chipClass(tone)}`
+  const base = `inline-flex min-w-0 items-center gap-1.5 rounded-sm px-2 py-1 text-xs ${chipClass(tone)}`
   // A chip that reports a problem should also be the way to reach the fix.
   if (!onClick) return <span className={base}>{content}</span>
   return (
-    <button type="button" onClick={onClick} title={title} className={`${base} hover:brightness-125 focus:outline-none focus:ring-1 focus:ring-cyan-500`}>
+    <button type="button" onClick={onClick} title={title} className={`${base} hover:brightness-125 focus:outline-hidden focus:ring-1 focus:ring-cyan-500`}>
       {content}
     </button>
   )
@@ -172,7 +172,7 @@ export function IntakePhaseTabs({
               <span className="block text-sm font-medium text-white">
                 {item.number ? `${item.number}. ${item.label}` : item.label}
               </span>
-              <span className="mt-0.5 block break-words text-xs text-gray-500">{item.helper}</span>
+              <span className="mt-0.5 block wrap-break-word text-xs text-gray-500">{item.helper}</span>
             </span>
           </button>
         )
@@ -244,13 +244,13 @@ export function RunnerInstallCard({
           }`}>
             {installed ? 'READY' : readiness?.supported_host === false ? 'unavailable on this host' : 'not installed'}
           </span>
-          <button type="button" onClick={onRecheck} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">
+          <button type="button" onClick={onRecheck} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">
             Re-check
           </button>
         </div>
       </div>
 
-      <div className="mt-3 rounded border border-gray-800 bg-gray-900/70 p-3 text-xs text-gray-400">
+      <div className="mt-3 rounded-sm border border-gray-800 bg-gray-900/70 p-3 text-xs text-gray-400">
         <div className="font-medium text-gray-300">Linux host requirements</div>
         <ul className="mt-1 list-disc space-y-1 pl-4">
           <li>x86_64 Linux with KVM available at <code>/dev/kvm</code></li>
@@ -267,7 +267,7 @@ export function RunnerInstallCard({
       </div>
 
       {storage?.available && storage.filesystem && (
-        <div className="mt-3 rounded border border-gray-800 bg-gray-900/70 p-3">
+        <div className="mt-3 rounded-sm border border-gray-800 bg-gray-900/70 p-3">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <div className="text-xs font-medium text-gray-200">Runner storage</div>
@@ -276,19 +276,19 @@ export function RunnerInstallCard({
                 times the model size while it runs; jobs are rejected if that would cross the safety reserve.
               </p>
             </div>
-            <span className={`rounded px-2 py-1 text-xs font-semibold ${storage.active_job ? 'bg-cyan-950/50 text-cyan-200' : 'bg-gray-800 text-gray-300'}`}>
+            <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${storage.active_job ? 'bg-cyan-950/50 text-cyan-200' : 'bg-gray-800 text-gray-300'}`}>
               {storage.active_job ? 'job active' : 'idle'}
             </span>
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Free now</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.free_bytes)}</div></div>
-            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Safety reserve</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.reserve_bytes)}</div></div>
-            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Runner scratch</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.scratch_bytes)}</div></div>
-            <div className="rounded border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Converted models retained</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.converted_models_bytes)}</div></div>
+            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Free now</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.free_bytes)}</div></div>
+            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Safety reserve</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.filesystem.reserve_bytes)}</div></div>
+            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Runner scratch</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.scratch_bytes)}</div></div>
+            <div className="rounded-sm border border-gray-800 bg-gray-950 p-2"><div className="text-[10px] uppercase text-gray-600">Converted models retained</div><div className="mt-1 text-sm font-semibold text-white">{formatBytes(storage.usage?.converted_models_bytes)}</div></div>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button type="button" disabled={cleanupBusy} onClick={() => onCleanup(true)} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50">Preview cleanup</button>
-            <button type="button" disabled={cleanupBusy || storage.active_job} onClick={() => onCleanup(false)} className="rounded bg-cyan-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-700 disabled:opacity-50">Clean inactive scratch</button>
+            <button type="button" disabled={cleanupBusy} onClick={() => onCleanup(true)} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 disabled:opacity-50">Preview cleanup</button>
+            <button type="button" disabled={cleanupBusy || storage.active_job} onClick={() => onCleanup(false)} className="rounded-sm bg-cyan-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-700 disabled:opacity-50">Clean inactive scratch</button>
             <span className="text-[11px] text-gray-500">
               {formatBytes(storage.reclaimable?.bytes)} safely reclaimable now · automatic cleanup {storage.automatic_cleanup?.enabled ? 'on' : 'off'}
             </span>
@@ -321,7 +321,7 @@ export function RunnerInstallCard({
               }
             </button>
             {open && (
-              <div className="mt-3 grid gap-3 rounded border border-gray-800 bg-gray-900 p-3">
+              <div className="mt-3 grid gap-3 rounded-sm border border-gray-800 bg-gray-900 p-3">
                 <p className="text-xs text-gray-400">
                   {installed
                     ? 'This runner is installed. The same reviewed procedure installs it on another compatible host or refreshes its pinned components here.'
@@ -342,7 +342,7 @@ export function RunnerInstallCard({
                         <div className="text-xs font-medium text-white">
                           {choice.label}{choice.production ? '' : ' (non-production)'}
                         </div>
-                        <div className="mt-1 break-words text-[11px] text-gray-500">{choice.detail}</div>
+                        <div className="mt-1 wrap-break-word text-[11px] text-gray-500">{choice.detail}</div>
                       </button>
                     ))}
                   </div>
@@ -352,7 +352,7 @@ export function RunnerInstallCard({
                       <input
                         value={kmsKeyId}
                         onChange={(event) => setKmsKeyId(event.target.value)}
-                        className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
+                        className="w-full rounded-sm border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-hidden"
                         placeholder="arn:aws:kms:region:account:key/…"
                       />
                       <span className="text-[11px] text-gray-500">
@@ -362,9 +362,9 @@ export function RunnerInstallCard({
                   )}
                 </div>
                 <div className="text-xs font-medium text-gray-300">Run this one command</div>
-                <div className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-black/40 p-2">
+                <div className="flex min-w-0 items-center gap-2 rounded-sm border border-gray-800 bg-black/40 p-2">
                   <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-cyan-200">{command}</code>
-                  <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
+                  <button type="button" onClick={copyCommand} disabled={!commandReady} className="shrink-0 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40">
                     <Copy className="h-3 w-3" /> {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
@@ -396,7 +396,7 @@ export function RunnerInstallCard({
             )}
           </div>
         ) : (
-          <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-xs text-gray-400">
+          <div className="mt-3 rounded-sm border border-gray-800 bg-gray-900 p-3 text-xs text-gray-400">
             {plan.reason} Every other Model Intake check is unaffected.
           </div>
         )
@@ -419,7 +419,7 @@ export function PreflightScanTracker({
     <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm font-medium text-gray-200">Preflight scans queued from this page</div>
-        <button type="button" onClick={onRefresh} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+        <button type="button" onClick={onRefresh} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
           Refresh
         </button>
       </div>
@@ -428,7 +428,7 @@ export function PreflightScanTracker({
           const terminal = isTerminalScanStatus(scan.status)
           const attachable = scan.status === 'completed' && scan.complete_artifact
           return (
-            <div key={scan.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-900 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div key={scan.id} className="grid min-w-0 gap-2 rounded-sm border border-gray-800 bg-gray-900 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
               <div className="min-w-0">
                 <div className="truncate font-mono text-xs text-gray-300">{scan.id}</div>
                 <div className="mt-1 text-xs text-gray-500">
@@ -451,7 +451,7 @@ export function PreflightScanTracker({
                 </span>
                 <a
                   href={`/scans/${scan.id}`}
-                  className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                  className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
                 >
                   Report
                 </a>
@@ -461,7 +461,7 @@ export function PreflightScanTracker({
                       type="button"
                       onClick={() => { void downloadModelIntakeSbom(scan.id) }}
                       title="Download the CycloneDX bill of materials for this scan"
-                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                      className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
                     >
                       SBOM
                     </button>
@@ -469,7 +469,7 @@ export function PreflightScanTracker({
                       type="button"
                       onClick={() => { void downloadModelIntakeLicenseArtifact(scan.id, 'license-bom') }}
                       title="Download reconciled model and dependency license evidence"
-                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                      className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
                     >
                       License BOM
                     </button>
@@ -477,7 +477,7 @@ export function PreflightScanTracker({
                       type="button"
                       onClick={() => { void downloadModelIntakeLicenseArtifact(scan.id, 'third-party-notices') }}
                       title="Download the draft third-party notices file"
-                      className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                      className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
                     >
                       Notices draft
                     </button>
@@ -488,7 +488,7 @@ export function PreflightScanTracker({
                   disabled={!attachable}
                   title={!attachable && scan.status === 'completed' ? 'A complete artifact download is required for admission' : undefined}
                   onClick={() => onUseInAdmission(scan.id)}
-                  className="inline-flex items-center gap-1.5 rounded border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
+                  className="inline-flex items-center gap-1.5 rounded-sm border border-cyan-700 bg-cyan-950/40 px-2 py-1 text-xs text-cyan-100 hover:bg-cyan-900/40 disabled:cursor-not-allowed disabled:border-gray-700 disabled:bg-transparent disabled:text-gray-600"
                 >
                   <LockKeyhole className="h-3 w-3" /> Use in admission
                 </button>

@@ -33,14 +33,14 @@ function AssuranceChip({ scan }: { scan: Scan }) {
   const assurance = scanAssurance(scan)
   if (!assurance) {
     return (
-      <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-200">
+      <span className="rounded-sm bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-200">
         Examination strength unavailable
       </span>
     )
   }
   return (
     <span
-      className={`rounded bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
+      className={`rounded-sm bg-gray-900 px-1.5 py-0.5 text-xs ${assuranceClass(assurance.band)}`}
       title={`Examination strength ${assurance.score}/100 - ${assurance.label}`}
     >
       {assurance.label} · {assurance.score}/100
@@ -448,7 +448,7 @@ function ScansContent() {
             checked={includeInternal}
             onChange={(e) => setFilter('include_internal', e.target.checked ? 'true' : undefined)}
             aria-label="Show ASM and internal scans"
-            className="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
+            className="h-4 w-4 rounded-sm border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500"
           />
           Show ASM/internal scans
         </label>
@@ -459,7 +459,7 @@ function ScansContent() {
             type="button"
             onClick={() => setFilter('within', undefined)}
             aria-label={`Remove filter: last ${withinFilter} days`}
-            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             Last {withinFilter}d
             <span aria-hidden="true">×</span>
@@ -514,7 +514,7 @@ function ScansContent() {
                 ? '-'
                 : formatDuration(Math.max(0, Math.floor((durationTickMs - createdAtMs) / 1000)))
               return (
-                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/[0.04] p-4">
+                <div key={`hunt-${campaign.id}`} className="rounded-lg border border-blue-500/30 bg-blue-500/4 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <Link
                       href={`/deep-hunt/runs/${campaign.id}`}
@@ -534,7 +534,7 @@ function ScansContent() {
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
                     <span className="text-blue-300">Verifier · legacy</span>
                     {progress.max > 0 ? (
-                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">
+                      <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-400">
                         Episode {progress.started}/{progress.max}
                       </span>
                     ) : null}
@@ -546,7 +546,7 @@ function ScansContent() {
                   <div className="mt-3">
                     <Link
                       href={`/deep-hunt/runs/${campaign.id}`}
-                      className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                     >
                       View hunt
                     </Link>
@@ -604,7 +604,7 @@ function ScansContent() {
                   <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
                     <span className="text-gray-300">{scanTypeLabel}</span>
                     {variantLabel && (
-                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400">{variantLabel}</span>
+                      <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-gray-400">{variantLabel}</span>
                     )}
                     <span aria-hidden="true">·</span>
                     <span>{getDurationLabel(scan)}</span>
@@ -617,14 +617,14 @@ function ScansContent() {
                         <button
                           onClick={() => setConfirmCancelId(scan.id)}
                           disabled={cancelling.has(scan.id)}
-                          className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                          className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-sm text-xs font-medium transition-colors disabled:opacity-50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
                         >
                           {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                         </button>
                       ) : isAIScan ? (
                         <Link
                           href="/ai-gate"
-                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                          className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
                         >
                           AI Gate
                         </Link>
@@ -688,7 +688,7 @@ function ScansContent() {
                     <td className="px-4 py-3">
                       <Link
                         href={`/deep-hunt/runs/${campaign.id}`}
-                        className="inline-flex rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                        className="inline-flex rounded-sm bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                       >
                         View
                       </Link>
@@ -785,14 +785,14 @@ function ScansContent() {
                       <button
                         onClick={() => setConfirmCancelId(scan.id)}
                         disabled={cancelling.has(scan.id)}
-                        className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs font-medium transition-colors disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                        className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded-sm text-xs font-medium transition-colors disabled:opacity-50 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-red-500"
                       >
                         {cancelling.has(scan.id) ? 'Cancelling...' : 'Cancel'}
                       </button>
                     ) : isAIScan ? (
                       <Link
                         href="/ai-gate"
-                        className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
                       >
                         AI Gate
                       </Link>
@@ -800,7 +800,7 @@ function ScansContent() {
                       <div>
                         <button
                           onClick={() => handleScan(scan.target_url)}
-                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Scan again
                         </button>

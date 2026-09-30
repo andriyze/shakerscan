@@ -32,15 +32,15 @@ function humanHeader(key: string): string {
 
 function Provenance({ section, currentScanId }: { section: TargetPostureSection | null; currentScanId: string }) {
   if (!section) {
-    return <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">not examined yet</span>
+    return <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-400">not examined yet</span>
   }
   if (section.scan_id === currentScanId) {
-    return <span className="rounded bg-blue-500/10 px-2 py-0.5 text-xs text-blue-200">observed in this scan</span>
+    return <span className="rounded-sm bg-blue-500/10 px-2 py-0.5 text-xs text-blue-200">observed in this scan</span>
   }
   return (
     <Link
       href={`/scans/${section.scan_id}`}
-      className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300 hover:text-white"
+      className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300 hover:text-white"
       title="This run did not observe this section; showing the newest observation from another scan"
     >
       from another scan{section.observed_at ? ` · ${formatDate(section.observed_at)}` : ''}

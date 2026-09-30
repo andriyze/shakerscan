@@ -153,7 +153,7 @@ function GraphContent() {
         <Link
           href="/targets"
           aria-label="Back to targets"
-          className="rounded text-gray-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-sm text-gray-400 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -176,15 +176,15 @@ function GraphContent() {
         }
       >
         <div className="flex flex-wrap gap-2 text-xs">
-          <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">{summary.node_count} nodes</span>
-          <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">{summary.edge_count} edges</span>
+          <span className="px-2 py-1 rounded-sm bg-gray-800 text-gray-300">{summary.node_count} nodes</span>
+          <span className="px-2 py-1 rounded-sm bg-gray-800 text-gray-300">{summary.edge_count} edges</span>
           {Object.entries(summary.by_node_type || {}).map(([k, v]) => (
-            <span key={`n-${k}`} className="px-2 py-1 rounded bg-blue-900/40 text-blue-300">
+            <span key={`n-${k}`} className="px-2 py-1 rounded-sm bg-blue-900/40 text-blue-300">
               {v} {k}
             </span>
           ))}
           {Object.entries(summary.by_edge_type || {}).map(([k, v]) => (
-            <span key={`e-${k}`} className="px-2 py-1 rounded bg-purple-900/40 text-purple-300">
+            <span key={`e-${k}`} className="px-2 py-1 rounded-sm bg-purple-900/40 text-purple-300">
               {v} {k}
             </span>
           ))}
@@ -199,7 +199,7 @@ function GraphContent() {
           <p role="alert" className="mt-3 text-xs text-red-300">{leadError}</p>
         )}
         {leadResult && (
-          <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
+          <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
             <span className="text-gray-300">{leadResult.candidate_count}</span> candidate lead(s),
             {' '}<span className="text-green-300">{leadResult.created}</span> created,
             {' '}<span className="text-blue-300">{leadResult.endorsed}</span> endorsed,
@@ -218,7 +218,7 @@ function GraphContent() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden"
               placeholder="route, object, principal, field"
             />
           </label>
@@ -227,7 +227,7 @@ function GraphContent() {
             <select
               value={nodeType}
               onChange={(e) => setNodeType(e.target.value)}
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="all">All nodes</option>
               {Object.keys(summary.by_node_type || {}).map((type) => <option key={type} value={type}>{type}</option>)}
@@ -238,7 +238,7 @@ function GraphContent() {
             <select
               value={edgeType}
               onChange={(e) => setEdgeType(e.target.value)}
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="all">All edges</option>
               {Object.keys(summary.by_edge_type || {}).map((type) => <option key={type} value={type}>{type}</option>)}
@@ -254,7 +254,7 @@ function GraphContent() {
         <SectionCard
           title="Selected Node"
           actions={
-            <button type="button" onClick={() => setSelectedNodeKey(null)} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+            <button type="button" onClick={() => setSelectedNodeKey(null)} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
               Clear
             </button>
           }
@@ -265,7 +265,7 @@ function GraphContent() {
               <div className="mt-1 text-xs text-gray-500">{selectedNode.node_type} · {selectedNode.node_key}</div>
             </div>
             {selectedNode.attributes && Object.keys(selectedNode.attributes).length > 0 && (
-              <details className="rounded border border-gray-800 bg-gray-950">
+              <details className="rounded-sm border border-gray-800 bg-gray-950">
                 <summary className="cursor-pointer px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200">
                   Attributes ({Object.keys(selectedNode.attributes).length})
                 </summary>
@@ -280,7 +280,7 @@ function GraphContent() {
                 <div className="text-xs text-gray-500">No connected edges yet.</div>
               ) : (
                 selectedNodeEdges.slice(0, 12).map((edge) => (
-                  <div key={edge.id} className="rounded border border-gray-800 bg-gray-950 px-2 py-1 text-xs text-gray-300">
+                  <div key={edge.id} className="rounded-sm border border-gray-800 bg-gray-950 px-2 py-1 text-xs text-gray-300">
                     <span className="text-purple-300">{edge.edge_type}</span>{' '}
                     <span className="font-mono break-all">{keyLabel(edge.src_key)}</span>
                     <span className="mx-1 text-gray-500">→</span>
@@ -350,7 +350,7 @@ function GraphContent() {
                 >
                   <span className="font-mono text-gray-300 break-all">{nodeLabel(n)}</span>
                   {n.attributes?.role ? (
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">
+                    <span className="shrink-0 px-1.5 py-0.5 rounded-sm bg-gray-800 text-gray-400">
                       {String(n.attributes.role)}
                     </span>
                   ) : null}
@@ -394,7 +394,7 @@ function GraphContent() {
                 key={node.id}
                 type="button"
                 onClick={() => setSelectedNodeKey(node.node_key)}
-                className="rounded border border-gray-800 bg-gray-950 px-2 py-1 text-left text-xs hover:bg-gray-800/60"
+                className="rounded-sm border border-gray-800 bg-gray-950 px-2 py-1 text-left text-xs hover:bg-gray-800/60"
               >
                 <span className="text-gray-500">{node.node_type}</span>{' '}
                 <span className="font-mono text-gray-300 break-all">{nodeLabel(node)}</span>
@@ -412,11 +412,11 @@ function GraphContent() {
               : 'No edges match the current filters.'}
           </p>
         ) : (
-          <div className="space-y-1 max-h-[32rem] overflow-y-auto">
+          <div className="space-y-1 max-h-128 overflow-y-auto">
             {visibleEdges.map((edge) => (
-              <div key={edge.id} className="rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+              <div key={edge.id} className="rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded bg-purple-900/40 px-1.5 py-0.5 text-purple-200">{edge.edge_type}</span>
+                  <span className="rounded-sm bg-purple-900/40 px-1.5 py-0.5 text-purple-200">{edge.edge_type}</span>
                   <button type="button" onClick={() => setSelectedNodeKey(edge.src_key)} className="font-mono text-gray-200 hover:text-blue-300 break-all">
                     {keyLabel(edge.src_key)}
                   </button>
@@ -426,7 +426,7 @@ function GraphContent() {
                   </button>
                 </div>
                 {edge.attributes && Object.keys(edge.attributes).length > 0 && (
-                  <details className="mt-2 rounded bg-gray-900">
+                  <details className="mt-2 rounded-sm bg-gray-900">
                     <summary className="cursor-pointer px-2 py-1 text-xs text-gray-500 hover:text-gray-300">
                       Attributes ({Object.keys(edge.attributes).length})
                     </summary>

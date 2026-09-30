@@ -23,7 +23,7 @@ export function LegacyDeviceInvestigation({ run }: { run: DeviceAgentSession }) 
         <div>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs uppercase tracking-wide text-amber-300">Legacy device-agent run · read only</p>
-            <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-300">{run.status.replaceAll('_', ' ')}</span>
+            <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{run.status.replaceAll('_', ' ')}</span>
           </div>
           <h2 className="mt-3 font-medium text-white">{run.objective}</h2>
           <p className="mt-2 text-xs text-gray-500">
@@ -31,10 +31,10 @@ export function LegacyDeviceInvestigation({ run }: { run: DeviceAgentSession }) 
           </p>
         </div>
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Safety profile</span><span className="text-white">{run.safety_profile.replaceAll('_', ' ')}</span></div>
-          <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Planner turns</span><span className="text-white">{run.turns} / {run.max_turns}</span></div>
-          <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Actions</span><span className="text-white">{run.actions_used}</span></div>
-          <div className="rounded bg-gray-950 p-3"><span className="block text-xs text-gray-500">Scans queued</span><span className="text-white">{run.scans_queued}</span></div>
+          <div className="rounded-sm bg-gray-950 p-3"><span className="block text-xs text-gray-500">Safety profile</span><span className="text-white">{run.safety_profile.replaceAll('_', ' ')}</span></div>
+          <div className="rounded-sm bg-gray-950 p-3"><span className="block text-xs text-gray-500">Planner turns</span><span className="text-white">{run.turns} / {run.max_turns}</span></div>
+          <div className="rounded-sm bg-gray-950 p-3"><span className="block text-xs text-gray-500">Actions</span><span className="text-white">{run.actions_used}</span></div>
+          <div className="rounded-sm bg-gray-950 p-3"><span className="block text-xs text-gray-500">Scans queued</span><span className="text-white">{run.scans_queued}</span></div>
         </div>
         {run.stop_reason && <p className="text-sm text-amber-200">Stopped: {run.stop_reason.replaceAll('_', ' ')}</p>}
         <Link
@@ -84,7 +84,7 @@ export function LegacyDeviceInvestigation({ run }: { run: DeviceAgentSession }) 
           <h2 className="font-medium text-white">Candidate outcome</h2>
           <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
             {Object.entries(run.candidate_summary).map(([label, count]) => (
-              <div key={label} className="rounded bg-gray-950 p-3"><span className="block text-xs capitalize text-gray-500">{label}</span><span className="text-white">{count}</span></div>
+              <div key={label} className="rounded-sm bg-gray-950 p-3"><span className="block text-xs capitalize text-gray-500">{label}</span><span className="text-white">{count}</span></div>
             ))}
           </div>
           {run.result?.summary && <p className="mt-4 text-sm text-gray-300">{run.result.summary}</p>}

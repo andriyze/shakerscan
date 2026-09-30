@@ -80,7 +80,7 @@ function CampaignsContent() {
             type="button"
             aria-pressed={!statusFilter}
             onClick={() => setFilter('status', undefined)}
-            className={`rounded-full border px-3 py-1 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+            className={`rounded-full border px-3 py-1 text-xs transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
               !statusFilter ? 'border-blue-500 bg-blue-600/20 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-800'
             }`}
           >
@@ -92,7 +92,7 @@ function CampaignsContent() {
               type="button"
               aria-pressed={statusFilter === s}
               onClick={() => setFilter('status', s)}
-              className={`rounded-full border px-3 py-1 text-xs capitalize transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              className={`rounded-full border px-3 py-1 text-xs capitalize transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 statusFilter === s ? 'border-blue-500 bg-blue-600/20 text-blue-300' : 'border-gray-700 text-gray-400 hover:bg-gray-800'
               }`}
             >

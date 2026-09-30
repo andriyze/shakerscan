@@ -54,7 +54,7 @@ function Field({ label, children, mono = false }: {
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
       <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
-      <div className={`mt-1 break-words text-sm text-gray-200 ${mono ? 'font-mono' : ''}`}>
+      <div className={`mt-1 wrap-break-word text-sm text-gray-200 ${mono ? 'font-mono' : ''}`}>
         {children || <span className="text-gray-500">Not observed</span>}
       </div>
     </div>
@@ -196,7 +196,7 @@ export default function InfrastructureIntelligenceSection({ infrastructure }: { 
               {nameservers.length > 0 && <p><span className="text-gray-500">NS:</span> <span className="font-mono">{nameservers.join(', ')}</span></p>}
               {dns.soa?.primary_nameserver && <p><span className="text-gray-500">SOA:</span> <span className="font-mono">{text(dns.soa.primary_nameserver)}</span></p>}
               {recordMetadata.length > 0 && (
-                <details className="rounded border border-gray-800 bg-gray-950/40 p-3">
+                <details className="rounded-sm border border-gray-800 bg-gray-950/40 p-3">
                   <summary className="cursor-pointer text-xs font-medium text-gray-300">Record TTL and answer details</summary>
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {recordMetadata.slice(0, 20).map(([label, item]: [string, any]) => (
