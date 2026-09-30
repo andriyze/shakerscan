@@ -169,7 +169,7 @@ def test_source_symlink_target_is_not_modified(tmp_path):
 
 
 @pytest.mark.parametrize("image, expected", [
-    ("Dockerfile.api", ["ca-certificates", "curl", "jq"]),
+    ("Dockerfile.api", ["ca-certificates", "curl", "jq", "openssl", "libssl3t64"]),
     ("Dockerfile.model-intake", [
         "make", "gcc", "libcurl4-openssl-dev", "libssl-dev", "python3-dev",
         "python3-venv", "python3-pip-whl", "python3-setuptools-whl",

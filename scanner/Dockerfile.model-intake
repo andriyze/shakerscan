@@ -102,6 +102,13 @@ RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,r
     "/opt/model-intake-tools/pip-audit/bin/python" -c \
       'import importlib.util as u; assert u.find_spec("setuptools") is None; assert u.find_spec("pip._vendor.msgpack") is None; assert u.find_spec("pip._vendor.pkg_resources") is None'; \
     ! grep -Eq "^(msgpack|setuptools)==" "$vendor/vendor.txt"; \
+    # pip 26.2.1 vendors urllib3 2.7.0 (CVE-2026-97687, CVE-2026-97689; fixed in 2.8.0) and
+    # pip-api needs pip, so that copy is replaced with this environment's hash-locked urllib3,
+    # rewritten the way pip vendors it. The pip checks below then run on the replaced copy.
+    python3 /opt/model-intake-locks/revendor_pip_urllib3.py "$vendor" \
+      /opt/model-intake-tools/pip-audit/lib/python3.12/site-packages/urllib3; \
+    "/opt/model-intake-tools/pip-audit/bin/python" -c \
+      'import urllib3, pip._vendor.urllib3 as v, pip._vendor.requests; assert v.__version__ == urllib3.__version__ and v.__file__ != urllib3.__file__'; \
     "/opt/model-intake-tools/pip-audit/bin/python" -m pip --version >/dev/null; \
     "/opt/model-intake-tools/pip-audit/bin/pip-audit" --version >/dev/null; \
     find /opt/model-intake-tools -depth -type d \( -name "setuptools" -o -name "setuptools-*.dist-info" -o -name "_distutils_hack" \) -exec rm -rf {} +; \
