@@ -14,6 +14,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# PostgreSQL major upgrades run before anything can start PostgreSQL (see compose()). Without the
+# module a start could initialize an empty cluster beside the real data, so refuse to run instead.
+if [ ! -f "$SCRIPT_DIR/scripts/postgres_upgrade.sh" ]; then
+    echo -e "${RED}Error: $SCRIPT_DIR/scripts/postgres_upgrade.sh is missing; re-run the installer.${NC}" >&2
+    exit 1
+fi
+# shellcheck source=scripts/postgres_upgrade.sh
+source "$SCRIPT_DIR/scripts/postgres_upgrade.sh"
+
 # Default workers
 WORKERS=${WORKERS:-auto}
 DEFAULT_PREBUILT_IMAGE_TAG="${DEFAULT_PREBUILT_IMAGE_TAG:-latest}"
@@ -229,7 +238,8 @@ postgres_data_volume_exists() {
     local project="${COMPOSE_PROJECT_NAME:-shakerscan}"
 
     command_exists docker || return 1
-    docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
+    docker volume inspect "${project}_postgres-cluster" > /dev/null 2>&1 || \
+        docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
 }
 
 ensure_runtime_datastore_credentials() {
@@ -575,11 +585,38 @@ update_compose_file_args() {
     fi
 }
 
+# The Compose subcommand in an argument list, skipping global options and their values.
+compose_subcommand() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --profile|-f|--file|-p|--project-name|--project-directory|--env-file|--ansi|--progress|--parallel)
+                shift 2
+                ;;
+            -*)
+                shift
+                ;;
+            *)
+                echo "$1"
+                return 0
+                ;;
+        esac
+    done
+}
+
 compose() {
     if ! resolve_compose_command; then
         echo -e "${RED}Error: Docker Compose is not installed${NC}"
         return 1
     fi
+
+    # up/run/create can start PostgreSQL directly or as a dependency; an older cluster must be
+    # migrated first, or PostgreSQL would initialize an empty database beside the real one. Its
+    # progress goes to stderr so callers that discard or capture Compose's stdout still show it.
+    case "$(compose_subcommand "$@")" in
+        up|run|create)
+            ensure_postgres_cluster_current >&2 || return 1
+            ;;
+    esac
 
     "${DOCKER_COMPOSE_CMD[@]}" "${COMPOSE_FILE_ARGS[@]}" "$@"
 }
@@ -1350,7 +1387,7 @@ install_dependencies() {
 
 command_needs_docker_runtime() {
     case "$1" in
-        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell)
+        start|stop|restart|status|scale|logs|gungnir|devices|build|rebuild|reset|shell|db-upgrade)
             return 0
             ;;
         *)
@@ -2226,6 +2263,7 @@ print_help() {
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
+    echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remove-legacy)"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -3230,6 +3268,9 @@ reset_database() {
     if [ "$CONFIRM" = "yes" ]; then
         echo "Stopping services..."
         compose down -v
+        # Data kept for rolling back a PostgreSQL upgrade is not a Compose volume; without removing
+        # it the fresh start would migrate the old data straight back in.
+        docker_cli volume rm -f "$(postgres_legacy_volume)" > /dev/null 2>&1 || true
         echo "Starting fresh..."
         compose_up -d --scale worker=$start_workers
         echo -e "${GREEN}Database reset complete${NC}"
@@ -3281,6 +3322,26 @@ create_backup() {
 
     echo -e "${GREEN}Backup complete: $snapshot_dir${NC}"
     echo "This directory contains sensitive configuration and scan evidence; store it securely."
+}
+
+db_upgrade_cmd() {
+    case "${1:-}" in
+        "")
+            # start/restart and the installer do this automatically; this runs it without starting.
+            ensure_postgres_cluster_current || return 1
+            postgres_upgrade_status
+            ;;
+        --status)
+            postgres_upgrade_status
+            ;;
+        --remove-legacy)
+            remove_legacy_postgres_data
+            ;;
+        *)
+            echo "Usage: $(cli_hint) db-upgrade [--status|--remove-legacy]" >&2
+            return 1
+            ;;
+    esac
 }
 
 scale_workers() {
@@ -3953,6 +4014,9 @@ case $COMMAND in
         ;;
     backup)
         create_backup "${ARGS[0]}"
+        ;;
+    db-upgrade)
+        db_upgrade_cmd "${ARGS[@]}"
         ;;
     reset)
         reset_database
