@@ -19,8 +19,11 @@ RUN npm run typecheck && npm run build && \
 
 FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
 
+# Naming the base image's OpenSSL here upgrades it to the current noble-security build (the
+# scanner image already does); otherwise the API keeps whatever the pinned Playwright base
+# shipped, which failed the image gate on CVE-2026-84782 (fixed in 3.0.13-0ubuntu3.16).
 RUN --mount=type=bind,source=scanner/apt_install.sh,target=/tmp/apt_install.sh,ro \
-    sh /tmp/apt_install.sh ca-certificates curl jq
+    sh /tmp/apt_install.sh ca-certificates curl jq openssl libssl3t64
 
 # /app includes API modules and the shared policy/evidence code. Small static
 # fingerprint inputs remain so the API can compute the expected worker build;
