@@ -19,7 +19,7 @@ function activeTab(pathname: string): TabId {
 
 function seg(on: boolean): string {
   return cn(
-    'rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+    'rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500',
     on ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-white',
   )
 }

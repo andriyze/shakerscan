@@ -89,7 +89,7 @@ function Review({ huntId }: { huntId: string }) {
           <h2 className="text-lg font-semibold text-white">Investigation review</h2>
           <p className="mt-1 text-sm text-gray-400">Saved evidence, uncertainty, and retained leads. This view sends no target traffic.</p>
         </div>
-        <button type="button" disabled={loading} onClick={() => void loadPage(null)} className="rounded border border-gray-600 px-3 py-2 text-sm text-gray-200 disabled:opacity-50">Refresh history</button>
+        <button type="button" disabled={loading} onClick={() => void loadPage(null)} className="rounded-sm border border-gray-600 px-3 py-2 text-sm text-gray-200 disabled:opacity-50">Refresh history</button>
       </div>
       {error && <p role="alert" className="text-sm text-amber-300">{error}</p>}
       {loading && <p role="status" className="text-sm text-gray-400">Reading investigation history…</p>}
@@ -98,11 +98,11 @@ function Review({ huntId }: { huntId: string }) {
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex min-w-0 flex-1 flex-col gap-1 text-sm text-gray-300">
             Saved investigation
-            <select value={selected} onChange={event => setSelected(event.target.value)} className="rounded border border-gray-600 bg-gray-950 p-2 text-white">
+            <select value={selected} onChange={event => setSelected(event.target.value)} className="rounded-sm border border-gray-600 bg-gray-950 p-2 text-white">
               {ids.map(id => <option key={id} value={id}>{id}</option>)}
             </select>
           </label>
-          <button type="button" disabled={reading} onClick={() => setRevision(value => value + 1)} className="rounded border border-gray-600 px-3 py-2 text-sm text-gray-200 disabled:opacity-50">Refresh evidence</button>
+          <button type="button" disabled={reading} onClick={() => setRevision(value => value + 1)} className="rounded-sm border border-gray-600 px-3 py-2 text-sm text-gray-200 disabled:opacity-50">Refresh evidence</button>
         </div>
       )}
       {cursor && <button type="button" disabled={loading} onClick={() => void loadPage(cursor)} className="text-sm text-blue-300 disabled:opacity-50">Load more investigations — history is not yet complete</button>}
@@ -123,7 +123,7 @@ function Review({ huntId }: { huntId: string }) {
             <h3 className="font-medium text-gray-200">Retained leads</h3>
             <p className="mt-1 text-sm text-gray-400">{candidateHistoryText(review.candidate_relation)}</p>
             {history.map(candidate => (
-              <p key={`${candidate.id}:${candidate.created_from_attempt}`} className="mt-2 break-all rounded bg-gray-950 p-3 text-sm text-gray-300">
+              <p key={`${candidate.id}:${candidate.created_from_attempt}`} className="mt-2 break-all rounded-sm bg-gray-950 p-3 text-sm text-gray-300">
                 Candidate <code>{candidate.id}</code> · recorded from attempt {candidate.created_from_attempt} · store status: {candidate.status}
               </p>
             ))}
@@ -133,7 +133,7 @@ function Review({ huntId }: { huntId: string }) {
               {(review.resume?.open_questions || []).map((question, index) => <p key={index} className="mt-1 text-sm text-gray-400">{question}</p>)}
             </div>
           )}
-          <details className="rounded border border-gray-700 p-3">
+          <details className="rounded-sm border border-gray-700 p-3">
             <summary className="cursor-pointer text-sm text-gray-200">Attempt history and evidence references ({review.attempts.length})</summary>
             {review.attempts.map(attempt => (
               <div key={attempt.action_id} className="mt-3 space-y-1 border-t border-gray-800 pt-3 text-sm text-gray-300">
@@ -144,7 +144,7 @@ function Review({ huntId }: { huntId: string }) {
               </div>
             ))}
           </details>
-          <details className="rounded border border-gray-700 p-3">
+          <details className="rounded-sm border border-gray-700 p-3">
             <summary className="cursor-pointer text-sm text-gray-200">Evidence requirements and supported-request limitations</summary>
             {[...(review.evidence_needed || []), ...(review.limitations || [])].map((text, index) => <p key={index} className="mt-2 text-sm text-gray-400">{text}</p>)}
           </details>

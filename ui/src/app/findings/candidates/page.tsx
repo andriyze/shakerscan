@@ -84,7 +84,7 @@ export default function InvestigationCandidatesPage() {
             type="checkbox"
             checked={showTerminal}
             onChange={event => setShowTerminal(event.target.checked)}
-            className="rounded border-gray-700 bg-gray-900"
+            className="rounded-sm border-gray-700 bg-gray-900"
           />
           Include verified, refuted, and expired
         </label>
@@ -107,10 +107,10 @@ export default function InvestigationCandidatesPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <SeverityBadge severity={candidate.claimed_severity} />
-                      <span className="rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-300">
+                      <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-300">
                         {candidate.status.replace(/_/g, ' ')}
                       </span>
-                      <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">
+                      <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-400">
                         {candidate.plane === 'device' ? 'Hunt · device' : 'Hunt · web/API'}
                       </span>
                     </div>

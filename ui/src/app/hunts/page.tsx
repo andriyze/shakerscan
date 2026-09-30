@@ -231,7 +231,7 @@ function HuntsContent() {
                         <span className="line-clamp-2">{hunt.objective}</span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`rounded px-2 py-1 text-xs ${statusClass(hunt.status)}`}>
+                        <span className={`rounded-sm px-2 py-1 text-xs ${statusClass(hunt.status)}`}>
                           {huntStatusLabel(hunt.status)}
                         </span>
                         {hunt.stop_reason && hunt.stop_reason !== 'completed' && (

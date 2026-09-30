@@ -32,7 +32,7 @@ export function PageHeader({
       {backHref && (
         <Link
           href={backHref}
-          className="mb-2 inline-flex items-center gap-1.5 text-sm text-gray-400 transition-colors hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
+          className="mb-2 inline-flex items-center gap-1.5 text-sm text-gray-400 transition-colors hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           {backLabel}
@@ -45,7 +45,7 @@ export function PageHeader({
             {eyebrow && (
               <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">{eyebrow}</p>
             )}
-            <h1 className="break-words text-2xl font-bold text-white">{renderedTitle}</h1>
+            <h1 className="wrap-break-word text-2xl font-bold text-white">{renderedTitle}</h1>
             {description && <p className="mt-1 max-w-3xl text-sm text-gray-400">{description}</p>}
           </div>
         </div>

@@ -140,34 +140,34 @@ function TriagePanel({ finding }: { finding: Finding }) {
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {triage.verified === true && (
-            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-xs font-medium">
+            <span className="px-2 py-0.5 rounded-sm bg-emerald-500/20 text-emerald-300 text-xs font-medium">
               verified
             </span>
           )}
           {triage.suspected === true && (
-            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-medium">
+            <span className="px-2 py-0.5 rounded-sm bg-amber-500/20 text-amber-300 text-xs font-medium">
               suspected lead
             </span>
           )}
           {triage.needs_verification === true && (
-            <span className="px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-300 text-xs font-medium">
+            <span className="px-2 py-0.5 rounded-sm bg-yellow-500/20 text-yellow-300 text-xs font-medium">
               needs verification
             </span>
           )}
           {triage.confidence_tier && (
-            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+            <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
               confidence tier: {triage.confidence_tier}
             </span>
           )}
           {typeof triage.confidence === 'number' && (
-            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+            <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
               confidence: {Math.round(triage.confidence * 100)}%
             </span>
           )}
         </div>
 
         {(downgradedFromSeverity || typeof cappedFromConfidence === 'number') && (
-          <div className="rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
+          <div className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
             <p className="text-gray-400 font-medium mb-2">Precision policy adjustments</p>
             <div className="space-y-1">
               {downgradedFromSeverity && (
@@ -204,7 +204,7 @@ function TriagePanel({ finding }: { finding: Finding }) {
         )}
 
         {triage.verification_reason && (
-          <div className="rounded border border-gray-800 bg-gray-950 p-3 text-xs">
+          <div className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs">
             <p className="text-gray-400 font-medium mb-1">Verification reason</p>
             <p className="text-gray-200">{triage.verification_reason}</p>
           </div>
@@ -294,7 +294,7 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     <span className="inline-flex items-center gap-1">
       <button
         onClick={handleCopy}
-        className="p-1 rounded hover:bg-gray-800 transition-colors"
+        className="p-1 rounded-sm hover:bg-gray-800 transition-colors"
         title={label || 'Copy'}
         aria-label={label || 'Copy'}
         type="button"
@@ -698,7 +698,7 @@ function FindingDetailContent() {
           <Link
             href={backUrl}
             aria-label="Back to findings"
-            className="rounded text-gray-400 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="rounded-sm text-gray-400 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -751,7 +751,7 @@ function FindingDetailContent() {
             <select
               value={selectedRetestMode}
               onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
-              className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-hidden focus:border-blue-500"
               title="Retest mode"
               aria-label="Retest mode"
             >
@@ -801,7 +801,7 @@ function FindingDetailContent() {
       <nav aria-label="Jump to section" className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900/60 p-2 text-xs">
         <span className="px-2 py-1 font-medium text-gray-500">Jump to</span>
         {(([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ...((request || response) ? [['http', 'HTTP']] : [])]) as [string, string][]).map(([anchor, label]) => (
-          <a key={anchor} href={`#${anchor}`} className="rounded px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
+          <a key={anchor} href={`#${anchor}`} className="rounded-sm px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
         ))}
       </nav>
 
@@ -814,17 +814,17 @@ function FindingDetailContent() {
                 <FindingStatusBadge status={finding.status} />
                 <SourceTypeBadge type={getFindingSourceType(finding)} />
                 {finding.cvss_score !== undefined && finding.cvss_score !== null && (
-                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-200 text-xs">
+                  <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-200 text-xs">
                     CVSS {finding.cvss_score}
                   </span>
                 )}
                 {finding.tool && (
-                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+                  <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
                     {finding.tool}
                   </span>
                 )}
               </div>
-              <h2 className="text-xl font-semibold text-white mt-2 break-words">{finding.title}</h2>
+              <h2 className="text-xl font-semibold text-white mt-2 wrap-break-word">{finding.title}</h2>
               {showSummaryDescription && (
                 <p className="text-sm text-gray-300 mt-2 whitespace-pre-wrap">{summaryDescription}</p>
               )}
@@ -985,7 +985,7 @@ function FindingDetailContent() {
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <span className={`rounded px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
+                        <span className={`rounded-sm px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
                           {item.status}
                         </span>
                         {item.expires_at && <span className="text-gray-500">expires {formatDate(item.expires_at)}</span>}
@@ -1001,7 +1001,7 @@ function FindingDetailContent() {
                     <button
                       type="button"
                       onClick={() => setExceptionToDelete(item.id)}
-                      className="rounded border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      className="rounded-sm border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       Delete
                     </button>
@@ -1113,7 +1113,7 @@ function FindingDetailContent() {
             </p>
           </div>
           {!retestSupported && (
-            <div className="text-xs rounded px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
+            <div className="text-xs rounded-sm px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
               Automated retest unavailable: {retestUnsupportedMessage}
             </div>
           )}
@@ -1131,7 +1131,7 @@ function FindingDetailContent() {
             </div>
           )}
           {hasPendingRetest && (
-            <div className="inline-flex items-center gap-2 rounded bg-blue-900/30 border border-blue-900/60 px-2 py-1 text-xs text-blue-300">
+            <div className="inline-flex items-center gap-2 rounded-sm bg-blue-900/30 border border-blue-900/60 px-2 py-1 text-xs text-blue-300">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
               Verifying… results update automatically
             </div>
@@ -1146,7 +1146,7 @@ function FindingDetailContent() {
             </div>
           )}
           {finding.status === 'active' && lastVerdictInconclusive && (
-            <div className="text-xs rounded px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
+            <div className="text-xs rounded-sm px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
               This finding remains <span className="text-yellow-400">active</span> because the latest retest was{' '}
               <span className="text-amber-300">inconclusive</span> — verification did not conclude
               {lastRetestRetryable ? ' and is retryable' : ''}. Retest verdicts inform triage; the
@@ -1154,7 +1154,7 @@ function FindingDetailContent() {
             </div>
           )}
           {finding.status === 'active' && latestRetestVerdict === 'false_positive' && (
-            <div className="text-xs rounded px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
+            <div className="text-xs rounded-sm px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
               The latest retest judged this a <span className="text-gray-300">false positive</span> with high
               confidence. The finding is still <span className="text-yellow-400">active</span> — retests never
               change finding status automatically. Review and set the status to{' '}
@@ -1193,7 +1193,7 @@ function FindingDetailContent() {
           {retestHistory.length > 0 ? (
             <div className="space-y-2">
               {(historyExpanded || hasPendingRetest ? retestHistory : retestHistory.slice(0, 1)).map((entry) => (
-                <div key={entry.id} className="bg-gray-800/60 rounded p-2 text-xs">
+                <div key={entry.id} className="bg-gray-800/60 rounded-sm p-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 text-gray-300">
                       {(entry.status === 'queued' || entry.status === 'running') ? (
@@ -1209,7 +1209,7 @@ function FindingDetailContent() {
                             <span className="text-gray-500">({entry.result_status.replaceAll('_', ' ')})</span>
                           )}
                           {entry.retryable && (
-                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300/90 text-[10px]">retryable</span>
+                            <span className="px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-300/90 text-[10px]">retryable</span>
                           )}
                         </>
                       )}
@@ -1234,7 +1234,7 @@ function FindingDetailContent() {
                     </div>
                   )}
                   {Array.isArray(entry.tested_endpoints) && entry.tested_endpoints.length > 1 && (
-                    <details className="mt-1 rounded border border-gray-700/70 bg-gray-900/40 px-2 py-1.5">
+                    <details className="mt-1 rounded-sm border border-gray-700/70 bg-gray-900/40 px-2 py-1.5">
                       <summary className="cursor-pointer text-gray-300">
                         Tested scope ({entry.tested_endpoints.length} endpoints)
                       </summary>
@@ -1258,7 +1258,7 @@ function FindingDetailContent() {
                   {entry.verdict_reason && <div className="text-gray-400 mt-1">{entry.verdict_reason}</div>}
                   {!entry.verdict_reason && entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
                   {entry.ai_reasoning && (
-                    <div className="mt-1 rounded border border-violet-500/20 bg-violet-500/5 p-2 text-gray-400">
+                    <div className="mt-1 rounded-sm border border-violet-500/20 bg-violet-500/5 p-2 text-gray-400">
                       <span className="font-medium text-violet-300">AI assessment — advisory, cannot override deterministic proof:</span> {entry.ai_reasoning}
                     </div>
                   )}
@@ -1347,7 +1347,7 @@ function FindingDetailContent() {
             <p className="text-xs text-gray-500 mb-2">Vulnerable URLs ({evidence.allUrls.length})</p>
             <div className="space-y-2">
               {evidence.allUrls.map((url, i) => (
-                <div key={i} className="bg-gray-800/60 rounded p-2 flex items-start justify-between gap-2">
+                <div key={i} className="bg-gray-800/60 rounded-sm p-2 flex items-start justify-between gap-2">
                   <code className="text-xs text-blue-300 break-all flex-1">{extractEndpoint(url)}</code>
                   <div className="flex items-center gap-1 shrink-0">
                     <CopyButton text={url} label="Copy full URL" />
@@ -1355,7 +1355,7 @@ function FindingDetailContent() {
                       href={url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="p-1 rounded hover:bg-gray-700 transition-colors"
+                      className="p-1 rounded-sm hover:bg-gray-700 transition-colors"
                       title="Open in new tab"
                     >
                       <ExternalLink className="w-3.5 h-3.5 text-gray-400" />
@@ -1373,7 +1373,7 @@ function FindingDetailContent() {
             <p className="text-xs text-gray-500 mb-2">Working Payloads ({evidence.allPayloads.length})</p>
             <div className="space-y-2">
               {evidence.allPayloads.map((payload, i) => (
-                <div key={i} className="bg-gray-800/60 rounded p-2 flex items-start justify-between gap-2">
+                <div key={i} className="bg-gray-800/60 rounded-sm p-2 flex items-start justify-between gap-2">
                   <code className="text-xs text-yellow-300 break-all flex-1">{decodePayload(payload)}</code>
                   <CopyButton text={decodePayload(payload)} label="Copy payload" />
                 </div>
@@ -1389,7 +1389,7 @@ function FindingDetailContent() {
             <div className="space-y-2">
               {evidence.remediation.map((step, i) => (
                 <div key={i} className="flex items-start gap-3 text-sm">
-                  <div className="w-5 h-5 rounded border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
+                  <div className="w-5 h-5 rounded-sm border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
                     <span className="text-xs text-gray-500">{i + 1}</span>
                   </div>
                   <span className="text-gray-300">{step}</span>
@@ -1406,7 +1406,7 @@ function FindingDetailContent() {
               {evidence.evidenceDetails.map((detail, idx) => (
                 <li key={idx} className="flex items-start gap-2">
                   <span className="text-yellow-400 mt-0.5">&#8226;</span>
-                  <span className="break-words">{detail}</span>
+                  <span className="wrap-break-word">{detail}</span>
                 </li>
               ))}
             </ul>
@@ -1427,7 +1427,7 @@ function FindingDetailContent() {
             {aiTactics.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {aiTactics.map((tactic) => (
-                  <span key={tactic} className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">
+                  <span key={tactic} className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
                     {tactic.replaceAll('_', ' ')}
                   </span>
                 ))}
@@ -1456,7 +1456,7 @@ function FindingDetailContent() {
             {rawEvidence && (
               <details open className="bg-gray-800/60 rounded-lg p-3">
                 <summary className="text-sm font-medium text-gray-300 cursor-pointer">Expanded raw evidence</summary>
-                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
+                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{redactEvidenceForDisplay(rawEvidence)}</pre>
               </details>
             )}
           </div>
@@ -1531,12 +1531,12 @@ function FindingDetailContent() {
                     </div>
                   </div>
                   {contentText && (
-                    <details className="rounded border border-gray-800 bg-gray-950 p-2">
+                    <details className="rounded-sm border border-gray-800 bg-gray-950 p-2">
                       <summary className="cursor-pointer text-xs font-medium text-gray-300">Object content</summary>
                       <div className="mt-2 flex justify-end">
                         <CopyButton text={contentText} label="Copy evidence object content" />
                       </div>
-                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs text-gray-300">
+                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap wrap-break-word text-xs text-gray-300">
                         {contentText}
                       </pre>
                     </details>
@@ -1589,16 +1589,16 @@ function FindingDetailContent() {
                     ))}
                   </ul>
                 ) : (
-                  <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words">
+                  <pre className="text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">
                     {JSON.stringify(finding.ai_recommendations, null, 2)}
                   </pre>
                 )}
               </div>
             )}
             {!finding.ai_verdict && !finding.ai_rationale && !finding.ai_recommendations && latestAiRetest && (
-              <div className="rounded border border-violet-500/25 bg-violet-500/5 p-3">
+              <div className="rounded-sm border border-violet-500/25 bg-violet-500/5 p-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
+                  <span className="rounded-sm bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
                     Latest advisory AI retest
                   </span>
                   {latestAiRetest.verdict && (
@@ -1628,13 +1628,13 @@ function FindingDetailContent() {
             {request && (
               <details className="bg-gray-800/60 rounded-lg p-3">
                 <summary className="cursor-pointer text-sm text-gray-300">Request</summary>
-                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap break-words">{request}</pre>
+                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{request}</pre>
               </details>
             )}
             {response && (
               <details className="bg-gray-800/60 rounded-lg p-3">
                 <summary className="cursor-pointer text-sm text-gray-300">Response</summary>
-                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap break-words">{response}</pre>
+                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{response}</pre>
               </details>
             )}
           </div>
@@ -1645,7 +1645,7 @@ function FindingDetailContent() {
         <Card className="p-4">
           <details>
             <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
-            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap break-words">{redactEvidenceForDisplay(rawEvidence)}</pre>
+            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{redactEvidenceForDisplay(rawEvidence)}</pre>
           </details>
         </Card>
       )}

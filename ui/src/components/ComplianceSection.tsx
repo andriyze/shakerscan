@@ -28,7 +28,7 @@ export default function ComplianceSection({ compliance }: Props) {
             <h3 className="text-sm font-medium text-orange-400 mb-3">OWASP Top 10</h3>
             <div className="flex flex-wrap gap-2">
               {compliance.owasp_top10.map((item, i) => (
-                <span key={i} className="px-2 py-1 bg-orange-900/30 text-orange-300 text-xs rounded">
+                <span key={i} className="px-2 py-1 bg-orange-900/30 text-orange-300 text-xs rounded-sm">
                   {item}
                 </span>
               ))}
@@ -46,7 +46,7 @@ export default function ComplianceSection({ compliance }: Props) {
                   href={`https://cwe.mitre.org/data/definitions/${item.replace('CWE-', '')}.html`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-2 py-1 bg-blue-900/30 text-blue-300 text-xs rounded hover:bg-blue-900/50"
+                  className="px-2 py-1 bg-blue-900/30 text-blue-300 text-xs rounded-sm hover:bg-blue-900/50"
                 >
                   {item}
                 </a>
@@ -60,7 +60,7 @@ export default function ComplianceSection({ compliance }: Props) {
             <h3 className="text-sm font-medium text-purple-400 mb-3">PCI DSS</h3>
             <div className="flex flex-wrap gap-2">
               {compliance.pci_dss.map((item, i) => (
-                <span key={i} className="px-2 py-1 bg-purple-900/30 text-purple-300 text-xs rounded">
+                <span key={i} className="px-2 py-1 bg-purple-900/30 text-purple-300 text-xs rounded-sm">
                   {item}
                 </span>
               ))}
@@ -73,7 +73,7 @@ export default function ComplianceSection({ compliance }: Props) {
             <h3 className="text-sm font-medium text-green-400 mb-3">GDPR</h3>
             <div className="flex flex-wrap gap-2">
               {compliance.gdpr.map((item, i) => (
-                <span key={i} className="px-2 py-1 bg-green-900/30 text-green-300 text-xs rounded">
+                <span key={i} className="px-2 py-1 bg-green-900/30 text-green-300 text-xs rounded-sm">
                   {item}
                 </span>
               ))}
@@ -86,7 +86,7 @@ export default function ComplianceSection({ compliance }: Props) {
             <h3 className="text-sm font-medium text-red-400 mb-3">HIPAA</h3>
             <div className="flex flex-wrap gap-2">
               {compliance.hipaa.map((item, i) => (
-                <span key={i} className="px-2 py-1 bg-red-900/30 text-red-300 text-xs rounded">
+                <span key={i} className="px-2 py-1 bg-red-900/30 text-red-300 text-xs rounded-sm">
                   {item}
                 </span>
               ))}
@@ -99,7 +99,7 @@ export default function ComplianceSection({ compliance }: Props) {
             <h3 className="text-sm font-medium text-yellow-400 mb-3">SOC 2</h3>
             <div className="flex flex-wrap gap-2">
               {compliance.soc2.map((item, i) => (
-                <span key={i} className="px-2 py-1 bg-yellow-900/30 text-yellow-300 text-xs rounded">
+                <span key={i} className="px-2 py-1 bg-yellow-900/30 text-yellow-300 text-xs rounded-sm">
                   {item}
                 </span>
               ))}

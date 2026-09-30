@@ -51,7 +51,7 @@ const SOURCE_TAB_ITEMS = SOURCE_TYPE_OPTIONS.map((option) => ({ key: option.valu
 // for different questions.
 const SEVERITY_PILL_BASE =
   'rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ' +
-  'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500'
+  'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
 
 export function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): string {
   if (sortBy === 'last_seen' || sortBy === 'first_seen') {

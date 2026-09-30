@@ -125,11 +125,11 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
   }
 
   if (!enabled) return error ? <p role="status" className="mb-4 text-sm text-amber-300">{error}</p> : null
-  const inputClass = 'mt-1 w-full rounded border border-gray-700 bg-gray-950 p-2 focus:outline-none focus:ring-2 focus:ring-blue-400'
+  const inputClass = 'mt-1 w-full rounded-sm border border-gray-700 bg-gray-950 p-2 focus:outline-hidden focus:ring-2 focus:ring-blue-400'
   return <section aria-label="Authentication profiles" className="mb-6 rounded-xl border border-gray-800 p-5">
     <h2 className="text-lg font-semibold">Authentication profiles · internal preview</h2>
     <p className="my-2 text-sm text-gray-400">Reviewed configuration does not grant target authorization. Scan selection is not supported in this preview. Existing credentials do not prove accepted identity.</p>
-    <button type="button" className="my-2 rounded border border-gray-600 px-3 py-2 focus:ring-2 focus:ring-blue-400" onClick={() => start(null)}>New authentication profile</button>
+    <button type="button" className="my-2 rounded-sm border border-gray-600 px-3 py-2 focus:ring-2 focus:ring-blue-400" onClick={() => start(null)}>New authentication profile</button>
     {error && <p role="alert" className="my-2 text-sm text-amber-300">{error}</p>}
     <ul className="divide-y divide-gray-800">
       {profiles.map(profile => <li key={profile.profile_id} className="py-3">
@@ -159,7 +159,7 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
       <label className="block">JSON identity field<input required className={inputClass} value={draft.validation_policy.identity_field} onChange={e => setDraft({ ...draft, validation_policy: { ...draft.validation_policy, identity_field: e.target.value } })} /></label>
       <label className="block">Expected non-secret identity label<input required maxLength={120} className={inputClass} value={draft.validation_policy.expected_identity} onChange={e => setDraft({ ...draft, validation_policy: { ...draft.validation_policy, expected_identity: e.target.value } })} /></label>
       {draft.validation_policy.role_field && <p className="text-sm text-gray-400">Observed-role criterion: {draft.validation_policy.role_field} must match {draft.validation_policy.expected_role}. This is separate from the declared role label.</p>}
-      <details className="rounded border border-gray-700 p-3">
+      <details className="rounded-sm border border-gray-700 p-3">
         <summary className="cursor-pointer focus:ring-2 focus:ring-blue-400">Advanced validation: role, timeout, and freshness</summary>
         <div className="mt-2 space-y-3">
           <label className="block">Optional JSON role field<input required={!!draft.validation_policy.expected_role} maxLength={64} pattern="[A-Za-z_][A-Za-z0-9_]{0,63}" className={inputClass} value={draft.validation_policy.role_field || ''} onChange={e => setDraft({ ...draft, validation_policy: { ...draft.validation_policy, role_field: e.target.value || null } })} /></label>
@@ -172,7 +172,7 @@ export default function AuthenticationProfiles({ targetId, credentials }: {
         <option value="draft">Draft</option><option value="ready">Reviewed configuration (identity unverified)</option><option value="disabled">Disabled</option><option value="archived">Archived (permanent)</option>
       </select></label>
       <label className="flex items-start gap-2"><input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)} className="mt-1" />I reviewed the destination and non-secret identity criteria, and confirm the health resource is read-only. This does not authorize assessment work.</label>
-      <div className="flex gap-3"><button disabled={!reviewed || saving} className="rounded bg-blue-700 px-3 py-2 disabled:opacity-40 focus:ring-2 focus:ring-blue-400">{saving ? 'Saving…' : 'Save reviewed revision'}</button><button type="button" onClick={() => setDraft(null)} className="rounded border border-gray-600 px-3 py-2 focus:ring-2 focus:ring-blue-400">Close</button></div>
+      <div className="flex gap-3"><button disabled={!reviewed || saving} className="rounded-sm bg-blue-700 px-3 py-2 disabled:opacity-40 focus:ring-2 focus:ring-blue-400">{saving ? 'Saving…' : 'Save reviewed revision'}</button><button type="button" onClick={() => setDraft(null)} className="rounded-sm border border-gray-600 px-3 py-2 focus:ring-2 focus:ring-blue-400">Close</button></div>
     </form>}
   </section>
 }

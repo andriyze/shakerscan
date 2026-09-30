@@ -309,7 +309,7 @@ export default function PolicyProfilesPage() {
             <button
               type="button"
               onClick={() => setForm(EMPTY_FORM)}
-              className="inline-flex items-center gap-1 rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+              className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
             >
               <X className="h-3.5 w-3.5" />
               Cancel edit
@@ -355,7 +355,7 @@ export default function PolicyProfilesPage() {
           </label>
           <div className="grid gap-2 pt-6 text-sm text-gray-300">
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={form.is_active} onChange={(e) => updateForm('is_active', e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+              <input type="checkbox" checked={form.is_active} onChange={(e) => updateForm('is_active', e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
               Active
             </label>
           </div>
@@ -364,12 +364,12 @@ export default function PolicyProfilesPage() {
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {form.product_area === 'model_intake' && (
           <label className="flex items-center gap-2 text-sm text-gray-300">
-            <input type="checkbox" checked={form.strict_model_intake} onChange={(e) => updateForm('strict_model_intake', e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+            <input type="checkbox" checked={form.strict_model_intake} onChange={(e) => updateForm('strict_model_intake', e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
             Strict Model Intake
           </label>
           )}
           <label className="flex items-center gap-2 text-sm text-gray-300">
-            <input type="checkbox" checked={form.allow_active_exceptions} onChange={(e) => updateForm('allow_active_exceptions', e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+            <input type="checkbox" checked={form.allow_active_exceptions} onChange={(e) => updateForm('allow_active_exceptions', e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
             Allow active exceptions
           </label>
         </div>
@@ -386,14 +386,14 @@ export default function PolicyProfilesPage() {
               <button
                 type="button"
                 onClick={loadTrustAnchors}
-                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
               >
                 Refresh anchors
               </button>
             </div>
             {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
             {trustAnchors.length === 0 ? (
-              <div className="mt-3 rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+              <div className="mt-3 rounded-sm border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
                 No active saved trust anchors. Create anchors in Model Intake, then bind them here.
               </div>
             ) : (
@@ -411,11 +411,11 @@ export default function PolicyProfilesPage() {
                         type="checkbox"
                         checked={selected}
                         onChange={(e) => toggleRequiredAnchor(anchor.id, e.target.checked)}
-                        className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
+                        className="mt-0.5 h-4 w-4 rounded-sm border-gray-700 bg-gray-800"
                       />
                       <span className="min-w-0">
-                        <span className="block break-words font-medium">{anchor.name}</span>
-                        <span className="mt-1 block break-words text-xs text-gray-500">
+                        <span className="block wrap-break-word font-medium">{anchor.name}</span>
+                        <span className="mt-1 block wrap-break-word text-xs text-gray-500">
                           {anchor.policy_profile || 'any profile'}{anchor.owner ? ` · ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` · ${anchor.public_key_sha256.slice(0, 12)}...` : ' · PEM anchor'}
                         </span>
                       </span>
@@ -485,7 +485,7 @@ export default function PolicyProfilesPage() {
                           )}
                         </div>
                       )}
-                      <span className={`rounded px-2 py-1 text-xs ${profile.is_active ? 'bg-green-900/50 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
+                      <span className={`rounded-sm px-2 py-1 text-xs ${profile.is_active ? 'bg-green-900/50 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
                         {profile.is_active ? 'active' : 'inactive'}
                       </span>
                     </td>
@@ -494,7 +494,7 @@ export default function PolicyProfilesPage() {
                         <button
                           type="button"
                           onClick={() => setForm(profileToForm(profile))}
-                          className="rounded border border-gray-700 p-2 text-gray-300 hover:bg-gray-800"
+                          className="rounded-sm border border-gray-700 p-2 text-gray-300 hover:bg-gray-800"
                           aria-label={`Edit ${profile.name}`}
                         >
                           <Edit3 className="h-4 w-4" />
@@ -502,7 +502,7 @@ export default function PolicyProfilesPage() {
                         <button
                           type="button"
                           onClick={() => setDeleteTarget(profile)}
-                          className="rounded border border-red-900/70 p-2 text-red-300 hover:bg-red-950/40"
+                          className="rounded-sm border border-red-900/70 p-2 text-red-300 hover:bg-red-950/40"
                           aria-label={`Delete ${profile.name}`}
                         >
                           <Trash2 className="h-4 w-4" />

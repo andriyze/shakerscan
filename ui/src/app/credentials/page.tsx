@@ -493,7 +493,7 @@ export default function CredentialsPage() {
       </Card>
 
       {(targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
-      {error && <div className="mb-4 rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
+      {error && <div className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
       {profilesLoading ? (
         <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
       ) : !profiles.length ? (
@@ -512,10 +512,10 @@ export default function CredentialsPage() {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="font-semibold text-white">{profile.name}</h2>
-                    <span className={`rounded px-2 py-0.5 text-xs ${statusClass(profile)}`}>
+                    <span className={`rounded-sm px-2 py-0.5 text-xs ${statusClass(profile)}`}>
                       {profile.refresh_required && profile.status === 'active' ? 'expiring soon' : profile.status}
                     </span>
-                    <span className="rounded bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">{profile.principal_slot}</span>
+                    <span className="rounded-sm bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">{profile.principal_slot}</span>
                   </div>
                   <p className="mt-1 text-sm text-gray-400">
                     {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
@@ -524,8 +524,8 @@ export default function CredentialsPage() {
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
                     {profile.allowed_capabilities.length
-                      ? profile.allowed_capabilities.map((item) => <span key={item} className="rounded bg-gray-900 px-2 py-1">{item}</span>)
-                      : <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
+                      ? profile.allowed_capabilities.map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)
+                      : <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
                     {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
                   </div>
                   <p className="mt-3 flex items-center gap-1.5 text-xs text-emerald-400">
@@ -549,7 +549,7 @@ export default function CredentialsPage() {
         footer={<><Button variant="secondary" disabled={busy} onClick={() => setEditorOpen(false)}>Cancel</Button><Button loading={busy} onClick={() => void saveProfile()}>{rotating ? 'Rotate credential' : 'Create profile'}</Button></>}
       >
         {editorError && (
-          <div role="alert" className="mb-4 rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+          <div role="alert" className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
             {editorError}
           </div>
         )}
@@ -605,7 +605,7 @@ export default function CredentialsPage() {
                   {capabilityOptions.map((capability) => {
                     const selected = splitValues(draft.capabilities).includes(capability.name)
                     return (
-                      <label key={capability.name} className="flex items-start gap-3 rounded border border-gray-800 p-2 text-xs text-gray-300">
+                      <label key={capability.name} className="flex items-start gap-3 rounded-sm border border-gray-800 p-2 text-xs text-gray-300">
                         <input
                           type="checkbox"
                           checked={selected}
@@ -620,7 +620,7 @@ export default function CredentialsPage() {
                         <span className="min-w-0 flex-1">
                           <span className="flex flex-wrap items-center gap-2">
                             <code>{capability.name}</code>
-                            <span className={`rounded px-1.5 py-0.5 ${capability.requires_active_approval ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
+                            <span className={`rounded-sm px-1.5 py-0.5 ${capability.requires_active_approval ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'}`}>
                               {capability.risk_tier}
                             </span>
                             {capability.default && <span className="text-blue-300">safe default</span>}
@@ -633,7 +633,7 @@ export default function CredentialsPage() {
                 </div>
               )}
               {capabilityOptions.some((item) => item.requires_active_approval && splitValues(draft.capabilities).includes(item.name)) && (
-                <label className="mt-3 flex items-start gap-2 rounded border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
+                <label className="mt-3 flex items-start gap-2 rounded-sm border border-amber-700/50 bg-amber-500/10 p-2 text-xs text-amber-100">
                   <input type="checkbox" checked={draft.allowActiveCapabilities} onChange={(event) => updateDraft({ allowActiveCapabilities: event.target.checked })} className="mt-0.5" />
                   I explicitly elevate this profile for the selected active capabilities. Runtime policy and target-bound approval are still required.
                 </label>

@@ -683,16 +683,16 @@ function TargetsContent() {
             const domainInfo = (
               <div className="flex-1 min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="block min-w-[10rem] max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
+                  <span className="block min-w-40 max-w-full truncate font-medium text-white">{boundedDisplayText(domain.root_domain, 96)}</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
                     identity.internal ? 'bg-amber-500/10 text-amber-300' : 'bg-gray-800 text-gray-400'
                   }`}>{identity.label}</span>
-                  <span className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-300">{domain.root_target?.cohort || domain.subdomains[0]?.cohort || 'unclassified'}</span>
+                  <span className="shrink-0 rounded-sm bg-violet-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-violet-300">{domain.root_target?.cohort || domain.subdomains[0]?.cohort || 'unclassified'}</span>
                   {domain.root_target && !domain.root_target.is_active && (
-                    <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
+                    <span className="shrink-0 rounded-sm bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
                   )}
                   {domain.subdomain_count > 0 && (
-                    <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded">
+                    <span className="px-1.5 py-0.5 bg-gray-800 text-gray-400 text-xs rounded-sm">
                       +{domain.subdomain_count} subdomain{domain.subdomain_count !== 1 ? 's' : ''}
                     </span>
                   )}
@@ -704,7 +704,7 @@ function TargetsContent() {
                   <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
                     {domain.root_target.authorized_for_active_testing ? (
                       <>
-                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">Authorized for active testing</span>
+                        <span className="rounded-sm bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">Authorized for active testing</span>
                         <button
                           type="button"
                           className="text-gray-500 underline-offset-2 hover:text-gray-300 hover:underline disabled:opacity-50"
@@ -744,7 +744,7 @@ function TargetsContent() {
                     type="button"
                     onClick={() => toggleExpand(domain.root_domain)}
                     aria-expanded={expandedDomains.has(domain.root_domain)}
-                    className="flex w-full flex-1 min-w-0 items-center gap-3 text-left rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="flex w-full flex-1 min-w-0 items-center gap-3 text-left rounded-sm focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                   >
                     {/* Expand/Collapse Icon */}
                     <span className="text-gray-500 hover:text-white">
@@ -854,7 +854,7 @@ function TargetsContent() {
                     <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }} archived={!domain.root_target!.is_active}
                       subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                     {/* Scan Menu */}
-                    <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-[100]' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
+                    <div className={`relative ${openScanMenu === domain.root_target!.id ? 'z-100' : ''}`} ref={openScanMenu === domain.root_target!.id ? scanMenuRef : null}>
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
@@ -862,7 +862,7 @@ function TargetsContent() {
                         }}
                         aria-expanded={openScanMenu === domain.root_target!.id}
                         aria-haspopup="menu"
-                        className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                        className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
                       >
                         Scan
                         <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -891,7 +891,7 @@ function TargetsContent() {
                 )}
                 {/* Scan All Menu - scan entire domain set */}
                 {domain.total_count > 0 && (
-                  <div className={`relative ${openScanAllMenu === domain.root_domain ? 'z-[100]' : ''}`} ref={openScanAllMenu === domain.root_domain ? scanAllMenuRef : null}>
+                  <div className={`relative ${openScanAllMenu === domain.root_domain ? 'z-100' : ''}`} ref={openScanAllMenu === domain.root_domain ? scanAllMenuRef : null}>
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
@@ -900,7 +900,7 @@ function TargetsContent() {
                       aria-expanded={openScanAllMenu === domain.root_domain}
                       aria-haspopup="menu"
                       disabled={scanningDomains.has(domain.root_domain)}
-                      className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white rounded text-xs font-medium transition-colors"
+                      className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white rounded-sm text-xs font-medium transition-colors"
                       title={`Scan all ${domain.total_count} target${domain.total_count !== 1 ? 's' : ''} in this asset group`}
                     >
                       {scanningDomains.has(domain.root_domain) ? (
@@ -955,7 +955,7 @@ function TargetsContent() {
                     handleDiscover(domain.root_domain)
                   }}
                   disabled={discoveringDomains.has(domain.root_domain)}
-                  className="flex items-center justify-center gap-1 rounded border border-gray-700 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
+                  className="flex items-center justify-center gap-1 rounded-sm border border-gray-700 bg-gray-800 px-3 py-1 text-xs font-medium text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
                   title="Discover subdomains"
                 >
                   {discoveringDomains.has(domain.root_domain) ? (
@@ -995,11 +995,11 @@ function TargetsContent() {
                           <span className="text-sm text-gray-300 truncate">
                             {subdomain.url.replace(/^https?:\/\//, '')}
                           </span>
-                          <span className={`px-1.5 py-0.5 text-xs rounded ${getSourceBadge(subdomain.discovery_source)}`}>
+                          <span className={`px-1.5 py-0.5 text-xs rounded-sm ${getSourceBadge(subdomain.discovery_source)}`}>
                             {subdomain.discovery_source}
                           </span>
                           {!subdomain.is_active && (
-                            <span className="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
+                            <span className="rounded-sm bg-gray-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-300" title="Archived: hidden from the default inventory, schedules paused, history kept">archived</span>
                           )}
                         </div>
                       </div>
@@ -1085,7 +1085,7 @@ function TargetsContent() {
                       <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }} archived={!subdomain.is_active}
                         subject={subdomain.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                       {/* Scan Menu for Subdomain */}
-                      <div className={`relative ${openScanMenu === subdomain.id ? 'z-[100]' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>
+                      <div className={`relative ${openScanMenu === subdomain.id ? 'z-100' : ''}`} ref={openScanMenu === subdomain.id ? scanMenuRef : null}>
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -1093,7 +1093,7 @@ function TargetsContent() {
                           }}
                           aria-expanded={openScanMenu === subdomain.id}
                           aria-haspopup="menu"
-                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                          className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-sm text-xs font-medium transition-colors"
                         >
                           Scan
                           <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">

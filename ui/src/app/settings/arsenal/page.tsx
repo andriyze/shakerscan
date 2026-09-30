@@ -157,11 +157,11 @@ function CommandRow({ command }: { command: ArsenalCommand }) {
           </div>
           <p className="mt-2 text-sm text-gray-400">{command.description}</p>
         </div>
-        <div className="max-w-full break-all rounded bg-gray-900 px-2 py-1 font-mono text-xs text-gray-300 sm:shrink-0">
+        <div className="max-w-full break-all rounded-sm bg-gray-900 px-2 py-1 font-mono text-xs text-gray-300 sm:shrink-0">
           {command.method} {command.path}
         </div>
       </div>
-      <div className="mt-3 flex flex-wrap gap-2 break-words text-xs text-gray-500">
+      <div className="mt-3 flex flex-wrap gap-2 wrap-break-word text-xs text-gray-500">
         {command.scope_fields.length > 0 && <span>scope: {command.scope_fields.join(', ')}</span>}
         {command.required_confirmations.length > 0 && <span>confirm: {command.required_confirmations.join(', ')}</span>}
         {command.evidence_contract.length > 0 && <span>evidence: {command.evidence_contract.slice(0, 3).join(', ')}</span>}
@@ -181,7 +181,7 @@ function CommandResultRow({ result }: { result: CommandResult }) {
             <Badge className={riskClass(result.risk_tier)}>{result.risk_tier}</Badge>
             {result.dry_run && <Badge className={statusClass('dry_run')}>dry run</Badge>}
           </div>
-          <p className="mt-1 break-words text-sm text-gray-400">{result.operator_message}</p>
+          <p className="mt-1 wrap-break-word text-sm text-gray-400">{result.operator_message}</p>
         </div>
         {result.next_action ? (
           <a
@@ -303,7 +303,7 @@ function CampaignActionRow({
             <Badge className={riskClass(action.risk_tier)}>{action.risk_tier}</Badge>
             {action.dry_run && <Badge className={statusClass('dry_run')}>dry run</Badge>}
           </div>
-          <p className="mt-1 break-words text-sm text-gray-400">
+          <p className="mt-1 wrap-break-word text-sm text-gray-400">
             {action.operator_message || 'Recorded campaign action'}
           </p>
         </div>
@@ -362,7 +362,7 @@ function CampaignActionRow({
               <select
                 value={sessionId}
                 onChange={(event) => setSessionId(event.target.value)}
-                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
               >
                 {availableSessions.length === 0 && <option value="">No active sessions</option>}
                 {availableSessions.map((session) => (
@@ -531,7 +531,7 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
             <Badge className="bg-gray-800 text-gray-300">{hypothesis.source}</Badge>
             {hypothesis.claim_state?.expired && <Badge className="bg-amber-500/15 text-amber-300">claim expired</Badge>}
           </div>
-          <p className="mt-1 break-words text-sm text-gray-400">
+          <p className="mt-1 wrap-break-word text-sm text-gray-400">
             {hypothesis.title || hypothesis.description || hypothesis.dedupe_key}
           </p>
         </div>
@@ -605,7 +605,7 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
             <select
               value={signalType}
               onChange={(e) => setSignalType(e.target.value as 'endorsement' | 'refutation')}
-              className="rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white focus:border-blue-500 focus:outline-none"
+              className="rounded-sm border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="endorsement">endorsement</option>
               <option value="refutation">refutation</option>
@@ -615,14 +615,14 @@ function HypothesisRow({ hypothesis, approvalReceiptId, operator, onRefresh }: {
               value={signalSource}
               onChange={(e) => setSignalSource(e.target.value)}
               placeholder="source"
-              className="w-40 rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              className="w-40 rounded-sm border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden"
             />
             <input
               type="text"
               value={signalReason}
               onChange={(e) => setSignalReason(e.target.value)}
               placeholder="reason (optional)"
-              className="flex-1 rounded border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              className="flex-1 rounded-sm border border-gray-700 bg-gray-950 px-2 py-1 text-xs text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden"
             />
             <Button size="sm" disabled={busyAction !== null} onClick={() => void submitSignal()}>
               {busyAction === 'signal' ? 'Saving…' : 'Save'}
@@ -652,7 +652,7 @@ function HypothesisReportRow({ item }: { item: HypothesisReportItem }) {
             {claimOwner && <Badge className="bg-blue-500/15 text-blue-300">claim {claimOwner}</Badge>}
             {item.claim_state?.expired && <Badge className="bg-amber-500/15 text-amber-300">expired</Badge>}
           </div>
-          <p className="mt-1 break-words text-sm text-gray-400">
+          <p className="mt-1 wrap-break-word text-sm text-gray-400">
             {item.title || item.dedupe_key}
           </p>
         </div>
@@ -760,7 +760,7 @@ function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['can
             {candidate.source && <Badge className="bg-gray-800 text-gray-300">{candidate.source}</Badge>}
             {candidate.already_reviewed && <Badge className="bg-green-500/15 text-green-300">reviewed</Badge>}
           </div>
-          <p className="mt-1 break-words text-sm text-gray-400">{candidate.title || candidate.subject_id || 'Refuter candidate'}</p>
+          <p className="mt-1 wrap-break-word text-sm text-gray-400">{candidate.title || candidate.subject_id || 'Refuter candidate'}</p>
         </div>
         <div className="text-right text-xs text-gray-500">
           <div className="font-mono text-gray-300">{candidate.proof_state || 'unknown'}</div>
@@ -785,7 +785,7 @@ function RefuterCandidateRow({ candidate }: { candidate: RefuterWorkSummary['can
           <div className="grid gap-1.5">
             {candidate.automation_plan.steps.slice(0, 3).map((step) => (
               <div key={step.id} className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
-                <span className="rounded bg-gray-800 px-1.5 py-0.5 font-mono text-gray-300">{step.command}</span>
+                <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 font-mono text-gray-300">{step.command}</span>
                 <span className="text-gray-300">{step.label}</span>
                 <span>{step.mode}</span>
               </div>
@@ -875,8 +875,8 @@ function RefuterQueueResultPanel({ result }: { result: RefuterQueueResult }) {
           ))}
         </div>
       )}
-      {message && <div className="mt-2 rounded border border-green-500/20 bg-green-500/10 px-2 py-1 text-xs text-green-100">{message}</div>}
-      {error && <div className="mt-2 rounded border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs text-red-200">{error}</div>}
+      {message && <div className="mt-2 rounded-sm border border-green-500/20 bg-green-500/10 px-2 py-1 text-xs text-green-100">{message}</div>}
+      {error && <div className="mt-2 rounded-sm border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs text-red-200">{error}</div>}
     </div>
   )
 }
@@ -966,7 +966,7 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
             <Badge className="bg-gray-800 text-gray-300">{review.verdict_basis}</Badge>
             {review.refuter_verdict && <Badge className={refuterVerdictClass(review.refuter_verdict, review.verdict_basis)}>{review.refuter_verdict}</Badge>}
           </div>
-          <p className="mt-2 break-words text-sm text-gray-300">{review.trigger_reason}</p>
+          <p className="mt-2 wrap-break-word text-sm text-gray-300">{review.trigger_reason}</p>
           <p className="mt-1 break-all font-mono text-xs text-gray-500">{review.id}</p>
         </div>
         {review.finding_id && <a href={`/findings/${review.finding_id}`} className="text-xs text-blue-300 hover:text-blue-200">Finding</a>}
@@ -977,7 +977,7 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
             {plan.reviewQuestions.map((item) => <p key={item} className="text-xs text-gray-500">{item}</p>)}
           </div></div>
           <div><div className="text-xs font-medium text-gray-300">Benign explanations</div><div className="mt-1 flex flex-wrap gap-1.5">
-            {plan.benignExplanations.map((item) => <Badge key={item} className="max-w-full break-words bg-gray-800 text-gray-300">{item}</Badge>)}
+            {plan.benignExplanations.map((item) => <Badge key={item} className="max-w-full wrap-break-word bg-gray-800 text-gray-300">{item}</Badge>)}
           </div></div>
           <div><div className="text-xs font-medium text-gray-300">Required evidence</div><div className="mt-1 flex flex-wrap gap-1.5">
             {plan.requiredEvidenceRefs.map((item) => <Badge key={item} className="bg-blue-500/15 text-blue-300">{item}</Badge>)}
@@ -1005,8 +1005,8 @@ function RefuterReviewRow({ review, approvalReceiptId, operator, onRefresh }: {
       {annotationOpen && (
         <div className="mt-3 space-y-3 rounded-md border border-gray-800 bg-gray-900/60 p-3">
           <div className="inline-flex rounded-md border border-gray-700 bg-gray-950 p-0.5" role="group" aria-label="Annotation mode">
-            <button type="button" onClick={() => setAnnotationMode('signal')} className={`rounded px-3 py-1.5 text-xs ${annotationMode === 'signal' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Signal note</button>
-            <button type="button" onClick={() => setAnnotationMode('human_verdict')} className={`rounded px-3 py-1.5 text-xs ${annotationMode === 'human_verdict' ? 'bg-amber-600 text-white' : 'text-gray-400 hover:text-white'}`}>Human verdict</button>
+            <button type="button" onClick={() => setAnnotationMode('signal')} className={`rounded-sm px-3 py-1.5 text-xs ${annotationMode === 'signal' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Signal note</button>
+            <button type="button" onClick={() => setAnnotationMode('human_verdict')} className={`rounded-sm px-3 py-1.5 text-xs ${annotationMode === 'human_verdict' ? 'bg-amber-600 text-white' : 'text-gray-400 hover:text-white'}`}>Human verdict</button>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             {annotationMode === 'signal' ? (
@@ -1179,24 +1179,24 @@ function ContractRow({
           </div>
           <p className="mt-2 text-sm text-gray-400">{contract.description}</p>
         </div>
-        <div className="shrink-0 rounded bg-gray-900 px-2 py-1 text-xs text-gray-400">
+        <div className="shrink-0 rounded-sm bg-gray-900 px-2 py-1 text-xs text-gray-400">
           {fieldNames.length} fields
         </div>
       </div>
       <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
         <div className="min-w-0">
           <span className="text-gray-400">required: </span>
-          <span className="break-words text-gray-300">{required.length ? required.slice(0, 6).join(', ') : 'none'}</span>
+          <span className="wrap-break-word text-gray-300">{required.length ? required.slice(0, 6).join(', ') : 'none'}</span>
         </div>
         <div className="min-w-0">
           <span className="text-gray-400">fields: </span>
-          <span className="break-words text-gray-300">{fieldNames.slice(0, 6).join(', ')}</span>
+          <span className="wrap-break-word text-gray-300">{fieldNames.slice(0, 6).join(', ')}</span>
         </div>
       </div>
       {invariants.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {invariants.slice(0, 3).map((invariant) => (
-            <Badge key={invariant} className="max-w-full break-words bg-blue-500/15 text-blue-300">
+            <Badge key={invariant} className="max-w-full wrap-break-word bg-blue-500/15 text-blue-300">
               {invariant}
             </Badge>
           ))}
@@ -1204,7 +1204,7 @@ function ContractRow({
       )}
       {forbidden.length > 0 && (
         <p className="mt-2 text-xs text-red-300">
-          forbidden: <span className="break-words">{forbidden.join(', ')}</span>
+          forbidden: <span className="wrap-break-word">{forbidden.join(', ')}</span>
         </p>
       )}
     </div>
@@ -1960,7 +1960,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={sourceTargetId}
               onChange={(event) => setSourceTargetId(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -1968,7 +1968,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={sourceLabel}
               onChange={(event) => setSourceLabel(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -1976,7 +1976,7 @@ export default function ArsenalSettingsPage() {
             <select
               value={sourceKind}
               onChange={(event) => setSourceKind(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="openapi_operation">openapi_operation</option>
               <option value="backend_route">backend_route</option>
@@ -1991,7 +1991,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={sourceMethod}
               onChange={(event) => setSourceMethod(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -1999,7 +1999,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={sourcePath}
               onChange={(event) => setSourcePath(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2008,7 +2008,7 @@ export default function ArsenalSettingsPage() {
               value={sourceRiskHints}
               onChange={(event) => setSourceRiskHints(event.target.value)}
               placeholder="idor, sqli, xss"
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2017,7 +2017,7 @@ export default function ArsenalSettingsPage() {
               value={sourceObjectKeys}
               onChange={(event) => setSourceObjectKeys(event.target.value)}
               placeholder="order.id"
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2026,7 +2026,7 @@ export default function ArsenalSettingsPage() {
               value={sourceBodyPaths}
               onChange={(event) => setSourceBodyPaths(event.target.value)}
               placeholder="$.isAdmin"
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2034,7 +2034,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={sourceConfidence}
               onChange={(event) => setSourceConfidence(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
         </div>
@@ -2091,7 +2091,7 @@ export default function ArsenalSettingsPage() {
               value={fromPlanId}
               onChange={(e) => setFromPlanId(e.target.value)}
               placeholder="OperationPlan UUID"
-              className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden"
             />
             <Button size="sm" className="mt-3" disabled={generatorBusy !== null} onClick={() => void submitFromPlan()}>
               {generatorBusy === 'plan' ? 'Generating…' : 'Generate from plan'}
@@ -2103,22 +2103,22 @@ export default function ArsenalSettingsPage() {
               <div>
                 <label htmlFor="from-bm-name" className="mb-1 block text-xs text-gray-400">Benchmark</label>
                 <input id="from-bm-name" type="text" value={fromBenchmarkName} onChange={(e) => setFromBenchmarkName(e.target.value)}
-                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none" />
+                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-hidden" />
               </div>
               <div>
                 <label htmlFor="from-bm-family" className="mb-1 block text-xs text-gray-400">Family</label>
                 <input id="from-bm-family" type="text" value={fromBenchmarkFamily} onChange={(e) => setFromBenchmarkFamily(e.target.value)}
-                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none" />
+                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-hidden" />
               </div>
               <div>
                 <label htmlFor="from-bm-exp" className="mb-1 block text-xs text-gray-400">Expectation ID</label>
                 <input id="from-bm-exp" type="text" value={fromBenchmarkExpectation} onChange={(e) => setFromBenchmarkExpectation(e.target.value)}
-                  placeholder="e.g. bola-basket-9" className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+                  placeholder="e.g. bola-basket-9" className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden" />
               </div>
               <div>
                 <label htmlFor="from-bm-route" className="mb-1 block text-xs text-gray-400">Route (optional)</label>
                 <input id="from-bm-route" type="text" value={fromBenchmarkRoute} onChange={(e) => setFromBenchmarkRoute(e.target.value)}
-                  placeholder="/rest/basket/{id}" className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+                  placeholder="/rest/basket/{id}" className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden" />
               </div>
             </div>
             <Button size="sm" className="mt-3" disabled={generatorBusy !== null} onClick={() => void submitFromBenchmark()}>
@@ -2301,7 +2301,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={planObjective}
               onChange={(event) => setPlanObjective(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2309,7 +2309,7 @@ export default function ArsenalSettingsPage() {
             <select
               value={planCommand}
               onChange={(event) => setPlanCommand(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               {(commands?.commands || []).map((command) => (
                 <option key={command.name} value={command.name}>
@@ -2323,7 +2323,7 @@ export default function ArsenalSettingsPage() {
             <select
               value={planRiskTier}
               onChange={(event) => setPlanRiskTier(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="read_only">read_only</option>
               <option value="passive">passive</option>
@@ -2338,7 +2338,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={planContextHash}
               onChange={(event) => setPlanContextHash(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
         </div>
@@ -2364,8 +2364,8 @@ export default function ArsenalSettingsPage() {
               <span className="text-xs text-gray-500">execution disabled</span>
             </div>
             <div className="mt-3 grid gap-2 text-xs text-gray-500 md:grid-cols-2">
-              <div>errors: <span className="break-words text-gray-300">{planResult.operation_plan.validation_errors.length ? planResult.operation_plan.validation_errors.join(', ') : 'none'}</span></div>
-              <div>warnings: <span className="break-words text-gray-300">{planResult.operation_plan.validation_warnings.length ? planResult.operation_plan.validation_warnings.join(', ') : 'none'}</span></div>
+              <div>errors: <span className="wrap-break-word text-gray-300">{planResult.operation_plan.validation_errors.length ? planResult.operation_plan.validation_errors.join(', ') : 'none'}</span></div>
+              <div>warnings: <span className="wrap-break-word text-gray-300">{planResult.operation_plan.validation_warnings.length ? planResult.operation_plan.validation_warnings.join(', ') : 'none'}</span></div>
               <div>scope receipt: <span className="break-all font-mono text-gray-300">{planResult.operation_plan.scope_receipt_id || 'none'}</span></div>
               <div>approval receipt: <span className="break-all font-mono text-gray-300">{planResult.operation_plan.approval_receipt_id || 'none'}</span></div>
             </div>
@@ -2376,7 +2376,7 @@ export default function ArsenalSettingsPage() {
             {recentPlans.slice(0, 5).map((plan) => (
               <div key={plan.id} className="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="min-w-0 break-words text-sm text-gray-200">{plan.objective}</span>
+                  <span className="min-w-0 wrap-break-word text-sm text-gray-200">{plan.objective}</span>
                   <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
                     <Badge className={plan.status === 'blocked' ? statusClass('out_of_scope') : statusClass('read_only')}>{plan.status}</Badge>
                     <span className="break-all font-mono text-xs text-gray-500">{plan.id}</span>
@@ -2402,7 +2402,7 @@ export default function ArsenalSettingsPage() {
               <select
                 value={localPlannerAgent}
                 onChange={(event) => setLocalPlannerAgent(event.target.value)}
-                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
               >
                 {visibleLocalAgents.map((agent) => (
                   <option key={agent.agent} value={agent.agent}>
@@ -2418,7 +2418,7 @@ export default function ArsenalSettingsPage() {
                 value={localPlannerContextId}
                 onChange={(event) => setLocalPlannerContextId(event.target.value)}
                 placeholder="00000000-0000-0000-0000-000000000000"
-                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-hidden"
               />
             </label>
             <div className="flex items-end">
@@ -2507,7 +2507,7 @@ export default function ArsenalSettingsPage() {
                 value={contextTargetId}
                 onChange={(event) => setContextTargetId(event.target.value)}
                 placeholder="00000000-0000-0000-0000-000000000000"
-                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-hidden"
               />
             </label>
             <div className="flex items-end">
@@ -2534,10 +2534,10 @@ export default function ArsenalSettingsPage() {
                   <span className="text-xs text-gray-500">context pack</span>
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
-                  errors: <span className="break-words text-gray-300">{contextResult.context_pack.validation_errors.length ? contextResult.context_pack.validation_errors.join(', ') : 'none'}</span>
+                  errors: <span className="wrap-break-word text-gray-300">{contextResult.context_pack.validation_errors.length ? contextResult.context_pack.validation_errors.join(', ') : 'none'}</span>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
-                  allowed commands: <span className="break-words text-gray-300">{contextResult.context_pack.allowed_commands.slice(0, 6).join(', ') || 'none'}</span>
+                  allowed commands: <span className="wrap-break-word text-gray-300">{contextResult.context_pack.allowed_commands.slice(0, 6).join(', ') || 'none'}</span>
                 </div>
               </div>
             )}
@@ -2551,7 +2551,7 @@ export default function ArsenalSettingsPage() {
                   <span className="text-xs text-gray-500">decision trace</span>
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
-                  errors: <span className="break-words text-gray-300">{traceResult.decision_trace.validation_errors.length ? traceResult.decision_trace.validation_errors.join(', ') : 'none'}</span>
+                  errors: <span className="wrap-break-word text-gray-300">{traceResult.decision_trace.validation_errors.length ? traceResult.decision_trace.validation_errors.join(', ') : 'none'}</span>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
                   steps: <span className="text-gray-300">{traceResult.decision_trace.steps.length}</span>
@@ -2606,7 +2606,7 @@ export default function ArsenalSettingsPage() {
             <input
               value={scopeUrl}
               onChange={(event) => setScopeUrl(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2614,7 +2614,7 @@ export default function ArsenalSettingsPage() {
             <select
               value={scopeEnvironment}
               onChange={(event) => setScopeEnvironment(event.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             >
               <option value="production">production</option>
               <option value="staging">staging</option>
@@ -2629,7 +2629,7 @@ export default function ArsenalSettingsPage() {
               value={scopeHosts}
               onChange={(event) => setScopeHosts(event.target.value)}
               rows={3}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block">
@@ -2638,7 +2638,7 @@ export default function ArsenalSettingsPage() {
               value={scopeRoots}
               onChange={(event) => setScopeRoots(event.target.value)}
               rows={3}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
           <label className="block lg:col-span-2">
@@ -2647,7 +2647,7 @@ export default function ArsenalSettingsPage() {
               value={scopeRedirects}
               onChange={(event) => setScopeRedirects(event.target.value)}
               rows={2}
-              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
             />
           </label>
         </div>
@@ -2690,7 +2690,7 @@ export default function ArsenalSettingsPage() {
                   <select
                     value={approvalRiskTier}
                     onChange={(event) => setApprovalRiskTier(event.target.value)}
-                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
                   >
                     <option value="active">active</option>
                     <option value="intrusive">intrusive</option>
@@ -2703,7 +2703,7 @@ export default function ArsenalSettingsPage() {
                   <input
                     value={approvalActor}
                     onChange={(event) => setApprovalActor(event.target.value)}
-                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
                   />
                 </label>
                 <label className="block">
@@ -2711,7 +2711,7 @@ export default function ArsenalSettingsPage() {
                   <input
                     value={denialReason}
                     onChange={(event) => setDenialReason(event.target.value)}
-                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                    className="mt-1 w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden"
                   />
                 </label>
               </div>

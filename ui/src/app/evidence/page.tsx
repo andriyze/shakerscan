@@ -164,9 +164,9 @@ function EvidenceContent() {
       </div>
 
       {findingFilter && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/[0.06] px-4 py-2 text-sm text-blue-100">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/6 px-4 py-2 text-sm text-blue-100">
           <span>Showing evidence for finding <span className="font-mono text-xs">{findingFilter.slice(0, 12)}…</span></span>
-          <button type="button" onClick={() => { setFindingInput(''); setFilter('finding_id', undefined) }} className="rounded border border-blue-400/30 px-2 py-0.5 text-xs hover:bg-blue-500/10">Clear</button>
+          <button type="button" onClick={() => { setFindingInput(''); setFilter('finding_id', undefined) }} className="rounded-sm border border-blue-400/30 px-2 py-0.5 text-xs hover:bg-blue-500/10">Clear</button>
         </div>
       )}
 
@@ -184,7 +184,7 @@ function EvidenceContent() {
                     type="button"
                     aria-pressed={active}
                     onClick={() => setProofFilter(pf)}
-                    className={`rounded-lg border px-3 py-1.5 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                    className={`rounded-lg border px-3 py-1.5 text-sm transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       active
                         ? 'border-blue-500/50 bg-blue-600/20 text-blue-200'
                         : 'border-gray-700 bg-gray-950 text-gray-300 hover:bg-gray-800'
@@ -430,8 +430,8 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
       <div className="space-y-2">
         <div className={`rounded-lg border p-3 ${
           isUsableProof
-            ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-100'
-            : 'border-amber-500/25 bg-amber-500/[0.06] text-amber-100'
+            ? 'border-emerald-500/25 bg-emerald-500/6 text-emerald-100'
+            : 'border-amber-500/25 bg-amber-500/6 text-amber-100'
         }`}>
           <div className="text-xs font-semibold uppercase tracking-wide">
             {proofHeading}
@@ -479,13 +479,13 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
           {typeof inst.tool_receipt_id === 'string' && <span className="text-xs text-gray-600">receipt {inst.tool_receipt_id.slice(0, 8)}…</span>}
         </div>
         {comparisons.length > 0 ? (
-          <details className="rounded border border-gray-800 bg-gray-950/50">
+          <details className="rounded-sm border border-gray-800 bg-gray-950/50">
             <summary className="cursor-pointer px-2 py-1.5 text-xs text-blue-300">
               Read {comparisons.length} request comparison{comparisons.length === 1 ? '' : 's'}
             </summary>
             <div className="grid gap-2 border-t border-gray-800 p-2">
               {comparisons.slice(0, 3).map((comparison, index) => (
-                <pre key={index} className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-black/30 p-2 text-[10px] leading-4 text-gray-400">
+                <pre key={index} className="max-h-56 overflow-auto whitespace-pre-wrap wrap-break-word rounded-sm bg-black/30 p-2 text-[10px] leading-4 text-gray-400">
                   {JSON.stringify(comparison, null, 2)}
                 </pre>
               ))}
@@ -497,7 +497,7 @@ function EvidenceDetail({ inst, onViewObject }: { inst: EvidenceInstance; onView
         {onViewObject && (
           <button type="button" onClick={onViewObject} className="text-xs text-blue-400 hover:text-blue-300">View raw object</button>
         )}
-        <details className="rounded border border-gray-800 bg-black/20">
+        <details className="rounded-sm border border-gray-800 bg-black/20">
           <summary className="cursor-pointer px-2 py-1.5 text-xs text-gray-500 hover:text-gray-300">Raw proof observation</summary>
           <pre className="max-h-64 overflow-auto p-2 text-[10px] leading-4 text-gray-500">{JSON.stringify(po, null, 2)}</pre>
         </details>

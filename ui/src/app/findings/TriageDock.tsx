@@ -9,7 +9,7 @@ import { TRIAGE_VERDICTS } from './triage'
 
 const VERDICT_BASE =
   'inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-semibold ring-1 ring-inset transition-colors ' +
-  'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50'
+  'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50'
 
 /**
  * Bottom dock that exists only while findings are selected. Triage verdicts are the primary
@@ -67,9 +67,9 @@ export function TriageDock({
     <div
       role="region"
       aria-label="Selection actions"
-      className="fixed inset-x-3 bottom-3 z-40 md:left-[calc(16rem+1.5rem)] md:right-6 motion-safe:animate-[dock-rise_150ms_ease-out]"
+      className="fixed inset-x-3 bottom-3 z-40 md:left-70 md:right-6 motion-safe:animate-[dock-rise_150ms_ease-out]"
     >
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-700 bg-gray-900/95 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-700 bg-gray-900/95 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur-sm">
         <p className="text-sm text-gray-200" aria-live="polite">
           <span className="font-semibold tabular-nums">{count}</span> selected
         </p>
@@ -81,7 +81,7 @@ export function TriageDock({
         <div
           role="group"
           aria-label="Set status for selected findings"
-          className="order-last grid w-full grid-cols-2 gap-1.5 sm:order-none sm:ml-auto sm:flex sm:w-auto sm:flex-wrap sm:items-center"
+          className="order-last grid w-full grid-cols-2 gap-1.5 sm:order-0 sm:ml-auto sm:flex sm:w-auto sm:flex-wrap sm:items-center"
         >
           {verdicts.map((verdict) => (
             <button
@@ -131,7 +131,7 @@ export function TriageDock({
                     menuButtonRef.current?.focus()
                     onDelete()
                   }}
-                  className="w-full px-3 py-2 text-left transition-colors hover:bg-gray-700 focus:outline-none focus-visible:bg-gray-700"
+                  className="w-full px-3 py-2 text-left transition-colors hover:bg-gray-700 focus:outline-hidden focus-visible:bg-gray-700"
                 >
                   <span className="block text-sm font-medium text-red-300">Delete selected findings</span>
                   <span id="triage-dock-delete-hint" className="mt-0.5 block text-xs text-gray-400">

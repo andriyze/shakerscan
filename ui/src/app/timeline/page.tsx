@@ -114,11 +114,11 @@ function EventRow({ event }: { event: TimelineEvent }) {
           <TimelineStatusBadge status={effectiveEventStatus(event)} />
           <RiskTierBadge tier={event.risk_tier} />
           <span className="text-sm font-medium text-white">{eventTitle(event)}</span>
-          <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
+          <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
             {eventKindLabel(event)}
           </span>
           {event.dry_run && (
-            <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">dry run</span>
+            <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">dry run</span>
           )}
         </div>
         {event.operator_message && (
@@ -241,7 +241,7 @@ function TimelineContent() {
                 <button
                   type="button"
                   onClick={() => setFilter('target', undefined)}
-                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                 >
                   Clear
                 </button>

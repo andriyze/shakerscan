@@ -64,7 +64,7 @@ export default function EvidenceObjectModal({
       >
         <div className="flex items-center justify-between border-b border-gray-800 p-4">
           <h2 className="text-lg font-semibold text-white">Evidence object</h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-sm p-1 text-gray-400 hover:bg-gray-800 hover:text-white">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -79,7 +79,7 @@ export default function EvidenceObjectModal({
                 {obj.retention_class && <RetentionClassBadge retentionClass={obj.retention_class} />}
                 {obj.proof_state && <ProofStateBadge proofState={obj.proof_state as 'verified'} />}
                 {obj.object_type && (
-                  <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
+                  <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-gray-400">
                     {obj.object_type}
                   </span>
                 )}

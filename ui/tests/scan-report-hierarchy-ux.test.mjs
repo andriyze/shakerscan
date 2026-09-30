@@ -6,7 +6,8 @@ const report = fs.readFileSync(new URL('../src/components/ReportView.tsx', impor
 
 test('detailed report does not repeat the target as a second page title', () => {
   assert.match(report, /<h2 className="text-2xl font-bold mb-2">Detailed scan report<\/h2>/)
-  assert.doesNotMatch(report, /<h1 className="text-3xl font-bold mb-2 break-words">/)
+  // `break-words` is `wrap-break-word` in Tailwind v4; reject the duplicate title under either name.
+  assert.doesNotMatch(report, /<h1 className="text-3xl font-bold mb-2 (?:break-words|wrap-break-word)">/)
 })
 
 test('unlinked scan evidence is described in user-facing language', () => {

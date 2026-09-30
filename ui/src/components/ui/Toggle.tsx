@@ -3,7 +3,7 @@
 import { cn } from '@/lib/cn'
 
 const FOCUS_RING =
-  'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950'
+  'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950'
 
 // Presentational track + thumb, shared by the standalone Toggle and the
 // full-row ToggleField so a real interactive control can wrap it (you can't

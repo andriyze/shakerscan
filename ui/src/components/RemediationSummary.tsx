@@ -36,7 +36,7 @@ export default function RemediationSummary({ remediations, totalFindings }: Prop
 
       <div className="w-full bg-gray-700 rounded-full h-3 mb-6">
         <div
-          className="bg-gradient-to-r from-blue-500 to-green-500 h-3 rounded-full transition-all duration-500"
+          className="bg-linear-to-r from-blue-500 to-green-500 h-3 rounded-full transition-all duration-500"
           style={{ width: `${progressPercent}%` }}
         />
       </div>

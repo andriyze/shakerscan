@@ -224,7 +224,7 @@ function RollupView({
           value={filters.domain ?? ''}
           onChange={(e) => setFilter('domain', e.target.value || undefined)}
           aria-label="Filter endpoints by domain"
-          className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <option value="">All domains</option>
           {domains.map((d) => (
@@ -318,7 +318,7 @@ function NumField({
         min={min}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       />
       {hint && <span className="text-[11px] text-gray-600">{hint}</span>}
     </label>
@@ -526,7 +526,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+            className="h-4 w-4 rounded-sm border-gray-600 bg-gray-800"
           />
           Enable background dispatcher
         </label>
@@ -609,7 +609,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
                 type="checkbox"
                 checked={cfg.exploit_depth}
                 onChange={(e) => set({ exploit_depth: e.target.checked })}
-                className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+                className="h-4 w-4 rounded-sm border-gray-600 bg-gray-800"
               />
               Deeper active checks
             </label>
@@ -620,7 +620,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
                 aria-label="Coverage window start hour (UTC, 0-23)"
                 value={cfg.window_start_hour ?? ''}
                 onChange={(e) => set({ window_start_hour: e.target.value === '' ? null : Number(e.target.value) })}
-                className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+                className="w-16 rounded-sm border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
               />
               <span className="text-gray-600">–</span>
               <input
@@ -628,7 +628,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
                 aria-label="Coverage window end hour (UTC, 0-23)"
                 value={cfg.window_end_hour ?? ''}
                 onChange={(e) => set({ window_end_hour: e.target.value === '' ? null : Number(e.target.value) })}
-                className="w-16 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+                className="w-16 rounded-sm border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
               />
               {cfg.window_start_hour !== null && cfg.window_end_hour !== null ? (
                 <span className="text-[11px] text-blue-300">
@@ -655,7 +655,7 @@ function ContinuousCard({ targetId, targetUrl }: { targetId: string; targetUrl: 
                   key={d}
                   type="button"
                   onClick={() => toggleDay(i)}
-                  className={`rounded px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+                  className={`rounded-sm px-2 py-0.5 text-xs ${on ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
                 >
                   {d}
                 </button>
@@ -934,7 +934,7 @@ function CoverageAdvisorCard({
             </div>
           )}
           {decision && (
-            <div className="grid gap-2 rounded border border-gray-800 bg-gray-950/50 p-2 text-xs sm:grid-cols-2">
+            <div className="grid gap-2 rounded-sm border border-gray-800 bg-gray-950/50 p-2 text-xs sm:grid-cols-2">
               <div>
                 <div className="text-[11px] uppercase text-gray-500">Scheduler decision</div>
                 <div className="mt-1 text-gray-300">
@@ -1011,7 +1011,7 @@ function CoverageAdvisorCard({
             </div>
           )}
             {!!gaps?.stuck_verification && gaps.stuck_verification > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2 rounded-sm border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs">
               <span className="font-medium text-amber-300">
                 ⚠ {gaps.stuck_verification} high/critical finding{gaps.stuck_verification === 1 ? '' : 's'} stuck unproven
               </span>
@@ -1038,7 +1038,7 @@ function CoverageAdvisorCard({
                 <select
                   value={checkFamily}
                   onChange={(e) => setCheckFamily(e.target.value)}
-                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
                 >
                   {checkFamilyOptions.map((option) => (
                     <option key={option.value} value={option.value} disabled={option.disabled}>
@@ -1052,7 +1052,7 @@ function CoverageAdvisorCard({
                 <select
                   value={endpointFilter}
                   onChange={(e) => setEndpointFilter(e.target.value)}
-                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
+                  className="w-full rounded-sm border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-200"
                 >
                   <option value="">All endpoints</option>
                   <option value="api">API-like only</option>
@@ -1093,7 +1093,7 @@ function CoverageAdvisorCard({
           <div className="text-[11px] uppercase text-gray-500">Recommended follow-up work</div>
           <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
             {gaps.recommended_campaigns.slice(0, 6).map((c) => (
-              <div key={c.campaign} className="flex items-start gap-2 rounded border border-gray-800 bg-gray-950/40 p-2 text-xs">
+              <div key={c.campaign} className="flex items-start gap-2 rounded-sm border border-gray-800 bg-gray-950/40 p-2 text-xs">
                 <Badge className={
                   c.priority === 'high' ? 'bg-red-500/15 text-red-300'
                   : c.priority === 'medium' ? 'bg-yellow-500/15 text-yellow-300'
@@ -1383,7 +1383,7 @@ function LeadRow({ item }: { item: HypothesisReportItem }) {
         {item.severity_guess && <Badge className="bg-amber-500/15 text-amber-300">{item.severity_guess}</Badge>}
         <Badge className="bg-gray-800 text-gray-300">{item.source}</Badge>
       </div>
-      <div className="mt-1 break-words text-sm text-gray-400">{item.title || item.dedupe_key}</div>
+      <div className="mt-1 wrap-break-word text-sm text-gray-400">{item.title || item.dedupe_key}</div>
       <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
         <Badge className="bg-gray-800 text-gray-300">{Math.round((item.confidence || 0) * 100)}% confidence</Badge>
         <Badge className="bg-gray-800 text-gray-300">endorse {item.endorsement_count}</Badge>
@@ -1627,7 +1627,7 @@ function TargetView({ targetId }: { targetId: string }) {
             <CoverageStat label="Attempts" value={coverage.metric_contract?.execution.attempts ?? coverage.attempted ?? 0} />
             <CoverageStat label="Proof-bearing variants" value={coverage.metric_contract?.proof.proof_bearing_variants ?? 0} accent="text-emerald-400" />
           </div>
-          <details className="rounded border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
+          <details className="rounded-sm border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-400">
             <summary className="cursor-pointer font-medium text-gray-300">How coverage is counted</summary>
             <div className="mt-2 space-y-1">
               <p><strong>Canonical route</strong>: one normalized path.</p>
@@ -1682,7 +1682,7 @@ function TargetView({ targetId }: { targetId: string }) {
             value={filters.status ?? ''}
             onChange={(e) => setFilter('status', e.target.value || undefined)}
             aria-label="Filter endpoints by status"
-            className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {STATUS_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>

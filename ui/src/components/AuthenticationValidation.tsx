@@ -87,13 +87,13 @@ export default function AuthenticationValidation({ profileId, revision, targetId
     {requestId && <button type="button" className="underline focus:ring-2 focus:ring-blue-400" onClick={cancel}>Cancel validation</button>}
     {message && <p role="status" className="mt-2">{message}</p>}
     {error && <p role="alert" className="mt-2 text-amber-300">{error}</p>}
-    {open && <div className="mt-2 space-y-2 rounded border border-gray-700 p-3">
+    {open && <div className="mt-2 space-y-2 rounded-sm border border-gray-700 p-3">
       <p className="break-all">One GET to {origin}{path}, using saved credentials. Redirects are not followed.</p>
       <p>This observation expires. It does not prove continuous authentication or authorize a Scan.</p>
       <label className="flex items-start gap-2"><input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)} className="mt-1" />I authorize this identity check and confirm the owner-provided resource is read-only.</label>
       {needsTransportReview && <label className="flex items-start gap-2"><input type="checkbox" checked={insecure} onChange={e => setInsecure(e.target.checked)} className="mt-1" />I approve sending this test credential over unencrypted HTTP to the displayed destination.</label>}
       <label className="flex items-start gap-2"><input type="checkbox" checked={lab} onChange={e => setLab(e.target.checked)} className="mt-1" />This is an isolated lab environment (allow private lab scope review).</label>
-      <button type="button" disabled={busy || !reviewed || (needsTransportReview && !insecure)} onClick={validate} className="rounded bg-blue-700 px-3 py-2 disabled:opacity-40 focus:ring-2 focus:ring-blue-400">{busy ? 'Requesting…' : 'Run reviewed identity check'}</button>
+      <button type="button" disabled={busy || !reviewed || (needsTransportReview && !insecure)} onClick={validate} className="rounded-sm bg-blue-700 px-3 py-2 disabled:opacity-40 focus:ring-2 focus:ring-blue-400">{busy ? 'Requesting…' : 'Run reviewed identity check'}</button>
     </div>}
   </div>
 }

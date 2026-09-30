@@ -19,7 +19,7 @@ type Environment = 'preview' | 'staging' | 'development'
 type Profile = 'smoke' | 'trace' | 'standard' | 'deep'
 type PrincipalKey = keyof BoundaryPrincipal
 
-const inputStyle = 'w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none'
+const inputStyle = 'w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden'
 const buttonStyle = 'rounded-lg border border-blue-500/50 bg-blue-500/15 px-3 py-2 text-sm font-medium text-blue-100 hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-40'
 const emptyPrincipal = (): BoundaryPrincipal => ({ role: '', subject: '', tenant: '', resource_id: '' })
 const principalFields: Array<{ key: PrincipalKey; label: string }> = [

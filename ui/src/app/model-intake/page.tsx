@@ -80,9 +80,9 @@ import {
 } from './IntakeShell'
 
 const inputClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
 const textareaClass =
-  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden'
 const fieldClass = 'grid min-w-0 gap-1 text-sm text-gray-300'
 const COMPLETE_METADATA_EXAMPLE = {
   source_repo: 'https://github.com/example/model-release',
@@ -1428,7 +1428,7 @@ function ModelIntakeSettingsContent() {
         <button
           type="button"
           onClick={openCheckCatalog}
-          className="inline-flex items-center gap-2 rounded-lg border border-cyan-700/60 bg-cyan-950/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-900/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+          className="inline-flex items-center gap-2 rounded-lg border border-cyan-700/60 bg-cyan-950/30 px-3 py-2 text-sm font-medium text-cyan-100 hover:bg-cyan-900/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-400"
         >
           <Info className="h-4 w-4" />
           What ShakerScan checks
@@ -1457,7 +1457,7 @@ function ModelIntakeSettingsContent() {
                   <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="font-medium text-white">{item.check}</div>
-                      <span className="shrink-0 rounded bg-gray-800 px-2 py-0.5 font-mono text-xs text-gray-300">{item.id}</span>
+                      <span className="shrink-0 rounded-sm bg-gray-800 px-2 py-0.5 font-mono text-xs text-gray-300">{item.id}</span>
                     </div>
                     <p className="mt-1 text-sm leading-5 text-gray-300">{item.description}</p>
                     <div className="mt-2 text-xs text-gray-500">
@@ -1509,7 +1509,7 @@ function ModelIntakeSettingsContent() {
 
       {workflowMode === 'automatic' && (
       <>
-      <Card className="border-cyan-500/30 bg-gradient-to-br from-cyan-950/40 to-gray-950 p-5">
+      <Card className="border-cyan-500/30 bg-linear-to-br from-cyan-950/40 to-gray-950 p-5">
         <div className="max-w-3xl">
           <div className="flex items-center gap-2 text-lg font-semibold text-white">
             <PackageCheck className="h-5 w-5 text-cyan-300" />
@@ -1583,7 +1583,7 @@ function ModelIntakeSettingsContent() {
             <button
               type="button"
               onClick={() => { setWorkflowMode('advanced'); setPhase('status') }}
-              className="rounded border border-yellow-600/50 px-3 py-1.5 text-xs font-medium hover:bg-yellow-900/40"
+              className="rounded-sm border border-yellow-600/50 px-3 py-1.5 text-xs font-medium hover:bg-yellow-900/40"
             >
               Set up Firecracker
             </button>
@@ -1597,7 +1597,7 @@ function ModelIntakeSettingsContent() {
             <h2 className="text-sm font-semibold text-white">Automatic reviews</h2>
             <p className="mt-1 text-xs text-gray-500">The controller keeps working if this page is closed or the API restarts.</p>
           </div>
-          <button type="button" onClick={loadAutomaticReviews} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+          <button type="button" onClick={loadAutomaticReviews} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
         </div>
         {automaticReviewsError && <div role="alert" className="mt-3 text-xs text-red-300">{automaticReviewsError}</div>}
         {!automaticReviewsError && automaticReviews.length === 0 ? (
@@ -1634,12 +1634,12 @@ function ModelIntakeSettingsContent() {
                         {review.source_label || 'Model review'}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded px-2 py-1 text-xs font-semibold ${passed ? 'bg-green-950/60 text-green-300' : blocked ? 'bg-red-950/60 text-red-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
+                        <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${passed ? 'bg-green-950/60 text-green-300' : blocked ? 'bg-red-950/60 text-red-300' : terminal ? 'bg-yellow-950/60 text-yellow-300' : 'bg-cyan-950/60 text-cyan-300'}`}>
                           {outcomeLabel}
                         </span>
                         <span className="text-xs text-gray-500">{review.requested_environment}</span>
                         {supersededByNewerReview && (
-                          <span className="rounded bg-gray-800 px-2 py-1 text-xs text-gray-400">Earlier run · newer review available</span>
+                          <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-400">Earlier run · newer review available</span>
                         )}
                       </div>
                       <div className="mt-2 text-sm font-medium text-white">{displayedStep.replace(/_/g, ' ')}</div>
@@ -1656,13 +1656,13 @@ function ModelIntakeSettingsContent() {
                     </div>
                   </div>
                   {workflowComplete && (
-                    <div className={`mt-3 rounded border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
+                    <div className={`mt-3 rounded-sm border p-3 text-xs ${blocked ? 'border-red-800/60 bg-red-950/20 text-red-200' : passed ? 'border-green-800/60 bg-green-950/20 text-green-200' : 'border-yellow-800/60 bg-yellow-950/20 text-yellow-200'}`}>
                       <div className="font-semibold">{blocked ? 'Do not use this revision yet' : passed ? 'Technical checks passed' : incomplete ? 'Review incomplete' : 'Review needs attention'}</div>
                       <div className="mt-1 opacity-80">{blocked ? 'One or more required technical checks failed. Open the report for evidence and next steps.' : passed ? 'All technical checks selected for this review completed successfully.' : incomplete ? 'One or more technical checks could not complete. Open the report for the exact prerequisite or retry.' : `${technicalFollowUp.length || 'Some'} check${technicalFollowUp.length === 1 ? '' : 's'} ${technicalFollowUp.length === 1 ? 'needs' : 'need'} review. Open the report for evidence and next steps.`}</div>
                     </div>
                   )}
                   {terminal && !workflowComplete && (
-                    <div className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+                    <div className="mt-3 rounded-sm border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
                       <div className="font-semibold">Required technical controls are incomplete</div>
                       <div className="mt-1 opacity-80">The workflow ended in {review.state.replace(/_/g, ' ')}. This is not 100% control completion.</div>
                     </div>
@@ -1673,20 +1673,20 @@ function ModelIntakeSettingsContent() {
                     </div>
                   )}
                   {review.error_json?.message && (
-                    <div role="alert" className="mt-3 rounded border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
+                    <div role="alert" className="mt-3 rounded-sm border border-yellow-800/60 bg-yellow-950/20 p-3 text-xs text-yellow-200">
                       {review.error_json.message}
                     </div>
                   )}
                   {technicalFollowUp.length > 0 && (
                     <div className="mt-3 grid gap-2 md:grid-cols-2">
                       {technicalFollowUp.map((control) => (
-                        <div key={control.control} className="rounded border border-gray-800 bg-gray-900 p-2 text-xs">
+                        <div key={control.control} className="rounded-sm border border-gray-800 bg-gray-900 p-2 text-xs">
                           <div className="font-medium text-gray-200">{control.control.replace(/_/g, ' ')} · {control.status}</div>
                           <div className="mt-1 text-gray-400">{control.summary || control.action}</div>
                           {(control.items || []).length > 0 && (
                             <ul className="mt-2 space-y-2">
                               {(control.items || []).map((item, index) => (
-                                <li key={`${item.path || item.title}:${item.line || index}`} className="rounded border border-gray-800 bg-gray-950 p-2">
+                                <li key={`${item.path || item.title}:${item.line || index}`} className="rounded-sm border border-gray-800 bg-gray-950 p-2">
                                   <div className="text-gray-200">{item.title}</div>
                                   <div className="mt-1 text-[11px] text-gray-500">
                                     {[item.path && `${item.path}${item.line ? `:${item.line}` : ''}`, (item.scanners || []).join(', ')].filter(Boolean).join(' · ')}
@@ -1703,7 +1703,7 @@ function ModelIntakeSettingsContent() {
                     </div>
                   )}
                   {deploymentFollowUp.length > 0 && (
-                    <details className="mt-3 rounded border border-gray-800 bg-gray-900/60 p-3 text-xs">
+                    <details className="mt-3 rounded-sm border border-gray-800 bg-gray-900/60 p-3 text-xs">
                       <summary className="cursor-pointer font-medium text-gray-300">Deployment follow-up</summary>
                       <p className="mt-2 text-gray-500">
                         Confirm publisher trust, production signing, application/data-plane controls, and any reviews required by your organization before deployment.
@@ -1711,7 +1711,7 @@ function ModelIntakeSettingsContent() {
                     </details>
                   )}
                   {(review.timeline_json || []).length > 0 && (
-                    <details className="mt-3 rounded border border-gray-800 bg-gray-900/60 p-3 text-xs">
+                    <details className="mt-3 rounded-sm border border-gray-800 bg-gray-900/60 p-3 text-xs">
                       <summary className="cursor-pointer font-medium text-gray-300">Workflow steps ({(review.timeline_json || []).length})</summary>
                       <ol className="mt-2 grid gap-2 border-l border-gray-700 pl-3">
                         {(review.timeline_json || []).map((event, index) => (
@@ -1729,7 +1729,7 @@ function ModelIntakeSettingsContent() {
                         type="button"
                         onClick={() => exportAutomaticReport(review.id, 'html')}
                         disabled={automaticDownload === `${review.id}:html`}
-                        className="rounded bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-600 disabled:opacity-50"
+                        className="rounded-sm bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-600 disabled:opacity-50"
                       >
                         {automaticDownload === `${review.id}:html` ? 'Preparing…' : 'HTML report'}
                       </button>
@@ -1739,28 +1739,28 @@ function ModelIntakeSettingsContent() {
                         type="button"
                         onClick={() => exportAutomaticBom(review.scan_id, 'aibom')}
                         disabled={automaticDownload === `${review.scan_id}:aibom`}
-                        className="rounded border border-cyan-700 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
+                        className="rounded-sm border border-cyan-700 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-950/50 disabled:opacity-50"
                       >
                         {automaticDownload === `${review.scan_id}:aibom` ? 'Preparing…' : 'AIBOM'}
                       </button>
                     )}
                     {review.submission_id && (
-                      <details className="relative rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300">
+                      <details className="relative rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300">
                         <summary className="cursor-pointer select-none">More exports</summary>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                          <Link href={`/scans/${review.scan_id}`} className="rounded border border-gray-700 px-3 py-1.5 text-center hover:bg-gray-800">Static scan details</Link>
+                          <Link href={`/scans/${review.scan_id}`} className="rounded-sm border border-gray-700 px-3 py-1.5 text-center hover:bg-gray-800">Static scan details</Link>
                           {(['cyclonedx', 'spdx'] as const).map((format) => (
-                            <button key={format} type="button" onClick={() => exportAutomaticBom(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                            <button key={format} type="button" onClick={() => exportAutomaticBom(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded-sm border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
                               {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : `${format === 'cyclonedx' ? 'CycloneDX' : 'SPDX'} SBOM`}
                             </button>
                           ))}
                           {(['license-bom', 'third-party-notices'] as const).map((format) => (
-                            <button key={format} type="button" onClick={() => exportAutomaticLicenseArtifact(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                            <button key={format} type="button" onClick={() => exportAutomaticLicenseArtifact(review.scan_id, format)} disabled={automaticDownload === `${review.scan_id}:${format}`} className="rounded-sm border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
                               {automaticDownload === `${review.scan_id}:${format}` ? 'Preparing…' : format === 'license-bom' ? 'License BOM' : 'Notices draft'}
                             </button>
                           ))}
                           {(['json', 'sarif'] as const).map((format) => (
-                            <button key={format} type="button" onClick={() => exportAutomaticReport(review.id, format)} disabled={automaticDownload === `${review.id}:${format}`} className="rounded border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
+                            <button key={format} type="button" onClick={() => exportAutomaticReport(review.id, format)} disabled={automaticDownload === `${review.id}:${format}`} className="rounded-sm border border-gray-700 px-3 py-1.5 hover:bg-gray-800 disabled:opacity-50">
                               {automaticDownload === `${review.id}:${format}` ? 'Preparing…' : `${format.toUpperCase()} report`}
                             </button>
                           ))}
@@ -1775,7 +1775,7 @@ function ModelIntakeSettingsContent() {
               <button
                 type="button"
                 onClick={() => setShowAllAutomaticReviews((current) => !current)}
-                className="rounded border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
+                className="rounded-sm border border-gray-700 px-3 py-2 text-xs text-gray-300 hover:bg-gray-800"
               >
                 {showAllAutomaticReviews ? 'Hide older reviews' : `Show ${automaticReviews.length - 5} older reviews`}
               </button>
@@ -1832,7 +1832,7 @@ function ModelIntakeSettingsContent() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <a href="#model-intake-trust-remediation" className="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
+              <a href="#model-intake-trust-remediation" className="rounded-sm border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20">
                 Trust controls
               </a>
             </div>
@@ -1902,9 +1902,9 @@ function ModelIntakeSettingsContent() {
                 >
                   <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-white">
                     <Icon className="h-4 w-4 shrink-0 text-cyan-300" />
-                    <span className="min-w-0 break-words">{option.label}</span>
+                    <span className="min-w-0 wrap-break-word">{option.label}</span>
                   </div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{option.helper}</div>
                 </button>
               )
             })}
@@ -1927,8 +1927,8 @@ function ModelIntakeSettingsContent() {
                     environment === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
-                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                  <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{option.helper}</div>
                 </button>
               ))}
             </div>
@@ -1951,8 +1951,8 @@ function ModelIntakeSettingsContent() {
                     activeDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
-                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                  <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{option.helper}</div>
                 </button>
               ))}
             </div>
@@ -1967,24 +1967,24 @@ function ModelIntakeSettingsContent() {
             <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
               <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
                 <div className="text-sm font-medium text-white">Resolved artifact</div>
-                <div className="mt-2 break-all rounded border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
+                <div className="mt-2 break-all rounded-sm border border-gray-800 bg-gray-900 px-3 py-2 font-mono text-xs text-gray-300">
                   {resolverResult.normalized_ref}
                 </div>
                 <div className="mt-3 grid min-w-0 gap-2 text-xs text-gray-400 sm:grid-cols-2">
-                  <div className="min-w-0 break-words">Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
-                  <div className="min-w-0 break-words">Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
-                  <div className="min-w-0 break-words">Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
-                  <div className="min-w-0 break-words">File: <span className="break-all text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
-                  <div className="min-w-0 break-words">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
-                  <div className="min-w-0 break-words">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
-                  <div className="min-w-0 break-words">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
-                  <div className="min-w-0 break-words">Artifact acquisition: <span className="text-gray-200">{resolverResult.capabilities?.artifact_acquisition || 'unknown'}</span></div>
-                  <div className="min-w-0 break-words">Repository snapshot: <span className="text-gray-200">{resolverResult.capabilities?.repository_snapshot || 'unknown'}</span></div>
+                  <div className="min-w-0 wrap-break-word">Provider: <span className="text-gray-200">{resolverResult.platform.replace(/_/g, ' ')}</span></div>
+                  <div className="min-w-0 wrap-break-word">Repository: <span className="text-gray-200">{resolverResult.repository || 'not detected'}</span></div>
+                  <div className="min-w-0 wrap-break-word">Revision: <span className="text-gray-200">{resolverResult.revision || 'not pinned'}</span></div>
+                  <div className="min-w-0 wrap-break-word">File: <span className="break-all text-gray-200">{resolverResult.selected_file?.path || 'manual'}</span></div>
+                  <div className="min-w-0 wrap-break-word">License: <span className="text-gray-200">{metadataString(resolverResult.metadata_json, 'license') || 'not found'}</span></div>
+                  <div className="min-w-0 wrap-break-word">Registry SHA: <span className="text-gray-200">{resolverResult.selected_file?.sha256 ? 'available' : 'not found'}</span></div>
+                  <div className="min-w-0 wrap-break-word">Evidence: <span className="text-gray-200">{Object.keys(resolverResult.metadata_json || {}).length} keys</span></div>
+                  <div className="min-w-0 wrap-break-word">Artifact acquisition: <span className="text-gray-200">{resolverResult.capabilities?.artifact_acquisition || 'unknown'}</span></div>
+                  <div className="min-w-0 wrap-break-word">Repository snapshot: <span className="text-gray-200">{resolverResult.capabilities?.repository_snapshot || 'unknown'}</span></div>
                 </div>
                 {resolverResult.warnings.length > 0 && (
                   <div className="mt-3 space-y-2">
                     {resolverResult.warnings.map((warning) => (
-                      <div key={warning} className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-2 text-xs text-yellow-200">
+                      <div key={warning} className="flex gap-2 rounded-sm border border-yellow-600/30 bg-yellow-950/20 p-2 text-xs text-yellow-200">
                         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                         <span>{warning}</span>
                       </div>
@@ -1996,7 +1996,7 @@ function ModelIntakeSettingsContent() {
               <div className="min-w-0 rounded-lg border border-gray-800 bg-gray-950 p-3">
                 <div className="text-sm font-medium text-white">Candidate files</div>
                 {resolverResult.candidate_files.length === 0 ? (
-                  <div className="mt-3 break-words rounded border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
+                  <div className="mt-3 wrap-break-word rounded-sm border border-gray-800 bg-gray-900 p-3 text-sm text-gray-500">
                     No artifact list was available. Enter a direct artifact URL or file path before queueing.
                   </div>
                 ) : (
@@ -2018,7 +2018,7 @@ function ModelIntakeSettingsContent() {
                               {file.risk === 'lower' ? 'lower risk' : 'review'}
                             </span>
                           </div>
-                          <div className="mt-1 break-words text-gray-500">
+                          <div className="mt-1 wrap-break-word text-gray-500">
                             {file.extension || 'unknown'} - {formatBytes(file.size_bytes)}{file.sha256 ? ' - registry SHA-256 available' : ''}
                           </div>
                         </button>
@@ -2053,7 +2053,7 @@ function ModelIntakeSettingsContent() {
               <ShieldCheck className="h-4 w-4 text-cyan-300" />
               <h2 className="text-sm font-semibold">2. Policy Profile</h2>
             </div>
-            <Link href="/settings/policy-profiles" className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+            <Link href="/settings/policy-profiles" className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
               Manage
             </Link>
           </div>
@@ -2073,8 +2073,8 @@ function ModelIntakeSettingsContent() {
                   policyProfile === profile.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-950 hover:border-gray-700'
                 }`}
               >
-                <div className="break-words text-sm font-medium text-white">{profile.label}</div>
-                <div className="mt-1 break-words text-xs text-gray-500">{profile.helper}</div>
+                <div className="wrap-break-word text-sm font-medium text-white">{profile.label}</div>
+                <div className="mt-1 wrap-break-word text-xs text-gray-500">{profile.helper}</div>
               </button>
             ))}
             {activeSavedPolicyProfiles.map((profile) => (
@@ -2087,10 +2087,10 @@ function ModelIntakeSettingsContent() {
                 }`}
               >
                 <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0 break-words text-sm font-medium text-white">{profile.name}</div>
-                  <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
+                  <div className="min-w-0 wrap-break-word text-sm font-medium text-white">{profile.name}</div>
+                  <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">{profile.environment}</span>
                 </div>
-                <div className="mt-1 break-words text-xs text-gray-500">
+                <div className="mt-1 wrap-break-word text-xs text-gray-500">
                   Block {profile.minimum_block_severity}+{profile.strict_model_intake ? ' + verified signing' : ''}
                 </div>
                 {profile.strict_model_intake && (profile.required_trust_anchor_ids || []).length > 0 && (
@@ -2103,7 +2103,7 @@ function ModelIntakeSettingsContent() {
           </div>
           {policyProfilesLoading && <div className="mt-3 text-xs text-gray-500">Loading saved profiles...</div>}
           {!policyProfilesLoading && policyProfilesError && (
-            <div role="alert" className="mt-3 break-words text-xs text-red-400">
+            <div role="alert" className="mt-3 wrap-break-word text-xs text-red-400">
               {policyProfilesError} — showing built-in profiles only.
             </div>
           )}
@@ -2131,8 +2131,8 @@ function ModelIntakeSettingsContent() {
                     scanDepth === option.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
-                  <div className="break-words text-sm font-medium text-white">{option.label}</div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{option.helper}</div>
+                  <div className="wrap-break-word text-sm font-medium text-white">{option.label}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{option.helper}</div>
                 </button>
               ))}
             </div>
@@ -2210,7 +2210,7 @@ function ModelIntakeSettingsContent() {
                   inspection prefix streams into content-addressed quarantine instead.
                 </div>
               </div>
-              <span className="rounded bg-gray-800 px-2 py-1 font-mono text-xs text-gray-200">
+              <span className="rounded-sm bg-gray-800 px-2 py-1 font-mono text-xs text-gray-200">
                 {formatBytes(Number(maxDownloadBytes) || 0)}
               </span>
             </div>
@@ -2225,7 +2225,7 @@ function ModelIntakeSettingsContent() {
                   }`}
                 >
                   <div className="text-sm font-medium text-white">{preset.label}</div>
-                  <div className="mt-0.5 break-words text-[11px] text-gray-500">{preset.helper}</div>
+                  <div className="mt-0.5 wrap-break-word text-[11px] text-gray-500">{preset.helper}</div>
                 </button>
               ))}
             </div>
@@ -2287,8 +2287,8 @@ function ModelIntakeSettingsContent() {
                     trustMode === mode.value ? 'border-cyan-500 bg-cyan-950/40' : 'border-gray-800 bg-gray-900 hover:border-gray-700'
                   }`}
                 >
-                  <div className="break-words text-sm font-medium text-white">{mode.label}</div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{mode.helper}</div>
+                  <div className="wrap-break-word text-sm font-medium text-white">{mode.label}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{mode.helper}</div>
                 </button>
               ))}
             </div>
@@ -2374,17 +2374,17 @@ function ModelIntakeSettingsContent() {
                   </label>
                 </div>
 
-                <div className="rounded border border-gray-800 bg-gray-900 p-3">
+                <div className="rounded-sm border border-gray-800 bg-gray-900 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <div className="text-sm font-medium text-gray-200">Saved trust anchors</div>
                       <div className="mt-1 text-xs text-gray-500">Reusable operator roots. Selected anchors are included in the queued scan as trusted PEM/fingerprint material.</div>
                     </div>
-                    <button type="button" onClick={loadTrustAnchors} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                    <button type="button" onClick={loadTrustAnchors} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                       Refresh
                     </button>
                   </div>
-                  <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-2 text-xs">
+                  <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950 p-2 text-xs">
                     {operatorToken ? (
                       <span className="text-gray-500">
                         Trust-anchor changes are authorized with the operator credential resolved in
@@ -2400,7 +2400,7 @@ function ModelIntakeSettingsContent() {
                   {trustAnchorsLoading && <div className="mt-3 text-xs text-gray-500">Loading trust anchors...</div>}
                   {trustAnchorsError && <div role="alert" className="mt-3 text-xs text-red-400">{trustAnchorsError}</div>}
                   {!trustAnchorsLoading && savedTrustAnchors.length === 0 && (
-                    <div className="mt-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
+                    <div className="mt-3 rounded-sm border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
                       No saved trust anchors yet. Save a fingerprint or PEM below, then select it for strict scans.
                     </div>
                   )}
@@ -2409,7 +2409,7 @@ function ModelIntakeSettingsContent() {
                       {savedTrustAnchors.map((anchor) => {
                         const selected = selectedTrustAnchorIds.includes(anchor.id)
                         return (
-                          <div key={anchor.id} className={`rounded border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
+                          <div key={anchor.id} className={`rounded-sm border p-3 ${selected ? 'border-cyan-500 bg-cyan-950/30' : 'border-gray-800 bg-gray-950'}`}>
                             <label className="flex min-w-0 items-start gap-2 text-sm text-gray-300">
                               <input
                                 type="checkbox"
@@ -2420,11 +2420,11 @@ function ModelIntakeSettingsContent() {
                                     : prev.filter((id) => id !== anchor.id)
                                   )
                                 }}
-                                className="mt-0.5 h-4 w-4 rounded border-gray-700 bg-gray-800"
+                                className="mt-0.5 h-4 w-4 rounded-sm border-gray-700 bg-gray-800"
                               />
                               <span className="min-w-0">
-                                <span className="block break-words font-medium text-gray-100">{anchor.name}</span>
-                                <span className="mt-1 block break-words text-xs text-gray-500">
+                                <span className="block wrap-break-word font-medium text-gray-100">{anchor.name}</span>
+                                <span className="mt-1 block wrap-break-word text-xs text-gray-500">
                                   {anchor.policy_profile || 'any profile'}{anchor.owner ? ` - ${anchor.owner}` : ''}{anchor.public_key_sha256 ? ` - ${anchor.public_key_sha256.slice(0, 12)}...` : ' - PEM anchor'}
                                 </span>
                               </span>
@@ -2432,7 +2432,7 @@ function ModelIntakeSettingsContent() {
                             <button
                               type="button"
                               onClick={() => deactivateTrustAnchor(anchor.id)}
-                              className="mt-2 rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800"
+                              className="mt-2 rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800"
                             >
                               Deactivate
                             </button>
@@ -2451,7 +2451,7 @@ function ModelIntakeSettingsContent() {
                       type="button"
                       onClick={saveTrustAnchor}
                       disabled={savingAnchor || !newAnchorName.trim() || (!newAnchorSha256.trim() && !newAnchorPem.trim())}
-                      className="inline-flex items-center justify-center rounded bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
+                      className="inline-flex items-center justify-center rounded-sm bg-cyan-700 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:opacity-50"
                     >
                       {savingAnchor ? 'Saving...' : 'Save'}
                     </button>
@@ -2461,7 +2461,7 @@ function ModelIntakeSettingsContent() {
             )}
 
             {trustMode === 'metadata_evidence' && (
-              <div className="flex gap-2 rounded border border-yellow-600/30 bg-yellow-950/20 p-3 text-sm text-yellow-200">
+              <div className="flex gap-2 rounded-sm border border-yellow-600/30 bg-yellow-950/20 p-3 text-sm text-yellow-200">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>Metadata-supplied signing data is treated as evidence of a publisher claim. It cannot establish a trusted signature unless an operator supplies the verifier key and trust anchor.</span>
               </div>
@@ -2497,14 +2497,14 @@ function ModelIntakeSettingsContent() {
 
             <div className="grid gap-2 lg:grid-cols-5">
               {trustPreview.items.map((previewItem) => (
-                <div key={previewItem.id} className="min-w-0 rounded border border-gray-800 bg-gray-900 p-3">
+                <div key={previewItem.id} className="min-w-0 rounded-sm border border-gray-800 bg-gray-900 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="break-words text-xs font-medium text-gray-200">{previewItem.label}</span>
-                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${TRUST_PREVIEW_BADGE[previewItem.status]}`}>
+                    <span className="wrap-break-word text-xs font-medium text-gray-200">{previewItem.label}</span>
+                    <span className={`rounded-sm px-1.5 py-0.5 text-[10px] ${TRUST_PREVIEW_BADGE[previewItem.status]}`}>
                       {previewItem.status}
                     </span>
                   </div>
-                  <div className="mt-1 break-words text-xs text-gray-500">{previewItem.detail}</div>
+                  <div className="mt-1 wrap-break-word text-xs text-gray-500">{previewItem.detail}</div>
                 </div>
               ))}
             </div>
@@ -2556,14 +2556,14 @@ function ModelIntakeSettingsContent() {
                 <span className={`text-xs ${metadataPreview === null ? 'text-red-300' : 'text-gray-500'}`}>
                   {metadataPreview === null ? 'Invalid JSON object' : metadataPreview ? `${metadataPreview} metadata key(s)` : 'No inline metadata yet'}
                 </span>
-                <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                <button type="button" onClick={() => applyMetadataExample('complete')} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                   Complete example
                 </button>
-                <button type="button" onClick={() => applyMetadataExample('minimal')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
+                <button type="button" onClick={() => applyMetadataExample('minimal')} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">
                   Minimal example
                 </button>
                 {metadataJson.trim() && (
-                  <button type="button" onClick={() => setMetadataJson('')} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
+                  <button type="button" onClick={() => setMetadataJson('')} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-400 hover:bg-gray-800">
                     Clear
                   </button>
                 )}
@@ -2577,31 +2577,31 @@ function ModelIntakeSettingsContent() {
               </div>
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireHash} onChange={(e) => setRequireHash(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Require checksum
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireSignature} onChange={(e) => setRequireSignature(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Require signature
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireSignatureVerification} onChange={(e) => setRequireSignatureVerification(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Verify signature
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireCryptographicSignatureVerification} onChange={(e) => setRequireCryptographicSignatureVerification(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireCryptographicSignatureVerification} onChange={(e) => setRequireCryptographicSignatureVerification(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Require trusted crypto verification
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireDeploymentApproval} onChange={(e) => setRequireDeploymentApproval(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Flag missing approval context
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={requireModelGovernance} onChange={(e) => setRequireModelGovernance(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Require governance
                 </label>
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={deploymentApproved} onChange={(e) => setDeploymentApproved(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Declare approval context (never grants authority)
                 </label>
               </div>
@@ -2616,7 +2616,7 @@ function ModelIntakeSettingsContent() {
                 </label>
               </div>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={completeArtifactDownload} onChange={(e) => setCompleteArtifactDownload(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Always acquire the complete artifact, whatever the limit above
               </label>
               <p className="text-xs text-gray-500">
@@ -2625,7 +2625,7 @@ function ModelIntakeSettingsContent() {
               </p>
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                  <input type="checkbox" checked={completeRepositorySnapshot} onChange={(e) => setCompleteRepositorySnapshot(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                  <input type="checkbox" checked={completeRepositorySnapshot} onChange={(e) => setCompleteRepositorySnapshot(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                   Snapshot every pinned repository file
                 </label>
                 <label className={fieldClass}>
@@ -2637,23 +2637,23 @@ function ModelIntakeSettingsContent() {
                 Full repository snapshots currently require a complete Hugging Face manifest pinned to an immutable commit.
               </p>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={runGeneratedScanners} onChange={(e) => setRunGeneratedScanners(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={runGeneratedScanners} onChange={(e) => setRunGeneratedScanners(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Run generated model, malware, secret, SBOM, and SCA scanners
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={runDynamicSandbox} onChange={(e) => setRunDynamicSandbox(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={runDynamicSandbox} onChange={(e) => setRunDynamicSandbox(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Run no-egress dynamic sandbox
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={requireDynamicSandbox} onChange={(e) => { setRequireDynamicSandbox(e.target.checked); if (e.target.checked) setRunDynamicSandbox(true) }} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Require sandbox pass for this technical evidence
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={runGeneratedEvaluation} onChange={(e) => setRunGeneratedEvaluation(e.target.checked)} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Evaluate embeddings and the vector/graph data plane
               </label>
               <label className="flex min-w-0 items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded border-gray-700 bg-gray-800" />
+                <input type="checkbox" checked={requireGeneratedEvaluation} onChange={(e) => { setRequireGeneratedEvaluation(e.target.checked); if (e.target.checked) setRunGeneratedEvaluation(true) }} className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800" />
                 Require evaluation pass for this technical evidence
               </label>
               <label className={fieldClass}>
@@ -2753,7 +2753,7 @@ function ModelIntakeSettingsContent() {
                   ShakerScan generates the technical scan, SBOM, malware, runtime, and evaluation evidence. Add the organization-specific approval, private data context, production restrictions, and monitoring plan needed for your deployment.
                 </p>
               </div>
-              <span className={`rounded px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
+              <span className={`rounded-sm px-2 py-1 text-xs ${evidenceBadgeClass}`}>{evidenceBadgeText}</span>
             </div>
 
             {!hasIntakeInput ? (
@@ -2765,7 +2765,7 @@ function ModelIntakeSettingsContent() {
                 {(missingControls.length ? missingControls : readinessControls).slice(0, 12).map((control) => {
                   const present = hasMetadataKey(readinessMetadata, control.keys)
                   return (
-                    <div key={control.id} className="flex min-w-0 items-center gap-2 rounded border border-gray-800 bg-gray-950 px-3 py-2 text-xs">
+                    <div key={control.id} className="flex min-w-0 items-center gap-2 rounded-sm border border-gray-800 bg-gray-950 px-3 py-2 text-xs">
                       <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${present ? 'text-green-300' : 'text-gray-600'}`} />
                       <span className={present ? 'truncate text-gray-300' : 'truncate text-yellow-200'}>{control.label}</span>
                     </div>
@@ -2803,7 +2803,7 @@ function ModelIntakeSettingsContent() {
               <h2 className="text-sm font-semibold text-white">Admission lifecycle</h2>
               <p className="mt-1 text-xs text-gray-500">Deployment accepts only active, registered, non-expired signed subjects.</p>
             </div>
-            <button type="button" onClick={loadAdmissions} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+            <button type="button" onClick={loadAdmissions} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
           </div>
           {admissionsError ? (
             <div className="mt-3 text-xs text-red-300">{admissionsError}</div>
@@ -2812,14 +2812,14 @@ function ModelIntakeSettingsContent() {
           ) : (
             <div className="mt-3 grid gap-2">
               {admissions.slice(0, 10).map((admission) => (
-                <div key={admission.id} className="grid min-w-0 gap-2 rounded border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <div key={admission.id} className="grid min-w-0 gap-2 rounded-sm border border-gray-800 bg-gray-950 p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
                   <div className="min-w-0">
                     <div className="truncate font-mono text-xs text-gray-300">sha256:{admission.artifact_sha256}</div>
                     <div className="mt-1 text-xs text-gray-500">Policy {admission.policy_profile || 'unspecified'} · reassess {new Date(admission.reassessment_due_at).toLocaleString()} · expires {new Date(admission.expires_at).toLocaleString()}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`rounded px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
-                    <Link href={`/scans/${admission.scan_id}`} className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
+                    <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${admission.status === 'active' ? 'bg-green-950/50 text-green-300' : admission.status === 'reassessment_required' ? 'bg-yellow-950/50 text-yellow-300' : 'bg-red-950/50 text-red-300'}`}>{admission.status.replace(/_/g, ' ')}</span>
+                    <Link href={`/scans/${admission.scan_id}`} className="rounded-sm border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800">Scan</Link>
                   </div>
                 </div>
               ))}
@@ -2850,24 +2850,24 @@ function ModelIntakeSettingsContent() {
             </div>
             <div className="flex items-center gap-2">
               {scannerReadiness && (
-                <span className={`rounded px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
+                <span className={`rounded-sm px-2 py-1 text-xs font-semibold ${scannerReadiness.status === 'READY' ? 'bg-green-950/50 text-green-300' : 'bg-yellow-950/50 text-yellow-300'}`}>
                   {scannerReadiness.required_ready}/{scannerReadiness.required_total} ready
                 </span>
               )}
-              <button type="button" onClick={loadScannerReadiness} className="rounded border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
+              <button type="button" onClick={loadScannerReadiness} className="rounded-sm border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800">Refresh</button>
             </div>
           </div>
           {scannerReadinessError ? (
             <div className="mt-3 text-xs text-red-300">{scannerReadinessError}</div>
           ) : scannerReadiness ? (
             <div className="mt-3">
-              {scannerReadiness.reassessment_required && <div className="mb-3 rounded border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
+              {scannerReadiness.reassessment_required && <div className="mb-3 rounded-sm border border-red-800/60 bg-red-950/20 p-3 text-xs text-red-300">Required scanner rules or vulnerability data are stale. Strict scans fail incomplete; rebuild scanner material and trigger <code>{scannerReadiness.reassessment_trigger || 'scanner_data_stale'}</code> reassessment for affected active admissions.</div>}
             <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               {scannerReadiness.adapters.filter((adapter) => adapter.enabled_by_default).map((adapter) => (
-                <div key={adapter.name} className="rounded border border-gray-800 bg-gray-950 p-3">
+                <div key={adapter.name} className="rounded-sm border border-gray-800 bg-gray-950 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono text-xs text-gray-200">{adapter.name}</span>
-                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
+                    <span className={`rounded-sm px-1.5 py-0.5 text-[10px] font-semibold ${adapter.ready ? 'bg-green-950/60 text-green-300' : 'bg-red-950/60 text-red-300'}`}>
                       {adapter.status}
                     </span>
                   </div>

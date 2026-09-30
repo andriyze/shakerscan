@@ -156,9 +156,9 @@ export default function ScanExecutionSettingsPanel() {
         >
           {scan && (
             <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
-              <span className="rounded border border-gray-800 px-2 py-1">Strategy: {scan.auto_sharding_strategy}</span>
-              <span className="rounded border border-gray-800 px-2 py-1">Max shards: {scan.auto_sharding_max_shards}</span>
-              <span className="rounded border border-gray-800 px-2 py-1">Min workers: {scan.auto_sharding_min_workers}</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Strategy: {scan.auto_sharding_strategy}</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Max shards: {scan.auto_sharding_max_shards}</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Min workers: {scan.auto_sharding_min_workers}</span>
             </span>
           )}
         </ToggleField>
@@ -176,17 +176,17 @@ export default function ScanExecutionSettingsPanel() {
         >
           {asmConfig && (
             <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
-              <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.batch_size, 'endpoint')} per batch</span>
-              <span className="rounded border border-gray-800 px-2 py-1">Retest after {countLabel(asmConfig.stale_days, 'day')}</span>
-              <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.daily_endpoint_cap, 'endpoint')}/day cap</span>
-              <span className="rounded border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'endpoint')}/hour per root domain (background work)</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">{countLabel(asmConfig.batch_size, 'endpoint')} per batch</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Retest after {countLabel(asmConfig.stale_days, 'day')}</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">{countLabel(asmConfig.daily_endpoint_cap, 'endpoint')}/day cap</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">{countLabel(asmConfig.max_requests_per_hour_per_domain, 'endpoint')}/hour per root domain (background work)</span>
             </span>
           )}
         </ToggleField>
       </div>
 
       <details className="group mt-4 rounded-lg border border-gray-800 bg-gray-950/30">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-3 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-3 py-3 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 [&::-webkit-details-marker]:hidden">
           <div>
             <h3 className="text-sm font-medium text-gray-200">Advanced automation controls</h3>
             <p className="mt-1 text-xs text-gray-500">
@@ -235,7 +235,7 @@ export default function ScanExecutionSettingsPanel() {
                       `Default Hunt planner set to ${option.label}`,
                     )}
                     disabled={loading || saving || !research}
-                    className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                    className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                       active
                         ? 'border-blue-500 bg-blue-600/15 text-blue-100'
                         : 'border-gray-800 bg-gray-950/40 text-gray-300 hover:bg-gray-800/70'
@@ -261,9 +261,9 @@ export default function ScanExecutionSettingsPanel() {
             className="p-3"
           >
             <span className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
-              <span className="rounded border border-gray-800 px-2 py-1">Scope preview required</span>
-              <span className="rounded border border-gray-800 px-2 py-1">Approval receipt required</span>
-              <span className="rounded border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Scope preview required</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Approval receipt required</span>
+              <span className="rounded-sm border border-gray-800 px-2 py-1">Legacy mode: {safety?.approval_receipts_required_for_state_changing_actions ? 'blocked' : 'allowed'}</span>
             </span>
           </ToggleField>
         </div>
@@ -287,7 +287,7 @@ export default function ScanExecutionSettingsPanel() {
                     `Default ASM preset set to ${preset.label}`
                   )}
                   disabled={saving}
-                  className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  className={`rounded-lg border px-3 py-2 text-left transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     active
                       ? 'border-blue-500 bg-blue-600/15 text-blue-100'
                       : 'border-gray-800 bg-gray-950/40 text-gray-300 hover:bg-gray-800/70'

@@ -1,16 +1,82 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Scan only src/ for class names, as the v3 `content` glob did (instead of the whole ui/ tree). */
+@import 'tailwindcss' source('../');
 
-:root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+/* Tailwind v3 used `darkMode: 'class'`; keep `dark:` bound to the `.dark` class on <html>. */
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Tailwind v3 line heights for the font-size scale.
+
+  v4 gives `text-xs`..`text-4xl` unitless line-height ratios (e.g. `text-sm` is
+  calc(1.25 / 0.875)); v3 used absolute rems (`text-sm` is 1.25rem). The element carrying the
+  class renders the same either way, but descendants inherit the value: a `text-[10px]` or
+  `text-[11px]` label inside a `text-sm` block keeps a 20px line in v3 and shrinks to ~14px
+  in v4. The UI has ~260 such arbitrary-size labels, so keep v3's absolute values.
+*/
+@theme {
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl--line-height: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: system-ui, -apple-system, sans-serif;
+/*
+  Tailwind v3 compatibility.
+
+  Tailwind v4 changed several Preflight defaults. These base-layer rules keep the v3 look
+  and behaviour that this UI was designed against. Utilities still override them, because
+  base sits below the utilities cascade layer.
+
+  - Default border color: v4 uses `currentcolor`; v3 used gray-200. Most borders set an
+    explicit color, but bare `border`/`divide-*` without one would otherwise turn bright.
+  - Placeholder color: v4 uses the text color at 50% opacity; v3 used gray-400. Most inputs
+    here have no placeholder utility and rely on this default.
+  - Button cursor: v4 Preflight resets buttons to `cursor: default`; v3 used a pointer.
+    Only a minority of the UI's buttons set `cursor-pointer` explicitly.
+
+  The Tailwind v4 default ring (1px, currentcolor) needs no shim: every ring width in the
+  UI declares its ring color explicitly.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/*
+  Page defaults. Kept in the base layer: v4 emits utilities in a native cascade layer, so an
+  unlayered `body` rule would beat the `bg-gray-950 text-gray-100` utilities on <body> (in v3
+  the utilities won on specificity).
+*/
+@layer base {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: system-ui, -apple-system, sans-serif;
+  }
 }
 
 /* Severity/grade colors live in src/lib/constants.ts as Tailwind class maps. */

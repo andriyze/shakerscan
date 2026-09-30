@@ -477,7 +477,7 @@ export default function RequestCollectionsPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="rounded bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
+                    <span className="rounded-sm bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
                       encrypted · digest {detail.collection.payload_sha256.slice(0, 12)}
                     </span>
                     <Button variant="danger" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>
@@ -491,7 +491,7 @@ export default function RequestCollectionsPage() {
                   <p className="mt-1 text-xs text-gray-500">Stored separately and decrypted only by the assigned worker.</p>
                 </div>
                 {detail.environments.map((environment) => (
-                  <div key={environment.id} className="rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
+                  <div key={environment.id} className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
                     {environment.name} · {environment.variable_count} variables · digest {environment.payload_sha256.slice(0, 12)}
                   </div>
                 ))}
@@ -511,7 +511,7 @@ export default function RequestCollectionsPage() {
                   {selectedChoice && <p className="mt-1 text-xs text-blue-300">Owner: {selectedChoice.label} · hostname source {selectedChoice.locator}</p>}
                 </div>
                 {matchingBindings.map((binding) => (
-                  <div key={binding.id} className="rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
+                  <div key={binding.id} className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
                     {binding.allowed_origins.join(', ')} · {binding.environment_id ? 'environment attached' : 'no environment'}
                   </div>
                 ))}
@@ -535,7 +535,7 @@ export default function RequestCollectionsPage() {
                   <p className="mt-1 text-xs text-gray-500">Selectors are frozen with the collection, environment, binding, and replay policy digests.</p>
                 </div>
                 {detail.selections.map((selection) => (
-                  <div key={selection.id} className="flex flex-wrap items-center justify-between gap-3 rounded border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
+                  <div key={selection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-gray-800 bg-gray-950 p-3 text-sm text-gray-300">
                     <div>
                       <span className="font-medium text-white">{selection.name}</span>
                       <span className="ml-2 text-xs text-gray-500">{selection.selected_request_count} requests · {selection.replay_policy.replaceAll('_', ' ')} · {selection.selection_digest.slice(0, 12)}</span>
@@ -548,9 +548,9 @@ export default function RequestCollectionsPage() {
                   </div>
                 ))}
                 {!matchingBindings.length ? (
-                  <p className="rounded border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">Save an exact {targetKind} binding before creating a selection.</p>
+                  <p className="rounded-sm border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">Save an exact {targetKind} binding before creating a selection.</p>
                 ) : (
-                  <div className="space-y-3 rounded border border-gray-800 bg-gray-950 p-4">
+                  <div className="space-y-3 rounded-sm border border-gray-800 bg-gray-950 p-4">
                     <div className="grid gap-3 md:grid-cols-3">
                       <Field label="Selection name"><Input value={selectionName} onChange={(event) => setSelectionName(event.target.value)} /></Field>
                       <Field label="Binding"><Select value={selectionBindingId} onChange={(event) => setSelectionBindingId(event.target.value)}>{matchingBindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.allowed_origins.join(', ')}</option>)}</Select></Field>
@@ -615,7 +615,7 @@ export default function RequestCollectionsPage() {
       <Modal open={uploaderOpen} onClose={() => setUploaderOpen(false)} title="Upload request collection" size="xl">
         <div className="space-y-4">
           {uploadErrors.form && (
-            <div role="alert" className="rounded border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
+            <div role="alert" className="rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">
               {uploadErrors.form}
             </div>
           )}
@@ -633,7 +633,7 @@ export default function RequestCollectionsPage() {
           </div>
           <Field label="Environment JSON (optional)" error={uploadErrors.environment}><Textarea rows={5} value={environmentText} onChange={(event) => { setEnvironmentText(event.target.value); setUploadErrors({}) }} /></Field>
           {targetKind === 'device' && <Field label="Device web base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
-          <p className="rounded border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
+          <p className="rounded-sm border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
           <div className="flex justify-end gap-3">
             <Button variant="secondary" onClick={() => setUploaderOpen(false)}>Cancel</Button>
             <Button onClick={uploadCollection} loading={busy} disabled={!documentText.trim()}>Validate and upload</Button>

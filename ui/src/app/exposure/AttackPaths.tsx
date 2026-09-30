@@ -55,12 +55,12 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
         // Scope the accessible name to the essentials — without this, the name
         // is every piece of text in the header concatenated.
         aria-label={`${path.name} — ${path.severity || 'unrated'} ${complete ? 'complete' : 'partial'} chain, ${path.steps.length} steps${path.asset_label ? `, on ${path.asset_label}` : ''}`}
-        className="flex w-full items-start gap-3 p-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        className="flex w-full items-start gap-3 p-4 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <ChevronRight className={`mt-0.5 h-4 w-4 shrink-0 text-gray-500 transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase ${severityClass(path.severity)}`}>
+            <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] uppercase ${severityClass(path.severity)}`}>
               {path.severity || 'unrated'}
             </span>
             <span className={`${styles.displayTitle} truncate text-sm text-white`}>{path.name}</span>
@@ -91,11 +91,11 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
         <div className="border-t border-gray-800/60 px-4 pb-4 pt-3">
           {path.description && <p className="mb-3 text-xs text-gray-400">{path.description}</p>}
           {!complete && (path.missing_required || []).length > 0 && (
-            <div className="mb-3 rounded border border-amber-500/20 bg-amber-500/5 p-2.5">
+            <div className="mb-3 rounded-sm border border-amber-500/20 bg-amber-500/5 p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-amber-300">Missing to complete</div>
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {(path.missing_required || []).map((item, i) => (
-                  <span key={`${i}-${item}`} className="rounded bg-gray-900 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
+                  <span key={`${i}-${item}`} className="rounded-sm bg-gray-900 px-1.5 py-0.5 font-mono text-[10px] text-gray-300">
                     {item}
                   </span>
                 ))}
@@ -118,7 +118,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
                     {step.impact && <p className="mt-0.5 text-[11px] text-gray-500">→ {step.impact}</p>}
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       {step.finding_type && (
-                        <span className="inline-block rounded bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] text-gray-400">
+                        <span className="inline-block rounded-sm bg-gray-800 px-1.5 py-0.5 font-mono text-[10px] text-gray-400">
                           {step.finding_type}
                         </span>
                       )}
@@ -126,14 +126,14 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
                         <Link
                           href={`/findings/${step.finding_id}`}
                           title={step.finding_title || undefined}
-                          className="inline-flex items-center gap-1 rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-300 hover:text-blue-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                          className="inline-flex items-center gap-1 rounded-sm bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-300 hover:text-blue-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                         >
                           Finding <ExternalLink className="h-2.5 w-2.5" aria-hidden="true" />
                         </Link>
                       )}
                     </div>
                     {evidence && (
-                      <pre className="mt-1 max-h-16 overflow-auto rounded border border-gray-800 bg-black/30 p-1.5 text-[10px] text-gray-500">
+                      <pre className="mt-1 max-h-16 overflow-auto rounded-sm border border-gray-800 bg-black/30 p-1.5 text-[10px] text-gray-500">
                         {evidence}
                       </pre>
                     )}
@@ -143,7 +143,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
             })}
           </ol>
           {remediation.length > 0 && (
-            <div className="mt-3 rounded border border-emerald-500/20 bg-emerald-500/5 p-2.5">
+            <div className="mt-3 rounded-sm border border-emerald-500/20 bg-emerald-500/5 p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-emerald-400">Remediation</div>
               <ul className="mt-1 space-y-1 text-xs text-gray-300">
                 {remediation.map((item, i) => (
@@ -155,14 +155,14 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
           <div className="mt-3 flex flex-wrap gap-2">
             <Link
               href={path.scan_href}
-              className="inline-flex items-center gap-1 rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               View scan <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </Link>
             {path.findings_href && (
               <Link
                 href={path.findings_href}
-                className="inline-flex items-center gap-1 rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 Scan findings <ExternalLink className="h-3 w-3" aria-hidden="true" />
               </Link>
@@ -171,7 +171,7 @@ function PathCard({ path, onExploreAsset }: { path: ExposureAttackPath; onExplor
               <button
                 type="button"
                 onClick={() => onExploreAsset(path.asset_node_id as string)}
-                className="inline-flex items-center gap-1 rounded border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="inline-flex items-center gap-1 rounded-sm border border-gray-700 px-2.5 py-1 text-xs text-gray-300 hover:bg-gray-800 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 <Radar className="h-3 w-3" aria-hidden="true" /> Explore asset
               </button>
@@ -259,7 +259,7 @@ export function AttackPaths({
           <button
             type="button"
             onClick={() => setTypeFilter(null)}
-            className="ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="ml-auto inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-gray-400 hover:bg-gray-800/60 hover:text-gray-200 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <X className="h-3 w-3" aria-hidden="true" /> Clear filter
           </button>
@@ -276,7 +276,7 @@ export function AttackPaths({
                 type="button"
                 aria-pressed={active}
                 onClick={() => setTypeFilter(active ? null : g.type)}
-                className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                className={`inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 ${
                   active ? 'border-teal-400/50 bg-teal-500/15 text-teal-100' : 'border-gray-800 bg-gray-950 text-gray-300 hover:border-gray-700'
                 }`}
               >
@@ -295,7 +295,7 @@ export function AttackPaths({
                   aria-hidden="true"
                 />
                 <span className="max-w-[16rem] truncate">{g.label}</span>
-                <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
+                <span className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400">
                   {g.count}
                 </span>
                 {g.complete > 0 && <span className="text-[10px] text-red-300">{g.complete} complete</span>}

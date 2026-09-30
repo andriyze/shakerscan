@@ -30,7 +30,7 @@ function CountRow({ label, counts }: { label: string; counts?: Record<string, nu
     <div className="flex flex-wrap items-center gap-2">
       <span className="text-xs text-gray-500">{label}:</span>
       {Object.entries(counts).map(([k, v]) => (
-        <span key={k} className="rounded bg-gray-800 px-1.5 py-0.5 text-xs text-gray-300">{k.replace(/_/g, ' ')}: {v}</span>
+        <span key={k} className="rounded-sm bg-gray-800 px-1.5 py-0.5 text-xs text-gray-300">{k.replace(/_/g, ' ')}: {v}</span>
       ))}
     </div>
   )
@@ -325,7 +325,7 @@ export default function EvidenceRetentionPanel({
                 invalidateSweepPreview()
               }}
               disabled={hasExecutingIntent}
-              className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
+              className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden disabled:opacity-60"
             >
               <option value="">All classes</option>
               {RETENTION_CLASSES.map((c) => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
@@ -370,7 +370,7 @@ export default function EvidenceRetentionPanel({
                     const selected = unfinishedExecutions.find((item) => item.preview_id === event.target.value)
                     if (selected) restoreUnfinishedExecution(selected)
                   }}
-                  className="w-full max-w-2xl rounded-lg border border-amber-800 bg-gray-950 px-3 py-2 text-sm text-white focus:border-amber-500 focus:outline-none"
+                  className="w-full max-w-2xl rounded-lg border border-amber-800 bg-gray-950 px-3 py-2 text-sm text-white focus:border-amber-500 focus:outline-hidden"
                 >
                   <option value="">Choose an unfinished exact deletion…</option>
                   {unfinishedExecutions.map((item) => {
@@ -399,7 +399,7 @@ export default function EvidenceRetentionPanel({
                     invalidateSweepPreview()
                   }}
                   disabled={targetsLoading || hasExecutingIntent}
-                  className="max-w-xs rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                  className="max-w-xs rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-hidden disabled:opacity-60"
                 >
                   <option value="">{targetsLoading ? 'Loading targets…' : 'Select a target…'}</option>
                   {targets.map((target) => (
@@ -424,7 +424,7 @@ export default function EvidenceRetentionPanel({
                   }}
                   placeholder="policy default"
                   disabled={hasExecutingIntent}
-                  className="w-40 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-60"
+                  className="w-40 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden disabled:opacity-60"
                 />
               </div>
               <Button size="sm" variant="secondary" onClick={runSweepPreview} disabled={sweepLoading || !targetId || hasExecutingIntent}>

@@ -140,7 +140,7 @@ function OperatorAccessCard({
             Remote access requires HTTPS or ShakerScan&apos;s verified Tailscale bind. The token stays in this browser tab only.
           </p>
         </div>
-        <div className="flex w-full gap-2 lg:w-[28rem]">
+        <div className="flex w-full gap-2 lg:w-md">
           <Input
             type={showToken ? 'text' : 'password'}
             value={operatorToken}
@@ -720,14 +720,14 @@ export default function FleetPage() {
                   {node.last_error && (
                     <div className="mt-4 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-200">
                       <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                      <span className="break-words">{node.last_error}</span>
+                      <span className="wrap-break-word">{node.last_error}</span>
                     </div>
                   )}
 
                   <button
                     type="button"
                     onClick={() => void toggleActivity(node)}
-                    className="mt-4 inline-flex items-center gap-2 rounded text-sm text-blue-400 hover:text-blue-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="mt-4 inline-flex items-center gap-2 rounded-sm text-sm text-blue-400 hover:text-blue-300 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
                     aria-expanded={expanded}
                   >
                     {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}

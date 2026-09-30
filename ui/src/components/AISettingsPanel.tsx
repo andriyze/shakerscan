@@ -323,17 +323,17 @@ export default function AISettingsPanel() {
 
       {aiSettings && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
-          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+          <div className="bg-gray-800/70 border border-gray-700 rounded-sm px-2 py-1.5 text-gray-300">
             Shared key: {aiSettings.ai_api_key_configured ? 'configured' : 'not set'}
           </div>
-          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+          <div className="bg-gray-800/70 border border-gray-700 rounded-sm px-2 py-1.5 text-gray-300">
             AI retest: {aiSettings.ai_verify_enabled ? 'enabled' : 'disabled'}
           </div>
-          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+          <div className="bg-gray-800/70 border border-gray-700 rounded-sm px-2 py-1.5 text-gray-300">
             Scan classification:{' '}
             {aiSettings.ai_scan_classification_enabled ? `on (${aiSettings.ai_classify_min_severity}+)` : 'off'}
           </div>
-          <div className="bg-gray-800/70 border border-gray-700 rounded px-2 py-1.5 text-gray-300">
+          <div className="bg-gray-800/70 border border-gray-700 rounded-sm px-2 py-1.5 text-gray-300">
             Smart proof filter: {aiSettings.proof_required_for_smart ? 'on' : 'off'}
           </div>
         </div>
@@ -363,7 +363,7 @@ export default function AISettingsPanel() {
           />
 
           {demoModeEnabledInput && (
-            <div className="space-y-3 rounded border border-gray-800 bg-gray-900/50 p-3">
+            <div className="space-y-3 rounded-sm border border-gray-800 bg-gray-900/50 p-3">
               <div>
                 <p className="text-xs font-medium text-gray-300">Honey source</p>
                 <p className="text-[11px] text-gray-500 mt-0.5">
@@ -404,7 +404,7 @@ export default function AISettingsPanel() {
                 type="button"
                 onClick={() => setShowDemoNetworking(!showDemoNetworking)}
                 aria-expanded={showDemoNetworking}
-                className="rounded text-xs text-gray-400 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="rounded-sm text-xs text-gray-400 hover:text-gray-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {showDemoNetworking ? 'Hide networking details' : 'Show networking details'}
               </button>
@@ -431,7 +431,7 @@ export default function AISettingsPanel() {
         </Fieldset>
       )}
 
-      <div className="rounded border border-blue-500/30 bg-blue-500/10 px-3 py-2">
+      <div className="rounded-sm border border-blue-500/30 bg-blue-500/10 px-3 py-2">
         <p className="text-xs font-medium text-blue-200">Pipeline flow</p>
         <p className="text-xs text-blue-100/90 mt-1">
           Scanner tools run first. Optional scan-time AI helps with triage. Retests run deterministic proofs first, then
@@ -636,7 +636,7 @@ export default function AISettingsPanel() {
           <p className="text-xs text-gray-500">
             Retest AI uses the shared provider settings from <span className="text-gray-300">Shared Provider</span>.
           </p>
-          <div className="rounded border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
             Effective AI threshold: <span className="font-medium text-gray-200">{aiEscalationMinSeverityInput}</span>.
             Change it once under Verification Policy below.
           </div>
@@ -724,7 +724,7 @@ export default function AISettingsPanel() {
               ))}
             </select>
           </Field>
-          <div className="rounded border border-blue-500/20 bg-blue-500/10 p-3">
+          <div className="rounded-sm border border-blue-500/20 bg-blue-500/10 p-3">
             <div className="text-xs font-medium text-blue-200">Effective policy preview</div>
             {thresholdContradiction && (
               <p role="alert" className="mt-1 text-xs text-red-300">
@@ -753,7 +753,7 @@ export default function AISettingsPanel() {
               Precedence: verification baseline → optional automatic queue → deterministic proof → AI escalation threshold.
             </p>
           </div>
-          <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1.5">
+          <p className="text-xs text-yellow-400/90 bg-yellow-500/10 border border-yellow-500/20 rounded-sm px-2 py-1.5">
             If proof-required is enabled, Scan reports can look quieter because unverified findings are filtered out of
             the primary report.
           </p>
@@ -770,7 +770,7 @@ export default function AISettingsPanel() {
             checked={autoRetestEnabledInput}
             onChange={setAutoRetestEnabledInput}
           />
-          <div className="rounded border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
+          <div className="rounded-sm border border-gray-800 bg-gray-950/50 px-3 py-2 text-xs text-gray-400">
             Automatic queue threshold follows the canonical verification baseline:
             {' '}<span className="font-medium text-gray-200">{autoRetestMinSeverityInput}</span>.
           </div>
@@ -847,7 +847,7 @@ function ToggleRow({
       aria-checked={checked}
       aria-label={label}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-start justify-between gap-3 rounded border border-gray-800 bg-gray-900/50 px-2.5 py-2 text-left transition-colors hover:border-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
+      className="flex w-full items-start justify-between gap-3 rounded-sm border border-gray-800 bg-gray-900/50 px-2.5 py-2 text-left transition-colors hover:border-gray-700 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-950"
     >
       <span className="min-w-0 space-y-0.5">
         <span className="block text-xs text-gray-200">{label}</span>

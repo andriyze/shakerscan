@@ -173,9 +173,9 @@ export default function AISurfaceInventoryPanel() {
             value={search}
             onChange={(e) => { setSearch(e.target.value); setVisible(PAGE_STEP) }}
             placeholder={`Search ${surfaces.length} surfaces by endpoint or owner…`}
-            className="mb-3 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            className="mb-3 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-hidden"
           />
-          <div className="max-h-[36rem] overflow-auto rounded-lg border border-gray-800">
+          <div className="max-h-144 overflow-auto rounded-lg border border-gray-800">
             <table className="min-w-full divide-y divide-gray-800 text-sm">
               <thead className="sticky top-0 bg-gray-900">
                 <tr className="text-left text-xs uppercase tracking-wide text-gray-500">
