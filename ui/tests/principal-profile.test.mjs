@@ -9,7 +9,7 @@ import test from 'node:test'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const out = mkdtempSync(path.join(tmpdir(), 'principal-profile-'))
-execFileSync('npx', ['tsc', 'src/lib/principalProfile.ts', '--module', 'commonjs', '--target', 'es2022', '--outDir', out, '--skipLibCheck'], { cwd: root })
+execFileSync('npx', ['tsc', 'src/lib/principalProfile.ts', '--module', 'commonjs', '--target', 'es2022', '--outDir', out, '--skipLibCheck', '--ignoreConfig'], { cwd: root })
 const require = createRequire(import.meta.url)
 const { buildPrincipalProfilePayload } = require(path.join(out, 'principalProfile.js'))
 test.after(() => rmSync(out, { recursive: true, force: true }))

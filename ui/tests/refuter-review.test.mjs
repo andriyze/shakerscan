@@ -9,7 +9,7 @@ import test from 'node:test'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const out = mkdtempSync(path.join(tmpdir(), 'refuter-review-'))
-execFileSync('npx', ['tsc', 'src/lib/refuterReview.ts', '--module', 'commonjs', '--target', 'es2022', '--outDir', out, '--skipLibCheck'], { cwd: root })
+execFileSync('npx', ['tsc', 'src/lib/refuterReview.ts', '--module', 'commonjs', '--target', 'es2022', '--outDir', out, '--skipLibCheck', '--ignoreConfig'], { cwd: root })
 const require = createRequire(import.meta.url)
 const { buildRefuterReviewPlanView, buildRefuterAnnotationPayload, refuterVerdictClass } = require(path.join(out, 'refuterReview.js'))
 test.after(() => rmSync(out, { recursive: true, force: true }))

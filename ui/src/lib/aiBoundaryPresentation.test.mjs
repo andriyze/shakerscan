@@ -1,13 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
-import ts from 'typescript'
 
-const source = readFileSync(new URL('./aiBoundaryPresentation.ts', import.meta.url), 'utf8')
-const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } })
-const { boundaryBaseFromTarget, boundaryCandidateIds, boundaryScanMessage, savedArtifactMatchesSource } = await import(
-  `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
-)
+import { boundaryBaseFromTarget, boundaryCandidateIds, boundaryScanMessage, savedArtifactMatchesSource } from './aiBoundaryPresentation.ts'
 
 test('saved fixture base omits execution fragments and credentials', () => {
   const identity = { path: '/identity', subject_field: 'subject', tenant_field: 'tenant' }

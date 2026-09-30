@@ -19,10 +19,10 @@
     "tr46": "6.0.0"
   },
   "devDependencies": {
-    "@types/node": "24.10.1",
+    "@types/node": "26.6.3",
     "@types/tr46": "5.0.1",
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   }
 }

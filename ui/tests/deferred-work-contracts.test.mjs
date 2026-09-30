@@ -20,6 +20,7 @@ execFileSync(
     '--target', 'es2022',
     '--outDir', outDir,
     '--skipLibCheck',
+    '--ignoreConfig',
   ],
   { cwd: uiRoot, stdio: 'pipe' },
 )
