@@ -11,7 +11,7 @@ const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = mkdtempSync(path.join(tmpdir(), 'ai-boundary-workflow-'))
 execFileSync('npx', [
   'tsc', 'src/lib/aiBoundary.ts', 'src/lib/apiConfig.ts', '--module', 'commonjs',
-  '--target', 'es2022', '--outDir', outDir, '--skipLibCheck',
+  '--target', 'es2022', '--outDir', outDir, '--skipLibCheck', '--ignoreConfig',
 ], { cwd: uiRoot, stdio: 'pipe' })
 const require = createRequire(import.meta.url)
 const boundary = require(path.join(outDir, 'aiBoundary.js'))

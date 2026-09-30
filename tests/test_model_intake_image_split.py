@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import yaml
 
@@ -73,6 +74,24 @@ def test_the_release_images_have_no_vulnerability_waivers():
     assert "release_image_inventory" in validator
     inventory = json.loads((ROOT / "install" / "release-images.json").read_text())
     assert "model_intake" in {item["key"] for item in inventory["images"]}
+
+
+def _locked_version(lock: pathlib.Path, package: str) -> tuple[int, ...]:
+    match = re.search(rf"^{package}==([0-9.]+) ", lock.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, f"{package} is not pinned in {lock}"
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def test_pyjwt_stays_above_the_token_forgery_fix_despite_semgreps_pin():
+    # Semgrep pins pyjwt~=2.13.0; 2.13.x fails the image gate (CVE-2026-102268 and five highs,
+    # fixed in 2.14.0). The Semgrep lock overrides that pin rather than waiving the finding.
+    for lock in ("scanner/model_intake_tools/semgrep.lock", "scanner/requirements.lock"):
+        assert _locked_version(ROOT / lock, "pyjwt") >= (2, 14, 0), lock
+    semgrep_lock = (ROOT / "scanner" / "model_intake_tools" / "semgrep.lock").read_text(encoding="utf-8")
+    # Regenerating the lock from its recorded command must keep the override...
+    assert "--override scanner/model_intake_tools/semgrep-overrides.txt" in semgrep_lock.splitlines()[1]
+    # ...and pip must install the overridden graph as locked instead of re-resolving Semgrep's pin.
+    assert 'if [ "${tool}" = "semgrep" ]; then deps="--no-deps"; fi;' in MI
 
 
 def test_model_intake_pip_audit_environment_removes_avoidable_build_tools():

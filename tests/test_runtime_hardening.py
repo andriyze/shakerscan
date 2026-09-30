@@ -1313,8 +1313,8 @@ def test_scanner_image_builds_network_tools_above_reviewed_security_floors():
     assert "golang.org/x/text@v0.41.0" in dockerfile
     assert "github.com/jackc/pgx/v5@v5.9.0" in dockerfile
     assert "apt-get purge -y --auto-remove" in dockerfile
-    assert "playwright==1.62.0" in requirements
-    assert "playwright/python:v1.62.0-noble@sha256:" in dockerfile
+    assert "playwright==1.63.0" in requirements
+    assert "playwright/python:v1.63.0-noble@sha256:" in dockerfile
 
 
 def test_compose_passes_secret_bound_gateway_and_join_rate_limit_to_api_processes():

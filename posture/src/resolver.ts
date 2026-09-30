@@ -37,7 +37,7 @@ function tcp(server: string, port: number, query: Uint8Array, signal: AbortSigna
     socket.on('error', error => done(error));
     socket.on('connect', () => socket.end(Buffer.concat([Buffer.from([query.length >> 8, query.length & 255]), query])));
     socket.on('data', chunk => {
-      chunks.push(chunk);
+      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
       const all = Buffer.concat(chunks);
       if (all.length > 65537) done(new Error('dns_too_large'));
       else if (all.length >= 2 && all.length >= 2 + all.readUInt16BE(0)) done(undefined, all.subarray(2, 2 + all.readUInt16BE(0)));

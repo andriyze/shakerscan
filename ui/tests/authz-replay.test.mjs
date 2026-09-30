@@ -23,6 +23,7 @@ execFileSync(
     '--outDir',
     outDir,
     '--skipLibCheck',
+    '--ignoreConfig',
   ],
   { cwd: uiRoot, stdio: 'pipe' }
 )

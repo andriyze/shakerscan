@@ -88,7 +88,7 @@ def test_api_process_execution_reasons_remain_narrow_and_named():
 def test_api_image_omits_worker_executables_and_defaults_to_non_root():
     dockerfile = (ROOT / "scanner" / "Dockerfile.api").read_text(encoding="utf-8")
     assert "FROM ${SCANNER_RUNTIME_IMAGE} AS scanner-runtime" in dockerfile
-    assert "FROM mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:" in dockerfile
+    assert "FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:" in dockerfile
     assert "COPY --from=scanner-runtime /opt/tools" not in dockerfile
     assert "test ! -e /opt/tools" in dockerfile
     assert "USER 10002:10002" in dockerfile
