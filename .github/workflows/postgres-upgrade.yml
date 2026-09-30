@@ -1,0 +1,39 @@
+name: PostgreSQL upgrade
+
+# The launcher migrates PostgreSQL 16 data to the 18 cluster layout before anything can start
+# PostgreSQL. This runs that migration against the real images in throwaway Compose projects:
+# the happy path with rollback, a no-op rerun, an 18 cluster started too early, a failed restore
+# followed by a retry, an empty host, and an unsupported POSTGRES_IMAGE.
+on:
+  pull_request:
+    paths:
+      - 'scanner.sh'
+      - 'scripts/postgres_upgrade.sh'
+      - 'scripts/postgres_upgrade_smoke.sh'
+      - 'docker-compose.yml'
+      - 'docker-compose.release.yml'
+      - 'db/init.sql'
+      - 'install/index.sh'
+      - 'tests/test_postgres_upgrade.py'
+      - '.github/workflows/postgres-upgrade.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Migrate PostgreSQL 16 data to 18 through the launcher
+        run: bash scripts/postgres_upgrade_smoke.sh

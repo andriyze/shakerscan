@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -159,6 +160,9 @@ restart_services() { persist_remote_access_env; echo RESTARTED; }
 '''
     script = tmp_path / "scanner.sh"
     script.write_text(before + overrides + "\n# Parse arguments" + after, encoding="utf-8")
+    # The launcher refuses to run without its PostgreSQL upgrade module beside it.
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    shutil.copy(ROOT / "scripts" / "postgres_upgrade.sh", tmp_path / "scripts" / "postgres_upgrade.sh")
     return subprocess.run(["bash", str(script), *args], env=_env(), capture_output=True, text=True, timeout=10)
 
 

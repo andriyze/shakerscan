@@ -527,7 +527,8 @@ refuse_foreign_install() {
         say "To adopt the data volumes from $INSTALL_DIR anyway (that install's results/ evidence will not be visible here), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
         exit 1
     fi
-    if docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
+    if docker volume inspect "${project}_postgres-cluster" >/dev/null 2>&1 || \
+       docker volume inspect "${project}_postgres-data" >/dev/null 2>&1; then
         say "Error: a PostgreSQL data volume for Compose project '$project' already exists, but $INSTALL_DIR is not the install that created it." >&2
         say "If that install lives in another directory, upgrade it in place: SHAKERSCAN_HOME=<that directory> sh -c 'curl -fsSL $INSTALL_URL | sh'" >&2
         say "To adopt the volume from $INSTALL_DIR (its database password will be rotated), set SHAKERSCAN_ADOPT_EXISTING_DATA=1." >&2
@@ -576,6 +577,7 @@ download "$REPO_RAW_BASE/install/MANIFEST.sha256" "$INSTALL_DIR/$RUNTIME_MANIFES
 INSTALL_MANIFEST_FILE="$INSTALL_STAGE/$RUNTIME_MANIFEST_NAME"
 [ "$(grep -c . "$INSTALL_MANIFEST_FILE")" -gt 0 ] || fail "release manifest is empty"
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
+download "$REPO_RAW_BASE/scripts/postgres_upgrade.sh" "$INSTALL_DIR/scripts/postgres_upgrade.sh"
 download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compose.release.yml"
 download "$REPO_RAW_BASE/docker-compose.worker.yml" "$INSTALL_DIR/docker-compose.worker.yml"
 download "$REPO_RAW_BASE/docker-compose.broker-worker.yml" "$INSTALL_DIR/docker-compose.broker-worker.yml"

@@ -1,6 +1,6 @@
 # Upgrade and Rollback
 
-**Status:** current source/installer upgrade runbook; reconciled 2026-09-28.
+**Status:** current source/installer upgrade runbook; reconciled 2026-09-30.
 
 ShakerScan upgrades are in-place and run database migrations when the API and workers start. Required
 schema invariants fail closed: if a migration cannot complete safely, the affected service exits
@@ -124,10 +124,63 @@ Afterwards re-enable any opt-in lane you used (`shakerscan devices start`, `shak
 Never use `docker compose down -v`, `shakerscan reset`, `docker system prune --volumes`, or
 `scripts/clean-shakerscan.sh` for this: each deletes the database.
 
+## PostgreSQL 18
+
+Releases from this one run PostgreSQL 18; every earlier release ran PostgreSQL 16. A newer PostgreSQL
+major cannot open older data files, and PostgreSQL 18 images keep each major's data in its own
+directory under `/var/lib/postgresql`, so the data moves from the `postgres-data` volume to a new
+`postgres-cluster` volume. `shakerscan start` (and therefore the installer) does this automatically
+before anything can start PostgreSQL:
+
+1. it stops the running stack, starts PostgreSQL 16 on the existing data, and records every table's
+   row count, every sequence, and every role;
+2. it writes `pg_dumpall` to a private `backups/postgres-16-to-18-TIMESTAMP/` directory;
+3. it restores the dump into a new PostgreSQL 18 cluster, stopping at the first error;
+4. it compares row counts, sequences, and role password hashes with the source and publishes the new
+   cluster only if they all match.
+
+Nothing is written to the PostgreSQL 16 data (PostgreSQL's own startup and shutdown aside): the
+`postgres-data` volume stays as it was, for rollback. Plan for free space of about the database size
+for the dump on the host and 1.2 times the database size in Docker's disk; the upgrade checks both
+before it starts. Most installs take a few minutes.
+
+To run the step on its own, without starting the stack, or to see where an install stands:
+
+```bash
+shakerscan db-upgrade            # migrate now if needed, then print the status
+shakerscan db-upgrade --status   # target image, what each volume holds, and the plan
+```
+
+If the upgrade fails, it says why and where the details are (`restore.log`, `verify.diff`), publishes
+nothing, and does not start the stack; the PostgreSQL 16 data is untouched. Fix the cause and run
+`shakerscan start` again, or keep using the previous release. A `POSTGRES_IMAGE` override must name a
+PostgreSQL 18 or newer image.
+
+If `start` reports that `postgres-cluster` already holds a PostgreSQL 18 cluster that was not
+migrated, PostgreSQL 18 was started before the upgrade ran (for example with a raw
+`docker compose up`) and initialized an empty database. The real data is still in `postgres-data`.
+When nothing in the new cluster is needed, remove it with `docker volume rm shakerscan_postgres-cluster`
+and run `shakerscan start` again.
+
+After you have checked the upgraded release, reclaim the space the PostgreSQL 16 data uses. This
+asks for confirmation and removes the only copy a previous release can start with:
+
+```bash
+shakerscan db-upgrade --remove-legacy
+```
+
+`shakerscan reset` deletes both volumes.
+
 ## Roll back after a failed upgrade
 
 Rollback has two parts: restore the pre-upgrade data, then restore the previous release runtime and
 images. Replace the example paths and version with the values from the backup manifest.
+
+To go back from PostgreSQL 18 to a release that runs PostgreSQL 16, skip the database restore below
+and only reinstall the previous release (the last part of this section). That release reads the
+`postgres-data` volume, which still holds the data exactly as it was when the upgrade copied it;
+changes made after the upgrade are not in it. Do not start the new release's PostgreSQL with
+`docker compose up` for this.
 
 Stop ShakerScan and start only PostgreSQL:
 
