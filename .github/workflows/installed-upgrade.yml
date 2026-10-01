@@ -1,0 +1,105 @@
+name: Installed upgrade
+
+# Installs the current stable release with the real installer, gives it data, upgrades it to a
+# candidate's runtime files and exact image digests, rolls back with the pinned installer and upgrades
+# again (scripts/installed_upgrade_smoke.sh). The release candidate calls this before certifying;
+# a pull request that changes the test runs it against the newest candidate built on main.
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit whose tree is installed
+        required: true
+        type: string
+      receipt_artifact:
+        description: This run's uncertified release-candidate receipt artifact
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - 'scripts/installed_upgrade_smoke.sh'
+      - '.github/workflows/installed-upgrade.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: installed-upgrade-${{ github.ref }}-${{ inputs.candidate_sha || github.sha }}
+  cancel-in-progress: true
+
+env:
+  SCANNER_IMAGE: shakerscan/shakerscan-scanner
+  API_IMAGE: shakerscan/shakerscan-api
+  UI_IMAGE: shakerscan/shakerscan-ui
+  SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+  MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
+
+jobs:
+  installed-upgrade:
+    name: Upgrade a real installed stable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Download this run's candidate receipt
+        if: ${{ inputs.receipt_artifact != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ${{ inputs.receipt_artifact }}
+          path: artifacts/candidate
+
+      - name: Download the newest candidate built on main
+        if: ${{ inputs.receipt_artifact == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          run_id="$(gh run list -R "$REPOSITORY" --workflow build-on-main.yml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId')"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "no successful build-on-main run" >&2; exit 1; }
+          artifact="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts" \
+            --jq '[.artifacts[] | select(.name | startswith("release-candidate-uncertified-"))][0].name')"
+          gh run download "$run_id" -R "$REPOSITORY" -n "$artifact" -D artifacts/candidate
+
+      - name: Write the candidate image lock
+        shell: bash
+        run: |
+          receipt=artifacts/candidate/release-candidate-receipt.json
+          {
+            echo "SCANNER_IMAGE=${SCANNER_IMAGE}@$(jq -r '.images.scanner' "$receipt")"
+            echo "API_IMAGE=${API_IMAGE}@$(jq -r '.images.api' "$receipt")"
+            echo "UI_IMAGE=${UI_IMAGE}@$(jq -r '.images.ui' "$receipt")"
+            echo "SIGNER_IMAGE=${SIGNER_IMAGE}@$(jq -r '.images.signer' "$receipt")"
+            echo "MODEL_INTAKE_IMAGE=${MODEL_INTAKE_IMAGE}@$(jq -r '.images.model_intake' "$receipt")"
+            echo "RUNTIME_MANIFEST_SHA256=$(sha256sum install/MANIFEST.sha256 | cut -d' ' -f1)"
+          } > artifacts/candidate/release-image-lock.env
+          grep -Ec '^[A-Z_]+_IMAGE=shakerscan/[a-z-]+@sha256:[0-9a-f]{64}$' artifacts/candidate/release-image-lock.env | grep -qx 5
+          cat artifacts/candidate/release-image-lock.env
+
+      - name: Free runner disk for two release image sets
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af > /dev/null
+          df -h /
+
+      - name: Install stable, upgrade to the candidate, roll back and upgrade again
+        env:
+          CANDIDATE_IMAGE_LOCK: artifacts/candidate/release-image-lock.env
+          UPGRADE_RECEIPT_PATH: ${{ github.workspace }}/artifacts/installed-upgrade/receipt.json
+        run: bash scripts/installed_upgrade_smoke.sh
+
+      - name: Keep the receipt and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: installed-upgrade-${{ inputs.candidate_sha || github.sha }}
+          path: artifacts/installed-upgrade
+          if-no-files-found: warn
+          retention-days: 14
