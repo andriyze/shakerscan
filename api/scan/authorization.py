@@ -128,6 +128,7 @@ def revalidate_action_authority(
     scope_receipt_id: str | None = None,
     approval_receipt_id: str | None = None,
     now: datetime | None = None,
+    asset_authority_validated: bool = False,
 ) -> ActionAuthorityDecision:
     """Evaluate fresh durable authority without granting or widening scope."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -227,7 +228,14 @@ async def revalidate_scan_action_authority(
         approval_receipt = await conn.fetchrow(
             "SELECT * FROM approval_receipts WHERE id=$1", approval_id,
         )
+    from targets.asset_authority import standing_authorization_matches_target
+    asset_authority_validated = False
+    if approval and scope and str(approval.get("action_name") or "") == STANDING_ACTION_NAME:
+        asset_authority_validated = await standing_authorization_matches_target(conn,
+            target_id=target_binding.target_id,scope_target_id=scope.get("target_id"),
+            approval_receipt_id=approval.get("id"))
     return revalidate_action_authority(
+        asset_authority_validated=asset_authority_validated,
         action=action,
         target_binding=target_binding,
         scope_receipt=scope_receipt,

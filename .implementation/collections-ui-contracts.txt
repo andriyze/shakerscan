@@ -1,0 +1,608 @@
+
+=== api/request_collection_api.py:360 create_request_collection ===
+async def create_request_collection(request: RequestCollectionCreate):
+    target_uuid = _uuid_or_400(request.target_id, "target id")
+    try:
+        payload, summary, index = validate_and_index_request_collection(
+            request.document,
+            request.environment,
+            requested_name=request.name,
+            import_format=request.format,
+            base_url=request.base_url,
+            import_limit=request.import_limit,
+            max_document_bytes=request.max_document_bytes,
+        )
+    except RequestImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    collection_payload = dict(payload)
+    environment_payload = collection_payload.pop("environment", None)
+    collection_digest = _request_collection_json_digest(collection_payload)
+    encrypted_payload = _encrypt_request_collection_payload(
+        collection_payload, kind="document",
+    )
+    summary = {
+        **dict(summary),
+        "document_sha256": collection_digest,
+        "payload_sha256": collection_digest,
+        "environment_stored_separately": environment_payload is not None,
+    }
+    try:
+        from public_retry_atomic import acquire_for_atomic_retry
+    except ModuleNotFoundError:
+        from api.public_retry_atomic import acquire_for_atomic_retry
+    # A keyed upload shares the middleware transaction so its receipt and every
+    # collection/environment/binding/index change commit or roll back together.
+    async with acquire_for_atomic_retry(_pool()) as conn:
+        web_target = await conn.fetchrow(
+            "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
+        )
+        device_target = None if web_target else await conn.fetchrow(
+            """SELECT id, primary_locator FROM device_targets
+               WHERE id=$1 AND is_active=true""",
+            target_uuid,
+        )
+        if not web_target and not device_target:
+            raise HTTPException(
+                status_code=404, detail="Active web or device target not found",
+            )
+        async with conn.transaction():
+            collection_name = summary.get("name") or request.name or "Request collection"
+            existing = await conn.fetchrow(
+                """SELECT id, payload_sha256 FROM request_collections
+                   WHERE name=$1 AND (($2::uuid IS NOT NULL AND target_id=$2) OR
+                                      ($3::uuid IS NOT NULL AND device_target_id=$3))
+                   FOR UPDATE""",
+                collection_name,
+                target_uuid if web_target else None,
+                target_uuid if device_target else None,
+            )
+            collection_id = existing["id"] if existing else uuid.uuid4()
+            row = await conn.fetchrow(
+                """INSERT INTO request_collections (
+                       id, target_id, device_target_id, name, format, encrypted_payload,
+                       payload_sha256, request_count, safe_request_count,
+                       potentially_mutating_request_count, metadata_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                   ON CONFLICT (id)
+                   DO UPDATE SET format=EXCLUDED.format, encrypted_payload=EXCLUDED.encrypted_payload,
+                       payload_sha256=EXCLUDED.payload_sha256, request_count=EXCLUDED.request_count,
+                       safe_request_count=EXCLUDED.safe_request_count,
+                       potentially_mutating_request_count=EXCLUDED.potentially_mutating_request_count,
+                       metadata_json=EXCLUDED.metadata_json, updated_at=NOW(), is_active=true
+                   RETURNING *""",
+                collection_id,
+                target_uuid if web_target else None,
+                target_uuid if device_target else None,
+                collection_name,
+                summary.get("format") or request.format,
+                encrypted_payload,
+                collection_digest,
+                int(summary.get("request_count") or len(index)),
+                sum(1 for item in index if item.get("safe_method")),
+                sum(1 for item in index if not item.get("safe_method")),
+                json.dumps({
+                    key: value for key, value in summary.items() if key != "requests"
+                }, default=str),
+            )
+            await conn.execute(
+                "DELETE FROM request_collection_requests WHERE collection_id=$1",
+                row["id"],
+            )
+            if index:
+                await conn.executemany(
+                    """INSERT INTO request_collection_requests (
+                           collection_id, request_id, ordinal, folder, name, method,
+                           redacted_url, normalized_path, body_mode, auth_type, tags_json,
+                           content_type, body_field_names_json, safe_method, supported
+                       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)""",
+                    [(
+                        row["id"], item["request_id"], item["ordinal"],
+                        item.get("folder"), item.get("name"), item["method"],
+                        item.get("redacted_url"), item.get("normalized_path"),
+                        item.get("body_mode"), item.get("auth_type"),
+                        json.dumps(item.get("tags") or []),
+                        item.get("content_type"),
+                        json.dumps(item.get("body_field_names") or []),
+                        item.get("safe_method", False), item.get("supported", True),
+                    ) for item in index],
+                )
+            if existing and str(existing.get("payload_sha256") or "") != collection_digest:
+                await conn.execute(
+                    """UPDATE request_collection_selections
+                       SET is_active=false, updated_at=NOW()
+                       WHERE collection_id=$1 AND is_active=true""",
+                    row["id"],
+                )
+
+            environment_row = None
+            if environment_payload is not None:
+                if not isinstance(environment_payload, Mapping):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Postman environment must be one JSON object",
+                    )
+                environment_digest = _request_collection_json_digest(environment_payload)
+                environment_name = str(
+                    request.environment_name
+                    or environment_payload.get("name")
+                    or "Default environment"
+                ).strip()[:160]
+                existing_environment = await conn.fetchrow(
+                    """SELECT id, payload_sha256
+                       FROM request_collection_environments
+                       WHERE collection_id=$1 AND name=$2 FOR UPDATE""",
+                    row["id"], environment_name,
+                )
+                environment_row = await conn.fetchrow(
+                    """INSERT INTO request_collection_environments (
+                           collection_id, name, encrypted_payload, payload_sha256,
+                           variable_count, metadata_json
+                       ) VALUES ($1,$2,$3,$4,$5,$6)
+                       ON CONFLICT (collection_id, name) DO UPDATE SET
+                           encrypted_payload=EXCLUDED.encrypted_payload,
+                           payload_sha256=EXCLUDED.payload_sha256,
+                           variable_count=EXCLUDED.variable_count,
+                           metadata_json=EXCLUDED.metadata_json,
+                           is_active=true, updated_at=NOW()
+                       RETURNING *""",
+                    row["id"],
+                    environment_name,
+                    _encrypt_request_collection_payload(
+                        environment_payload, kind="environment",
+                    ),
+                    environment_digest,
+                    _request_collection_environment_count(environment_payload),
+                    json.dumps({
+                        "schema_version": "request-collection-environment/v1",
+                        "secret_values_visible": False,
+                    }),
+                )
+                if (
+                    existing_environment
+                    and str(existing_environment.get("payload_sha256") or "")
+                    != environment_digest
+                ):
+                    await conn.execute(
+                        """UPDATE request_collection_selections s
+                           SET is_active=false, updated_at=NOW()
+                           FROM request_collection_bindings b
+                           WHERE s.binding_id=b.id
+                             AND b.environment_id=$1
+                             AND s.is_active=true""",
+                        environment_row["id"],
+                    )
+
+            binding_row = None
+            binding_origin = None
+            binding_kind = "web"
+            if web_target:
+                parsed_target = urllib.parse.urlsplit(str(web_target["url"] or ""))
+                binding_origin = canonical_collection_origin(
+                    f"{parsed_target.scheme}://{parsed_target.netloc}"
+                )
+            elif request.base_url:
+                parsed_base = urllib.parse.urlsplit(request.base_url)
+                binding_origin = canonical_collection_origin(
+                    f"{parsed_base.scheme}://{parsed_base.netloc}"
+                )
+                binding_kind = "device"
+            if binding_origin:
+                binding_row = await conn.fetchrow(
+                    """INSERT INTO request_collection_bindings (
+                           collection_id, target_kind, target_id, allowed_origins,
+                           environment_id
+                       ) VALUES ($1,$2,$3,$4,$5)
+                       ON CONFLICT (collection_id, target_kind, target_id) DO UPDATE SET
+                           allowed_origins=EXCLUDED.allowed_origins,
+                           environment_id=COALESCE(EXCLUDED.environment_id,
+                               request_collection_bindings.environment_id),
+                           is_active=true, updated_at=NOW()
+                       RETURNING *""",
+                    row["id"], binding_kind, target_uuid,
+                    json.dumps([binding_origin]),
+                    environment_row["id"] if environment_row else None,
+                )
+    result = _public_request_collection(row)
+    result["environment"] = (
+        _public_request_collection_environment(environment_row)
+        if environment_row else None
+    )
+    result["binding"] = (
+        _public_request_collection_binding(binding_row) if binding_row else None
+    )
+    return result
+
+=== api/request_collection_api.py:574 list_request_collections ===
+async def list_request_collections(
+    target_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM request_collections
+               WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
+               ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
+            target_uuid, limit, offset,
+        )
+    return {
+        "collections": [_public_request_collection(row) for row in rows],
+        "count": len(rows), "limit": limit, "offset": offset,
+    }
+
+=== api/request_collection_api.py:659 get_request_collection ===
+async def get_request_collection(collection_id: str):
+    collection_uuid = _uuid_or_400(collection_id, "request collection id")
+    async with _pool().acquire() as conn:
+        collection = await _request_collection_owner(conn, collection_uuid)
+        environments = await conn.fetch(
+            """SELECT id, collection_id, name, payload_sha256, variable_count,
+                      metadata_json, is_active, created_at, updated_at
+               FROM request_collection_environments
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY lower(name), id""",
+            collection_uuid,
+        )
+        bindings = await conn.fetch(
+            """SELECT * FROM request_collection_bindings
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY target_kind, target_id, id""",
+            collection_uuid,
+        )
+        selections = await conn.fetch(
+            """SELECT * FROM request_collection_selections
+               WHERE collection_id=$1 AND is_active=true
+               ORDER BY lower(name), id""",
+            collection_uuid,
+        )
+    return {
+        "collection": _public_request_collection(collection),
+        "environments": [
+            _public_request_collection_environment(row) for row in environments
+        ],
+        "bindings": [_public_request_collection_binding(row) for row in bindings],
+        "selections": [
+            _public_request_collection_selection(row) for row in selections
+        ],
+        "secret_values_visible": False,
+    }
+
+=== api/targets/router.py:3112 _authorized_for_active_testing_sql ===
+def _authorized_for_active_testing_sql(column: str = "t.url") -> str:
+    """The EXISTS predicate for a standing authorization, matching the canonical reader.
+
+    A listing that only checked status, approver and expiry reported "Authorized" for receipts
+    current_target_authorization() rejects -- a blocked scope, or one naming a host the target no
+    longer has. The page then showed authority that later steps did not honour.
+    """
+    host = _TARGET_HOST_SQL.format(col=column)
+    return f"""EXISTS (
+                    SELECT 1 FROM approval_receipts a
+                    JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                    WHERE s.target_id = t.id AND a.status = 'active'
+                      AND a.approved_by IS NOT NULL
+                      AND a.risk_tier = ANY(ARRAY['active', 'intrusive'])
+                      AND a.action_name = 'target.authorization'
+                      AND (a.expires_at IS NULL OR a.expires_at > NOW())
+                      AND COALESCE(s.verdict, '') <> 'blocked'
+                      AND (
+                          lower(COALESCE(s.normalized_scope->>'host', '')) = {host}
+                          OR EXISTS (
+                              SELECT 1 FROM jsonb_array_elements_text(
+                                  CASE WHEN jsonb_typeof(s.allowed_hosts) = 'array'
+                                       THEN s.allowed_hosts ELSE '[]'::jsonb END
+                              ) AS scope_host
+                              WHERE lower(scope_host) = {host}
+                          )
+                      )
+                ) AS authorized_for_active_testing"""
+
+=== api/targets/router.py:3142 _public_target_row ===
+def _public_target_row(row: Any) -> dict[str, Any]:
+    """Serialize a target without exposing credentials stored in scan options."""
+    target = row_to_dict(row)
+    for key, limit in (("url", 2049), ("name", 512), ("root_domain", 253)):
+        value = target.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            target[key] = value[:limit]
+    if "scan_options" in target:
+        target["scan_options"] = _sanitize_scan_options(target.get("scan_options"))
+    metadata = _decode_json_value(target.get("metadata_json")) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    target.pop("metadata_json", None)
+    target["owner"] = str(metadata.get("owner") or metadata.get("asset_owner") or "").strip() or None
+    target["environment"] = str(metadata.get("environment") or "").strip().lower() or None
+    target["risk_tier"] = str(metadata.get("risk_tier") or "").strip().lower() or None
+    exposure_class = target_exposure_class(target.get("url"))
+    target["exposure_class"] = exposure_class
+    target["cohort"] = target_cohort(
+        url=target.get("url"),
+        name=target.get("name"),
+        discovery_source=target.get("discovery_source"),
+        metadata=metadata,
+        exposure_class=exposure_class,
+    )
+    if str(target.get("discovery_source") or "").lower() != "model-intake":
+        values = _decode_json_value(target.get("origins")) or []
+        if not isinstance(values, list):
+            values = []
+        origins: list[str] = []
+        for value in [*values, target.get("url")]:
+            try:
+                origin, _note = normalize_target_url(str(value or ""))
+            except TargetNormalizationError:
+                continue
+            if origin and origin not in origins:
+                origins.append(origin)
+        target["origins"] = origins
+    return target
+
+=== api/target_dedupe.py:114 canonical_target_key ===
+def canonical_target_key(url: Any, discovery_source: Any = None) -> str:
+    """Return the durable target identity key.
+
+    Web targets are host assets keyed by host and non-default port: every HTTP(S) scheme on
+    the default ports shares one ``web:`` key, and a service on another port is its own
+    target. Model Intake rows are artifact subjects and therefore retain their complete
+    scheme-insensitive path/query identity under ``artifact:``. Callers that create
+    artifact subjects must therefore provide the ``model-intake`` discovery source;
+    ordinary DAST and Deep Hunt URLs remain web targets even when they include a path.
+
+    This MUST stay equivalent to ``targets_set_canonical_key`` in ``db/init.sql`` and
+    ``retest_contract.py`` for normalized stored URLs.
+    """
+    raw = str(url or "").strip().lower()
+    source = str(discovery_source or "").strip().lower()
+    if source == "model-intake":
+        subject = re.sub(r"^https?://", "", raw).rstrip("/")
+        return f"artifact:{subject}"
+    asset = canonical_web_asset(raw)
+    return f"web:{asset}" if asset else "web:"
+
+=== ui/src/app/request-collections/page.tsx 677 lines ===
+
+97:   const [targets, setTargets] = useState<Target[]>([])
+98:   const [devices, setDevices] = useState<DeviceTarget[]>([])
+99:   // The collection owner lives in the URL, so reload, Back and links keep it.
+100:   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+101:   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+102:     ? filters.target_kind as RequestCollectionTargetKind
+103:     : 'web'
+104:   const targetId = filters.target_id || ''
+105:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+106:   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+98:   const [devices, setDevices] = useState<DeviceTarget[]>([])
+99:   // The collection owner lives in the URL, so reload, Back and links keep it.
+100:   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+101:   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+102:     ? filters.target_kind as RequestCollectionTargetKind
+103:     : 'web'
+104:   const targetId = filters.target_id || ''
+105:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+106:   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+107:     target_kind: kind === 'web' ? undefined : kind,
+99:   // The collection owner lives in the URL, so reload, Back and links keep it.
+100:   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+101:   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+102:     ? filters.target_kind as RequestCollectionTargetKind
+103:     : 'web'
+104:   const targetId = filters.target_id || ''
+105:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+106:   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+107:     target_kind: kind === 'web' ? undefined : kind,
+108:     target_id: undefined,
+101:   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+102:     ? filters.target_kind as RequestCollectionTargetKind
+103:     : 'web'
+104:   const targetId = filters.target_id || ''
+105:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+106:   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+107:     target_kind: kind === 'web' ? undefined : kind,
+108:     target_id: undefined,
+109:   }), [setFilters])
+110:   const latestCollectionsRequest = useRef(0)
+104:   const targetId = filters.target_id || ''
+105:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+106:   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+107:     target_kind: kind === 'web' ? undefined : kind,
+108:     target_id: undefined,
+109:   }), [setFilters])
+110:   const latestCollectionsRequest = useRef(0)
+111:   const [collections, setCollections] = useState<SharedRequestCollection[]>([])
+112:   const [selectedId, setSelectedId] = useState('')
+113:   const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)
+147: 
+148:   useEffect(() => {
+149:     let cancelled = false
+150:     Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
+151:       .then(([web, connected]) => {
+152:         if (cancelled) return
+153:         setTargets(usableWebTargets(web.targets || []))
+154:         setDevices((connected.devices || []).filter((item) => item.is_active))
+155:       })
+156:       .catch((cause) => {
+160:     return () => { cancelled = true }
+161:   }, [])
+162: 
+163:   const choices = useMemo<Choice[]>(() => targetKind === 'device'
+164:     ? devices.map((item) => ({
+165:         id: item.id,
+166:         label: String(item.name || 'Connected device').slice(0, 160),
+167:         detail: String(item.primary_locator || '').slice(0, 240),
+168:         locator: String(item.primary_locator || '').slice(0, 2048),
+169:         ownerKind: 'device' as const,
+174:         detail: String(item.url || '').slice(0, 240),
+175:         locator: String(item.url || '').slice(0, 2048),
+176:         ownerKind: 'web' as const,
+177:       })), [devices, targetKind, targets])
+178:   const selectedChoice = choices.find((choice) => choice.id === targetId)
+179: 
+180:   useEffect(() => {
+181:     // A target's ID is only checked once the lists have loaded, or a deep link would be cleared.
+182:     if (loading || !targetId || choices.some((choice) => choice.id === targetId)) return
+183:     if (targetKind !== 'device' && devices.some((item) => item.id === targetId)) {
+180:   useEffect(() => {
+181:     // A target's ID is only checked once the lists have loaded, or a deep link would be cleared.
+182:     if (loading || !targetId || choices.some((choice) => choice.id === targetId)) return
+183:     if (targetKind !== 'device' && devices.some((item) => item.id === targetId)) {
+184:       setFilters({ target_kind: 'device', target_id: targetId })
+185:     } else {
+186:       setTargetId('')
+187:     }
+188:   }, [choices, devices, loading, setFilters, setTargetId, targetId, targetKind])
+189: 
+181:     // A target's ID is only checked once the lists have loaded, or a deep link would be cleared.
+182:     if (loading || !targetId || choices.some((choice) => choice.id === targetId)) return
+183:     if (targetKind !== 'device' && devices.some((item) => item.id === targetId)) {
+184:       setFilters({ target_kind: 'device', target_id: targetId })
+185:     } else {
+186:       setTargetId('')
+187:     }
+188:   }, [choices, devices, loading, setFilters, setTargetId, targetId, targetKind])
+189: 
+190:   const loadCollections = useCallback(async () => {
+185:     } else {
+186:       setTargetId('')
+187:     }
+188:   }, [choices, devices, loading, setFilters, setTargetId, targetId, targetKind])
+189: 
+190:   const loadCollections = useCallback(async () => {
+191:     // Only the latest request may fill the list, so a slow answer never shows another target's collections.
+192:     const request = ++latestCollectionsRequest.current
+193:     if (!targetId) {
+194:       setCollections([])
+241:   useEffect(() => { void loadDetail(0) }, [loadDetail])
+242: 
+243:   const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (
+244:     binding.target_id === targetId && binding.target_kind === targetKind
+245:   )), [detail?.bindings, targetId, targetKind])
+246: 
+247:   useEffect(() => {
+248:     setSelectionBindingId((current) => (
+249:       matchingBindings.some((binding) => binding.id === current)
+250:         ? current
+242: 
+243:   const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (
+244:     binding.target_id === targetId && binding.target_kind === targetKind
+245:   )), [detail?.bindings, targetId, targetKind])
+246: 
+247:   useEffect(() => {
+248:     setSelectionBindingId((current) => (
+249:       matchingBindings.some((binding) => binding.id === current)
+250:         ? current
+251:         : matchingBindings[0]?.id || ''
+296:         document,
+297:         environment,
+298:         environment_name: environmentName.trim() || undefined,
+299:         base_url: targetKind === 'device' && baseUrl.trim() ? baseUrl.trim() : undefined,
+300:       }
+301:       const retryKey = await uploadAttempt.current.keyFor(payload)
+302:       const created = await createRequestCollection(payload, retryKey)
+303:       uploadAttempt.current.reset()
+304:       setUploaderOpen(false)
+305:       await loadCollections()
+342:     setBusy(true)
+343:     try {
+344:       await upsertRequestCollectionBinding(detail.collection.id, {
+345:         target_kind: targetKind,
+346:         target_id: targetId,
+347:         allowed_origins: splitValues(bindingOrigins),
+348:         environment_id: bindingEnvironmentId || undefined,
+349:       })
+350:       await loadDetail(inventoryOffset)
+351:       toast.success('Exact-origin collection binding saved')
+450: 
+451:       <Card className="grid gap-4 p-5 md:grid-cols-[180px_minmax(0,1fr)]">
+452:         <Field label="Target kind">
+453:           <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
+454:             <option value="web">Web application</option>
+455:             <option value="api">API</option>
+456:             {featureEnabled('devices') && <option value="device">Connected device</option>}
+457:           </Select>
+458:         </Field>
+459:         <Field label="Collection owner">
+580:                   </div>
+581:                 ))}
+582:                 {!matchingBindings.length ? (
+583:                   <p className="rounded-sm border border-amber-800 bg-amber-950/20 p-3 text-xs text-amber-200">Save an exact {targetKind} binding before creating a selection.</p>
+584:                 ) : (
+585:                   <div className="space-y-3 rounded-sm border border-gray-800 bg-gray-950 p-4">
+586:                     <div className="grid gap-3 md:grid-cols-3">
+587:                       <Field label="Selection name"><Input value={selectionName} onChange={(event) => setSelectionName(event.target.value)} /></Field>
+588:                       <Field label="Binding"><Select value={selectionBindingId} onChange={(event) => setSelectionBindingId(event.target.value)}>{matchingBindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.allowed_origins.join(', ')}</option>)}</Select></Field>
+589:                       <Field label="Replay policy"><Select value={replayPolicy} onChange={(event) => setReplayPolicy(event.target.value as RequestCollectionReplayPolicy)}><option value="discovery_only">Discovery only</option><option value="safe_reads">Safe reads</option><option value="confirmed_active">Confirmed active</option></Select></Field>
+664:             <Field label="Environment JSON file (optional)"><input type="file" accept=".json,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) { setEnvironmentText(value); setUploadErrors({}) } }).catch((cause) => setUploadErrors({ environment: cause instanceof Error ? cause.message : 'Failed to read file', form: 'The environment file could not be read.' }))} className="block w-full text-sm text-gray-400" /></Field>
+665:           </div>
+666:           <Field label="Environment JSON (optional)" error={uploadErrors.environment}><Textarea rows={5} value={environmentText} onChange={(event) => { setEnvironmentText(event.target.value); setUploadErrors({}) }} /></Field>
+667:           {targetKind === 'device' && <Field label="Device web base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
+668:           <p className="rounded-sm border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
+669:           <div className="flex justify-end gap-3">
+670:             <Button variant="secondary" onClick={() => setUploaderOpen(false)}>Cancel</Button>
+671:             <Button onClick={uploadCollection} loading={busy} disabled={!documentText.trim()}>Validate and upload</Button>
+672:           </div>
+673:         </div>
+
+=== ui/src/components/credentials/ShareCredentialDialog.tsx 205 lines ===
+
+25: const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network']
+26: 
+27: // Web, API and network are views of one asset row; a device is a different asset.
+28: function sharesAsset(profileKind: CredentialTargetKind, targetKind: CredentialTargetKind): boolean {
+29:   return profileKind === targetKind || (ASSET_KINDS.includes(profileKind) && ASSET_KINDS.includes(targetKind))
+30: }
+31: 
+32: /**
+33:  * Where a credential is used, and sharing it with more targets. A share makes the credential
+34:  * selectable on that target; Scans and Hunts there still need the target's own authorization.
+26: 
+27: // Web, API and network are views of one asset row; a device is a different asset.
+28: function sharesAsset(profileKind: CredentialTargetKind, targetKind: CredentialTargetKind): boolean {
+29:   return profileKind === targetKind || (ASSET_KINDS.includes(profileKind) && ASSET_KINDS.includes(targetKind))
+30: }
+31: 
+32: /**
+33:  * Where a credential is used, and sharing it with more targets. A share makes the credential
+34:  * selectable on that target; Scans and Hunts there still need the target's own authorization.
+35:  */
+63:     setApproveActive(false)
+64:     Promise.all([
+65:       listCredentialGrants(profile.id),
+66:       listCredentialCapabilities({ target_kind: profile.target_kind, auth_kind: profile.auth_kind }).catch(() => null),
+67:     ])
+68:       .then(([grantResult, catalog]) => {
+69:         if (!current) return
+70:         setGrants(grantResult.grants || [])
+71:         const active = new Set((catalog?.capabilities || []).filter((item) => item.requires_active_approval).map((item) => item.name))
+72:         // An unknown capability is treated as the stricter case, as the server does.
+81:   }, [profileId])
+82: 
+83:   const used = useMemo(() => new Set(grants.filter((grant) => grant.active).map((grant) => grant.target_id)), [grants])
+84:   const choices = useMemo(() => (profile ? targets.filter((target) =>
+85:     sharesAsset(profile.target_kind, target.kind) && target.id !== profile.target_id && !used.has(target.id)) : []),
+86:   [profile, targets, used])
+87:   const chosen = choices.find((target) => target.id === targetId)
+88:   const needsApproval = activeCapabilities.length > 0
+89: 
+90:   if (!profile) return null
+82: 
+83:   const used = useMemo(() => new Set(grants.filter((grant) => grant.active).map((grant) => grant.target_id)), [grants])
+84:   const choices = useMemo(() => (profile ? targets.filter((target) =>
+85:     sharesAsset(profile.target_kind, target.kind) && target.id !== profile.target_id && !used.has(target.id)) : []),
+86:   [profile, targets, used])
+87:   const chosen = choices.find((target) => target.id === targetId)
+88:   const needsApproval = activeCapabilities.length > 0
+89: 
+90:   if (!profile) return null
+91:   const home = grants.find((grant) => grant.home)
+112:           })
+113:         : null
+114:       await grantCredentialProfile(profile.id, {
+115:         target_kind: profile.target_kind === 'device' ? 'device' : profile.target_kind,
+116:         target_id: chosen.id,
+117:         approval_receipt_id: approval?.approvalReceiptId,
+118:       })
+119:       toast.success(`Shared with ${chosen.label}`)
+120:       setTargetId('')
+121:       setApproveActive(false)

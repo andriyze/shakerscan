@@ -39,7 +39,9 @@ def collection_index(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def migrate_asset_inputs(conn: Any) -> None:
+    from .asset_authority import migrate_asset_authority
     if await conn.fetchval("SELECT 1 FROM app_schema_migrations WHERE name=$1", INPUTS_MIGRATION):
+        await migrate_asset_authority(conn)
         return
     try:
         from runtime.credential_migration import sync_legacy_device_credential
@@ -95,3 +97,4 @@ async def migrate_asset_inputs(conn: Any) -> None:
     await conn.execute(INPUTS_VIEW_SQL)
     await conn.reload_schema_state()
     await conn.execute("INSERT INTO app_schema_migrations(name) VALUES($1)", INPUTS_MIGRATION)
+    await migrate_asset_authority(conn)

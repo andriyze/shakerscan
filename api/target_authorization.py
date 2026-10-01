@@ -129,6 +129,14 @@ def effective_target_environment(
 
 
 async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
+    try:
+        from targets.asset_authority import resolve_target_authorization
+    except ModuleNotFoundError:
+        from api.targets.asset_authority import resolve_target_authorization
+    return await resolve_target_authorization(conn, target_id, _current_exact_target_authorization)
+
+
+async def _current_exact_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
     """The target's standing (or still valid bounded) authorization, or None.
 
     Only receipts whose scope still names the target's current host count: a target whose URL
@@ -235,6 +243,8 @@ async def authorize_target(
         url = locator if "://" in locator else (
             f"http://[{locator}]" if ":" in locator else f"http://{locator}"
         )
+    if url.startswith("host://"):
+        url = "http://" + url[len("host://"):].split("#",1)[0]
     host = _host(url)
     receipt = receipt_to_dict(evaluate_scope(
         url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),
@@ -277,6 +287,10 @@ async def revoke_target_authorization(
     reason = str(reason or "").strip()
     if not revoked_by or not reason:
         raise TargetAuthorizationError("revoked_by and reason are required")
+    await conn.execute("""UPDATE targets SET authorization_inheritance=false,
+        metadata_json=jsonb_set(COALESCE(metadata_json,'{}'::jsonb),'{authorization_inheritance_revoked}',
+            jsonb_build_object('revoked_by',$2::text,'reason',$3::text,'at',NOW())),updated_at=NOW()
+        WHERE id=$1""", target_uuid, revoked_by, reason[:2000])
     result = await conn.execute(
         """
         UPDATE approval_receipts a

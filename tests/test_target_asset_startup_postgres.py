@@ -5,12 +5,33 @@ from pathlib import Path
 import sys
 
 from api.targets.asset_migration import BoundConnectionPool
-from tests.test_target_asset_migration_postgres import database
+from contextlib import asynccontextmanager
+import os
+import uuid
+import pytest
+
+@asynccontextmanager
+async def startup_database():
+    asyncpg=pytest.importorskip('asyncpg')
+    dsn=os.environ.get('TARGET_ASSET_TEST_DATABASE_URL')
+    if not dsn: pytest.skip('TARGET_ASSET_TEST_DATABASE_URL is not configured')
+    admin=await asyncpg.connect(dsn)
+    name='asset_startup_'+uuid.uuid4().hex
+    conn=None
+    try:
+        await admin.execute(f'CREATE DATABASE "{name}"')
+        conn=await asyncpg.connect(dsn,database=name)
+        await conn.execute((Path(__file__).resolve().parents[1]/'db/init.sql').read_text())
+        yield conn
+    finally:
+        if conn: await conn.close()
+        await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        await admin.close()
 
 
 def test_real_startup_upgrade_and_restart_preserve_new_writes():
     async def run():
-        async with database() as conn:
+        async with startup_database() as conn:
             api_root = str(Path(__file__).resolve().parents[1] / 'api')
             if api_root not in sys.path:
                 sys.path.insert(0, api_root)

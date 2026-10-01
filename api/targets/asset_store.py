@@ -106,7 +106,12 @@ async def asset_detail(conn: Any, target_id: Any) -> dict[str, Any]:
     finding_counts = await conn.fetch("""SELECT severity,count(*) AS count FROM findings
         WHERE status='active' AND target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1)
         GROUP BY severity""", owner)
+    try:
+        from target_authorization import current_target_authorization
+    except ModuleNotFoundError:
+        from ..target_authorization import current_target_authorization
     return {
+        'authorization': await current_target_authorization(conn,owner),
         'target': public_asset(row), 'requested_target_id': str(target_id),
         'origins': [dict(item) for item in origins], 'services': [dict(item) for item in services],
         'services_limit': 1000,
