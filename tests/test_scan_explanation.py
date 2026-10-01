@@ -533,6 +533,33 @@ def test_the_public_receipt_names_the_failure_class_without_publishing_tool_text
     assert "token=never" not in serialized
 
 
+def test_the_diagnostic_names_endpoints_a_timed_out_sweep_never_examined():
+    """A template sweep whose attempts timed out before reporting anything examined nothing.
+
+    The receipt counted those endpoints as attempted, so the operator saw a timeout with zero
+    findings and no sign that whole endpoints went unexamined.
+    """
+    rows = json.loads(json.dumps(_rows()))
+    rows[0]["status"] = "timed_out"
+    rows[0]["reason_code"] = "timed_out"
+    rows[0]["receipt_json"]["errors"] = ["timed_out", "timeout", "timeout"]
+    rows[0]["receipt_json"]["redacted_execution"].update({
+        "attempted_count": 7, "unattempted_count": 0,
+        "unexamined_count": 3, "recovered_count": 1, "execution_started": True,
+    })
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID,
+        scan_status="running",
+        plan_payload=_plan(),
+        action_rows=rows,
+        plan_budget_limits={"max_http_requests": 20, "max_tool_wall_seconds": 60},
+    )
+    diagnostic = explanation["actions"][0]["receipt"]["diagnostic"]
+    assert diagnostic["unexamined_count"] == 3
+    assert diagnostic["recovered_count"] == 1
+    assert diagnostic["attempted_count"] == 7
+
+
 def test_a_clean_receipt_carries_no_diagnostic_noise():
     """A successful action has nothing to diagnose, so it says nothing."""
     explanation = build_scan_execution_explanation(

@@ -234,7 +234,9 @@ def _receipt_projection(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | 
     )
     if error_class != "none":
         counts = {
-            key: value for key in ("attempted_count", "unattempted_count")
+            key: value for key in (
+                "attempted_count", "unattempted_count", "unexamined_count", "recovered_count",
+            )
             if isinstance(value := execution.get(key), int) and not isinstance(value, bool)
         }
         projection["diagnostic"] = {
