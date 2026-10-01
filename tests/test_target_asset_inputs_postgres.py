@@ -117,8 +117,8 @@ def test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries(m
             assert not await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=other)
             with pytest.raises(CredentialStoreError):
                 await store.load_for_worker(conn,profile_id=profile.profile_id,target_kind='web',target_id=other,capability='http.request')
-            await conn.execute("""INSERT INTO credential_profile_bindings(id,profile_id,binding_kind,binding_id,is_active,revoked_at)
-                VALUES($1,$2,'target',$3,false,NOW())""",uuid.uuid4(),uuid.UUID(profile.profile_id),str(origin))
+            await conn.execute("""INSERT INTO credential_profile_bindings(id,profile_id,binding_kind,binding_id,is_active,revoked_at,created_at)
+                VALUES($1,$2,'target',$3,false,NOW(),NOW())""",uuid.uuid4(),uuid.UUID(profile.profile_id),str(origin))
             assert not await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
             assert await store.list_profiles(conn,target_kind='web',target_id=origin) == []
             with pytest.raises(CredentialStoreError):

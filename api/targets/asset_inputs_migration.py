@@ -93,4 +93,5 @@ async def migrate_asset_inputs(conn: Any) -> None:
     await _retarget_foreign_keys(conn, "device_request_collections", "request_collections")
     await conn.execute("DROP TABLE device_credential_profiles; DROP TABLE device_request_collections")
     await conn.execute(INPUTS_VIEW_SQL)
+    await conn.reload_schema_state()
     await conn.execute("INSERT INTO app_schema_migrations(name) VALUES($1)", INPUTS_MIGRATION)

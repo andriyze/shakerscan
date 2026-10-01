@@ -1,0 +1,743 @@
+
+=== api/targets/router.py:396 list_targets_grouped ===
+async def list_targets_grouped(
+    include_inactive: bool = False,
+    search: Optional[str] = None,
+    discovery_source: Optional[str] = Query(None, pattern="^(manual|subfinder|gungnir-monitor|import|model-intake)$"),
+    grade: Optional[str] = Query(None, pattern="^[A-Fa-f]$"),
+    has_findings: Optional[bool] = None,
+    sort_by: Optional[str] = Query("root_domain", pattern="^(root_domain|last_scanned_at|active_findings_count|last_score|created_at)$"),
+    sort_order: Optional[str] = Query("asc", pattern="^(asc|desc)$")
+):
+    """List all targets grouped by root domain for hierarchical display."""
+    async with _pool().acquire() as conn:
+        query = f"""
+            SELECT
+                t.id,
+                LEFT(t.url, 2049) AS url,
+                LEFT(t.name, 512) AS name,
+                LEFT(t.root_domain, 253) AS root_domain,
+                t.is_root,
+                t.discovery_source, t.is_active, t.metadata_json,
+                t.last_scanned_at, t.last_score, t.last_grade,
+                t.total_scans, t.active_findings_count,
+                t.created_at,
+                -- The targets page reads this grouped shape, not the flat list. Without the flag
+                -- every row rendered "Authorize for active testing (once)" forever: the click
+                -- recorded a real authorization and said so, then the row was unchanged on the
+                -- next load, so an operator had no way to tell it had worked.
+                {_authorized_for_active_testing_sql()}
+            FROM targets t
+            WHERE 1=1
+        """
+        params = []
+        param_idx = 1
+
+        if not include_inactive:
+            query += " AND t.is_active = true"
+
+        # Model Intake subjects have their own workflow and must not appear as
+        # web targets. Keep the explicit legacy source filter for API clients
+        # that need to inspect historical rows during migration.
+        if discovery_source != "model-intake":
+            query += " AND COALESCE(t.discovery_source, 'manual') <> 'model-intake'"
+
+        if search:
+            query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
+            params.append(search)
+            param_idx += 1
+
+        if discovery_source:
+            query += f" AND t.discovery_source = ${param_idx}"
+            params.append(discovery_source)
+            param_idx += 1
+
+        if grade:
+            query += f" AND UPPER(t.last_grade) = UPPER(${param_idx})"
+            params.append(grade)
+            param_idx += 1
+
+        if has_findings is not None:
+            if has_findings:
+                query += " AND t.active_findings_count > 0"
+            else:
+                query += " AND t.active_findings_count = 0"
+
+        query += " ORDER BY t.root_domain, t.is_root DESC, t.url"
+
+        rows = await conn.fetch(query, *params)
+        # Collapse scheme/trailing-slash duplicate target rows so the grouped view
+        # doesn't expose the same origin multiple times.
+        rows = _dedupe_canonical_target_rows(rows)
+
+        # Per-target ASM coverage and exact AI Investigator trust-tier counts.
+        asm_by_target: dict[str, dict] = {}
+        investigator_findings_by_target: dict[str, dict[str, int]] = {}
+        target_ids = [row['id'] for row in rows]
+        if target_ids:
+            investigator_rows = await conn.fetch(
+                """
+                SELECT ids.target_id,
+                       COALESCE(f.investigator_verified_count, 0) AS investigator_verified_count,
+                       COALESCE(c.investigator_suspected_count, 0) AS investigator_suspected_count
+                FROM unnest($1::uuid[]) AS ids(target_id)
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS investigator_verified_count
+                    FROM findings
+                    WHERE target_id=ids.target_id AND status='active'
+                      AND last_verification_verdict='exploited'
+                      AND tool IN ('autonomous_workflow','bola')
+                ) f ON true
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS investigator_suspected_count
+                    FROM investigation_candidates
+                    WHERE target_id=ids.target_id AND plane='web'
+                      AND status IN ('new','verification_queued','verifying','inconclusive','blocked')
+                ) c ON true
+                """,
+                target_ids,
+            )
+            investigator_findings_by_target = {
+                str(row['target_id']): {
+                    'investigator_verified_count': int(row['investigator_verified_count'] or 0),
+                    'investigator_suspected_count': int(row['investigator_suspected_count'] or 0),
+                }
+                for row in investigator_rows
+            }
+            asm_rows = await conn.fetch(
+                """
+                WITH inventory AS (
+                    SELECT target_id,
+                           COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE test_status <> 'gone') AS testable,
+                           COUNT(*) FILTER (WHERE test_status = 'tested') AS status_tested
+                    FROM target_endpoints
+                    WHERE target_id = ANY($1::uuid[])
+                    GROUP BY target_id
+                ),
+                latest_attempt AS (
+                    SELECT DISTINCT ON (te.id)
+                        te.target_id,
+                        te.id AS endpoint_id,
+                        CASE
+                            WHEN aea.status = 'completed'
+                             AND lower(COALESCE(aea.scanner_telemetry_json->>'per_endpoint_telemetry', 'false')) <> 'true'
+                            THEN 'partial'
+                            ELSE aea.status
+                        END AS status
+                    FROM target_endpoints te
+                    JOIN asm_endpoint_attempts aea ON aea.endpoint_id = te.id
+                    WHERE te.target_id = ANY($1::uuid[]) AND te.test_status <> 'gone'
+                    ORDER BY te.id, COALESCE(aea.completed_at, aea.started_at) DESC, aea.started_at DESC
+                ),
+                attempts AS (
+                    SELECT target_id,
+                           COUNT(*) AS attempted,
+                           COUNT(*) FILTER (WHERE status = 'completed') AS completed
+                    FROM latest_attempt
+                    GROUP BY target_id
+                )
+                SELECT i.target_id, i.total, i.testable, i.status_tested,
+                       COALESCE(a.attempted, 0) AS attempted,
+                       COALESCE(a.completed, 0) AS attempt_completed
+                FROM inventory i
+                LEFT JOIN attempts a ON a.target_id = i.target_id
+                """,
+                target_ids,
+            )
+            for ar in asm_rows:
+                total = int(ar['total'] or 0)
+                testable = int(ar['testable'] or total)
+                attempted = int(ar['attempted'] or 0)
+                tested = int(ar['attempt_completed'] if attempted > 0 else (ar['status_tested'] or 0))
+                denominator = testable
+                asm_by_target[str(ar['target_id'])] = {
+                    'total': total,
+                    'tested': tested,
+                    'untested': max(0, denominator - tested),
+                    'coverage': round(tested / denominator, 4) if denominator else 0.0,
+                    'coverage_basis': 'attempt_ledger' if attempted > 0 else 'endpoint_status',
+                    'attempted': attempted,
+                }
+
+    def _attach_asm(target_data):
+        if target_data:
+            target_data['asm_coverage'] = asm_by_target.get(str(target_data['id']))
+            target_data.update(investigator_findings_by_target.get(str(target_data['id']), {
+                'investigator_verified_count': 0,
+                'investigator_suspected_count': 0,
+            }))
+        return target_data
+
+    # Group by root_domain
+    grouped = {}
+    for row in rows:
+        rd = row['root_domain'] or 'unknown'
+        if rd not in grouped:
+            grouped[rd] = {
+                'root_domain': rd,
+                'root_target': None,
+                'subdomains': []
+            }
+
+        target_data = _attach_asm(_public_target_row(row))
+        if row['is_root']:
+            grouped[rd]['root_target'] = target_data
+        else:
+            grouped[rd]['subdomains'].append(target_data)
+
+    # Convert to list and add summary stats
+    result = []
+    for rd, data in grouped.items():
+        data['subdomain_count'] = len(data['subdomains'])
+        data['total_count'] = data['subdomain_count'] + (1 if data['root_target'] else 0)
+        # Add aggregate stats for sorting
+        root_findings = data['root_target']['active_findings_count'] if data['root_target'] else 0
+        subdomain_findings = sum(s['active_findings_count'] for s in data['subdomains'])
+        data['total_findings'] = root_findings + subdomain_findings
+        data['best_score'] = data['root_target']['last_score'] if data['root_target'] and data['root_target']['last_score'] is not None else None
+        data['latest_scan'] = data['root_target']['last_scanned_at'] if data['root_target'] else None
+        data['earliest_created'] = data['root_target']['created_at'] if data['root_target'] else (
+            min((s['created_at'] for s in data['subdomains']), default=None)
+        )
+        # Domain-level ASM coverage rollup across root + subdomains.
+        cov_targets = ([data['root_target']] if data['root_target'] else []) + data['subdomains']
+        cov_total = sum((t.get('asm_coverage') or {}).get('total', 0) for t in cov_targets)
+        cov_tested = sum((t.get('asm_coverage') or {}).get('tested', 0) for t in cov_targets)
+        data['asm_coverage'] = {
+            'total': cov_total,
+            'tested': cov_tested,
+            'untested': cov_total - cov_tested,
+            'coverage': round(cov_tested / cov_total, 4) if cov_total else 0.0,
+        } if cov_total else None
+        result.append(data)
+
+    # Sort based on sort_by and sort_order
+    reverse = sort_order == 'desc'
+
+    def sort_key(x):
+        if sort_by == 'root_domain':
+            return x['root_domain'].lower()
+        elif sort_by == 'last_scanned_at':
+            return x['latest_scan'] or ''
+        elif sort_by == 'active_findings_count':
+            return x['total_findings']
+        elif sort_by == 'last_score':
+            # None values should sort last in ascending, first in descending
+            score = x['best_score']
+            if score is None:
+                return -1 if reverse else 101
+            return score
+        elif sort_by == 'created_at':
+            return x['earliest_created'] or ''
+        return x['root_domain'].lower()
+
+    result.sort(key=sort_key, reverse=reverse)
+
+    return {
+        'domains': result,
+        'total_root_domains': len(result),
+        'total_targets': sum(d['total_count'] for d in result)
+    }
+
+=== api/targets/router.py:663 create_target ===
+async def create_target(request: TargetCreate):
+    """Create a new target."""
+    _refuse_raw_target_authentication(request.scan_options)
+    scheme_inferred = "://" not in (request.url or "")
+    try:
+        normalized_target, target_note = normalize_target_url(request.url)
+    except TargetNormalizationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not normalized_target:
+        raise HTTPException(status_code=400, detail="Invalid target URL")
+    original_target = normalized_target
+    # example.com that publishes no address record while www.example.com does (or the reverse)
+    # would otherwise become a target whose every Scan is refused. Register the name that
+    # resolves and say so; a resolver fault or a twin that does not resolve changes nothing.
+    requested_cohort = getattr(request, "cohort", None)
+
+    async def _creation_environment() -> str:
+        return target_authorization.effective_target_environment({}, requested=requested_cohort)
+
+    dns_fallback = await target_resolution.prefer_resolving_twin(
+        normalized_target, environment_of=_creation_environment,
+    )
+    requested_url = normalized_target
+    if dns_fallback:
+        normalized_target = dns_fallback["resolved_url"]
+        requested_url = normalized_target
+    root_domain = extract_root_domain(normalized_target)
+    is_root = is_root_domain(normalized_target)
+
+    async with _pool().acquire() as conn:
+        try:
+            # One transaction, so a refused authorization leaves no target behind. The insert
+            # committed before the authorization step could raise, so a private-range target was
+            # created and the caller still got 400: the UI said "Failed to add target" while the
+            # target sat in the list, and retrying hit "Target already exists".
+            async with conn.transaction():
+                # Canonical find-or-create: a scheme/trailing-slash variant of an existing
+                # origin reuses that target instead of creating a duplicate. xmax = 0 is
+                # true only for a freshly INSERTed row, so we can report created vs reused.
+                row = await target_dns_alias.existing_registration_for_dns_alias(
+                    conn, original_target, normalized_target,
+                ) if dns_fallback else None
+                if row is None:
+                    row = await conn.fetchrow("""
+                    INSERT INTO targets (url, name, root_domain, is_root, scan_options, metadata_json, asm_enabled, asm_config)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (canonical_key) DO UPDATE SET url = targets.url
+                    RETURNING id, url, name, discovery_source, metadata_json,
+                              root_domain, is_root, (xmax = 0) AS created
+                    """, normalized_target, request.name, root_domain, is_root,
+                         json.dumps(_attach_target_note(request.scan_options or {}, request.url, target_note, scheme_inferred)),
+                         json.dumps({"cohort": requested_cohort}) if requested_cohort else json.dumps({}),
+                         _default_asm_enabled_for_new_web_target("manual"),
+                         json.dumps(_default_asm_config_for_new_web_target("manual")))
+
+                response = {
+                    'id': str(row['id']),
+                    'url': row['url'],
+                    # When a different origin reuses an existing host-level target,
+                    # report the stored target metadata rather than metadata derived
+                    # from the just-submitted origin.
+                    'root_domain': row['root_domain'],
+                    'is_root': row['is_root'],
+                    'cohort': target_cohort(
+                        url=row['url'],
+                        name=row.get('name'),
+                        discovery_source=row.get('discovery_source'),
+                        metadata=_decode_json_value(row.get('metadata_json')) or {},
+                    ),
+                    'status': 'created' if row['created'] else 'already_exists'
+                }
+                # Surface warning if path/query was stripped
+                if target_note:
+                    response['warning'] = target_note
+                    response['original_url'] = request.url
+                # Web identity is host-level, so a different scheme or port resolves to an existing
+                # target rather than creating a new one. That merge is deliberate, but returning only
+                # an id let a caller believe it had registered the origin it asked for: a scope receipt
+                # and a Hunt were then bound to one application while the work ran against another on
+                # the same host, and the result looked correct. Say so explicitly.
+                if dns_fallback:
+                    response['dns_fallback'] = dns_fallback
+                    response['requested_url'] = request.url
+                    response['notice'] = dns_fallback['message']
+                    if row['url'] == original_target:
+                        requested_url = original_target
+                if not scope_origin_matches_target(requested_url, row['url']):
+                    response['origin_merged'] = True
+                    response['requested_url'] = request.url
+                    response['warning'] = (
+                        f"{requested_url} resolves to the existing host-level target {row['url']}; "
+                        "web targets are identified by host, so scans, scope receipts and Hunts bound "
+                        "to this id address that origin, not the one requested."
+                    )
+                authorized_by = getattr(request, "authorized_by", None)
+                if authorized_by:
+                    try:
+                        # One environment for the row, resolved from what is stored. The cohort
+                        # the operator picked has to reach authorization -- without it every
+                        # authorization evaluated scope as "production" and choosing Lab changed
+                        # nothing -- but a *reused* row keeps its own. Passing the incoming cohort
+                        # unconditionally let a new request authorize an existing Production
+                        # target under a Lab evaluation while the row still read Production.
+                        stored_metadata = _decode_json_value(row.get('metadata_json')) or {}
+                        response['authorization'] = await target_authorization.authorize_target(
+                            conn, row['id'], approved_by=authorized_by,
+                            environment=target_authorization.effective_target_environment(
+                                stored_metadata,
+                                requested=requested_cohort if row['created'] else None,
+                            ),
+                        )
+                    except target_authorization.TargetAuthorizationError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return response
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="Target already exists")
+
+=== api/targets/router.py:834 get_target ===
+async def get_target(target_id: str):
+    """Get target details."""
+    target_uuid = _uuid_or_400(target_id, "target id")
+    async with _pool().acquire() as conn:
+        target = await conn.fetchrow("""
+            SELECT t.*, fs.*, COALESCE(origins.items, '[]'::jsonb) AS origins
+            FROM targets t
+            LEFT JOIN findings_summary fs ON t.id = fs.target_id
+            LEFT JOIN LATERAL (
+                SELECT jsonb_agg(item.target_url ORDER BY item.last_seen DESC) AS items
+                FROM (
+                    SELECT s.target_url, MAX(s.created_at) AS last_seen
+                    FROM scans s
+                    WHERE s.target_id=t.id AND s.run_kind='web_dast'
+                    GROUP BY s.target_url
+                    ORDER BY MAX(s.created_at) DESC
+                    LIMIT 32
+                ) item
+            ) origins ON true
+            WHERE t.id = $1
+        """, target_uuid)
+
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+        # Get recent scans (exclude child shard rows of parallel scans)
+        scans = await conn.fetch("""
+            SELECT id, status, score, grade, created_at, completed_at
+            FROM scans
+            WHERE target_id = $1 AND (scan_role IS NULL OR scan_role <> 'shard')
+            ORDER BY created_at DESC LIMIT 10
+        """, target_uuid)
+
+    result = _public_target_row(target)
+    async with _pool().acquire() as conn:
+        result["authorization"] = await target_authorization.current_target_authorization(conn, target_id)
+    result['recent_scans'] = [dict(s) for s in scans]
+    return result
+
+=== api/targets/router.py:875 update_target ===
+async def update_target(target_id: str, request: TargetUpdate):
+    """Update a target."""
+    async with _pool().acquire() as conn:
+        updates = []
+        params = []
+        param_idx = 1
+
+        if request.name is not None:
+            updates.append(f"name = ${param_idx}")
+            params.append(request.name)
+            param_idx += 1
+
+        if request.is_active is not None:
+            updates.append(f"is_active = ${param_idx}")
+            params.append(request.is_active)
+            param_idx += 1
+
+        if request.scan_options is not None:
+            _refuse_raw_target_authentication(request.scan_options)
+            updates.append(f"scan_options = ${param_idx}")
+            params.append(json.dumps(request.scan_options))
+            param_idx += 1
+
+        # metadata_json and cohort both merge into the same column, so they share one assignment:
+        # PostgreSQL rejects an UPDATE that assigns a column twice.
+        metadata_patch = dict(request.metadata_json or {})
+        if request.cohort is not None:
+            metadata_patch["cohort"] = request.cohort
+        if request.metadata_json is not None or request.cohort is not None:
+            updates.append(f"metadata_json = COALESCE(metadata_json, '{{}}'::jsonb) || ${param_idx}::jsonb")
+            params.append(json.dumps(metadata_patch))
+            param_idx += 1
+
+        if not updates:
+            raise HTTPException(status_code=400, detail="No updates provided")
+
+        updates.append("updated_at = NOW()")
+        params.append(uuid.UUID(target_id))
+
+        query = f"UPDATE targets SET {', '.join(updates)} WHERE id = ${param_idx} RETURNING id"
+        result = await conn.fetchval(query, *params)
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+    return {'id': target_id, 'status': 'updated'}
+
+=== api/targets/router.py:2012 scan_target ===
+async def scan_target(
+    target_id: str,
+    request: Optional[TargetScanRequest] = None,
+):
+    """Start a scan for a specific target."""
+    request = request or TargetScanRequest()
+    async with _pool().acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT url, scan_options FROM targets WHERE id = $1", uuid.UUID(target_id)
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+
+    # Historical target defaults remain readable, but old mode fields are never
+    # allowed to authorize a new execution.
+    stored_options = target['scan_options']
+    if isinstance(stored_options, str):
+        merged_options = json.loads(stored_options) if stored_options else {}
+    else:
+        merged_options = stored_options or {}
+    stored_scheme_inferred = merged_options.get("target_scheme_inferred") is True
+    for key in LEGACY_SCAN_WRITE_FIELDS:
+        merged_options.pop(key, None)
+    merged_options.update(request.options.model_dump(exclude_unset=True))
+
+    # Preserve the stored scheme inference flag when submitting the canonical target URL.
+    scan_request = ScanInternalCompatibilityRequest(
+        target=target['url'],
+        budget_profile=request.budget_profile,
+        policy=dict(request.policy or {}),
+        advanced=request.advanced,
+        approval_receipt_id=request.approval_receipt_id,
+        options=ScanOptions(**merged_options),
+    )
+    return await _submit_scan(scan_request, stored_scheme_inferred=stored_scheme_inferred)
+
+=== api/scan/authorization.py ===
+"""Runtime revalidation of immutable Scan action scope and approval authority."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+import ipaddress
+import json
+from typing import Any, Mapping
+
+try:
+    from ..runtime.capability_registry import CAPABILITY_REGISTRY
+except (ImportError, ModuleNotFoundError):
+    from runtime.capability_registry import CAPABILITY_REGISTRY
+
+
+class ActionAuthorityDecision(str, Enum):
+    ALLOWED = "allowed"
+    REJECTED_CAPABILITY = "capability_unknown"
+    REJECTED_MISSING = "authorization_missing"
+    REJECTED_REVOKED = "authorization_revoked"
+    REJECTED_EXPIRED = "authorization_expired"
+    REJECTED_SCOPE = "scope_invalid"
+    REJECTED_MISMATCH = "authorization_mismatch"
+
+
+def _value(source: Any, name: str, default: Any = None) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(name, default)
+    try:
+        return source[name]
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass
+    return getattr(source, name, default)
+
+
+def _timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _sequence(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return (value,)
+        if not isinstance(decoded, list):
+            return (value,)
+        value = decoded
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _host_in_scope(host: str, scope_receipt: Any) -> bool:
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if not normalized:
+        return False
+    allowed_hosts = {
+        item.strip().lower().rstrip(".")
+        for item in _sequence(_value(scope_receipt, "allowed_hosts", ()))
+        if item.strip()
+    }
+    roots = {
+        item.strip().lower().rstrip(".")
+        for item in _sequence(_value(scope_receipt, "allowed_root_domains", ()))
+        if item.strip()
+    }
+    try:
+        address = str(ipaddress.ip_address(normalized))
+    except ValueError:
+        address = ""
+    return bool(
+        normalized in allowed_hosts
+        or (address and address in allowed_hosts)
+        or any(normalized == root or normalized.endswith("." + root) for root in roots)
+    )
+
+
+STANDING_AUTHORIZATION_ACTION = "target.authorization"
+
+
+def _standing_authorization(approval_receipt: Any) -> bool:
+    """A standing target authorization is the one receipt allowed to have no expiry.
+
+    It is created once per target (``target_authorization.authorize_target``), revoked
+    explicitly or superseded when the target's scope changes, and never covers the dangerous
+    tier, which keeps its bounded per-action approvals.
+    """
+    action_name = str(_value(approval_receipt, "action_name", "") or "").strip()
+    risk_tier = str(_value(approval_receipt, "risk_tier", "") or "").strip().lower()
+    return action_name == STANDING_AUTHORIZATION_ACTION and risk_tier in {"active", "intrusive"}
+
+
+def _requires_approval(action: Any) -> bool | None:
+    capability_name = str(_value(action, "capability_name", "") or "").strip()
+    try:
+        specification = CAPABILITY_REGISTRY.require(capability_name)
+        values = _value(action, "capability_input", {})
+        method = str(_value(values, "method", "") or "").upper()
+        # Writes must not inherit http.request's passive baseline shortcut.
+        return specification.requires_active_approval or (
+            capability_name == "http.request"
+            and (method in {"POST", "PUT", "PATCH", "DELETE"}
+                 or bool(_value(values, "capture") or _value(values, "request_bindings")))
+        )
+    except KeyError:
+        return None
+
+
+def revalidate_action_authority(
+    *,
+    action: Any,
+    target_binding: Any,
+    scope_receipt: Any | None = None,
+    approval_receipt: Any | None = None,
+    scope_receipt_id: str | None = None,
+    approval_receipt_id: str | None = None,
+    now: datetime | None = None,
+) -> ActionAuthorityDecision:
+    """Evaluate fresh durable authority without granting or widening scope."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    approval_status = str(_value(approval_receipt, "status", "") or "").lower()
+    scope_status = str(_value(scope_receipt, "status", "") or "").lower()
+    target_status = str(_value(target_binding, "status", "active") or "active").lower()
+    if (
+        approval_status in {"revoked", "denied", "inactive"}
+        or scope_status in {"revoked", "denied", "inactive"}
+        or _value(approval_receipt, "revoked_at")
+        or _value(scope_receipt, "revoked_at")
+        or _value(approval_receipt, "denial_reason")
+    ):
+        return ActionAuthorityDecision.REJECTED_REVOKED
+    if target_status not in {"active", "running", "allowed"}:
+        return ActionAuthorityDecision.REJECTED_SCOPE
+
+    bound_scope_id = str(
+        scope_receipt_id
+        or _value(target_binding, "scope_receipt_id", "")
+        or ""
+    ).strip()
+    if bound_scope_id and scope_receipt is None:
+        return ActionAuthorityDecision.REJECTED_MISSING
+    if scope_receipt is not None:
+        actual_scope_id = str(_value(scope_receipt, "id", "") or "").strip()
+        if bound_scope_id and actual_scope_id != bound_scope_id:
+            return ActionAuthorityDecision.REJECTED_MISMATCH
+        verdict = str(_value(scope_receipt, "verdict", "allowed") or "").lower()
+        if verdict == "blocked":
+            return ActionAuthorityDecision.REJECTED_SCOPE
+        target_id = str(_value(target_binding, "target_id", "") or "").strip()
+        scope_target_id = str(_value(scope_receipt, "target_id", "") or "").strip()
+        if target_id and scope_target_id and target_id != scope_target_id:
+            return ActionAuthorityDecision.REJECTED_SCOPE
+        if not _host_in_scope(
+            str(_value(target_binding, "canonical_host", "") or ""), scope_receipt,
+        ):
+            return ActionAuthorityDecision.REJECTED_SCOPE
+
+    requires_approval = _requires_approval(action)
+    if requires_approval is None:
+        return ActionAuthorityDecision.REJECTED_CAPABILITY
+    if not requires_approval:
+        return ActionAuthorityDecision.ALLOWED
+    if approval_receipt is None or not str(approval_receipt_id or "").strip():
+        return ActionAuthorityDecision.REJECTED_MISSING
+    actual_approval_id = str(_value(approval_receipt, "id", "") or "").strip()
+    if actual_approval_id != str(approval_receipt_id).strip():
+        return ActionAuthorityDecision.REJECTED_MISMATCH
+    approval_scope_id = str(
+        _value(approval_receipt, "scope_receipt_id", "") or ""
+    ).strip()
+    if not bound_scope_id or approval_scope_id != bound_scope_id:
+        return ActionAuthorityDecision.REJECTED_MISMATCH
+    expires_at = _timestamp(_value(approval_receipt, "expires_at"))
+    if expires_at is None and not _standing_authorization(approval_receipt):
+        return ActionAuthorityDecision.REJECTED_MISSING
+    if expires_at is not None and expires_at <= current:
+        return ActionAuthorityDecision.REJECTED_EXPIRED
+    if not _value(approval_receipt, "approved_by"):
+        return ActionAuthorityDecision.REJECTED_REVOKED
+    confirmations = set(_sequence(_value(approval_receipt, "confirmations", ())))
+    if "confirm_authorized" not in confirmations:
+        return ActionAuthorityDecision.REJECTED_MISMATCH
+    if (
+        str(_value(scope_receipt, "verdict", "allowed") or "").lower()
+        == "needs_approval"
+        and "confirm_scope_reviewed" not in confirmations
+    ):
+        return ActionAuthorityDecision.REJECTED_MISMATCH
+    return ActionAuthorityDecision.ALLOWED
+
+
+async def revalidate_scan_action_authority(
+    conn: Any,
+    *,
+    action: Any,
+    target_binding: Any,
+    scope_receipt_id: str | None,
+    approval_receipt_id: str | None,
+    now: datetime | None = None,
+) -> ActionAuthorityDecision:
+    """Reload scope and approval rows immediately before one action executes."""
+    scope_receipt = None
+    approval_receipt = None
+    if scope_receipt_id:
+        scope_receipt = await conn.fetchrow(
+            "SELECT * FROM scope_receipts WHERE id=$1", str(scope_receipt_id),
+        )
+    if approval_receipt_id:
+        try:
+            import uuid
+            approval_id = uuid.UUID(str(approval_receipt_id))
+        except (TypeError, ValueError, AttributeError):
+            return ActionAuthorityDecision.REJECTED_MISMATCH
+        approval_receipt = await conn.fetchrow(
+            "SELECT * FROM approval_receipts WHERE id=$1", approval_id,
+        )
+    return revalidate_action_authority(
+        action=action,
+        target_binding=target_binding,
+        scope_receipt=scope_receipt,
+        approval_receipt=approval_receipt,
+        scope_receipt_id=scope_receipt_id,
+        approval_receipt_id=approval_receipt_id,
+        now=now,
+    )
+
+
+=== api/retest_contract.py:1066 run_schema_migrations ===
+async def run_schema_migrations(pool) -> None:
+    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
+
+    The advisory lock serializes new ShakerScan processes, but during a rolling
+    rebuild an older API can still be using a relation while the first new
+    worker applies idempotent DDL. PostgreSQL may choose the migrator as the
+    deadlock victim. Retry in-process so a healthy worker does not crash-loop.
+    """
+    for attempt in range(3):
+        try:
+            await _run_schema_migrations_once(pool)
+            return
+        except Exception as exc:
+            if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
+                raise
+            await asyncio.sleep(0.2 * (attempt + 1))
