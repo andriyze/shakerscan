@@ -51,13 +51,15 @@ def test_an_explicit_raw_base_still_installs_directly():
     assert 'REPO_RAW_BASE="${SHAKERSCAN_RAW_BASE:-}"' in source
 
 
-def test_an_explicit_install_version_does_not_delegate():
-    # A pinned version already names its tag; its own manifest is the one being asked for.
+def test_an_explicit_install_version_hands_over_too():
+    # install.shakerscan.com serves this file from main, so a pinned rollback runs the CURRENT
+    # installer. Without the handover it installed the current manifest from the old tag and failed
+    # on the first file the old release does not have (2.5.6 lacks scripts/postgres_upgrade.sh).
     source = _source()
     pinned = source.index('if [ -n "$INSTALL_VERSION" ]; then')
     handover = source.index('"$REPO_RAW_BASE/install/index.sh"')
-    else_branch = source.index("    else\n", pinned)
-    assert pinned < else_branch < handover
+    assert pinned < handover
+    assert source.count('"$REPO_RAW_BASE/install/index.sh"') == 1, "one handover serves both selections"
 
 
 def test_the_temporary_installer_is_removed_on_both_paths():
@@ -139,3 +141,29 @@ def test_an_explicit_base_installs_without_delegating(tmp_path):
     )
     assert "DELEGATED" not in run.stdout
     assert "Source:            https://example.invalid/base" in run.stdout
+
+
+def test_pinning_a_version_runs_that_tags_installer(tmp_path):
+    script, _ = _runnable_installer(tmp_path)
+    run = subprocess.run(
+        ["sh", str(script), "--flag"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "SHAKERSCAN_INSTALL_VERSION": "2.5.6"},
+    )
+    assert "DELEGATED" in run.stdout, run.stdout + run.stderr
+    assert "base=https://raw.githubusercontent.com/andriyze/shakerscan/v2.5.6" in run.stdout
+    assert "version=2.5.6" in run.stdout
+    assert "args=--flag" in run.stdout
+    assert run.returncode == 7
+    # The pinned version wins over the channel; nothing in this run read STABLE_VERSION (0.8.18).
+    assert "v0.8.18" not in run.stdout
+
+
+def test_an_unsafe_pinned_version_is_refused_before_any_download(tmp_path):
+    script, _ = _runnable_installer(tmp_path)
+    run = subprocess.run(
+        ["sh", str(script)], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "SHAKERSCAN_INSTALL_VERSION": "2.5.6;rm"},
+    )
+    assert run.returncode != 0
+    assert "DELEGATED" not in run.stdout
+    assert "must be a release version" in run.stdout + run.stderr

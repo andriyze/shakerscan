@@ -197,9 +197,10 @@ def test_prebuilt_runtime_defaults_to_the_downloaded_release_version():
     assert "not published" not in release_rows[0]
     assert f"shakerscan/shakerscan-scanner:{stable_version}" in release_rows[0]
     assert 'CHANNEL_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/main"' in installer
-    assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"' in installer
+    assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${selected_version}"' in installer
     assert 'INSTALL_VERSION="${SHAKERSCAN_INSTALL_VERSION:-}"' in installer
-    assert 'REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"' in installer
+    # A pinned version selects the tag the same way the channel does, then hands over to it.
+    assert 'selected_version="$INSTALL_VERSION"' in installer
 
 
 def test_upgrade_smoke_waits_for_final_postgres_process():

@@ -461,34 +461,36 @@ if [ -z "$REPO_RAW_BASE" ]; then
         if ! printf '%s' "$INSTALL_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
             fail "SHAKERSCAN_INSTALL_VERSION must be a release version such as 0.8.18"
         fi
-        REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${INSTALL_VERSION}"
+        selected_version="$INSTALL_VERSION"
     else
         stable_raw="$(curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$CHANNEL_RAW_BASE/install/STABLE_VERSION")" || \
             fail "failed to resolve the stable ShakerScan release channel"
-        stable_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
-        case "$stable_version" in
+        selected_version="$(printf '%s' "$stable_raw" | tr -d '[:space:]')"
+        case "$selected_version" in
             ""|*[!0-9A-Za-z._-]*) fail "stable release channel returned an unsafe version" ;;
         esac
-        REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${stable_version}"
-        # This file carries THIS revision's file manifest, which does not describe another
-        # release's tree: pointing it at an older tag makes it request files that do not exist
-        # there. When the channel selects a version, hand over to that version's own installer --
-        # the same handover install/bootstrap.sh performs -- so the manifest and the tree always
-        # come from one revision. SHAKERSCAN_RAW_BASE is the recursion guard: the delegated
-        # installer sees it set and installs instead of resolving again.
-        delegate="$(mktemp "${TMPDIR:-/tmp}/shakerscan-installer.XXXXXX")" || \
-            fail "failed to create a temporary file for the release installer"
-        if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
-            rm -f -- "$delegate"
-            fail "failed to download the v${stable_version} installer"
-        fi
-        SHAKERSCAN_INSTALL_VERSION="$stable_version" \
-        SHAKERSCAN_RAW_BASE="$REPO_RAW_BASE" \
-            sh "$delegate" "$@"
-        delegate_status=$?
-        rm -f -- "$delegate"
-        exit "$delegate_status"
     fi
+    REPO_RAW_BASE="https://raw.githubusercontent.com/andriyze/shakerscan/v${selected_version}"
+    # This file carries THIS revision's file manifest, which does not describe another release's
+    # tree: pointing it at another tag makes it request files that do not exist there. Whether the
+    # stable channel or SHAKERSCAN_INSTALL_VERSION selected the version, hand over to that version's
+    # own installer -- the same handover install/bootstrap.sh performs -- so the manifest and the
+    # tree always come from one revision. A pinned rollback served from the hosted (current)
+    # installer used to install the current manifest from the old tag and fail on every file the
+    # old release does not have. SHAKERSCAN_RAW_BASE is the recursion guard: the delegated
+    # installer sees it set and installs instead of resolving again.
+    delegate="$(mktemp "${TMPDIR:-/tmp}/shakerscan-installer.XXXXXX")" || \
+        fail "failed to create a temporary file for the release installer"
+    if ! curl -fsSL --proto '=https,file' --proto-redir '=https' --tlsv1.2 "$REPO_RAW_BASE/install/index.sh" -o "$delegate"; then
+        rm -f -- "$delegate"
+        fail "failed to download the v${selected_version} installer"
+    fi
+    SHAKERSCAN_INSTALL_VERSION="$selected_version" \
+    SHAKERSCAN_RAW_BASE="$REPO_RAW_BASE" \
+        sh "$delegate" "$@"
+    delegate_status=$?
+    rm -f -- "$delegate"
+    exit "$delegate_status"
 fi
 
 say "ShakerScan installer"
