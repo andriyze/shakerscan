@@ -2,10 +2,11 @@
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   getDevices,
+  getTarget,
   getTargets,
   createTargetPolicyApprovalReceipt,
   type DeviceTarget,
@@ -39,6 +40,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { usableWebTargets } from '@/lib/targetChoices'
+import { useUrlFilters } from '@/lib/useUrlFilters'
 
 const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
   { value: 'bearer_token', label: 'Bearer token' },
@@ -222,13 +224,30 @@ function statusClass(profile: CredentialProfile): string {
   return 'bg-gray-800 text-gray-400'
 }
 
+const TARGET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
+
 export default function CredentialsPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-gray-400">Loading credential targets…</div>}>
+      <CredentialsContent />
+    </Suspense>
+  )
+}
+
+function CredentialsContent() {
   const toast = useToast()
   const appliedDeepLink = useRef(false)
+  // The selected target lives in the URL, so reload, Back and links keep it.
+  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; target?: string }>()
+  const targetKind: CredentialTargetKind = TARGET_KINDS.includes(filters.target_kind as CredentialTargetKind)
+    ? filters.target_kind as CredentialTargetKind
+    : 'web'
+  const targetId = filters.target_id || ''
+  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
+  const [missingTarget, setMissingTarget] = useState<string | null>(null)
+  const latestProfileRequest = useRef(0)
   const [targets, setTargets] = useState<Target[]>([])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
-  const [targetKind, setTargetKind] = useState<CredentialTargetKind>('web')
-  const [targetId, setTargetId] = useState('')
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [includeInactive, setIncludeInactive] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -264,29 +283,44 @@ export default function CredentialsPage() {
     : targets.map((item) => ({ id: item.id, label: item.name || item.url, detail: item.url })),
   [targetKind, devices, targets])
 
-  useEffect(() => {
-    if (targetId && !choices.some((item) => item.id === targetId)) setTargetId('')
-  }, [choices, targetId])
-
+  // A linked target outside the loaded list (500 most recent) is fetched by ID; one that does not
+  // exist or cannot hold credentials is reported instead of silently dropped.
   useEffect(() => {
     if (loading || appliedDeepLink.current) return
     appliedDeepLink.current = true
-    const params = new URLSearchParams(window.location.search)
-    const requestedId = params.get('target_id')?.trim()
-    const requestedUrl = params.get('target')?.trim()
-    const web = targets.find((item) => item.id === requestedId || (requestedUrl && item.url === requestedUrl))
-    const device = devices.find((item) => item.id === requestedId)
-    if (web) {
-      setTargetKind('web')
-      setTargetId(web.id)
-    } else if (device) {
-      setTargetKind('device')
-      setTargetId(device.id)
+    const requestedUrl = filters.target?.trim()
+    if (requestedUrl && !targetId) {
+      const web = targets.find((item) => item.url === requestedUrl)
+      if (web) setFilters({ target_kind: undefined, target_id: web.id, target: undefined })
+      else setMissingTarget(requestedUrl)
+      return
     }
-  }, [devices, loading, targets])
+    if (!targetId) return
+    if (targets.some((item) => item.id === targetId)) {
+      if (targetKind === 'device') setFilters({ target_kind: undefined, target_id: targetId })
+      return
+    }
+    const device = devices.find((item) => item.id === targetId)
+    if (device) {
+      if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
+      return
+    }
+    getTarget(targetId)
+      .then((target) => {
+        const usable = usableWebTargets([target])
+        if (usable.length) setTargets((current) => [...current, ...usable])
+        else setMissingTarget(target.url || targetId)
+      })
+      .catch(() => setMissingTarget(targetId))
+  }, [devices, filters.target, loading, setFilters, targetId, targetKind, targets])
 
   const loadProfiles = useCallback(async () => {
-    if (!targetId) {
+    // Only the latest request may fill the list: a slower answer for a target that is no longer
+    // selected would show its profiles under the new target, and Rotate or Deactivate would act on them.
+    const request = ++latestProfileRequest.current
+    // A linked ID is queried only once it is a known target: an unknown one gets the notice above
+    // rather than an API error.
+    if (!targetId || !choices.some((item) => item.id === targetId)) {
       setProfiles([])
       return
     }
@@ -297,15 +331,17 @@ export default function CredentialsPage() {
         target_id: targetId,
         include_inactive: includeInactive,
       })
+      if (request !== latestProfileRequest.current) return
       setProfiles(result.profiles || [])
       setError(null)
     } catch (cause) {
+      if (request !== latestProfileRequest.current) return
       setProfiles([])
       setError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
     } finally {
-      setProfilesLoading(false)
+      if (request === latestProfileRequest.current) setProfilesLoading(false)
     }
-  }, [includeInactive, targetId, targetKind])
+  }, [choices, includeInactive, targetId, targetKind])
 
   useEffect(() => { void loadProfiles() }, [loadProfiles])
 
@@ -381,10 +417,10 @@ export default function CredentialsPage() {
     // A target ID is meaningful only inside its kind. Clear it in the same
     // event before the profile-loading effect can combine a new kind with the
     // previous kind's ID and surface a misleading 404.
-    setTargetId('')
     setProfiles([])
     setError(null)
-    setTargetKind(kind)
+    setMissingTarget(null)
+    setFilters({ target_kind: kind === 'web' ? undefined : kind, target_id: undefined, target: undefined })
   }
 
   async function saveProfile() {
@@ -480,7 +516,7 @@ export default function CredentialsPage() {
             </Select>
           </Field>
           <Field label="Bound target">
-            <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+            <Select value={choices.some((item) => item.id === targetId) ? targetId : ''} onChange={(event) => { setMissingTarget(null); setTargetId(event.target.value) }}>
               <option value="">{choices.length ? 'Choose a target…' : 'No active targets'}</option>
               {choices.map((item) => <option key={item.id} value={item.id}>{item.label} — {item.detail}</option>)}
             </Select>
@@ -492,6 +528,11 @@ export default function CredentialsPage() {
         </div>
       </Card>
 
+      {missingTarget && (
+        <div role="alert" className="mb-4 rounded-sm border border-amber-900/60 bg-amber-950/30 p-3 text-sm text-amber-200">
+          The linked target {missingTarget} was not found among active targets that can hold credentials. Choose a target above.
+        </div>
+      )}
       {(targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
       {error && <div className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
       {profilesLoading ? (

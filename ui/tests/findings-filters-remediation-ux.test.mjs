@@ -23,8 +23,11 @@ test('severity and proof pills select several values, sent as the comma lists th
 })
 
 test('the proof filter narrows the list, its older-findings count, and the way back from a finding', () => {
-  assert.equal(list.match(/proof_state: proofFilter \|\| undefined/g)?.length, 2)
-  assert.match(list, /params\.set\('return_proof_state', proofFilter\)/)
+  // The list and the count of what its freshness window hides use one set of filters.
+  assert.equal(list.match(/proof_state: proofFilter \|\| undefined/g)?.length, 1)
+  assert.match(list, /getFindings\(\{\s*\.\.\.scope,\s*seen_within_days: undefined,\s*not_seen_within_days: STALE_AFTER_DAYS,/)
+  // The way back from a finding carries every filter in effect, proof_state included.
+  assert.match(list, /detailUrlWithReturn\(`\/findings\/\$\{finding\.id\}`, filters, FINDINGS_FILTER_DEFAULTS\)/)
   assert.match(list, /severityFilter \|\| proofFilter \|\|/)
 })
 

@@ -55,7 +55,8 @@ test('the launcher no longer renders a failed history fetch as "no hunts"', () =
 })
 
 test('the launcher links to the full history instead of capping silently', () => {
-  assert.match(launcher, /href=\{`\/hunts\?search=/)
+  // The full history is the target's, by exact ID: search never matched a target UUID.
+  assert.match(launcher, /href=\{`\/hunts\?target_id=\$\{encodeURIComponent\(targetId\)\}`\}/)
   assert.match(launcher, /View all \$\{total\}/)
 })
 

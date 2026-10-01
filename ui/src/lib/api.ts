@@ -4186,6 +4186,9 @@ export async function getScans(params?: {
   limit?: number
   offset?: number
   root_domain?: string
+  /** Exact: one target's scans. */
+  target_id?: string
+  /** Substring of the scan URL. */
   target?: string
   created_within_days?: number
   include_shards?: boolean
@@ -4197,6 +4200,7 @@ export async function getScans(params?: {
   if (params?.limit) searchParams.set('limit', params.limit.toString())
   if (params?.offset) searchParams.set('offset', params.offset.toString())
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
+  if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.target) searchParams.set('target', params.target)
   if (params?.created_within_days) searchParams.set('created_within_days', params.created_within_days.toString())
   if (params?.include_shards) searchParams.set('include_shards', 'true')

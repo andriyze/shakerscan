@@ -60,7 +60,8 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
 from .list_filters import (
-    PROOF_FILTER_MAX_ROWS, PROOF_STATES, SEVERITIES, parse_choice_list, project_and_filter_by_proof,
+    PROOF_FILTER_MAX_ROWS, PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
+    project_and_filter_by_proof,
 )
 from .remediation import finding_remediation
 
@@ -168,7 +169,7 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
     if source_type == "deep_hunt":
         return (
             " AND ("
-            "f.source = 'autonomous'"
+            "f.source IN ('autonomous', 'deep_hunt')"
             " OR f.tool = 'autonomous_workflow'"
             " OR f.evidence->'research'->>'driven_by' = 'autonomous_research'"
             ")"
@@ -186,7 +187,7 @@ def _source_type_filter_sql(source_type: Optional[str]) -> str:
     if source_type == "dast":
         return (
             " AND COALESCE(f.source, 'scan') NOT IN "
-            "('ai_gate', 'ai_session', 'autonomous', 'model_intake', 'asm', 'manual', 'device')"
+            "('ai_gate', 'ai_session', 'autonomous', 'deep_hunt', 'model_intake', 'asm', 'manual', 'device')"
             " AND f.ai_target_id IS NULL"
             " AND COALESCE(f.tool, '') NOT IN ('model_intake', 'autonomous_workflow')"
             " AND COALESCE(f.evidence->'research'->>'driven_by', '') <> 'autonomous_research'"
@@ -500,8 +501,8 @@ async def list_findings(
         if root_domain:
             query += f""" AND (
                 t.root_domain = ${param_idx}
-                OR LOWER(ait.endpoint_url) LIKE '%' || LOWER(${param_idx}) || '%'
-                OR LOWER(dt.primary_locator) LIKE '%' || LOWER(${param_idx}) || '%'
+                OR {host_in_domain_sql("ait.endpoint_url", f"${param_idx}")}
+                OR {host_in_domain_sql("dt.primary_locator", f"${param_idx}")}
             )"""
             params.append(root_domain)
             param_idx += 1
@@ -543,8 +544,11 @@ async def list_findings(
                 f.title ILIKE ${param_idx}
                 OR f.url ILIKE ${param_idx}
                 OR t.url ILIKE ${param_idx}
+                OR t.name ILIKE ${param_idx}
                 OR ait.endpoint_url ILIKE ${param_idx}
                 OR ait.name ILIKE ${param_idx}
+                OR dt.name ILIKE ${param_idx}
+                OR dt.primary_locator ILIKE ${param_idx}
             )"""
             params.append(search_pattern)
             param_idx += 1
@@ -691,7 +695,7 @@ async def list_findings(
             if root_domain:
                 candidate_query += f""" AND (
                     t.root_domain = ${cand_idx}
-                    OR LOWER(t.url) LIKE '%' || LOWER(${cand_idx}) || '%'
+                    OR {host_in_domain_sql("t.url", f"${cand_idx}")}
                 )"""
                 candidate_params.append(root_domain)
                 cand_idx += 1

@@ -7,6 +7,7 @@ import { useEffect, useState, useRef, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { getFindings, getDomains, bulkUpdateFindings, getFindingResearchProvenance, type Finding } from '@/lib/api'
 import { useUrlFilters } from '@/lib/useUrlFilters'
+import { detailUrlWithReturn } from '@/lib/detailReturnUrl'
 import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
 import {
   effectiveStatusView,
@@ -127,9 +128,11 @@ function DeepLinkFilterChip({ label, onClear }: { label: string; onClear: () => 
   )
 }
 
+const FINDINGS_FILTER_DEFAULTS: Partial<FindingsFilters> = { sort_by: 'severity', sort_order: 'desc', page: 1 }
+
 function FindingsContent() {
   const { filters, setFilter, setFilters } = useUrlFilters<FindingsFilters>({
-    defaults: { sort_by: 'severity', sort_order: 'desc', page: 1 }
+    defaults: FINDINGS_FILTER_DEFAULTS,
   })
   const toast = useToast()
 
@@ -247,7 +250,8 @@ function FindingsContent() {
 
   async function fetchFindings() {
     try {
-      const data = await getFindings({
+      // One set of filters for the list and for the count of what its freshness window hides.
+      const scope: NonNullable<Parameters<typeof getFindings>[0]> = {
         severity: severityFilter || undefined,
         proof_state: proofFilter || undefined,
         status: statusFilter || undefined,
@@ -268,6 +272,9 @@ function FindingsContent() {
         verified_only: verifiedOnlyFilter || undefined,
         driven_by: drivenByFilter === 'autonomous_research' ? 'autonomous_research' : undefined,
         research_campaign_id: researchCampaignFilter || undefined,
+      }
+      const data = await getFindings({
+        ...scope,
         sort_by: sortBy,
         sort_order: sortOrder,
         limit: pageSize,
@@ -290,16 +297,8 @@ function FindingsContent() {
       if (freshnessFilter === 'current') {
         try {
           const older = await getFindings({
-            severity: severityFilter || undefined,
-            proof_state: proofFilter || undefined,
-            status: statusFilter || undefined,
-            source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
-            root_domain: domainFilter || undefined,
-            scan_id: scanIdFilter || undefined,
-            target_id: targetIdFilter || undefined,
-            ai_target_id: aiTargetIdFilter || undefined,
-            device_target_id: deviceTargetIdFilter || undefined,
-            search: searchQuery || undefined,
+            ...scope,
+            seen_within_days: undefined,
             not_seen_within_days: STALE_AFTER_DAYS,
             limit: 1,
             offset: 0,
@@ -429,26 +428,7 @@ function FindingsContent() {
   // Build detail URL with return params to preserve filter context
   const buildDetailUrl = (finding: Finding) => {
     if (finding.is_candidate) return '/findings/candidates'
-    const params = new URLSearchParams()
-    if (severityFilter) params.set('return_severity', severityFilter)
-    if (proofFilter) params.set('return_proof_state', proofFilter)
-    if (filters.status) params.set('return_status', filters.status)
-    if (sourceTypeFilter) params.set('return_source_type', sourceTypeFilter)
-    if (domainFilter) params.set('return_domain', domainFilter)
-    if (scanIdFilter) params.set('return_scan_id', scanIdFilter)
-    if (targetIdFilter) params.set('return_target_id', targetIdFilter)
-    if (aiTargetIdFilter) params.set('return_ai_target_id', aiTargetIdFilter)
-    if (firstSeenWithinFilter) params.set('return_first_seen_within', String(firstSeenWithinFilter))
-    if (resolvedWithinFilter) params.set('return_resolved_within', String(resolvedWithinFilter))
-    if (searchQuery) params.set('return_search', searchQuery)
-    if (verificationVerdictFilter) params.set('return_verification_verdict', verificationVerdictFilter)
-    if (verificationModeFilter) params.set('return_verification_mode', verificationModeFilter)
-    if (verifiedOnlyFilter) params.set('return_verified_only', 'true')
-    if (sortBy !== 'severity') params.set('return_sort_by', sortBy)
-    if (sortOrder !== 'desc') params.set('return_sort_order', sortOrder)
-    if (page > 1) params.set('return_page', String(page))
-    const queryString = params.toString()
-    return queryString ? `/findings/${finding.id}?${queryString}` : `/findings/${finding.id}`
+    return detailUrlWithReturn(`/findings/${finding.id}`, filters, FINDINGS_FILTER_DEFAULTS)
   }
 
   const PaginationControls = () => (

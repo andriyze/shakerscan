@@ -1259,7 +1259,7 @@ async def exposure_assets(
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
-            "findings_href": f"/findings?target_id={row['id']}&status=active",
+            "findings_href": f"/findings?target_id={row['id']}&status=active&freshness=all",
         })
 
     for row in ai_rows:
@@ -1371,7 +1371,7 @@ async def exposure_assets(
             "first_seen_at": row.get("created_at"),
             "is_new": _exposure_is_new(row.get("created_at")),
             "risk_score": _exposure_risk_score(crit, high, total),
-            "findings_href": f"/findings?ai_target_id={row['id']}&status=active",
+            "findings_href": f"/findings?ai_target_id={row['id']}&status=active&freshness=all",
         })
 
     cohort_counts = dict(Counter(

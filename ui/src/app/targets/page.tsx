@@ -49,12 +49,10 @@ function configureScanHref(targets: string[], forceBatch = false): string {
   return `/scan/new?${params.toString()}`
 }
 
-function scanHistoryHref(rootDomain: string, targetUrl: string): string {
-  const params = new URLSearchParams({
-    domain: rootDomain,
-    search: targetUrl,
-  })
-  return `/scans?${params.toString()}`
+// The counter is targets.total_scans (finished, non-shard runs), so the link opens exactly those:
+// this target's, not every scan whose URL contains the target's, in any status.
+function scanHistoryHref(targetId: string): string {
+  return `/scans?${new URLSearchParams({ target_id: targetId, status: 'completed' }).toString()}`
 }
 
 interface TargetsFilters {
@@ -771,7 +769,7 @@ function TargetsContent() {
                   <>
                     <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                       <Link
-                        href={scanHistoryHref(domain.root_domain, domain.root_target.url)}
+                        href={scanHistoryHref(domain.root_target.id)}
                         onClick={(e) => e.stopPropagation()}
                         className="hover:text-blue-400 transition-colors"
                       >
@@ -779,7 +777,7 @@ function TargetsContent() {
                       </Link>
                       {domain.root_target.active_findings_count > 0 && (
                         <Link
-                          href={`/findings?target_id=${domain.root_target.id}&status=active`}
+                          href={`/findings?target_id=${domain.root_target.id}&status=active&freshness=all`}
                           onClick={(e) => e.stopPropagation()}
                           className="text-yellow-500 hover:text-yellow-400 transition-colors"
                         >
@@ -1007,14 +1005,14 @@ function TargetsContent() {
                       {/* Subdomain Stats */}
                       <div className="hidden items-center gap-4 text-sm text-gray-500 lg:flex">
                         <Link
-                          href={scanHistoryHref(domain.root_domain, subdomain.url)}
+                          href={scanHistoryHref(subdomain.id)}
                           className="hover:text-blue-400 transition-colors"
                         >
                           {subdomain.total_scans} completed scans
                         </Link>
                         {subdomain.active_findings_count > 0 && (
                           <Link
-                            href={`/findings?target_id=${subdomain.id}&status=active`}
+                            href={`/findings?target_id=${subdomain.id}&status=active&freshness=all`}
                             className="text-yellow-500 hover:text-yellow-400 transition-colors"
                           >
                             {subdomain.active_findings_count} findings

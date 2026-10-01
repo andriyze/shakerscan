@@ -1,7 +1,8 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useUrlFilters } from '@/lib/useUrlFilters'
 import { UploadAttempt } from '@/lib/uploadAttempt'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import {
@@ -81,12 +82,32 @@ function defaultOrigin(choice: Choice | undefined): string {
   }
 }
 
+const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'device']
+
 export default function RequestCollectionsPage() {
+  return (
+    <Suspense fallback={null}>
+      <RequestCollectionsContent />
+    </Suspense>
+  )
+}
+
+function RequestCollectionsContent() {
   const toast = useToast()
   const [targets, setTargets] = useState<Target[]>([])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
-  const [targetKind, setTargetKind] = useState<RequestCollectionTargetKind>('web')
-  const [targetId, setTargetId] = useState('')
+  // The collection owner lives in the URL, so reload, Back and links keep it.
+  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+    ? filters.target_kind as RequestCollectionTargetKind
+    : 'web'
+  const targetId = filters.target_id || ''
+  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+    target_kind: kind === 'web' ? undefined : kind,
+    target_id: undefined,
+  }), [setFilters])
+  const latestCollectionsRequest = useRef(0)
   const [collections, setCollections] = useState<SharedRequestCollection[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)
@@ -157,12 +178,18 @@ export default function RequestCollectionsPage() {
   const selectedChoice = choices.find((choice) => choice.id === targetId)
 
   useEffect(() => {
-    if (targetId && !choices.some((choice) => choice.id === targetId)) {
+    // A target's ID is only checked once the lists have loaded, or a deep link would be cleared.
+    if (loading || !targetId || choices.some((choice) => choice.id === targetId)) return
+    if (targetKind !== 'device' && devices.some((item) => item.id === targetId)) {
+      setFilters({ target_kind: 'device', target_id: targetId })
+    } else {
       setTargetId('')
     }
-  }, [choices, targetId])
+  }, [choices, devices, loading, setFilters, setTargetId, targetId, targetKind])
 
   const loadCollections = useCallback(async () => {
+    // Only the latest request may fill the list, so a slow answer never shows another target's collections.
+    const request = ++latestCollectionsRequest.current
     if (!targetId) {
       setCollections([])
       setSelectedId('')
@@ -170,6 +197,7 @@ export default function RequestCollectionsPage() {
     }
     try {
       const result = await listRequestCollections(targetId)
+      if (request !== latestCollectionsRequest.current) return
       setCollections(result.collections || [])
       setSelectedId((current) => (
         result.collections.some((item) => item.id === current)
@@ -178,6 +206,10 @@ export default function RequestCollectionsPage() {
       ))
       setError(null)
     } catch (cause) {
+      if (request !== latestCollectionsRequest.current) return
+      // The previous target's collections must not stay on screen under this target.
+      setCollections([])
+      setSelectedId('')
       setError(cause instanceof Error ? cause.message : 'Failed to load request collections')
     }
   }, [targetId])

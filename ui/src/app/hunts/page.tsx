@@ -33,6 +33,7 @@ interface HuntFilters {
   [key: string]: string | number | undefined
   status?: string
   kind?: string
+  target_id?: string
   search?: string
   sort?: string
   order?: string
@@ -76,6 +77,7 @@ function HuntsContent() {
   const sort = (filters.sort || 'created_at') as HuntSortField
   const order = filters.order === 'asc' ? 'asc' : 'desc'
   const search = filters.search || ''
+  const targetId = filters.target_id || ''
   const page = Math.max(1, filters.page || 1)
 
   // Mirror the URL when it changes from outside this input, such as browser-back.
@@ -94,6 +96,7 @@ function HuntsContent() {
       const result = await listHuntsV2({
         status: (status || undefined) as HuntV2['status'] | undefined,
         targetKind: (kind || undefined) as HuntV2['target_kind'] | undefined,
+        targetId: targetId || undefined,
         search: search || undefined,
         sortBy: sort,
         sortOrder: order,
@@ -110,7 +113,7 @@ function HuntsContent() {
     } finally {
       if (!isPolling) setLoading(false)
     }
-  }, [status, kind, search, sort, order, page])
+  }, [status, kind, targetId, search, sort, order, page])
 
   useEffect(() => {
     load()
@@ -119,7 +122,9 @@ function HuntsContent() {
   }, [load])
 
   const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const filtered = Boolean(status || kind || search)
+  const filtered = Boolean(status || kind || targetId || search)
+  // The target a target-scoped link selected, named from the rows once they load.
+  const scopedTarget = targetId ? (hunts.find((hunt) => hunt.target_id === targetId) || null) : null
   const first = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
   const last = Math.min(page * PAGE_SIZE, total)
 
@@ -130,6 +135,23 @@ function HuntsContent() {
         description="Every investigation, across targets."
         actions={<Link href="/hunt" className={buttonClasses('primary')}>New Hunt</Link>}
       />
+
+      {targetId && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-gray-400">Target</span>
+          <span className="inline-flex items-center gap-2 rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-blue-100" data-testid="hunts-target-filter">
+            {scopedTarget ? targetLabel(scopedTarget) : targetId}
+            <button
+              type="button"
+              onClick={() => setFilter('target_id', undefined)}
+              className="text-blue-300 hover:text-white"
+              aria-label="Show Hunts for every target"
+            >
+              ×
+            </button>
+          </span>
+        </div>
+      )}
 
       <Card className="mb-4 p-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

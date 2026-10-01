@@ -113,7 +113,7 @@ function HuntHistory({
           <h2 className="font-medium text-white">Recent Hunts for this target</h2>
           <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
         </div>
-        <Link href={`/hunts?search=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
+        <Link href={`/hunts?target_id=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
           {total > runs.length ? `View all ${total}` : 'View all hunts'}
         </Link>
       </div>

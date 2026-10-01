@@ -1571,7 +1571,7 @@ function TargetView({ targetId }: { targetId: string }) {
         </button>
         <div className="ml-auto flex items-center gap-2">
           <Link
-            href={`/findings?target_id=${targetId}&status=active`}
+            href={`/findings?target_id=${targetId}&status=active&freshness=all`}
             className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300"
           >
             View findings <ExternalLink className="h-3.5 w-3.5" />
