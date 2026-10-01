@@ -2,6 +2,7 @@
 set -euo pipefail
 export PYTHONPATH="$PWD:$PWD/api:$PWD/scanner"
 python -m pip install -q --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+python -m playwright install --with-deps chromium
 npm --prefix ui ci --silent
 python scripts/generate_public_api_contract.py
 set +e

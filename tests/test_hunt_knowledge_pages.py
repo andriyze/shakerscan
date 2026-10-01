@@ -21,6 +21,8 @@ class KnowledgeDB:
         self.db = sqlite3.connect(":memory:", check_same_thread=check_same_thread)
         self.db.row_factory = sqlite3.Row
         self.calls = []
+        self.db.execute('CREATE TABLE targets (id TEXT PRIMARY KEY, asset_owner_id TEXT)')
+        self.db.executemany('INSERT INTO targets VALUES (?,NULL)',[(str(TARGET),),(str(OTHER),)])
         for table in {s.table for s in QUERIES.values()}:
             fields = {"id", "target_id", "device_target_id", "is_active", "target_scope"}
             for spec in QUERIES.values():
@@ -31,6 +33,8 @@ class KnowledgeDB:
             self.db.execute(f"CREATE TABLE {table} ({', '.join(fields)})")
 
     def insert(self, kind, **values):
+        if values.get('device_target_id') and not values.get('target_id'):
+            values['target_id']=values['device_target_id']  # canonical alias populated by migration
         self.db.execute(f"INSERT INTO {QUERIES[kind].table} ({', '.join(values)}) VALUES ({','.join('?' for _ in values)})", list(values.values()))
 
     async def fetch(self, sql, *args):
@@ -335,3 +339,13 @@ def test_grouped_empty_inventory_is_explicit_and_has_no_cursor():
     assert result["rows"] == [] and result["group_count"] == 0
     assert not result["has_more"] and result["next_cursor"] is None
     assert not result["inventory_truncated"]
+
+
+def test_device_history_includes_child_services_but_not_a_different_asset():
+    db=KnowledgeDB()
+    child=str(uuid.UUID(int=999001))
+    db.db.execute('INSERT INTO targets VALUES (?,?)',(child,str(TARGET)))
+    db.insert('scans',id='root-scan',target_id=str(TARGET),status='completed',created_at=STAMP)
+    db.insert('scans',id='child-scan',target_id=child,status='completed',created_at=STAMP)
+    db.insert('scans',id='foreign-scan',target_id=str(OTHER),status='completed',created_at=STAMP)
+    assert {row['id'] for row in page(db,'scans',device=True)['rows']}=={'root-scan','child-scan'}

@@ -73,6 +73,8 @@ class _Conn:
 
     async def execute(self, query, *args):
         self.executed.append((query, args))
+        if 'UPDATE targets SET authorization_inheritance=false' in query:
+            return 'UPDATE 1'
         if "INSERT INTO scope_receipts" in query:
             self.scopes[args[0]] = {
                 "target_id": args[1], "allowed_hosts": json.loads(args[9]),
@@ -90,6 +92,8 @@ class _Conn:
         raise AssertionError(query)
 
     async def fetchval(self, query, *args):
+        if 'target_effective_authorization_target' in query:
+            return TARGET_ID if str(args[0]) == str(TARGET_ID) else None
         raise AssertionError(query)
 
 

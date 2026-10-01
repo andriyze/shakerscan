@@ -5,7 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
+import importlib  # noqa: E402
 import api as api_module  # noqa: E402
+if hasattr(api_module, '__path__'):
+    api_module = importlib.import_module('api.api')
 import worker  # noqa: E402
 
 
