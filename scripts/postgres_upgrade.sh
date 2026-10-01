@@ -94,26 +94,75 @@ postgres_probe_volumes() {
         mounts+=(-v "$cluster:/cluster:ro")
     fi
     if [ ${#mounts[@]} -eq 0 ]; then
-        printf 'legacy_major=\ncluster_majors=\nreceipt_majors=\n'
+        printf 'legacy_major=\ncluster_majors=\nreceipt_majors=\nreplaced_dirs=\n'
         return 0
     fi
+    # Each cluster's global/pg_control is rewritten by every checkpoint, including the one at a clean
+    # shutdown, so its digest changes whenever PostgreSQL has run on that data. A receipt records the
+    # digest of the data it was copied from; the probe reports both so a later start can tell whether
+    # an older release ran on the old data after the copy.
     docker_cli run --rm --network none "${mounts[@]}" --entrypoint sh "$image" -c '
+        control() { [ -f "$1/global/pg_control" ] && sha256sum "$1/global/pg_control" | cut -d" " -f1; }
         legacy=""
         [ -f /legacy/PG_VERSION ] && legacy="$(tr -dc 0-9 < /legacy/PG_VERSION)"
-        majors=""; receipts=""
+        [ -n "$legacy" ] && printf "legacy_control=%s\n" "$(control /legacy)"
+        majors=""; receipts=""; replaced=""
         for dir in /cluster/*/; do
             [ -d "$dir" ] || continue
             major="$(basename "$dir")"
             case "$major" in ""|*[!0-9]*) continue ;; esac
-            [ -f "$dir/docker/PG_VERSION" ] && majors="$majors $major"
-            [ -f "$dir/'"$POSTGRES_MIGRATION_RECEIPT"'" ] && receipts="$receipts $major"
+            if [ -f "$dir/docker/PG_VERSION" ]; then
+                majors="$majors $major"
+                printf "control_%s=%s\n" "$major" "$(control "$dir/docker")"
+            fi
+            for aside in "$dir"replaced-*/; do
+                [ -d "$aside" ] && replaced="$replaced $major/$(basename "$aside")"
+            done
+            receipt="$dir/'"$POSTGRES_MIGRATION_RECEIPT"'"
+            if [ -f "$receipt" ]; then
+                receipts="$receipts $major"
+                sed -nE "s/^(from_kind|from_major|from_volume|source_control)=/receipt_${major}_\1=/p" "$receipt"
+            fi
         done
-        printf "legacy_major=%s\ncluster_majors=%s\nreceipt_majors=%s\n" "$legacy" "${majors# }" "${receipts# }"
+        printf "legacy_major=%s\ncluster_majors=%s\nreceipt_majors=%s\nreplaced_dirs=%s\n" \
+            "$legacy" "${majors# }" "${receipts# }" "${replaced# }"
     '
 }
 
 postgres_probe_value() {
     printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1
+}
+
+# Whether the data the target cluster was copied from has run since the copy. Prints one of:
+#   unchanged | gone | unrecorded | diverged <legacy|cluster> <major>
+# "diverged" means an older release ran on the old data after the upgrade (a rollback), so the
+# copy may be missing whatever was written then; a start must not pick a side silently.
+postgres_source_state() {
+    local probe="$1" target="$2" kind major recorded current
+    major="$(postgres_probe_value "$probe" "receipt_${target}_from_major")"
+    recorded="$(postgres_probe_value "$probe" "receipt_${target}_source_control")"
+    kind="$(postgres_probe_value "$probe" "receipt_${target}_from_kind")"
+    if [ -z "$kind" ]; then
+        case "$(postgres_probe_value "$probe" "receipt_${target}_from_volume")" in
+            "$(postgres_legacy_volume)") kind="legacy" ;;
+            *) kind="cluster" ;;
+        esac
+    fi
+    if [ "$kind" = "legacy" ]; then
+        [ "$(postgres_probe_value "$probe" legacy_major)" = "$major" ] && \
+            current="$(postgres_probe_value "$probe" legacy_control)"
+    else
+        current="$(postgres_probe_value "$probe" "control_${major}")"
+    fi
+    if [ -z "$current" ]; then
+        echo "gone"
+    elif [ -z "$recorded" ]; then
+        echo "unrecorded"
+    elif [ "$current" = "$recorded" ]; then
+        echo "unchanged"
+    else
+        echo "diverged $kind $major"
+    fi
 }
 
 # Decide what a start must do, from the target major and what the volumes hold. Prints one of:
@@ -253,7 +302,7 @@ postgres_ensure_cluster_volume() {
 migrate_postgres_cluster() {
     local source_kind="$1" source_major="$2" target_image="$3" target="$4"
     local project source_image source_volume source_mount source_pgdata source_desc
-    local backup_dir timestamp size_bytes need_kb free_kb temp_password
+    local backup_dir timestamp size_bytes need_kb free_kb temp_password source_control
     local src dst
 
     project="$(postgres_project)"
@@ -323,8 +372,20 @@ migrate_postgres_cluster() {
         postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "pg_dumpall failed"
         return 1
     fi
-    docker_cli stop -t 60 "$src" > /dev/null 2>&1 || true
+    if ! docker_cli stop -t 120 "$src" > /dev/null; then
+        postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "PostgreSQL $source_major did not shut down cleanly"
+        return 1
+    fi
     docker_cli rm -f "$src" > /dev/null 2>&1 || true
+    # The digest of the source's pg_control after its clean shutdown identifies the exact data that
+    # was copied; any later run of an older release on it (a rollback) changes the digest.
+    source_control="$(docker_cli run --rm --network none -v "$source_volume:/source:ro" --entrypoint sh \
+        "$target_image" -c "sha256sum '/source${source_pgdata#"$source_mount"}/global/pg_control' | cut -d' ' -f1")"
+    case "$source_control" in
+        *[!0-9a-f]*|'')
+            postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "could not fingerprint the source data"
+            return 1 ;;
+    esac
 
     # A leftover from an interrupted attempt is never published; start the copy from scratch.
     free_kb="$(postgres_cluster_shell "$target_image" \
@@ -386,8 +447,8 @@ migrate_postgres_cluster() {
     fi
     docker_cli rm -f "$dst" > /dev/null 2>&1 || true
 
-    printf 'from_major=%s\nfrom_volume=%s\nto_major=%s\nmigrated_at=%s\nbackup=%s\ntables_verified=%s\n' \
-        "$source_major" "$source_volume" "$target" "$timestamp" "$backup_dir" \
+    printf 'from_kind=%s\nfrom_major=%s\nfrom_volume=%s\nsource_control=%s\nto_major=%s\nmigrated_at=%s\nbackup=%s\ntables_verified=%s\n' \
+        "$source_kind" "$source_major" "$source_volume" "$source_control" "$target" "$timestamp" "$backup_dir" \
         "$(grep -c '|table|' "$backup_dir/source-fingerprint.txt")" > "$backup_dir/$POSTGRES_MIGRATION_RECEIPT"
     # Receipt first, then the rename that publishes the data directory: an interruption between the
     # two leaves no <major>/docker, so the next start simply repeats the copy.
@@ -406,9 +467,27 @@ migrate_postgres_cluster() {
     echo "    $(cli_hint) db-upgrade --remove-legacy"
 }
 
+postgres_report_diverged() {
+    local target="$1" state="$2" kind major source
+    kind="$(printf '%s' "$state" | awk '{print $2}')"
+    major="$(printf '%s' "$state" | awk '{print $3}')"
+    if [ "$kind" = "legacy" ]; then
+        source="volume $(postgres_legacy_volume)"
+    else
+        source="the PostgreSQL $major directory in $(postgres_cluster_volume)"
+    fi
+    echo -e "${RED}Error: the PostgreSQL $major data in $source has been used since it was copied to PostgreSQL $target.${NC}" >&2
+    echo "An earlier ShakerScan release ran on it after the upgrade (a rollback), so the PostgreSQL $target" >&2
+    echo "copy may be missing what was written then. Nothing was started. Choose which data to keep:" >&2
+    echo "  $(cli_hint) db-upgrade --remigrate      copy the PostgreSQL $major data again; changes made on" >&2
+    echo "                                          PostgreSQL $target since the first copy are set aside" >&2
+    echo "  $(cli_hint) db-upgrade --keep-current   keep the PostgreSQL $target data; changes made on the" >&2
+    echo "                                          PostgreSQL $major data since the copy are not carried over" >&2
+}
+
 # Called before anything that can start PostgreSQL. Idempotent and cheap once the cluster is current.
 ensure_postgres_cluster_current() {
-    local target_image target probe plan action detail
+    local target_image target probe plan action detail source_state
 
     [ "$POSTGRES_CLUSTER_CHECKED" -eq 1 ] && return 0
     if ! target_image="$(postgres_target_image)"; then
@@ -428,7 +507,14 @@ ensure_postgres_cluster_current() {
     action="${plan%% *}"
     detail="${plan#* }"
     case "$action" in
-        ready|fresh)
+        ready)
+            source_state="$(postgres_source_state "$probe" "$target")"
+            if [ "${source_state%% *}" = "diverged" ]; then
+                postgres_report_diverged "$target" "$source_state"
+                return 1
+            fi
+            ;;
+        fresh)
             ;;
         migrate)
             migrate_postgres_cluster "${detail%% *}" "${detail#* }" "$target_image" "$target" || return 1
@@ -437,9 +523,8 @@ ensure_postgres_cluster_current() {
             echo -e "${RED}Error: $(postgres_cluster_volume) already holds a PostgreSQL $target cluster that was not migrated,${NC}" >&2
             echo -e "${RED}while older PostgreSQL data still exists (volume $(postgres_legacy_volume) or an older major).${NC}" >&2
             echo "PostgreSQL $target was started before the upgrade ran, so it initialized an empty database." >&2
-            echo "Your data is still in the older volume. If nothing in the new cluster is needed, remove it with" >&2
-            echo "  docker volume rm $(postgres_cluster_volume)" >&2
-            echo "and run '$(cli_hint) start' again to migrate." >&2
+            echo "Your data is still in the older volume. To set the new cluster aside and migrate, run" >&2
+            echo "  $(cli_hint) db-upgrade --remigrate" >&2
             return 1
             ;;
         downgrade)
@@ -470,11 +555,119 @@ postgres_upgrade_status() {
     echo "Cluster volume: $(postgres_cluster_volume): majors [$(postgres_probe_value "$probe" cluster_majors)], migrated [$(postgres_probe_value "$probe" receipt_majors)]"
     echo "Plan:           $(postgres_cluster_plan "$target" "$(postgres_probe_value "$probe" legacy_major)" \
         "$(postgres_probe_value "$probe" cluster_majors)" "$(postgres_probe_value "$probe" receipt_majors)")"
+    if printf ' %s ' "$(postgres_probe_value "$probe" receipt_majors)" | grep -q " $target "; then
+        case "$(postgres_source_state "$probe" "$target")" in
+            unchanged) echo "Source data:    unchanged since the copy (kept for rollback)" ;;
+            gone) echo "Source data:    removed" ;;
+            unrecorded) echo "Source data:    present; this copy predates source fingerprints" ;;
+            diverged*) echo "Source data:    used since the copy (rollback); resolve with --remigrate or --keep-current" ;;
+        esac
+    fi
+    if [ -n "$(postgres_probe_value "$probe" replaced_dirs)" ]; then
+        echo "Set aside:      $(postgres_probe_value "$probe" replaced_dirs) (reclaim with db-upgrade --remove-legacy)"
+    fi
+}
+
+# The older data a target cluster comes from: the receipt's record, else what a migration would use.
+postgres_upgrade_source() {
+    local probe="$1" target="$2" kind major newest=""
+    kind="$(postgres_probe_value "$probe" "receipt_${target}_from_kind")"
+    major="$(postgres_probe_value "$probe" "receipt_${target}_from_major")"
+    if [ -n "$kind" ] && [ -n "$major" ]; then
+        echo "$kind $major"
+        return 0
+    fi
+    for major in $(postgres_probe_value "$probe" cluster_majors); do
+        if [ "$major" -lt "$target" ] && { [ -z "$newest" ] || [ "$major" -gt "$newest" ]; }; then
+            newest="$major"
+        fi
+    done
+    if [ -n "$newest" ]; then
+        echo "cluster $newest"
+    elif [ -n "$(postgres_probe_value "$probe" legacy_major)" ]; then
+        echo "legacy $(postgres_probe_value "$probe" legacy_major)"
+    else
+        return 1
+    fi
+}
+
+# Interactive only: set the current cluster aside (not deleted) and copy the older data again. For a
+# rollback that wrote to the old data, or a cluster PostgreSQL initialized before the upgrade ran.
+remigrate_postgres_cluster() {
+    local target_image target probe source kind major stamp confirm
+    target_image="$(postgres_target_image)" || return 1
+    target="$(postgres_image_major "$target_image")" || return 1
+    probe="$(postgres_probe_volumes "$target_image")" || return 1
+    if ! printf ' %s ' "$(postgres_probe_value "$probe" cluster_majors)" | grep -q " $target "; then
+        echo -e "${RED}Error: there is no PostgreSQL $target cluster to replace; '$(cli_hint) start' migrates on its own.${NC}" >&2
+        return 1
+    fi
+    if ! source="$(postgres_upgrade_source "$probe" "$target")"; then
+        echo -e "${RED}Error: there is no older PostgreSQL data to copy again.${NC}" >&2
+        return 1
+    fi
+    if [ -n "$(postgres_probe_value "$probe" "receipt_${target}_from_major")" ] && \
+        [ "$(postgres_source_state "$probe" "$target")" = "gone" ]; then
+        echo -e "${RED}Error: the PostgreSQL data this cluster was copied from is no longer present; nothing to copy again.${NC}" >&2
+        return 1
+    fi
+    kind="${source%% *}"
+    major="${source#* }"
+    echo -e "${YELLOW}This sets the current PostgreSQL $target data aside and copies the PostgreSQL $major data again.${NC}"
+    echo "Anything written on PostgreSQL $target since then stays only in the set-aside copy."
+    read -r -p "Type 'remigrate' to continue: " confirm || confirm=""
+    if [ "$confirm" != "remigrate" ]; then
+        echo "Cancelled; nothing was changed."
+        return 1
+    fi
+    postgres_stop_volume_users "$(postgres_cluster_volume)" "$(postgres_legacy_volume)" || return 1
+    postgres_remove_upgrade_containers
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    postgres_cluster_shell "$target_image" "set -e
+        mv /var/lib/postgresql/$target/docker /var/lib/postgresql/$target/replaced-$stamp
+        if [ -f /var/lib/postgresql/$target/$POSTGRES_MIGRATION_RECEIPT ]; then
+            mv /var/lib/postgresql/$target/$POSTGRES_MIGRATION_RECEIPT /var/lib/postgresql/$target/replaced-$stamp/$POSTGRES_MIGRATION_RECEIPT
+        fi" || return 1
+    echo "Set the previous PostgreSQL $target data aside as $target/replaced-$stamp in $(postgres_cluster_volume)."
+    migrate_postgres_cluster "$kind" "$major" "$target_image" "$target" || return 1
+    POSTGRES_CLUSTER_CHECKED=1
+}
+
+# Interactive only: keep the current cluster after a rollback ran on the older data, and accept that
+# what was written there since the copy is not carried over. The older data stays for rollback.
+keep_current_postgres_cluster() {
+    local target_image target probe state kind major current confirm
+    target_image="$(postgres_target_image)" || return 1
+    target="$(postgres_image_major "$target_image")" || return 1
+    probe="$(postgres_probe_volumes "$target_image")" || return 1
+    state="$(postgres_source_state "$probe" "$target")"
+    if [ "${state%% *}" != "diverged" ]; then
+        echo "Nothing to resolve: the PostgreSQL $target data and its source agree ($state)."
+        return 0
+    fi
+    kind="$(printf '%s' "$state" | awk '{print $2}')"
+    major="$(printf '%s' "$state" | awk '{print $3}')"
+    if [ "$kind" = "legacy" ]; then
+        current="$(postgres_probe_value "$probe" legacy_control)"
+    else
+        current="$(postgres_probe_value "$probe" "control_${major}")"
+    fi
+    echo -e "${YELLOW}This keeps the PostgreSQL $target data. Changes made on the PostgreSQL $major data since the upgrade are not carried over.${NC}"
+    read -r -p "Type 'keep' to continue: " confirm || confirm=""
+    if [ "$confirm" != "keep" ]; then
+        echo "Cancelled; nothing was changed."
+        return 1
+    fi
+    postgres_cluster_shell "$target_image" "set -e
+        receipt=/var/lib/postgresql/$target/$POSTGRES_MIGRATION_RECEIPT
+        sed -i '/^source_control=/d' \"\$receipt\"
+        printf 'source_control=%s\naccepted_at=%s\n' '$current' '$(date -u +%Y%m%dT%H%M%SZ)' >> \"\$receipt\"" || return 1
+    echo "Kept the PostgreSQL $target data. The PostgreSQL $major data stays for rollback."
 }
 
 # Interactive only: delete the data that a verified upgrade left behind for rollback.
 remove_legacy_postgres_data() {
-    local target_image target probe plan legacy older major confirm
+    local target_image target probe plan legacy older major confirm replaced aside
     target_image="$(postgres_target_image)" || return 1
     target="$(postgres_image_major "$target_image")" || return 1
     probe="$(postgres_probe_volumes "$target_image")" || return 1
@@ -489,7 +682,8 @@ remove_legacy_postgres_data() {
     for major in $(postgres_probe_value "$probe" cluster_majors); do
         [ "$major" -lt "$target" ] && older="$older $major"
     done
-    if ! postgres_volume_exists "$legacy" && [ -z "$older" ]; then
+    replaced="$(postgres_probe_value "$probe" replaced_dirs)"
+    if ! postgres_volume_exists "$legacy" && [ -z "$older" ] && [ -z "$replaced" ]; then
         echo "No pre-upgrade PostgreSQL data remains."
         return 0
     fi
@@ -497,6 +691,9 @@ remove_legacy_postgres_data() {
     postgres_volume_exists "$legacy" && echo "  volume $legacy"
     for major in $older; do
         echo "  $(postgres_cluster_volume): PostgreSQL $major data directory"
+    done
+    for aside in $replaced; do
+        echo "  $(postgres_cluster_volume): set-aside copy $aside"
     done
     echo "A previous ShakerScan release will no longer be able to start with its data."
     read -r -p "Type 'remove' to continue: " confirm || confirm=""
@@ -515,5 +712,9 @@ remove_legacy_postgres_data() {
     for major in $older; do
         postgres_cluster_shell "$target_image" "rm -rf /var/lib/postgresql/$major" || return 1
         echo "Removed the PostgreSQL $major data directory"
+    done
+    for aside in $replaced; do
+        postgres_cluster_shell "$target_image" "rm -rf '/var/lib/postgresql/$aside'" || return 1
+        echo "Removed the set-aside copy $aside"
     done
 }

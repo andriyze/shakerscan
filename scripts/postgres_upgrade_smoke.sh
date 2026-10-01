@@ -2,9 +2,13 @@
 # Exercise the launcher's PostgreSQL major upgrade (scripts/postgres_upgrade.sh) against the real
 # images, in throwaway Compose projects that share nothing with a running stack:
 #   1. 16 data in the legacy volume -> `scanner.sh db-upgrade` -> verified 18 cluster, credentials
-#      and every row intact, and the legacy volume still starts under 16 for rollback;
+#      and every row intact, with the source fingerprint in the receipt;
 #   2. a second run is a no-op;
-#   3. an 18 cluster started before the upgrade (no receipt) beside 16 data is refused;
+#   2b. a rollback that writes on 16 after the copy is refused rather than silently ignored, and is
+#      resolved by --keep-current or --remigrate (the latter carrying the rollback's rows over);
+#      --remove-legacy then reclaims the 16 volume and the set-aside copy;
+#   3. an 18 cluster started before the upgrade (no receipt) beside 16 data is refused, and
+#      --remigrate sets it aside and migrates;
 #   4. a restore error (an extension 18 no longer ships) publishes nothing, and a retry after fixing
 #      the source succeeds;
 #   5. a host without data creates no volumes;
@@ -135,21 +139,59 @@ docker exec -e PGPASSWORD="$PASSWORD" "${P1}-pg18" psql -X -h 127.0.0.1 -U scann
     fail "the scanner password no longer authenticates"
 docker exec -e PGPASSWORD="$SIGNER_PASSWORD" "${P1}-pg18" psql -X -h 127.0.0.1 -U smoke_signer -d scanner -At \
     -c "SELECT count(*) FROM smoke_rows" > /dev/null || fail "the signer role password no longer authenticates"
-docker exec "${P1}-pg18" test -f /var/lib/postgresql/18/shakerscan-migration.txt || fail "no migration receipt"
+docker exec "${P1}-pg18" grep -Eq '^source_control=[0-9a-f]{64}$' /var/lib/postgresql/18/shakerscan-migration.txt || \
+    fail "the receipt does not record the source fingerprint"
 docker exec "${P1}-pg18" test ! -e /var/lib/postgresql/18/migrating || fail "staging directory left behind"
 docker rm -f "${P1}-pg18" > /dev/null
-
-# Rollback: the previous release's PostgreSQL 16 still starts on the untouched legacy volume.
-docker run -d --name "${P1}-pg16" -v "${P1}_postgres-data:/var/lib/postgresql/data" "$LEGACY_IMAGE" > /dev/null
-wait_ready "${P1}-pg16"
-[ "$(count "${P1}-pg16" scanner "SELECT count(*) FROM smoke_rows")" = "20000" ] || fail "legacy data changed"
-docker rm -f "${P1}-pg16" > /dev/null
 
 echo "== 2. a second run is a no-op"
 out="$(launcher "$P1" db-upgrade 2>&1)" || { echo "$out"; fail "second db-upgrade failed"; }
 echo "$out" | grep -q "Upgrading PostgreSQL" && fail "second run migrated again"
 [ "$(find "$WORK/$P1/backups" -maxdepth 1 -type d -name 'postgres-16-to-*' | wc -l | tr -d ' ')" = "1" ] || \
     fail "second run took another dump"
+
+echo "== 2b. a rollback that writes on 16 is detected and resolved explicitly"
+rollback_write() {
+    docker run -d --name "${P1}-pg16" -v "${P1}_postgres-data:/var/lib/postgresql/data" "$LEGACY_IMAGE" > /dev/null
+    wait_ready "${P1}-pg16"
+    docker exec "${P1}-pg16" psql -X -q -U scanner -d scanner -c "INSERT INTO smoke_rows (note) VALUES ('$1')"
+    docker stop -t 30 "${P1}-pg16" > /dev/null
+    docker rm "${P1}-pg16" > /dev/null
+}
+count_18() {
+    docker run -d --name "${P1}-check" -e POSTGRES_PASSWORD=unused -v "${P1}_postgres-cluster:/var/lib/postgresql" \
+        "$TARGET_IMAGE" > /dev/null
+    wait_ready "${P1}-check"
+    count "${P1}-check" scanner "SELECT count(*) FROM smoke_rows"
+    docker stop -t 30 "${P1}-check" > /dev/null
+    docker rm "${P1}-check" > /dev/null
+}
+rollback_write "written during the first rollback"
+if out="$(launcher "$P1" db-upgrade 2>&1)"; then
+    echo "$out"
+    fail "a start ignored writes made on 16 after the copy"
+fi
+show "$out"
+echo "$out" | grep -q "has been used since it was copied" || { echo "$out"; fail "divergence was not explained"; }
+out="$(printf 'keep\n' | launcher "$P1" db-upgrade --keep-current 2>&1)" || { echo "$out"; fail "--keep-current failed"; }
+out="$(launcher "$P1" db-upgrade 2>&1)" || { echo "$out"; fail "start still refused after --keep-current"; }
+echo "$out" | grep -q "unchanged since the copy" || { echo "$out"; fail "keep-current did not re-baseline the source"; }
+[ "$(count_18)" = "20000" ] || fail "--keep-current changed the 18 data"
+
+rollback_write "written during the second rollback"
+out="$(printf 'nope\n' | launcher "$P1" db-upgrade --remigrate 2>&1)" && fail "--remigrate ran without confirmation"
+out="$(printf 'remigrate\n' | launcher "$P1" db-upgrade --remigrate 2>&1)" || { echo "$out"; fail "--remigrate failed"; }
+show "$out"
+echo "$out" | grep -q "tables verified" || { echo "$out"; fail "--remigrate did not verify a new copy"; }
+[ "$(count_18)" = "20002" ] || fail "--remigrate did not carry the rollback writes over"
+status="$(launcher "$P1" db-upgrade --status 2>&1)"
+echo "$status" | grep -q "Set aside: *18/replaced-" || { echo "$status"; fail "the replaced 18 data was not kept"; }
+out="$(printf 'remove\n' | launcher "$P1" db-upgrade --remove-legacy 2>&1)" || { echo "$out"; fail "--remove-legacy failed"; }
+docker volume inspect "${P1}_postgres-data" > /dev/null 2>&1 && fail "--remove-legacy kept the 16 volume"
+status="$(launcher "$P1" db-upgrade --status 2>&1)"
+echo "$status" | grep -q "Set aside" && { echo "$status"; fail "--remove-legacy kept the set-aside copy"; }
+echo "$status" | grep -q "Plan: *ready" || { echo "$status"; fail "cluster is not ready after cleanup"; }
+[ "$(count_18)" = "20002" ] || fail "cleanup changed the 18 data"
 
 echo "== 3. an 18 cluster started before the upgrade is refused"
 P3="${PREFIX}c"
@@ -167,6 +209,9 @@ if out="$(launcher "$P3" db-upgrade 2>&1)"; then
 fi
 show "$out"
 echo "$out" | grep -q "was not migrated" || { echo "$out"; fail "conflict was not explained"; }
+out="$(printf 'remigrate\n' | launcher "$P3" db-upgrade --remigrate 2>&1)" || { echo "$out"; fail "--remigrate did not resolve the conflict"; }
+echo "$out" | grep -q "Plan: *ready" || out="$(launcher "$P3" db-upgrade 2>&1)"
+echo "$out" | grep -q "Plan: *ready" || { echo "$out"; fail "conflict resolution did not reach ready"; }
 
 echo "== 4. a restore error publishes nothing, and a retry succeeds"
 P4="${PREFIX}d"

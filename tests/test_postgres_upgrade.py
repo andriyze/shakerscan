@@ -230,3 +230,64 @@ def test_the_launcher_refuses_to_run_without_the_upgrade_module(tmp_path):
     result = subprocess.run(["bash", str(launcher), "status"], capture_output=True, text=True, cwd=tmp_path)
     assert result.returncode == 1
     assert "postgres_upgrade.sh is missing" in result.stderr
+
+
+def _source_state(probe: dict[str, str], target: int = 18) -> str:
+    lines = "\\n".join(f"{key}={value}" for key, value in probe.items())
+    result = _bash(
+        f'source "{MODULE}"; COMPOSE_PROJECT_NAME=demo; '
+        f'postgres_source_state "$(printf "{lines}")" {target}'
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+RECEIPT = {"legacy_major": "16", "receipt_18_from_kind": "legacy", "receipt_18_from_major": "16",
+           "receipt_18_source_control": "a" * 64}
+
+
+def test_a_copy_whose_source_never_ran_again_is_unchanged():
+    assert _source_state({**RECEIPT, "legacy_control": "a" * 64}) == "unchanged"
+
+
+def test_a_rollback_that_ran_on_the_old_data_is_detected():
+    # Any run of PostgreSQL 16 on the legacy volume rewrites pg_control, so its digest moves.
+    assert _source_state({**RECEIPT, "legacy_control": "b" * 64}) == "diverged legacy 16"
+
+
+def test_removed_old_data_and_pre_fingerprint_receipts_are_not_divergence():
+    assert _source_state({k: v for k, v in RECEIPT.items() if k != "legacy_major"}) == "gone"
+    legacy_receipt = {"legacy_major": "16", "legacy_control": "b" * 64,
+                      "receipt_18_from_major": "16", "receipt_18_from_volume": "demo_postgres-data"}
+    assert _source_state(legacy_receipt) == "unrecorded"
+
+
+def test_a_later_major_compares_against_the_older_cluster_directory():
+    probe = {"receipt_19_from_kind": "cluster", "receipt_19_from_major": "18",
+             "receipt_19_source_control": "c" * 64, "control_18": "c" * 64}
+    assert _source_state(probe, target=19) == "unchanged"
+    assert _source_state({**probe, "control_18": "d" * 64}, target=19) == "diverged cluster 18"
+
+
+def test_every_major_a_target_can_migrate_from_has_a_pinned_source_image():
+    # Moving the stack to PostgreSQL 19 must keep an image that can read 18 data, or every 18 install
+    # would stop at "no pinned image can read PostgreSQL 18 data".
+    target = int(re.match(r"postgres:(\d+)\.", _compose_postgres_image()).group(1))
+    for major in [16, *range(18, target)]:
+        result = _bash(f'source "{MODULE}"; postgres_source_image_for_major {major}')
+        assert result.returncode == 0, f"no pinned source image for PostgreSQL {major}"
+        assert re.fullmatch(rf"postgres:{major}\.\d+-alpine[0-9.]*@sha256:[0-9a-f]{{64}}", result.stdout.strip())
+
+
+def test_the_cli_offers_both_ways_to_resolve_a_rollback():
+    script = "\n".join([
+        'RED=""; NC=""',
+        "cli_hint() { echo shakerscan; }",
+        'remigrate_postgres_cluster() { echo REMIGRATE; }',
+        'keep_current_postgres_cluster() { echo KEEP; }',
+        _extract("db_upgrade_cmd"),
+        "db_upgrade_cmd --remigrate; db_upgrade_cmd --keep-current; db_upgrade_cmd --bogus",
+    ])
+    result = _bash(script)
+    assert result.stdout.splitlines()[:2] == ["REMIGRATE", "KEEP"]
+    assert "--remigrate|--keep-current" in result.stderr
