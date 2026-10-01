@@ -91,8 +91,8 @@ class _Conn:
         return len(self.rows)
 
 
-def _list(monkeypatch, rows, **params):
-    conn = _Conn(rows)
+def _list(monkeypatch, rows, conn=None, **params):
+    conn = conn or _Conn(rows)
 
     class _Pool:
         @asynccontextmanager
@@ -158,10 +158,57 @@ def test_the_proof_filter_refuses_rather_than_sampling(monkeypatch):
     assert refused.value.status_code == 422 and "Narrow the list" in refused.value.detail
 
 
-def test_a_proof_filter_never_mixes_in_hunt_candidates(monkeypatch):
-    result, conn = _list(monkeypatch, [], proof_state="verified", include_candidates=True)
-    assert len(conn.queries) == 1
-    assert result["candidates_total"] == 0
+class _ConnWithCandidates(_Conn):
+    """Answers the candidate query with its own rows, the findings query with the findings."""
+
+    def __init__(self, rows, candidates):
+        super().__init__(rows)
+        self.candidates = candidates
+
+    async def fetch(self, query, *args):
+        self.queries.append((query, args))
+        source = self.candidates if "investigation_candidates" in query else self.rows
+        return [dict(row) for row in source]
+
+
+def _candidate(identifier, severity):
+    return {"id": identifier, "target_id": None, "family": "access_control", "canonical_locus": {"route": "/api/x"},
+            "title": f"lead {identifier}", "claimed_severity": severity, "evidence_refs": [], "status": "new",
+            "first_seen_at": None, "last_seen_at": None, "target_url": None, "target_name": None,
+            "root_domain": None, "total_count": 1}
+
+
+def _list_with_candidates(monkeypatch, rows, candidates, **params):
+    return _list(monkeypatch, rows, conn=_ConnWithCandidates(rows, candidates), **params)
+
+
+def test_a_proven_only_filter_leaves_out_hunt_candidates(monkeypatch):
+    # A candidate is an unproven lead: it can never answer "verified" or "unverified".
+    for proof_state in ("verified", "unverified", "verified,unverified"):
+        result, conn = _list_with_candidates(monkeypatch, [], [_candidate("lead-1", "high")],
+                                             proof_state=proof_state, include_candidates=True)
+        assert not any("investigation_candidates" in query for query, _ in conn.queries)
+        assert result["candidates_total"] == 0
+
+
+def test_a_suspected_filter_includes_hunt_candidates_with_the_same_label(monkeypatch):
+    rows = [
+        _row("b", "critical", last_verification_verdict="exploited", latest_retest_mode="ai_driven"),
+        _row("a", "high", last_verification_verdict="exploited", latest_retest_mode="deterministic"),
+    ]
+    candidates = [_candidate("lead-1", "medium")]
+    result, conn = _list_with_candidates(monkeypatch, rows, candidates,
+                                         proof_state="suspected", include_candidates=True)
+    assert any("investigation_candidates" in query for query, _ in conn.queries)
+    labels = {item["id"]: (item["proof_state"], item["is_suspected"]) for item in result["findings"]}
+    # The proven finding is filtered out; the suspected finding and the lead stay, labelled alike.
+    assert labels == {"b": ("suspected", True), "lead-1": ("suspected", True)}
+    assert result["total"] == 2 and result["included_candidates"] == 1
+    # Pagination covers both: the second page holds the remaining item.
+    second, _ = _list_with_candidates(monkeypatch, rows, candidates,
+                                      proof_state="suspected", include_candidates=True, limit=1, offset=1)
+    assert len(second["findings"]) == 1
+    assert {item["id"] for item in second["findings"]} < {"b", "lead-1"}
 
 
 def test_choice_lists_parse_blank_as_no_filter():
@@ -223,6 +270,9 @@ def test_a_weak_policy_is_not_reported_as_a_missing_one():
     ({"title": "AWS access key id exposed: /api/cloud/metadata", "tool": "data_exposure"}, "Exposed Cloud Credentials"),
     ({"title": "Database connection string exposed: /mcp/resources", "tool": "data_exposure"}, "Sensitive Data in API Response"),
     ({"title": "Accessible Cloud Metadata: /.aws/config", "tool": "forced_browsing"}, "Exposed Cloud Credentials"),
+    # Reached only by the .aws alternative (no "cloud metadata" in the title); an over-escaped
+    # pattern sent it to the generic confidential-file guidance.
+    ({"title": "Accessible Sensitive File: /.aws/credentials", "tool": "forced_browsing"}, "Exposed Cloud Credentials"),
     ({"title": "Legacy TLS protocol negotiated", "tool": "tls.inspect"}, "Weak TLS Configuration"),
     # AI Gate: the catalog title decides, whatever probe family produced it.
     ({"title": "PII or credential pattern in response", "source": "ai_gate", "evidence": {"family": "tool_abuse"}}, "Sensitive Data in AI Responses"),

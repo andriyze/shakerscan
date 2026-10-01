@@ -677,7 +677,7 @@ TOOL_TITLE_REMEDIATION: dict[str, list[tuple[str, str]]] = {
     "exposed_files": [(r"\.env\b", "exposed_secret_file"), (r"\.git\b", "exposed_git"), (r".", "exposed_confidential_file")],
     "package_exposure": [(r".", "exposed_confidential_file")],
     "data_exposure": [(r"aws access key", "exposed_cloud_credential"), (r".", "api_excessive_data")],
-    "forced_browsing": [(r"cloud metadata|\\.aws", "exposed_cloud_credential"), (r"sensitive file", "exposed_confidential_file")],
+    "forced_browsing": [(r"cloud metadata|\.aws", "exposed_cloud_credential"), (r"sensitive file", "exposed_confidential_file")],
     "tls.inspect": [(r"legacy tls|weak cipher", "weak_tls")],
     "js_dependency": [(r"vulnerable javascript library", "vulnerable_js_library")],
     "approval_checks": [(r"authorization|approval", "broken_authorization")],
