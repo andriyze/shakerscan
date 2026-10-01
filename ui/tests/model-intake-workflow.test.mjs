@@ -597,7 +597,7 @@ test('a Model Intake scan distinguishes static inspection from the end-to-end re
   assert.match(scanDetail, /PageHeader title="Model Intake report"/)
   assert.match(scanDetail, /Corporate policy decision and exception details/)
   assert.match(scanDetail, /Model Intake execution log \(\{logs\.length\} lines\)/)
-  assert.match(report, /!isModelIntakeScan && <div className="bg-gray-800\/50/)
+  assert.match(report, /!isModelIntakeScan && section === 'all' && <div className="bg-gray-800\/50/)
   assert.match(report, /order-first bg-gray-800\/50/)
   assert.match(report, /Technical evidence coverage/)
   assert.match(report, /Deployment follow-up is shown separately/)

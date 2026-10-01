@@ -114,10 +114,12 @@ test('the page renders one coverage-gaps panel and colours a qualified conclusio
 })
 
 test('finding rows show a route, a proof label, and survive narrow screens', () => {
-  assert.match(detail, /function ScanFindingRow\(/)
+  assert.match(detail, /function ScanFindingClusterRow\(/)
+  assert.match(detail, /function ScanFindingLocation\(/)
   assert.match(detail, /function findingLocation\(/)
-  assert.match(detail, /sm:grid-cols-\[auto_minmax\(0,1fr\)_auto\]/)
-  assert.match(detail, /block truncate font-mono text-xs text-gray-500/)
+  assert.match(detail, /grid-cols-\[auto_minmax\(0,1fr\)_auto\]/)
+  assert.match(detail, /block truncate font-mono text-xs text-gray-400/)
+  assert.match(detail, /const proof = findingProofLabel\(finding\)/)
   assert.match(detail, /\{provenCount\} proven/)
   // The redundant per-row origin pill is gone; origin lives in the section heading.
   assert.doesNotMatch(detail, /\{finding\._origin\}<\/span>/)

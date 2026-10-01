@@ -30,9 +30,14 @@ test('scan result separates observations from findings not observed by this run'
 })
 
 test('scan result does not bury the current run under historical target rows', () => {
-  assert.match(detail, /const existingTotal = Math\.max/)
-  assert.match(detail, /current\.slice\(0, 6\)\.map\(\(finding: any\)/)
-  assert.match(detail, /Show \{current\.length - 6\} more findings observed in this scan/)
+  // Only this run's observations are listed, grouped (proven, needs verification, then the
+  // informational rest folded away); earlier target findings stay a count and a link.
+  assert.match(detail, /const groups = groupScanFindings\(current\)/)
+  assert.match(detail, /group\.key === 'informational' \? \(\s*<details/)
+  assert.match(detail, /Math\.max\(0, targetFindingsTotal - persistedCurrentCount\)/)
+  assert.doesNotMatch(detail, /targetFindings\.map\(\(finding: any\)/)
   assert.doesNotMatch(detail, /rows\.map\(\(finding: any\)/)
   assert.match(detail, /use the link above to review them/)
+  // The count matches the release gate's carried-over number when the gate supplies one.
+  assert.match(detail, /carriedCount=\{carriedOverFromDecision\(deploymentDecision\)\?\.count \?\? null\}/)
 })
