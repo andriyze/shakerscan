@@ -171,14 +171,24 @@ shakerscan db-upgrade --remigrate      # copy the 16 data again; the current 18 
 shakerscan db-upgrade --keep-current   # keep the 18 data; rollback-time changes are not carried over
 ```
 
-Both ask for confirmation. A set-aside copy stays in `postgres-cluster` until `--remove-legacy`.
+Both ask for confirmation.
 
-After you have checked the upgraded release, reclaim the space the PostgreSQL 16 data uses. This
-asks for confirmation and removes the only copy a previous release can start with:
+The PostgreSQL 16 data, the upgrade's dump in `backups/`, and any copy `--remigrate` set aside are
+kept for **30 days** and then deleted by the next `start`. A full second copy of the database is
+otherwise easy to forget on a small disk, and a rollback copy loses its value quickly: after a
+month on 18, rolling back to it would discard a month of work. During the last 7 days every
+`start` announces the date; `shakerscan db-upgrade --status` always shows it. Automatic deletion
+never touches data a rollback has used since the copy (that start refuses, as above) or a copy
+made before source fingerprints existed; those wait for `--remove-legacy`.
+
+Change the period with `SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS` in `.env` (in days; `0` keeps
+the data until you remove it). To reclaim the space now, after checking the upgraded release:
 
 ```bash
 shakerscan db-upgrade --remove-legacy
 ```
+
+That asks for confirmation and removes the only copy a previous release can start with.
 
 `shakerscan reset` deletes both volumes.
 
