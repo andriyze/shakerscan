@@ -1,5 +1,5 @@
 .......................                                                  [100%]
-23 passed in 14.21s
+23 passed in 22.59s
 module size ratchet: OK
 
-pytest_exit=0 affected_exit=1 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0
+pytest_exit=0 affected_exit=0 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0
