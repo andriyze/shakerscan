@@ -1393,6 +1393,8 @@ export interface DeviceService {
   service_name: string
   product?: string | null
   version?: string | null
+  extra_info?: string | null
+  tunnel?: string | null
   cpe?: string | null
   encrypted?: boolean | null
   web_origin?: string | null
