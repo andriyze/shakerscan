@@ -5,6 +5,14 @@ import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
+// The finding page renders through its own components; its guarantees hold across all of them.
+const readFindingDetail = () => [
+  read('src/app/findings/[id]/page.tsx'),
+  ...fs.readdirSync(path.join(root, 'src/components/findings/detail'))
+    .filter((name) => name.endsWith('.tsx'))
+    .sort()
+    .map((name) => read(`src/components/findings/detail/${name}`)),
+].join('\n')
 
 test('query filter history preserves the App Router route identity', () => {
   const source = read('src/lib/useUrlFilters.ts')
@@ -37,7 +45,7 @@ test('target groups distinguish domains from hosts and internal identities', () 
 })
 
 test('finding copy failures and empty presentation have visible fallbacks', () => {
-  const detail = read('src/app/findings/[id]/page.tsx')
+  const detail = readFindingDetail()
   const candidates = read('src/app/findings/candidates/page.tsx')
   assert.match(detail, /Clipboard access failed/)
   assert.match(detail, /select text/)
@@ -48,7 +56,7 @@ test('finding copy failures and empty presentation have visible fallbacks', () =
 })
 
 test('finding evidence names original, latest-observation, and producing scans separately', () => {
-  const detail = read('src/app/findings/[id]/page.tsx')
+  const detail = readFindingDetail()
   assert.match(detail, /Original finding scan:/)
   assert.match(detail, /Latest observation scan:/)
   assert.match(detail, /evidence-producing scan/)

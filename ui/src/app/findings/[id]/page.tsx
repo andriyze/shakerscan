@@ -4,7 +4,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { startHuntV2Native } from '@/lib/huntV2'
 import { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { BrainCircuit, Check, Copy, ExternalLink, Loader2 } from 'lucide-react'
+import { BrainCircuit, ExternalLink, Loader2, ShieldCheck } from 'lucide-react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import {
@@ -32,17 +32,23 @@ import {
 import { FINDING_STATUSES, RETEST_VERDICT_LABELS, type FindingSourceType } from '@/lib/constants'
 import { formatAnomaly, parseEvidence, extractEndpoint, decodePayload } from '@/lib/evidence-parser'
 import { canonicalFindingProofVerified } from '@/lib/findingProof'
+import { formatRelativeTime } from '@/lib/format'
+import { findingObservation, hostOf, pathOf, verificationSource } from '@/lib/findingObservation'
 import {
-  Card,
+  Button,
   ConfirmDialog,
   ErrorState,
-  FindingStatusBadge,
+  ProofStateBadge,
   RetestVerdictBadge,
-  SectionCard,
   SeverityBadge,
   SourceTypeBadge,
   useToast,
 } from '@/components/ui'
+import { CopyButton } from '@/components/findings/detail/CopyButton'
+import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObjectsList'
+import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
+import { Fact, Section } from '@/components/findings/detail/Section'
+import { WhatWeFound } from '@/components/findings/detail/WhatWeFound'
 
 function getFindingSourceType(finding: Finding): FindingSourceType {
   if (finding.source === 'device') {
@@ -101,13 +107,20 @@ function autonomousUnsupportedReason(finding: Finding): string {
   return 'Autonomous investigation requires an HTTP or HTTPS target.'
 }
 
-function InfoItem({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <p className="text-xs text-gray-500">{label}</p>
-      <div className="text-sm text-gray-200 mt-1">{children}</div>
-    </div>
-  )
+function recommendationList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean)
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value)
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item)).filter(Boolean)
+      if (typeof parsed === 'string') return [parsed]
+    } catch {
+      // Plain prose, not JSON.
+    }
+    return [value.trim()]
+  }
+  if (value && typeof value === 'object') return [JSON.stringify(value, null, 2)]
+  return []
 }
 
 function formatTriageReason(value: string | undefined): string {
@@ -136,7 +149,7 @@ function TriagePanel({ finding }: { finding: Finding }) {
   const capReason = policy?.confidence_cap_reason
 
   return (
-    <SectionCard title="Triage">
+    <Section title="Scanner triage">
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {triage.verified === true && (
@@ -210,8 +223,15 @@ function TriagePanel({ finding }: { finding: Finding }) {
           </div>
         )}
       </div>
-    </SectionCard>
+    </Section>
   )
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  active: 'Active',
+  resolved: 'Resolved',
+  false_positive: 'False positive',
+  accepted_risk: 'Accepted risk',
 }
 
 const ANALYST_VERDICTS = [
@@ -221,12 +241,6 @@ const ANALYST_VERDICTS = [
   { value: 'accepted_risk', label: 'Accepted risk', status: 'accepted_risk' },
   { value: 'retest_needed', label: 'Retest needed', status: 'active' },
 ] as const
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
-}
 
 function asEvidenceObject(rawEvidence: string): Record<string, unknown> | null {
   if (!rawEvidence) return null
@@ -254,56 +268,6 @@ function evidenceString(evidence: Record<string, unknown> | null, key: string): 
 function evidenceStringList(evidence: Record<string, unknown> | null, key: string): string[] {
   const value = evidence?.[key]
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
-}
-
-function evidenceObjectContentText(content: unknown): string {
-  if (content === undefined || content === null) return ''
-  if (typeof content === 'string') {
-    try {
-      return JSON.stringify(JSON.parse(content), null, 2)
-    } catch {
-      return content
-    }
-  }
-  try {
-    return JSON.stringify(content, null, 2)
-  } catch {
-    return String(content)
-  }
-}
-
-function CopyButton({ text, label }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-  const [failed, setFailed] = useState(false)
-  const toast = useToast()
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setFailed(false)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
-      setFailed(true)
-      toast.error('Clipboard access failed. Select and copy the adjacent text instead.')
-    }
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1">
-      <button
-        onClick={handleCopy}
-        className="p-1 rounded-sm hover:bg-gray-800 transition-colors"
-        title={label || 'Copy'}
-        aria-label={label || 'Copy'}
-        type="button"
-      >
-        {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className={`w-3.5 h-3.5 ${failed ? 'text-red-400' : 'text-gray-400'}`} />}
-      </button>
-      {failed && <span role="status" className="text-[10px] text-red-300">select text</span>}
-    </span>
-  )
 }
 
 function FindingDetailContent() {
@@ -334,14 +298,7 @@ function FindingDetailContent() {
   const [findingExceptions, setFindingExceptions] = useState<FindingException[]>([])
   const [policyProfiles, setPolicyProfiles] = useState<PolicyProfile[]>([])
   const [exceptionSaving, setExceptionSaving] = useState(false)
-  const [exceptionForm, setExceptionForm] = useState({
-    owner: '',
-    approver: '',
-    reason: '',
-    compensating_controls: '',
-    policy_id: '',
-    expires_days: '30',
-  })
+  const [exceptionDialogOpen, setExceptionDialogOpen] = useState(false)
 
   // Build back URL with preserved filters
   const backUrl = useMemo(() => {
@@ -452,25 +409,24 @@ function FindingDetailContent() {
     }
   }
 
-  async function handleCreateException(event: React.FormEvent) {
-    event.preventDefault()
-    if (!finding || exceptionSaving) return
+  async function handleCreateException(exceptionForm: ExceptionFormValues): Promise<boolean> {
+    if (!finding || exceptionSaving) return false
     const owner = exceptionForm.owner.trim()
     const approver = exceptionForm.approver.trim()
     const reason = exceptionForm.reason.trim()
     const controls = exceptionForm.compensating_controls.trim()
     if (!exceptionForm.policy_id) {
       toast.error('Select the exact policy this exception applies to')
-      return
+      return false
     }
     if (!owner || !approver || !reason || !controls) {
       toast.error('Owner, approver, reason, and compensating controls are all required')
-      return
+      return false
     }
     const days = Number(exceptionForm.expires_days || 30)
     if (!Number.isFinite(days) || days < 1) {
       toast.error('Expiry must be at least 1 day')
-      return
+      return false
     }
     const expiresAt = new Date(Date.now() + Math.round(days) * 24 * 60 * 60 * 1000).toISOString()
     try {
@@ -488,18 +444,12 @@ function FindingDetailContent() {
         status: 'active',
         expires_at: expiresAt,
       })
-      setExceptionForm({
-        owner: '',
-        approver: '',
-        reason: '',
-        compensating_controls: '',
-        policy_id: '',
-        expires_days: '30',
-      })
       await fetchFinding()
       toast.success('Policy exception created')
+      return true
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to create exception')
+      return false
     } finally {
       setExceptionSaving(false)
     }
@@ -614,6 +564,7 @@ function FindingDetailContent() {
       ? JSON.stringify(finding.evidence, null, 2)
       : ''
   const rawEvidenceObject = useMemo(() => asEvidenceObject(rawEvidence), [rawEvidence])
+  const rawEvidenceDisplay = rawEvidenceObject ? JSON.stringify(rawEvidenceObject, null, 2) : rawEvidence
   const isAiFinding = finding ? isAiReplayFinding(finding) : false
   const research = finding ? getFindingResearchProvenance(finding) : null
   const autonomousTargetUrl = finding ? autonomousWebTargetUrl(finding) : null
@@ -673,6 +624,28 @@ function FindingDetailContent() {
   const aiJudgeLayer = evidenceString(rawEvidenceObject, 'judge_layer')
   const aiTactics = evidenceStringList(rawEvidenceObject, 'tactics')
   const hasAiProbeEvidence = isAiFinding && (aiProbePrompt || aiResponseExcerpt || aiProbeId || aiTechnique || aiProbeFamily || aiJudgeLayer)
+  const observation = useMemo(() => findingObservation(finding?.evidence), [finding?.evidence])
+  // The API falls back to the scan-time verification verdict when no retest has run; name it as
+  // such instead of presenting it as a replay next to "0 attempts".
+  const verificationKind = verificationSource({
+    retestRuns: retestHistory.length,
+    latestRetestStatus: latestRetestStatus,
+    verificationCount: finding?.verification_count,
+  })
+  const verificationLabel = verificationKind === 'retest' ? 'Latest replay' : 'Scan-time check'
+  const aiRecommendations = useMemo(() => recommendationList(finding?.ai_recommendations), [finding?.ai_recommendations])
+  // The newest retest is always shown in the verification history; an advisory AI retest that is
+  // that entry is not repeated as a separate analysis.
+  const aiRetestShownInHistory = Boolean(latestAiRetest && latestAiRetest === retestHistory[0])
+  const hasAiAnalysis = Boolean(finding?.ai_verdict || finding?.ai_rationale || aiRecommendations.length > 0 || (latestAiRetest && !aiRetestShownInHistory))
+  const verifyApplicable = featureEnabled('hunt') && !deviceFinding && Boolean(autonomousTargetUrl)
+  const locations = evidence.allUrls.length > 0 ? evidence.allUrls : primaryUrl ? [primaryUrl] : []
+  const latestScanId = finding?.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding?.scan_id || ''
+  const originalScanId = finding?.first_seen_scan_id || evidenceProvenance.originalFindingScanId || ''
+  const hostLabel = finding?.target_name || hostOf(finding?.target_url) || hostOf(primaryUrl) || finding?.target_url || ''
+  const huntUnavailableReason = verifyApplicable && targetInactive && !hasPendingRetest
+    ? 'Target is deactivated — reactivate it under Targets to verify.'
+    : null
 
   if (loading) {
     return (
@@ -691,85 +664,144 @@ function FindingDetailContent() {
     )
   }
 
+  const retestControls = !deviceFinding && (
+    <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-950/60 p-1">
+      <select
+        value={selectedRetestMode}
+        onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
+        className="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-200 focus:border-blue-500 focus:outline-hidden"
+        title="Retest mode"
+        aria-label="Retest mode"
+      >
+        {retestOptions.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={handleRetest}
+        disabled={retestLoading || hasPendingRetest || !retestSupported}
+        title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
+        className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {retestLoading ? 'Queueing...' : hasPendingRetest ? 'Verifying…' : 'Retest'}
+      </button>
+    </div>
+  )
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <Link
-            href={backUrl}
-            aria-label="Back to findings"
-            className="rounded-sm text-gray-400 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
-          >
-            <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="text-2xl font-bold text-white">Finding Detail</h1>
+    <div className="space-y-5">
+      <header className="space-y-4">
+        <Link
+          href={backUrl}
+          aria-label="Back to findings"
+          className="inline-flex items-center gap-1 rounded-sm text-sm text-gray-400 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          <svg aria-hidden="true" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          Findings
+        </Link>
+
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <SeverityBadge severity={finding.severity} />
+              <ProofStateBadge proofState={finding.proof_state} />
+              <SourceTypeBadge type={getFindingSourceType(finding)} />
+            </div>
+            <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-400">
+              {hostLabel && (
+                finding.target_id
+                  ? <Link href={`/targets/${finding.target_id}/graph`} className="text-gray-200 hover:text-white" title="Open target">{hostLabel}</Link>
+                  : <span className="text-gray-200">{hostLabel}</span>
+              )}
+              {primaryUrl && (
+                <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+                  <code className="min-w-0 truncate font-mono text-xs text-blue-300" title={primaryUrl}>{pathOf(primaryUrl)}</code>
+                  <CopyButton text={primaryUrl} label="Copy URL" />
+                </span>
+              )}
+              {finding.cwe && (
+                <a
+                  href={`https://cwe.mitre.org/data/definitions/${finding.cwe.replace('CWE-', '')}.html`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300"
+                  title={finding.cwe_name || undefined}
+                >
+                  {finding.cwe}
+                </a>
+              )}
+              {finding.cvss_score !== undefined && finding.cvss_score !== null && (
+                <span>CVSS <span className="text-gray-200">{finding.cvss_score}</span></span>
+              )}
+              {finding.last_seen_at && (
+                <span title={formatDate(finding.last_seen_at)}>Last seen {formatRelativeTime(finding.last_seen_at)}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 lg:max-w-md lg:justify-end">
+            <label className="flex items-center gap-2 text-xs text-gray-500">
+              Status
+              <select
+                value={finding.status}
+                onChange={(e) => handleStatusChange(e.target.value)}
+                disabled={statusUpdating}
+                title="Canonical lifecycle — the finding's status. Retests and AI assessments never change it."
+                className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
+              >
+                {FINDING_STATUSES.map((status) => (
+                  <option key={status} value={status}>{STATUS_LABELS[status] || status.replaceAll('_', ' ')}</option>
+                ))}
+              </select>
+            </label>
+            {retestControls}
+            {verifyApplicable && (
+              <button
+                type="button"
+                onClick={() => setAutonomousConfirmOpen(true)}
+                disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
+                title={
+                  hasPendingRetest
+                    ? 'A proof replay is already queued or running for this finding.'
+                    : targetInactive
+                      ? "This finding's target is deactivated. Reactivate it under Targets to verify."
+                      : autonomousTargetUrl
+                        ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
+                        : autonomousUnsupportedReason(finding)
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                <BrainCircuit className="h-3.5 w-3.5" aria-hidden="true" />
+                Verify finding
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {featureEnabled('hunt') && !deviceFinding && <button
-            type="button"
-            onClick={() => setAutonomousConfirmOpen(true)}
-            disabled={!autonomousTargetUrl || autonomousLoading || hasPendingRetest || targetInactive}
-            title={
-              hasPendingRetest
-                ? 'A proof replay is already queued or running for this finding.'
-                : targetInactive
-                  ? "This finding's target is deactivated. Reactivate it under Targets to verify."
-                  : autonomousTargetUrl
-                    ? 'Inspect this finding, run at most one bounded proof replay, and conclude from its result.'
-                    : autonomousUnsupportedReason(finding)
-            }
-            className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            <BrainCircuit className="h-4 w-4" />
-            Verify finding
-          </button>}
-          {featureEnabled('hunt') && !deviceFinding && (!autonomousTargetUrl || hasPendingRetest || targetInactive) && (
-            <span className={`max-w-64 text-xs leading-4 ${hasPendingRetest ? 'text-gray-500' : 'text-amber-300/80'}`}>
-              {hasPendingRetest
-                ? 'Available after the current proof replay finishes.'
-                : targetInactive
-                  ? 'Target is deactivated — reactivate it under Targets to verify.'
-                  : autonomousUnsupportedReason(finding)}
+
+        {!deviceFinding && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm">
+            <span className="inline-flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Finding proof</span>
+              <span className={`rounded px-2 py-0.5 text-xs font-medium ${canonicalProofVerified ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'}`}>
+                {canonicalProofState}
+              </span>
             </span>
-          )}
-          {!deviceFinding && <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-800 bg-gray-950/50 p-1">
-            <span className="pl-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Finding proof</span>
-            <span className={`rounded px-2 py-1 text-xs font-medium ${
-              canonicalProofVerified
-                ? 'bg-emerald-500/15 text-emerald-300'
-                : 'bg-amber-500/15 text-amber-300'
-            }`}>
-              {canonicalProofState}
-            </span>
-            <span className="border-l border-gray-800 pl-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">Latest replay</span>
-            <RetestVerdictBadge
-              verdict={latestRetestVerdict}
-              pending={hasPendingRetest}
-            />
-            <select
-              value={selectedRetestMode}
-              onChange={(e) => setRetestMode(e.target.value as typeof retestMode)}
-              className="px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-gray-200 focus:outline-hidden focus:border-blue-500"
-              title="Retest mode"
-              aria-label="Retest mode"
-            >
-              {retestOptions.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-            <button
-              onClick={handleRetest}
-              disabled={retestLoading || hasPendingRetest || !retestSupported}
-              title={!retestSupported ? retestUnsupportedMessage : hasPendingRetest ? 'A proof replay is already queued or running.' : 'Replay this finding with one bounded verifier'}
-              className="px-3 py-1.5 bg-blue-900/50 text-blue-300 rounded-lg text-sm hover:bg-blue-900/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {retestLoading ? 'Queueing...' : 'Retest Finding'}
-            </button>
-          </div>}
-        </div>
-      </div>
+            {(latestRetestVerdict || hasPendingRetest) && (
+              <span className="inline-flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">{verificationLabel}</span>
+                <RetestVerdictBadge verdict={latestRetestVerdict} pending={hasPendingRetest} />
+                {latestRetestCompletedAt && !hasPendingRetest && (
+                  <span className="text-xs text-gray-500" title={formatDate(latestRetestCompletedAt)}>{formatRelativeTime(latestRetestCompletedAt)}</span>
+                )}
+              </span>
+            )}
+          </div>
+        )}
+      </header>
 
       <ConfirmDialog
         open={autonomousConfirmOpen}
@@ -786,7 +818,6 @@ function FindingDetailContent() {
         onCancel={() => setAutonomousConfirmOpen(false)}
       />
 
-
       <ConfirmDialog
         open={exceptionToDelete !== null}
         title="Delete policy exception"
@@ -798,879 +829,557 @@ function FindingDetailContent() {
         onCancel={() => setExceptionToDelete(null)}
       />
 
-      <nav aria-label="Jump to section" className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-900/60 p-2 text-xs">
-        <span className="px-2 py-1 font-medium text-gray-500">Jump to</span>
-        {(([['overview', 'Overview'], ['tracking', 'Tracking'], ['retest', 'Retest'], ['evidence', 'Evidence'], ['ai-analysis', 'AI analysis'], ...((request || response) ? [['http', 'HTTP']] : [])]) as [string, string][]).map(([anchor, label]) => (
-          <a key={anchor} href={`#${anchor}`} className="rounded-sm px-2 py-1 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500">{label}</a>
-        ))}
-      </nav>
+      <ExceptionDialog
+        open={exceptionDialogOpen}
+        policyProfiles={policyProfiles}
+        saving={exceptionSaving}
+        onClose={() => setExceptionDialogOpen(false)}
+        onSubmit={handleCreateException}
+      />
 
-      <SectionCard id="overview" title="Overview">
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <SeverityBadge severity={finding.severity} />
-                <FindingStatusBadge status={finding.status} />
-                <SourceTypeBadge type={getFindingSourceType(finding)} />
-                {finding.cvss_score !== undefined && finding.cvss_score !== null && (
-                  <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-200 text-xs">
-                    CVSS {finding.cvss_score}
-                  </span>
-                )}
-                {finding.tool && (
-                  <span className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
-                    {finding.tool}
-                  </span>
-                )}
-              </div>
-              <h2 className="text-xl font-semibold text-white mt-2 wrap-break-word">{finding.title}</h2>
-              {showSummaryDescription && (
-                <p className="text-sm text-gray-300 mt-2 whitespace-pre-wrap">{summaryDescription}</p>
-              )}
-              <div className="flex flex-wrap gap-2 mt-3 text-xs text-gray-400">
-                {finding.cwe && (
-                  <a
-                    href={`https://cwe.mitre.org/data/definitions/${finding.cwe.replace('CWE-', '')}.html`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-400 hover:text-blue-300"
-                  >
-                    {finding.cwe}{finding.cwe_name ? `: ${finding.cwe_name}` : ''}
-                  </a>
-                )}
-                {finding.owasp && <span>{finding.owasp}</span>}
-              </div>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="min-w-0 space-y-5">
+          <WhatWeFound
+            observation={observation}
+            description={showSummaryDescription ? summaryDescription : null}
+            payloads={evidence.allPayloads.map(decodePayload)}
+            signals={evidence.evidenceDetails}
+            anomaly={responseAnomaly ? formatAnomaly(responseAnomaly) : null}
+            aiProbe={hasAiProbeEvidence ? {
+              prompt: aiProbePrompt,
+              responseExcerpt: aiResponseExcerpt,
+              probeId: aiProbeId,
+              family: aiProbeFamily,
+              technique: aiTechnique,
+              judge: aiJudgeLayer,
+              tactics: aiTactics,
+            } : null}
+          />
 
-              {/* Status change controls */}
-              <div className="mt-4">
-                <p className="mb-2 text-xs font-medium text-gray-300">Canonical lifecycle</p>
-                <div className="flex flex-wrap gap-2">
-                {FINDING_STATUSES.map((status) => (
-                  <button
-                    key={status}
-                    onClick={() => handleStatusChange(status)}
-                    disabled={finding.status === status || statusUpdating}
-                    className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                      finding.status === status
-                        ? 'bg-blue-600 text-white cursor-default'
-                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-50'
-                    }`}
-                  >
-                    {status.replace('_', ' ')}
-                  </button>
+          {evidence.remediation.length > 0 && (
+            <Section id="remediation" title="How to fix">
+              <ol className="space-y-2">
+                {evidence.remediation.map((step, i) => (
+                  <li key={i} className="flex items-start gap-3 text-sm">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-gray-600 text-xs text-gray-500">{i + 1}</span>
+                    <span className="text-gray-300">{step}</span>
+                  </li>
                 ))}
-                </div>
+              </ol>
+            </Section>
+          )}
+
+          {locations.length > 0 && (
+            <Section
+              id="locations"
+              title={locations.length === 1 ? 'Location' : `Locations (${locations.length})`}
+              actions={evidence.parameter ? <span className="text-xs text-gray-500">Parameter <code className="font-mono text-purple-300">{evidence.parameter}</code></span> : undefined}
+            >
+              <ul className="space-y-1.5">
+                {locations.map((url, i) => (
+                  <li key={i} className="flex items-start justify-between gap-2 rounded-md bg-gray-950/70 px-2.5 py-2">
+                    <div className="min-w-0 flex-1">
+                      <code className="block font-mono text-xs text-blue-300 break-all">{extractEndpoint(url)}</code>
+                      {hostOf(url) && <span className="text-xs text-gray-500">{hostOf(url)}</span>}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <CopyButton text={url} label="Copy full URL" />
+                      {/^https?:\/\//i.test(url) && (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded-sm p-1 transition-colors hover:bg-gray-800"
+                          title="Open in new tab"
+                          aria-label="Open in new tab"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
+
+          {(request || response) && (
+            <Section id="http" title="HTTP request and response">
+              <div className="grid gap-3 xl:grid-cols-2">
+                {request && (
+                  <details open={request.length < 4000} className="min-w-0 rounded-md border border-gray-800 bg-gray-950/70 p-3">
+                    <summary className="cursor-pointer text-sm text-gray-300">Request</summary>
+                    <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-gray-300 wrap-break-word">{request}</pre>
+                  </details>
+                )}
+                {response && (
+                  <details open={response.length < 4000} className="min-w-0 rounded-md border border-gray-800 bg-gray-950/70 p-3">
+                    <summary className="cursor-pointer text-sm text-gray-300">Response{statusCode ? ` · ${statusCode}` : ''}</summary>
+                    <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-gray-300 wrap-break-word">{response}</pre>
+                  </details>
+                )}
+              </div>
+            </Section>
+          )}
+
+          <Section id="retest" title="Proof and verification">
+            <div className="space-y-3">
+              <div className={`rounded border px-3 py-2 ${
+                canonicalProofVerified
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+                  : 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+              }`}>
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  Canonical finding proof: {canonicalProofState}
+                </p>
+                <p className="mt-1 text-xs text-gray-300">
+                  {canonicalProofVerified
+                    ? 'The stored scan-time deterministic proof contract was satisfied. Later replay and AI assessments remain separate evidence and cannot downgrade that proof.'
+                    : 'No stored deterministic proof contract currently verifies this finding. Replay and AI assessments may inform triage but do not become proof by themselves.'}
+                </p>
               </div>
 
-              <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-medium text-gray-300">Analyst validation</p>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {finding.analyst_verdict
-                        ? `${finding.analyst_verdict.replaceAll('_', ' ')}${finding.analyst_verdict_at ? ` on ${formatDate(finding.analyst_verdict_at)}` : ''}`
-                        : 'No analyst verdict recorded'}
-                    </p>
+              <p className="text-sm text-gray-300">
+                {verificationKind === 'scan_time'
+                  ? latestRetestVerdict
+                    ? <>No retest has run yet. The scan-time check recorded <span className="font-medium text-gray-100">{(RETEST_VERDICT_LABELS[latestRetestVerdict] || latestRetestVerdict.replaceAll('_', ' ')).toLowerCase()}</span>{typeof latestRetestConfidence === 'number' ? ` at ${Math.round(latestRetestConfidence * 100)}% confidence` : ''}{latestRetestCompletedAt ? ` ${formatRelativeTime(latestRetestCompletedAt)}` : ''}.</>
+                    : 'No retest has run yet.'
+                  : <>
+                      {finding.verification_count ?? retestHistory.length} {(finding.verification_count ?? retestHistory.length) === 1 ? 'retest' : 'retests'} run.
+                      {latestRetestStatus && <> Latest {latestRetestStatus.replaceAll('_', ' ')}</>}
+                      {typeof latestRetestConfidence === 'number' && <>, {Math.round(latestRetestConfidence * 100)}% confidence</>}
+                      {latestRetestCompletedAt && <>, {formatRelativeTime(latestRetestCompletedAt)}</>}.
+                    </>}
+              </p>
+
+              {!retestSupported && (
+                <div className="rounded-sm border border-amber-900/60 bg-amber-900/30 px-2 py-1 text-xs text-amber-300">
+                  Automated retest unavailable: {retestUnsupportedMessage}
+                </div>
+              )}
+              {huntUnavailableReason && (
+                <p className="text-xs text-amber-300/80">Hunt verification unavailable: {huntUnavailableReason}</p>
+              )}
+              {manualVerifyCommands.length > 0 && (
+                <div>
+                  <p className="mb-1 text-xs text-gray-500">Manual verification commands (from evidence)</p>
+                  <div className="space-y-1">
+                    {manualVerifyCommands.map((command, idx) => (
+                      <div key={idx} className="flex items-start gap-1">
+                        <code className="flex-1 text-[11px] text-blue-300 break-all">{command}</code>
+                        <CopyButton text={command} label="Copy verification command" />
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {ANALYST_VERDICTS.map((verdict) => (
-                    <button
-                      key={verdict.value}
-                      type="button"
-                      onClick={() => handleAnalystVerdict(verdict)}
-                      disabled={finding.analyst_verdict === verdict.value || statusUpdating}
-                      className={`rounded px-2.5 py-1 text-xs font-medium ${
-                        finding.analyst_verdict === verdict.value
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-50'
-                      }`}
-                    >
-                      {verdict.label}
-                    </button>
-                  ))}
+              )}
+              {hasPendingRetest && (
+                <div className="inline-flex items-center gap-2 rounded-sm border border-blue-900/60 bg-blue-900/30 px-2 py-1 text-xs text-blue-300">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  Verifying… results update automatically
                 </div>
-              </div>
-            </div>
+              )}
+              {retestMessage && (
+                <div className={`rounded px-2 py-1 text-xs ${
+                  retestMessage.includes('Failed')
+                    ? 'border border-red-900/60 bg-red-900/30 text-red-300'
+                    : 'border border-blue-900/60 bg-blue-900/30 text-blue-300'
+                }`}>
+                  {retestMessage}
+                </div>
+              )}
+              {finding.status === 'active' && lastVerdictInconclusive && verificationKind === 'retest' && (
+                <div className="rounded-sm border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-xs text-gray-300">
+                  This finding remains <span className="text-yellow-400">active</span> because the latest retest was{' '}
+                  <span className="text-amber-300">inconclusive</span> — verification did not conclude
+                  {lastRetestRetryable ? ' and is retryable' : ''}. Retest verdicts inform triage; the
+                  finding status is set by analysts using the status control.
+                </div>
+              )}
+              {finding.status === 'active' && latestRetestVerdict === 'false_positive' && (
+                <div className="rounded-sm border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-xs text-gray-300">
+                  The latest retest judged this a <span className="text-gray-300">false positive</span> with high
+                  confidence. The finding is still <span className="text-yellow-400">active</span> — retests never
+                  change finding status automatically. Set the status to{' '}
+                  <span className="text-gray-300">false positive</span> if you agree.
+                </div>
+              )}
 
-            <div className="space-y-2 text-xs text-gray-400">
-              <div className="flex items-center gap-2">
-                <span>Finding ID:</span>
-                <code className="text-gray-300 break-all">{finding.id}</code>
-                <CopyButton text={finding.id} label="Copy finding ID" />
-              </div>
-              {research && (
-                <div className="flex items-center gap-2">
-                  <span>Discovered by:</span>
-                  <span className="text-indigo-300">Hunt</span>
-                  {research.campaign_id && (
-                    <Link
-                      href={`/deep-hunt/runs/${research.campaign_id}`}
-                      className="text-blue-400 hover:text-blue-300"
+              {retestHistory.length > 0 && (
+                <div className="space-y-2">
+                  {(historyExpanded || hasPendingRetest ? retestHistory : retestHistory.slice(0, 1)).map((entry) => (
+                    <div key={entry.id} className="rounded-sm bg-gray-800/60 p-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-gray-300">
+                          {(entry.status === 'queued' || entry.status === 'running') ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden="true" />
+                              <span>{entry.finding_type} • {entry.status}</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-gray-400">{entry.finding_type}</span>
+                              <RetestVerdictBadge verdict={entry.verdict || entry.result_status} />
+                              {entry.result_status && entry.result_status !== entry.verdict && (
+                                <span className="text-gray-500">({entry.result_status.replaceAll('_', ' ')})</span>
+                              )}
+                              {entry.retryable && (
+                                <span className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300/90">retryable</span>
+                              )}
+                            </>
+                          )}
+                        </div>
+                        <div className="text-gray-500">
+                          {entry.completed_at
+                            ? formatDate(entry.completed_at)
+                            : entry.created_at
+                            ? formatDate(entry.created_at)
+                            : 'N/A'}
+                        </div>
+                      </div>
+                      {entry.verification_mode && (
+                        <div className="mt-1 text-gray-400">
+                          mode: {entry.verification_mode.replaceAll('_', ' ')}
+                        </div>
+                      )}
+                      {entry.primary_tested_endpoint && (
+                        <div className="mt-1 flex min-w-0 gap-1 text-gray-400">
+                          <span className="shrink-0">primary tested endpoint:</span>
+                          <code className="break-all text-blue-300">{entry.primary_tested_endpoint}</code>
+                        </div>
+                      )}
+                      {Array.isArray(entry.tested_endpoints) && entry.tested_endpoints.length > 1 && (
+                        <details className="mt-1 rounded-sm border border-gray-700/70 bg-gray-900/40 px-2 py-1.5">
+                          <summary className="cursor-pointer text-gray-300">
+                            Tested scope ({entry.tested_endpoints.length} endpoints)
+                          </summary>
+                          <ul className="mt-1 space-y-1">
+                            {entry.tested_endpoints.map((endpoint) => (
+                              <li key={endpoint}><code className="break-all text-blue-300">{endpoint}</code></li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                      <div className="mt-1 flex flex-wrap gap-2 text-gray-400">
+                        <span>deterministic proof: <strong className={entry.deterministic_proof_state === 'proven' ? 'text-emerald-300' : 'text-amber-300'}>{entry.deterministic_proof_state === 'proven' ? 'proven' : 'not proven'}</strong></span>
+                        {entry.result_status && <span>execution result: <strong className="font-medium text-gray-300">{entry.result_status.replaceAll('_', ' ')}</strong></span>}
+                        {entry.verdict_basis === 'ai_assessment' && <span className="text-violet-300">verdict basis: advisory AI assessment</span>}
+                      </div>
+                      {typeof entry.confidence === 'number' && (
+                        <div className="mt-1 text-gray-400">
+                          confidence: {Math.round(entry.confidence * 100)}%
+                        </div>
+                      )}
+                      {entry.verdict_reason && entry.verdict_reason !== entry.ai_reasoning && <div className="mt-1 text-gray-400">{entry.verdict_reason}</div>}
+                      {!entry.verdict_reason && entry.message && entry.message !== entry.ai_reasoning && <div className="mt-1 text-gray-400">{entry.message}</div>}
+                      {entry.ai_reasoning && (
+                        <div className="mt-1 rounded-sm border border-violet-500/20 bg-violet-500/5 p-2 text-gray-400">
+                          <span className="font-medium text-violet-300">AI assessment — advisory, cannot override deterministic proof:</span> {entry.ai_reasoning}
+                        </div>
+                      )}
+                      {entry.ai_plan && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-blue-300">AI plan</summary>
+                          <pre className="mt-1 whitespace-pre-wrap text-[11px] text-gray-300 break-all">{JSON.stringify(entry.ai_plan, null, 2)}</pre>
+                        </details>
+                      )}
+                      {Array.isArray(entry.replay_commands) && entry.replay_commands.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {entry.replay_commands.slice(0, 3).map((command, idx) => (
+                            <div key={idx} className="flex items-start gap-1">
+                              <code className="flex-1 text-[11px] text-blue-300 break-all">{command}</code>
+                              <CopyButton text={command} label="Copy replay command" />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {entry.error_message && <div className="mt-1 text-red-300">{entry.error_message}</div>}
+                    </div>
+                  ))}
+                  {retestHistory.length > 1 && !hasPendingRetest && (
+                    <button
+                      type="button"
+                      onClick={() => setHistoryExpanded((v) => !v)}
+                      className="text-xs text-blue-300 transition-colors hover:text-blue-200"
                     >
-                      View run {research.campaign_id.slice(0, 8)}…
-                    </Link>
+                      {historyExpanded
+                        ? 'Show less'
+                        : `Show ${retestHistory.length - 1} older retest${retestHistory.length - 1 === 1 ? '' : 's'}`}
+                    </button>
                   )}
                 </div>
               )}
-              {(finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id) && (
-                <div className="flex items-center gap-2">
-                  <span>Latest observation scan:</span>
-                  <Link href={`/scans/${finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id}`} className="text-blue-400 hover:text-blue-300 break-all">
-                    {finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id}
-                  </Link>
-                  <CopyButton text={finding.last_seen_scan_id || evidenceProvenance.latestObservationScanId || finding.scan_id || ''} label="Copy latest observation scan ID" />
-                </div>
-              )}
-              {(finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId) && (
-                <div className="flex items-center gap-2">
-                  <span>Original finding scan:</span>
-                  <Link
-                    href={`/scans/${finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId}`}
-                    className="break-all text-blue-400 hover:text-blue-300"
-                  >
-                    {finding.first_seen_scan_id || evidenceProvenance.originalFindingScanId}
-                  </Link>
-                </div>
-              )}
-              {finding.target_id && (
-                <div className="flex items-center gap-2">
-                  <span>Target ID:</span>
-                  <code className="text-gray-300 break-all">{finding.target_id}</code>
-                  <CopyButton text={finding.target_id} label="Copy target ID" />
-                </div>
-              )}
-              {(finding.target_name || finding.target_url) && (
-                <div className="flex items-center gap-2">
-                  <span>Target:</span>
-                  <span className="text-gray-300">
-                    {finding.target_name || finding.target_url}
-                  </span>
-                </div>
-              )}
             </div>
-          </div>
+          </Section>
 
-          {finding.notes && (
-            <div className="bg-gray-800/60 rounded-lg p-3">
-              <p className="text-xs text-gray-400 mb-1">Analyst notes</p>
-              <p className="text-sm text-gray-200 whitespace-pre-wrap">{finding.notes}</p>
-            </div>
-          )}
-        </div>
-      </SectionCard>
-
-      <TriagePanel finding={finding} />
-
-      <SectionCard id="tracking" title="Tracking">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-          <InfoItem label="First seen">{formatDate(finding.first_seen_at)}</InfoItem>
-          <InfoItem label="Last seen">{formatDate(finding.last_seen_at)}</InfoItem>
-          {finding.resolved_at && (
-            <InfoItem label="Resolved at">{formatDate(finding.resolved_at)}</InfoItem>
-          )}
-          {finding.resurfaced_count !== undefined && (
-            <InfoItem label="Resurfaced count">{finding.resurfaced_count}</InfoItem>
-          )}
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Policy Exceptions">
-        <div className="space-y-4">
-          {findingExceptions.length > 0 ? (
-            <div className="space-y-2">
-              {findingExceptions.map((item) => (
-                <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <span className={`rounded-sm px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
-                          {item.status}
-                        </span>
-                        {item.expires_at && <span className="text-gray-500">expires {formatDate(item.expires_at)}</span>}
-                        {item.policy_id && <span className="font-mono text-gray-500">policy {item.policy_id}</span>}
-                      </div>
-                      {item.reason && <p className="mt-2 text-sm text-gray-300">{item.reason}</p>}
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
-                        {item.owner && <span>owner: <span className="text-gray-300">{item.owner}</span></span>}
-                        {item.approver && <span>approver: <span className="text-gray-300">{item.approver}</span></span>}
-                        {item.compensating_controls && <span>controls: <span className="text-gray-300">{item.compensating_controls}</span></span>}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setExceptionToDelete(item.id)}
-                      className="rounded-sm border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          {hasAiAnalysis && (
+            <Section id="ai-analysis" title="AI analysis">
+              <div className="space-y-3">
+                {finding.ai_verdict && (
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-2 py-0.5 text-xs font-medium ${
+                        finding.ai_verdict === 'true_positive'
+                          ? 'bg-red-900/50 text-red-300'
+                          : finding.ai_verdict === 'false_positive'
+                          ? 'bg-green-900/50 text-green-300'
+                          : 'bg-yellow-900/50 text-yellow-300'
+                      }`}
                     >
-                      Delete
-                    </button>
+                      AI: {finding.ai_verdict.replace('_', ' ')}
+                    </span>
+                    {typeof finding.ai_confidence === 'number' && (
+                      <span className="text-xs text-gray-400">
+                        {finding.ai_confidence > 1
+                          ? `${Math.round(finding.ai_confidence)}% confidence`
+                          : `${Math.round(finding.ai_confidence * 100)}% confidence`}
+                      </span>
+                    )}
                   </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-sm text-gray-500">
-              No active exception is recorded for this finding.
-            </div>
+                )}
+                {finding.ai_rationale && (
+                  <div>
+                    <p className="mb-1 text-xs text-gray-500">Rationale</p>
+                    <p className="whitespace-pre-wrap text-sm text-gray-300">{finding.ai_rationale}</p>
+                  </div>
+                )}
+                {aiRecommendations.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs text-gray-500">Recommendations</p>
+                    <ul className="list-inside list-disc space-y-1 text-sm text-gray-300">
+                      {aiRecommendations.map((rec, idx) => (
+                        <li key={idx} className="whitespace-pre-wrap wrap-break-word">{rec}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {!finding.ai_verdict && !finding.ai_rationale && aiRecommendations.length === 0 && latestAiRetest && !aiRetestShownInHistory && (
+                  <div className="rounded-sm border border-violet-500/25 bg-violet-500/5 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-sm bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
+                        Latest advisory AI retest
+                      </span>
+                      {latestAiRetest.verdict && (
+                        <span className="text-xs text-gray-300">{latestAiRetest.verdict.replaceAll('_', ' ')}</span>
+                      )}
+                      {typeof latestAiRetest.confidence === 'number' && (
+                        <span className="text-xs text-gray-400">{Math.round(latestAiRetest.confidence * 100)}% confidence</span>
+                      )}
+                    </div>
+                    <p className="mt-2 text-xs text-violet-200/80">
+                      Advisory only — this assessment cannot override the canonical deterministic proof state.
+                    </p>
+                    {latestAiRetest.ai_reasoning && (
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-gray-300">{latestAiRetest.ai_reasoning}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </Section>
           )}
 
-          <form onSubmit={handleCreateException} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1 text-sm text-gray-300">
-                Owner
-                <input
-                  value={exceptionForm.owner}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, owner: e.target.value }))}
-                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  placeholder="team or person"
-                  required
-                />
-              </label>
-              <label className="grid gap-1 text-sm text-gray-300">
-                Approver
-                <input
-                  value={exceptionForm.approver}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, approver: e.target.value }))}
-                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  placeholder="security approver"
-                  required
-                />
-              </label>
-              <label className="grid gap-1 text-sm text-gray-300">
-                Policy
+          <TriagePanel finding={finding} />
+        </div>
+
+        <aside className="min-w-0 space-y-5" aria-label="Finding status and history">
+          <Section id="triage" title="Triage">
+            <div className="space-y-3">
+              <label className="grid gap-1 text-xs text-gray-500">
+                Analyst verdict
                 <select
-                  value={exceptionForm.policy_id}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, policy_id: e.target.value }))}
-                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  required
+                  value={finding.analyst_verdict || ''}
+                  onChange={(e) => {
+                    const verdict = ANALYST_VERDICTS.find((item) => item.value === e.target.value)
+                    if (verdict) void handleAnalystVerdict(verdict)
+                  }}
+                  disabled={statusUpdating}
+                  className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:border-blue-500 focus:outline-hidden disabled:opacity-50"
                 >
-                  <option value="">Select an exact policy…</option>
-                  {policyProfiles.filter((profile) => profile.is_active).map((profile) => (
-                    <option key={profile.id} value={profile.id}>{profile.name} ({profile.environment})</option>
+                  <option value="" disabled>No verdict recorded</option>
+                  {ANALYST_VERDICTS.map((verdict) => (
+                    <option key={verdict.value} value={verdict.value}>{verdict.label}</option>
                   ))}
                 </select>
               </label>
-              <label className="grid gap-1 text-sm text-gray-300">
-                Expires in days
-                <input
-                  value={exceptionForm.expires_days}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, expires_days: e.target.value }))}
-                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  inputMode="numeric"
-                  min="1"
-                  required
-                />
-              </label>
-            </div>
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1 text-sm text-gray-300">
-                Reason
-                <textarea
-                  value={exceptionForm.reason}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, reason: e.target.value }))}
-                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  placeholder="Risk acceptance rationale"
-                  required
-                />
-              </label>
-              <label className="grid gap-1 text-sm text-gray-300">
-                Compensating controls
-                <textarea
-                  value={exceptionForm.compensating_controls}
-                  onChange={(e) => setExceptionForm((prev) => ({ ...prev, compensating_controls: e.target.value }))}
-                  className="min-h-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
-                  placeholder="Controls, monitoring, or rollout constraints"
-                  required
-                />
-              </label>
-            </div>
-            <div className="mt-3 flex justify-end">
-              <button
-                type="submit"
-                disabled={exceptionSaving || !exceptionForm.policy_id}
-                className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-              >
-                {exceptionSaving ? 'Creating...' : 'Create Exception'}
-              </button>
-            </div>
-          </form>
-        </div>
-      </SectionCard>
-
-      <SectionCard id="retest" title="Retest Verification">
-        <div className="space-y-3">
-          <div className={`rounded border px-3 py-2 ${
-            canonicalProofVerified
-              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
-              : 'border-amber-500/30 bg-amber-500/10 text-amber-100'
-          }`}>
-            <p className="text-sm font-medium">Canonical finding proof: {canonicalProofState}</p>
-            <p className="mt-1 text-xs text-gray-300">
-              {canonicalProofVerified
-                ? 'The stored scan-time deterministic proof contract was satisfied. Later replay and AI assessments remain separate evidence and cannot downgrade that proof.'
-                : 'No stored deterministic proof contract currently verifies this finding. Replay and AI assessments may inform triage but do not become proof by themselves.'}
-            </p>
-          </div>
-          {!retestSupported && (
-            <div className="text-xs rounded-sm px-2 py-1 bg-amber-900/30 text-amber-300 border border-amber-900/60">
-              Automated retest unavailable: {retestUnsupportedMessage}
-            </div>
-          )}
-          {manualVerifyCommands.length > 0 && (
-            <div>
-              <p className="text-xs text-gray-500 mb-1">Manual verification commands (from evidence)</p>
-              <div className="space-y-1">
-                {manualVerifyCommands.map((command, idx) => (
-                  <div key={idx} className="flex items-start gap-1">
-                    <code className="text-[11px] text-blue-300 break-all flex-1">{command}</code>
-                    <CopyButton text={command} label="Copy verification command" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {hasPendingRetest && (
-            <div className="inline-flex items-center gap-2 rounded-sm bg-blue-900/30 border border-blue-900/60 px-2 py-1 text-xs text-blue-300">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-              Verifying… results update automatically
-            </div>
-          )}
-          {retestMessage && (
-            <div className={`text-xs rounded px-2 py-1 ${
-              retestMessage.includes('Failed')
-                ? 'bg-red-900/30 text-red-300 border border-red-900/60'
-                : 'bg-blue-900/30 text-blue-300 border border-blue-900/60'
-            }`}>
-              {retestMessage}
-            </div>
-          )}
-          {finding.status === 'active' && lastVerdictInconclusive && (
-            <div className="text-xs rounded-sm px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
-              This finding remains <span className="text-yellow-400">active</span> because the latest retest was{' '}
-              <span className="text-amber-300">inconclusive</span> — verification did not conclude
-              {lastRetestRetryable ? ' and is retryable' : ''}. Retest verdicts inform triage; the
-              finding status is set by analysts using the status controls below.
-            </div>
-          )}
-          {finding.status === 'active' && latestRetestVerdict === 'false_positive' && (
-            <div className="text-xs rounded-sm px-2 py-1.5 bg-gray-800/60 text-gray-300 border border-gray-700">
-              The latest retest judged this a <span className="text-gray-300">false positive</span> with high
-              confidence. The finding is still <span className="text-yellow-400">active</span> — retests never
-              change finding status automatically. Review and set the status to{' '}
-              <span className="text-gray-300">false positive</span> below if you agree.
-            </div>
-          )}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <InfoItem label="Latest retest status">
-              <span className="capitalize">{latestRetestStatus?.replaceAll('_', ' ') || 'not tested'}</span>
-            </InfoItem>
-            <InfoItem label="Latest retest verdict">
-              {latestRetestVerdict ? (
-                <div className="flex flex-col items-start gap-1">
-                  <RetestVerdictBadge verdict={latestRetestVerdict} />
-                  {lastRetestRetryable && (
-                    <span className="text-[11px] text-amber-300/80">retryable — re-run to retry</span>
-                  )}
-                </div>
-              ) : (
-                <span className="text-gray-400">n/a</span>
-              )}
-            </InfoItem>
-            <InfoItem label="Latest retest confidence">
-              {typeof latestRetestConfidence === 'number'
-                ? `${Math.round(latestRetestConfidence * 100)}%`
-                : 'N/A'}
-            </InfoItem>
-            <InfoItem label="Latest retest completed">
-              {latestRetestCompletedAt ? formatDate(latestRetestCompletedAt) : 'N/A'}
-            </InfoItem>
-            <InfoItem label="Retest attempts">
-              {finding.verification_count ?? 0}
-            </InfoItem>
-          </div>
-
-          {retestHistory.length > 0 ? (
-            <div className="space-y-2">
-              {(historyExpanded || hasPendingRetest ? retestHistory : retestHistory.slice(0, 1)).map((entry) => (
-                <div key={entry.id} className="bg-gray-800/60 rounded-sm p-2 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 text-gray-300">
-                      {(entry.status === 'queued' || entry.status === 'running') ? (
-                        <>
-                          <Loader2 className="h-3 w-3 animate-spin text-blue-400" aria-hidden="true" />
-                          <span>{entry.finding_type} • {entry.status}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="text-gray-400">{entry.finding_type}</span>
-                          <RetestVerdictBadge verdict={entry.verdict || entry.result_status} />
-                          {entry.result_status && entry.result_status !== entry.verdict && (
-                            <span className="text-gray-500">({entry.result_status.replaceAll('_', ' ')})</span>
-                          )}
-                          {entry.retryable && (
-                            <span className="px-1.5 py-0.5 rounded-sm bg-amber-500/15 text-amber-300/90 text-[10px]">retryable</span>
-                          )}
-                        </>
-                      )}
-                    </div>
-                    <div className="text-gray-500">
-                      {entry.completed_at
-                        ? formatDate(entry.completed_at)
-                        : entry.created_at
-                        ? formatDate(entry.created_at)
-                        : 'N/A'}
-                    </div>
-                  </div>
-                  {entry.verification_mode && (
-                    <div className="text-gray-400 mt-1">
-                      mode: {entry.verification_mode.replaceAll('_', ' ')}
-                    </div>
-                  )}
-                  {entry.primary_tested_endpoint && (
-                    <div className="mt-1 flex min-w-0 gap-1 text-gray-400">
-                      <span className="shrink-0">primary tested endpoint:</span>
-                      <code className="break-all text-blue-300">{entry.primary_tested_endpoint}</code>
-                    </div>
-                  )}
-                  {Array.isArray(entry.tested_endpoints) && entry.tested_endpoints.length > 1 && (
-                    <details className="mt-1 rounded-sm border border-gray-700/70 bg-gray-900/40 px-2 py-1.5">
-                      <summary className="cursor-pointer text-gray-300">
-                        Tested scope ({entry.tested_endpoints.length} endpoints)
-                      </summary>
-                      <ul className="mt-1 space-y-1">
-                        {entry.tested_endpoints.map((endpoint) => (
-                          <li key={endpoint}><code className="break-all text-blue-300">{endpoint}</code></li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-                  <div className="mt-1 flex flex-wrap gap-2 text-gray-400">
-                    <span>deterministic proof: <strong className={entry.deterministic_proof_state === 'proven' ? 'text-emerald-300' : 'text-amber-300'}>{entry.deterministic_proof_state === 'proven' ? 'proven' : 'not proven'}</strong></span>
-                    {entry.result_status && <span>execution result: <strong className="font-medium text-gray-300">{entry.result_status.replaceAll('_', ' ')}</strong></span>}
-                    {entry.verdict_basis === 'ai_assessment' && <span className="text-violet-300">verdict basis: advisory AI assessment</span>}
-                  </div>
-                  {typeof entry.confidence === 'number' && (
-                    <div className="text-gray-400 mt-1">
-                      confidence: {Math.round(entry.confidence * 100)}%
-                    </div>
-                  )}
-                  {entry.verdict_reason && <div className="text-gray-400 mt-1">{entry.verdict_reason}</div>}
-                  {!entry.verdict_reason && entry.message && <div className="text-gray-400 mt-1">{entry.message}</div>}
-                  {entry.ai_reasoning && (
-                    <div className="mt-1 rounded-sm border border-violet-500/20 bg-violet-500/5 p-2 text-gray-400">
-                      <span className="font-medium text-violet-300">AI assessment — advisory, cannot override deterministic proof:</span> {entry.ai_reasoning}
-                    </div>
-                  )}
-                  {entry.ai_plan && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-blue-300">AI plan</summary>
-                      <pre className="mt-1 text-[11px] text-gray-300 whitespace-pre-wrap break-all">{JSON.stringify(entry.ai_plan, null, 2)}</pre>
-                    </details>
-                  )}
-                  {Array.isArray(entry.replay_commands) && entry.replay_commands.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {entry.replay_commands.slice(0, 3).map((command, idx) => (
-                        <div key={idx} className="flex items-start gap-1">
-                          <code className="text-[11px] text-blue-300 break-all flex-1">{command}</code>
-                          <CopyButton text={command} label="Copy replay command" />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {entry.error_message && <div className="text-red-300 mt-1">{entry.error_message}</div>}
-                </div>
-              ))}
-              {retestHistory.length > 1 && !hasPendingRetest && (
-                <button
-                  type="button"
-                  onClick={() => setHistoryExpanded((v) => !v)}
-                  className="text-xs text-blue-300 hover:text-blue-200 transition-colors"
-                >
-                  {historyExpanded
-                    ? 'Show less'
-                    : `Show ${retestHistory.length - 1} older retest${retestHistory.length - 1 === 1 ? '' : 's'}`}
-                </button>
-              )}
-            </div>
-          ) : (
-            <p className="text-xs text-gray-500">No retests recorded yet.</p>
-          )}
-        </div>
-      </SectionCard>
-
-      <SectionCard id="evidence" title="Evidence Summary">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <InfoItem label="Primary URL">
-            {primaryUrl ? (
-              <div className="flex items-center gap-2">
-                <code className="text-xs text-blue-300 break-all">{primaryUrl}</code>
-                <CopyButton text={primaryUrl} label="Copy URL" />
-              </div>
-            ) : (
-              <span className="text-gray-400 text-sm">Not provided</span>
-            )}
-          </InfoItem>
-          {evidence.duplicateCount > 0 && (
-            <InfoItem label="Occurrences">{evidence.duplicateCount}</InfoItem>
-          )}
-          {evidence.parameter && (
-            <InfoItem label="Parameter">
-              <code className="text-xs text-purple-300">{evidence.parameter}</code>
-            </InfoItem>
-          )}
-          {evidence.payload && (
-            <InfoItem label="Payload">
-              <code className="text-xs text-yellow-300 break-all">{evidence.payload}</code>
-            </InfoItem>
-          )}
-          {evidence.context && (
-            <InfoItem label="Context">
-              <span className="text-xs text-green-300">{evidence.context}</span>
-            </InfoItem>
-          )}
-          {statusCode && (
-            <InfoItem label="Status Code">
-              <span className="text-xs text-gray-200">{statusCode}</span>
-            </InfoItem>
-          )}
-          {responseAnomaly && (
-            <InfoItem label="Response anomaly">
-              <span className="text-xs text-yellow-300">{formatAnomaly(responseAnomaly)}</span>
-            </InfoItem>
-          )}
-        </div>
-
-        {/* Vulnerable URLs */}
-        {evidence.allUrls.length > 0 && (
-          <div className="mt-4">
-            <p className="text-xs text-gray-500 mb-2">Vulnerable URLs ({evidence.allUrls.length})</p>
-            <div className="space-y-2">
-              {evidence.allUrls.map((url, i) => (
-                <div key={i} className="bg-gray-800/60 rounded-sm p-2 flex items-start justify-between gap-2">
-                  <code className="text-xs text-blue-300 break-all flex-1">{extractEndpoint(url)}</code>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <CopyButton text={url} label="Copy full URL" />
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="p-1 rounded-sm hover:bg-gray-700 transition-colors"
-                      title="Open in new tab"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5 text-gray-400" />
-                    </a>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Working Payloads */}
-        {evidence.allPayloads.length > 0 && (
-          <div className="mt-4">
-            <p className="text-xs text-gray-500 mb-2">Working Payloads ({evidence.allPayloads.length})</p>
-            <div className="space-y-2">
-              {evidence.allPayloads.map((payload, i) => (
-                <div key={i} className="bg-gray-800/60 rounded-sm p-2 flex items-start justify-between gap-2">
-                  <code className="text-xs text-yellow-300 break-all flex-1">{decodePayload(payload)}</code>
-                  <CopyButton text={decodePayload(payload)} label="Copy payload" />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Remediation Steps */}
-        {evidence.remediation.length > 0 && (
-          <div className="mt-4">
-            <p className="text-xs text-gray-500 mb-2">Remediation Steps</p>
-            <div className="space-y-2">
-              {evidence.remediation.map((step, i) => (
-                <div key={i} className="flex items-start gap-3 text-sm">
-                  <div className="w-5 h-5 rounded-sm border border-gray-600 flex items-center justify-center shrink-0 mt-0.5">
-                    <span className="text-xs text-gray-500">{i + 1}</span>
-                  </div>
-                  <span className="text-gray-300">{step}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {evidence.evidenceDetails.length > 0 && (
-          <div className="mt-4 space-y-2">
-            <p className="text-xs text-gray-500">Evidence signals</p>
-            <ul className="space-y-1 text-sm text-gray-300">
-              {evidence.evidenceDetails.map((detail, idx) => (
-                <li key={idx} className="flex items-start gap-2">
-                  <span className="text-yellow-400 mt-0.5">&#8226;</span>
-                  <span className="wrap-break-word">{detail}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </SectionCard>
-
-      {hasAiProbeEvidence && (
-        <SectionCard title="AI Probe Evidence">
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
-              {aiProbeId && <InfoItem label="Probe ID"><code className="text-blue-300 break-all">{aiProbeId}</code></InfoItem>}
-              {aiProbeFamily && <InfoItem label="Family">{aiProbeFamily.replaceAll('_', ' ')}</InfoItem>}
-              {aiTechnique && <InfoItem label="Technique">{aiTechnique.replaceAll('_', ' ')}</InfoItem>}
-              {aiJudgeLayer && <InfoItem label="Judge">{aiJudgeLayer.replaceAll('_', ' ')}</InfoItem>}
-            </div>
-
-            {aiTactics.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {aiTactics.map((tactic) => (
-                  <span key={tactic} className="px-2 py-0.5 rounded-sm bg-gray-800 text-gray-300 text-xs">
-                    {tactic.replaceAll('_', ' ')}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div className="space-y-3">
-              {aiProbePrompt && (
-                <div className="flex justify-start">
-                  <div className="max-w-3xl rounded-lg border border-red-900/50 bg-red-950/30 p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-red-300">Probe</p>
-                    <p className="mt-2 text-sm text-gray-100 whitespace-pre-wrap">{aiProbePrompt}</p>
-                  </div>
-                </div>
-              )}
-              {aiResponseExcerpt && (
-                <div className="flex justify-end">
-                  <div className="max-w-3xl rounded-lg border border-blue-900/50 bg-blue-950/30 p-3">
-                    <p className="text-xs font-medium uppercase tracking-wide text-blue-300">Target response</p>
-                    <p className="mt-2 text-sm text-gray-100 whitespace-pre-wrap">{aiResponseExcerpt}</p>
-                  </div>
+              <p className="text-xs text-gray-500">
+                {finding.analyst_verdict && finding.analyst_verdict_at
+                  ? `Recorded ${formatRelativeTime(finding.analyst_verdict_at)}. `
+                  : ''}
+                Setting a verdict also updates the status.
+              </p>
+              {finding.notes && (
+                <div className="rounded-md bg-gray-950/70 p-3">
+                  <p className="mb-1 text-xs text-gray-500">Analyst notes</p>
+                  <p className="whitespace-pre-wrap text-sm text-gray-200">{finding.notes}</p>
                 </div>
               )}
             </div>
+          </Section>
 
-            {rawEvidence && (
-              <details open className="bg-gray-800/60 rounded-lg p-3">
-                <summary className="text-sm font-medium text-gray-300 cursor-pointer">Expanded raw evidence</summary>
-                <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{redactEvidenceForDisplay(rawEvidence)}</pre>
-              </details>
-            )}
-          </div>
-        </SectionCard>
-      )}
-
-      {evidenceObjects.length > 0 && (
-        <SectionCard
-          title="Durable Evidence Objects"
-          actions={
-            <Link href={`/evidence?finding_id=${encodeURIComponent(findingId)}`} className="text-xs text-blue-400 hover:text-blue-300">
-              Browse in Evidence →
-            </Link>
-          }
-        >
-          <p className="text-xs text-gray-500 mb-3">
-            First-class evidence records — content hash, redaction profile, retention class, and storage URI.
-            These persist independently of the embedded evidence above and survive worker churn.
-          </p>
-          <div className="space-y-2">
-            {evidenceObjects.map((eo) => {
-              const contentText = evidenceObjectContentText(eo.content)
-              return (
-                <div key={eo.id} className="bg-gray-800/60 rounded-lg p-3 space-y-2">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-sm font-medium text-gray-200">{eo.object_type}</span>
-                    <div className="flex items-center gap-2">
-                      {eo.retention_class && (
-                        <span
-                          className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            eo.retention_class === 'sensitive'
-                              ? 'bg-amber-900/50 text-amber-300'
-                              : 'bg-gray-700 text-gray-300'
-                          }`}
-                        >
-                          {eo.retention_class}
-                        </span>
-                      )}
-                      {typeof eo.size_bytes === 'number' && (
-                        <span className="text-xs text-gray-400">{formatBytes(eo.size_bytes)}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                    {eo.scan_id && (
-                      <div className="flex gap-2 min-w-0">
-                        <span className="text-gray-500 shrink-0">evidence-producing scan</span>
-                        <Link href={`/scans/${eo.scan_id}`} className="break-all font-mono text-blue-300 hover:text-blue-200">{eo.scan_id}</Link>
-                      </div>
-                    )}
-                    {eo.content_sha256 && (
-                      <div className="flex gap-2 min-w-0">
-                        <span className="text-gray-500 shrink-0">sha256</span>
-                        <span className="text-gray-300 font-mono break-all">{eo.content_sha256}</span>
-                      </div>
-                    )}
-                    {eo.storage_uri && (
-                      <div className="flex gap-2 min-w-0">
-                        <span className="text-gray-500 shrink-0">storage</span>
-                        <span className="text-gray-300 font-mono break-all">{eo.storage_uri}</span>
-                      </div>
-                    )}
-                    {eo.redaction_profile && (
-                      <div className="flex gap-2 min-w-0">
-                        <span className="text-gray-500 shrink-0">redaction</span>
-                        <span className="text-gray-300">{eo.redaction_profile}</span>
-                      </div>
-                    )}
-                    <div className="flex gap-2 min-w-0">
-                      <span className="text-gray-500 shrink-0">id</span>
-                      <span className="text-gray-400 font-mono break-all">{eo.id}</span>
-                    </div>
-                  </div>
-                  {contentText && (
-                    <details className="rounded-sm border border-gray-800 bg-gray-950 p-2">
-                      <summary className="cursor-pointer text-xs font-medium text-gray-300">Object content</summary>
-                      <div className="mt-2 flex justify-end">
-                        <CopyButton text={contentText} label="Copy evidence object content" />
-                      </div>
-                      <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap wrap-break-word text-xs text-gray-300">
-                        {contentText}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </SectionCard>
-      )}
-
-      <SectionCard id="ai-analysis" title="AI Analysis">
-        {finding.ai_verdict || finding.ai_rationale || finding.ai_recommendations || latestAiRetest ? (
-          <div className="space-y-3">
-            {finding.ai_verdict && (
-              <div className="flex items-center gap-2">
-                <span
-                  className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    finding.ai_verdict === 'true_positive'
-                      ? 'bg-red-900/50 text-red-300'
-                      : finding.ai_verdict === 'false_positive'
-                      ? 'bg-green-900/50 text-green-300'
-                      : 'bg-yellow-900/50 text-yellow-300'
-                  }`}
-                >
-                  AI: {finding.ai_verdict.replace('_', ' ')}
-                </span>
-                {typeof finding.ai_confidence === 'number' && (
-                  <span className="text-xs text-gray-400">
-                    {finding.ai_confidence > 1
-                      ? `${Math.round(finding.ai_confidence)}% confidence`
-                      : `${Math.round(finding.ai_confidence * 100)}% confidence`}
-                  </span>
-                )}
-              </div>
-            )}
-            {finding.ai_rationale && (
-              <div>
-                <p className="text-xs text-gray-500 mb-1">Rationale</p>
-                <p className="text-sm text-gray-300 whitespace-pre-wrap">{finding.ai_rationale}</p>
-              </div>
-            )}
-            {finding.ai_recommendations && (
-              <div>
-                <p className="text-xs text-gray-500 mb-1">Recommendations</p>
-                {Array.isArray(finding.ai_recommendations) ? (
-                  <ul className="space-y-1 text-sm text-gray-300 list-disc list-inside">
-                    {finding.ai_recommendations.map((rec, idx) => (
-                      <li key={idx}>{rec}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <pre className="text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">
-                    {JSON.stringify(finding.ai_recommendations, null, 2)}
-                  </pre>
-                )}
-              </div>
-            )}
-            {!finding.ai_verdict && !finding.ai_rationale && !finding.ai_recommendations && latestAiRetest && (
-              <div className="rounded-sm border border-violet-500/25 bg-violet-500/5 p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-sm bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
-                    Latest advisory AI retest
-                  </span>
-                  {latestAiRetest.verdict && (
-                    <span className="text-xs text-gray-300">{latestAiRetest.verdict.replaceAll('_', ' ')}</span>
-                  )}
-                  {typeof latestAiRetest.confidence === 'number' && (
-                    <span className="text-xs text-gray-400">{Math.round(latestAiRetest.confidence * 100)}% confidence</span>
-                  )}
-                </div>
-                <p className="mt-2 text-xs text-violet-200/80">
-                  Advisory only — this assessment cannot override the canonical deterministic proof state.
+          <Section id="tracking" title="History">
+            <dl className="divide-y divide-gray-800/70">
+              <Fact label="First seen"><span title={formatDate(finding.first_seen_at)}>{formatRelativeTime(finding.first_seen_at)}</span></Fact>
+              <Fact label="Last seen"><span title={formatDate(finding.last_seen_at)}>{formatRelativeTime(finding.last_seen_at)}</span></Fact>
+              {finding.resolved_at && (
+                <Fact label="Resolved"><span title={formatDate(finding.resolved_at)}>{formatRelativeTime(finding.resolved_at)}</span></Fact>
+              )}
+              {evidence.duplicateCount > 0 && <Fact label="Occurrences">{evidence.duplicateCount}</Fact>}
+              {typeof finding.resurfaced_count === 'number' && finding.resurfaced_count > 0 && (
+                <Fact label="Returned after resolve">{finding.resurfaced_count}×</Fact>
+              )}
+              <Fact label="Source">{getFindingSourceType(finding)}</Fact>
+              {finding.owasp && <Fact label="OWASP">{finding.owasp}</Fact>}
+            </dl>
+            <div className="mt-3 space-y-1.5 border-t border-gray-800/70 pt-3 text-xs">
+              {originalScanId && (
+                <p className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-gray-500">Original finding scan:</span>
+                  <Link href={`/scans/${originalScanId}`} className="truncate font-mono text-blue-400 hover:text-blue-300" title={originalScanId}>{originalScanId.slice(0, 8)}</Link>
                 </p>
-                {latestAiRetest.ai_reasoning && (
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-gray-300">{latestAiRetest.ai_reasoning}</p>
-                )}
+              )}
+              {latestScanId && (
+                <p className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-gray-500">Latest observation scan:</span>
+                  <Link href={`/scans/${latestScanId}`} className="truncate font-mono text-blue-400 hover:text-blue-300" title={latestScanId}>{latestScanId.slice(0, 8)}</Link>
+                </p>
+              )}
+              {finding.target_id && (
+                <p>
+                  <Link href={`/findings?target_id=${encodeURIComponent(finding.target_id)}&status=active`} className="text-blue-400 hover:text-blue-300">
+                    Other open findings on this target →
+                  </Link>
+                </p>
+              )}
+              {research && (
+                <p className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-gray-500">Discovered by:</span>
+                  <span className="text-indigo-300">Hunt</span>
+                  {research.campaign_id && (
+                    <Link href={`/deep-hunt/runs/${research.campaign_id}`} className="text-blue-400 hover:text-blue-300">
+                      run {research.campaign_id.slice(0, 8)}
+                    </Link>
+                  )}
+                </p>
+              )}
+            </div>
+          </Section>
+
+          <Section
+            id="exceptions"
+            title="Policy exceptions"
+            actions={
+              <Button size="sm" variant="secondary" onClick={() => setExceptionDialogOpen(true)}>
+                Accept risk…
+              </Button>
+            }
+          >
+            {findingExceptions.length > 0 ? (
+              <ul className="space-y-2">
+                {findingExceptions.map((item) => (
+                  <li key={item.id} className="rounded-md border border-gray-800 bg-gray-950/70 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className={`rounded-sm px-2 py-0.5 ${item.status === 'active' ? 'bg-green-900/40 text-green-200' : 'bg-gray-800 text-gray-400'}`}>
+                            {item.status}
+                          </span>
+                          {item.expires_at && <span className="text-gray-500" title={formatDate(item.expires_at)}>expires {formatRelativeTime(item.expires_at)}</span>}
+                        </div>
+                        {item.reason && <p className="text-sm text-gray-300 wrap-break-word">{item.reason}</p>}
+                        <p className="text-xs text-gray-500 wrap-break-word">
+                          {[item.owner && `owner ${item.owner}`, item.approver && `approver ${item.approver}`].filter(Boolean).join(' · ')}
+                        </p>
+                        {item.compensating_controls && <p className="text-xs text-gray-500 wrap-break-word">controls: <span className="text-gray-300">{item.compensating_controls}</span></p>}
+                        {item.policy_id && <p className="font-mono text-[11px] text-gray-600 break-all">policy {item.policy_id}</p>}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setExceptionToDelete(item.id)}
+                        className="shrink-0 rounded-sm border border-red-900/70 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-500">None. The release gate counts this finding while it is open.</p>
+            )}
+          </Section>
+        </aside>
+      </div>
+
+      <details className="group rounded-lg border border-gray-800 bg-gray-900/60">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-300 hover:text-white">
+          Technical details
+          <span className="ml-2 text-xs font-normal text-gray-500">identifiers, stored evidence records, raw evidence</span>
+        </summary>
+        <div className="space-y-5 border-t border-gray-800 px-4 py-4">
+          <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <dt className="shrink-0 text-gray-500">Finding ID</dt>
+              <dd className="flex min-w-0 items-center gap-1"><code className="break-all text-gray-300">{finding.id}</code><CopyButton text={finding.id} label="Copy finding ID" /></dd>
+            </div>
+            {finding.target_id && (
+              <div className="flex min-w-0 items-center gap-2">
+                <dt className="shrink-0 text-gray-500">Target ID</dt>
+                <dd className="flex min-w-0 items-center gap-1"><code className="break-all text-gray-300">{finding.target_id}</code><CopyButton text={finding.target_id} label="Copy target ID" /></dd>
               </div>
             )}
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500">No AI analysis available.</p>
-        )}
-      </SectionCard>
-
-      {(request || response) && (
-        <SectionCard id="http" title="HTTP Request/Response">
-          <div className="space-y-3">
-            {request && (
-              <details className="bg-gray-800/60 rounded-lg p-3">
-                <summary className="cursor-pointer text-sm text-gray-300">Request</summary>
-                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{request}</pre>
-              </details>
+            {latestScanId && (
+              <div className="flex min-w-0 items-center gap-2">
+                <dt className="shrink-0 text-gray-500">Latest observation scan ID</dt>
+                <dd className="flex min-w-0 items-center gap-1"><code className="break-all text-gray-300">{latestScanId}</code><CopyButton text={latestScanId} label="Copy latest observation scan ID" /></dd>
+              </div>
             )}
-            {response && (
-              <details className="bg-gray-800/60 rounded-lg p-3">
-                <summary className="cursor-pointer text-sm text-gray-300">Response</summary>
-                <pre className="mt-2 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{response}</pre>
-              </details>
+            {finding.tool && (
+              <div className="flex min-w-0 items-center gap-2">
+                <dt className="shrink-0 text-gray-500">Detector</dt>
+                <dd className="min-w-0"><code className="break-all text-gray-300">{finding.tool}</code></dd>
+              </div>
             )}
-          </div>
-        </SectionCard>
-      )}
+            {finding.fingerprint && (
+              <div className="flex min-w-0 items-center gap-2">
+                <dt className="shrink-0 text-gray-500">Fingerprint</dt>
+                <dd className="min-w-0"><code className="break-all text-gray-400">{finding.fingerprint}</code></dd>
+              </div>
+            )}
+          </dl>
 
-      {rawEvidence && !hasAiProbeEvidence && (
-        <Card className="p-4">
-          <details>
-            <summary className="text-sm font-medium text-gray-400 cursor-pointer">Raw Evidence</summary>
-            <pre className="mt-3 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{redactEvidenceForDisplay(rawEvidence)}</pre>
-          </details>
-        </Card>
-      )}
+          <EvidenceObjectsList objects={evidenceObjects} findingId={findingId} />
 
-      {/* Record deletion is an admin lifecycle action, not a triage decision, so it lives at the
-          end of the page in low emphasis. Same double gate as the Findings list. */}
-      {featureEnabled('record_deletion') && featureEnabled('engine_admin') && (
-        <section aria-labelledby="manage-record-heading" className="border-t border-gray-800 pt-6">
-          <h2 id="manage-record-heading" className="text-xs font-semibold uppercase tracking-wider text-gray-500">Manage record</h2>
-          <p className="mt-1 max-w-2xl text-sm text-gray-500">
-            Deleting removes this finding&apos;s database record permanently after a preview and approval.
-            Historical scans and evidence files are retained. To close a finding, use the lifecycle controls above instead.
-          </p>
-          <div className="mt-3">
-            <DeleteRecordsButton
-              variant="ghost"
-              className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
-              label="Delete finding"
-              subject="finding"
-              selection={{ kind: 'findings', finding_ids: [finding.id], scan_id: finding.scan_id || undefined }}
-              onDeleted={() => router.push(backUrl)}
-            />
-          </div>
-        </section>
-      )}
+          {rawEvidence && (
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Raw evidence</h3>
+              <pre className="max-h-[32rem] overflow-auto rounded-md border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300 whitespace-pre-wrap wrap-break-word">{redactEvidenceForDisplay(rawEvidenceDisplay)}</pre>
+            </div>
+          )}
+
+          {/* Record deletion is an admin lifecycle action, not a triage decision, so it lives here
+              in low emphasis. Same double gate as the Findings list. */}
+          {featureEnabled('record_deletion') && featureEnabled('engine_admin') && (
+            <section aria-labelledby="manage-record-heading" className="border-t border-gray-800 pt-4">
+              <h3 id="manage-record-heading" className="text-xs font-semibold uppercase tracking-wider text-gray-500">Manage record</h3>
+              <p className="mt-1 max-w-2xl text-sm text-gray-500">
+                Deleting removes this finding&apos;s database record permanently after a preview and approval.
+                Historical scans and evidence files are retained. To close a finding, change its status instead.
+              </p>
+              <div className="mt-3">
+                <DeleteRecordsButton
+                  variant="ghost"
+                  className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                  label="Delete finding"
+                  subject="finding"
+                  selection={{ kind: 'findings', finding_ids: [finding.id], scan_id: finding.scan_id || undefined }}
+                  onDeleted={() => router.push(backUrl)}
+                />
+              </div>
+            </section>
+          )}
+        </div>
+      </details>
     </div>
   )
 }

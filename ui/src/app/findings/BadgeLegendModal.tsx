@@ -8,8 +8,8 @@ import {
   SeverityBadge,
 } from '@/components/ui'
 
-// Severity / Proof / Retest / Status render as look-alike badges on each row. Spell out that
-// they are four different questions so newcomers don't conflate them.
+// Severity / Proof / Retest / Status answer four different questions; spell them out so
+// newcomers don't conflate them, and say when a row leaves one out.
 export function BadgeLegendModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
     <Modal open={open} title="What the badges mean" onClose={onClose} size="lg">
@@ -24,11 +24,11 @@ export function BadgeLegendModal({ open, onClose }: { open: boolean; onClose: ()
         </div>
         <div className="flex items-start gap-3">
           <div className="shrink-0"><RetestVerdictBadge verdict="likely_vulnerable" /></div>
-          <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Retest</span> — what the most recent automated re-check found.</p>
+          <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Retest</span> — what the most recent automated re-check found. Rows show it only when it adds something: an open finding a retest could not reproduce, a closed one it still reproduces, or a re-check that could not decide.</p>
         </div>
         <div className="flex items-start gap-3">
           <FindingStatusBadge status="active" />
-          <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Status</span> — your triage decision: active, resolved, false positive, or accepted risk.</p>
+          <p className="text-xs leading-5 text-gray-400"><span className="font-medium text-gray-200">Status</span> — your triage decision: open (active), resolved, false positive, or accepted risk. Rows show it in the All view; the other views are one status each.</p>
         </div>
       </div>
     </Modal>

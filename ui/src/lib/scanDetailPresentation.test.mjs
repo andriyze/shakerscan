@@ -6,6 +6,7 @@ import {
   carriedOverSummary,
   domainRatePresentation,
   formatResumeTime,
+  groupScanFindings,
   isProvenFinding,
   notExaminedExplanation,
   reconciledScanFindings,
@@ -165,6 +166,25 @@ test('proof is the server projection, never the scanner word or a second boolean
   assert.equal(isProvenFinding({ proof_state: 'exploited', verified: true }), false)
   assert.equal(isProvenFinding({ verified: true }), false)
   assert.equal(isProvenFinding({ proof_state: 'verified' }), true)
+})
+
+test('the Findings tab groups by proof, lists a title once, and orders by severity', () => {
+  const exposure = (path, severity = 'critical') => ({ title: 'Sensitive exposure: cloud credential material', severity, proof_state: 'verified', url: `https://t.test${path}` })
+  const groups = groupScanFindings([
+    { title: 'Missing HTTP response header: Referrer-Policy', severity: 'info', proof_state: 'suspected' },
+    { title: 'Git Configuration - Detect', severity: 'medium', proof_state: 'suspected' },
+    { title: 'Sensitive exposure: version control exposure', severity: 'high', proof_state: 'verified' },
+    exposure('/.aws/credentials'), exposure('/settings.py'), exposure('/actuator/env'),
+    { title: 'Possible SQL injection', severity: 'critical', proof_state: 'suspected' },
+  ])
+  assert.deepEqual(groups.proven.map((c) => [c.severity, c.title, c.findings.length]), [
+    ['critical', 'Sensitive exposure: cloud credential material', 3],
+    ['high', 'Sensitive exposure: version control exposure', 1],
+  ])
+  // An unproven critical is a lead to verify, never folded into the informational rest.
+  assert.deepEqual(groups.verify.map((c) => c.severity), ['critical', 'medium'])
+  assert.deepEqual(groups.informational.map((c) => c.title), ['Missing HTTP response header: Referrer-Policy'])
+  assert.deepEqual(groupScanFindings(null), { proven: [], verify: [], informational: [] })
 })
 
 test('ambiguous v3 reports claim posture deductions only when they carry one', () => {

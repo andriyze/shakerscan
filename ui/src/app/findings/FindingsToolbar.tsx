@@ -6,13 +6,13 @@ import { getSeverityBg } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import {
   SEVERITY_LEVELS,
-  FINDING_STATUSES,
-  FINDING_STATUS_LABELS,
   SORT_OPTIONS,
   LAST_SEEN_OPTIONS,
   type SortOption,
   type SortOrder,
 } from '@/lib/constants'
+import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
+import type { StatusView } from '@/lib/findingGroups'
 import { Button, Card, Field, Input, Select, Tabs, Toggle } from '@/components/ui'
 import { countActiveSecondaryFilters } from './triage'
 
@@ -39,9 +39,22 @@ const SOURCE_TYPE_OPTIONS = [
   { value: 'manual', label: 'Manual' },
 ] as const
 
-const STATUS_TAB_ITEMS = [
+// Open work first: the list used to default to every historical row, burying open findings
+// among resolved and dismissed ones. "All" is the last choice, not the starting point.
+const STATUS_TAB_ITEMS: { key: StatusView; label: string }[] = [
+  { key: 'active', label: 'Open' },
+  { key: 'resolved', label: 'Resolved' },
+  { key: 'false_positive', label: 'False positive' },
+  { key: 'accepted_risk', label: 'Accepted risk' },
   { key: 'all', label: 'All' },
-  ...FINDING_STATUSES.map((status) => ({ key: status, label: FINDING_STATUS_LABELS[status] })),
+]
+
+export type FreshnessView = 'current' | 'stale' | 'all'
+
+const FRESHNESS_TAB_ITEMS: { key: FreshnessView; label: string }[] = [
+  { key: 'current', label: `Seen in ${STALE_AFTER_DAYS} days` },
+  { key: 'stale', label: 'Not seen recently' },
+  { key: 'all', label: 'Any time' },
 ]
 
 const SOURCE_TAB_ITEMS = SOURCE_TYPE_OPTIONS.map((option) => ({ key: option.value || 'all', label: option.label }))
@@ -64,7 +77,11 @@ export function getSortOrderLabel(sortBy: SortOption, sortOrder: SortOrder): str
 }
 
 export interface FindingsToolbarValues {
-  status: string
+  /** The status view in effect (the URL may leave the default out). */
+  status: StatusView
+  /** The freshness view in effect, and whether the URL chose it explicitly. */
+  freshness: FreshnessView
+  freshnessExplicit: boolean
   severity: string
   sourceType: string
   domain: string
@@ -89,6 +106,8 @@ export function FindingsToolbar({
   values,
   setFilter,
   setFilters,
+  onStatusChange,
+  onFreshnessChange,
   domains,
 }: {
   searchInput: string
@@ -96,10 +115,13 @@ export function FindingsToolbar({
   values: FindingsToolbarValues
   setFilter: (key: string, value: string | number | undefined) => void
   setFilters: (updates: FilterUpdates) => void
+  onStatusChange: (view: StatusView) => void
+  onFreshnessChange: (view: FreshnessView) => void
   domains: string[]
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false)
   const secondaryFilterCount = countActiveSecondaryFilters([
+    values.freshnessExplicit && !values.lastSeen ? values.freshness : '',
     values.sourceType, values.domain, values.lastSeen, values.verificationVerdict, values.verificationMode, values.verifiedOnly,
   ])
   const SortDirectionIcon = values.sortOrder === 'desc' ? ArrowDownWideNarrow : ArrowUpNarrowWide
@@ -132,6 +154,7 @@ export function FindingsToolbar({
               </span>
             )}
           </Button>
+          <span className="text-xs text-gray-500" aria-hidden="true">Sort</span>
           <Select
             fullWidth={false}
             value={values.sortBy}
@@ -156,6 +179,17 @@ export function FindingsToolbar({
 
       {filtersOpen && (
         <Card id="findings-more-filters" className="space-y-4 p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xs font-medium text-gray-400">Seen</span>
+            {/* What is still there vs. what no recent scan reached. Not seen recently is not
+                the same as fixed; the count line says what the default leaves out. */}
+            <Tabs
+              ariaLabel="Finding freshness"
+              items={FRESHNESS_TAB_ITEMS}
+              active={values.lastSeen ? 'all' : values.freshness}
+              onChange={(key) => onFreshnessChange(key as FreshnessView)}
+            />
+          </div>
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-medium text-gray-400">Source</span>
             {/* User-facing finding source. Hunt includes direct AI claims and
@@ -215,6 +249,7 @@ export function FindingsToolbar({
                 size="sm"
                 className="mb-1"
                 onClick={() => setFilters({
+                  freshness: undefined,
                   source_type: undefined,
                   domain: undefined,
                   last_seen: undefined,
@@ -235,8 +270,8 @@ export function FindingsToolbar({
         <Tabs
           ariaLabel="Filter by status"
           items={STATUS_TAB_ITEMS}
-          active={values.status || 'all'}
-          onChange={(key) => setFilter('status', key === 'all' ? undefined : key)}
+          active={values.status}
+          onChange={(key) => onStatusChange(key as StatusView)}
         />
         <div role="group" aria-label="Filter by severity" className="flex flex-wrap gap-1.5">
           {SEVERITY_LEVELS.map((sev) => {

@@ -7,7 +7,9 @@ import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFin
 import { TargetPostureCard } from '@/components/TargetPostureCard'
 import { SEVERITY_BADGE_STYLES, SEVERITY_LEVELS, type SeverityLevel } from '@/lib/constants'
 import { Card, ErrorState, PageHeader, gradeTextColor } from '@/components/ui'
-import ReportView from '@/components/ReportView'
+import ReportView, { ReportDownloads } from '@/components/ReportView'
+import FindingCard from '@/components/FindingCard'
+import { SectionTabPanel, SectionTabs, useSectionTab, type SectionTab } from '@/components/ui/SectionTabs'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
@@ -15,8 +17,10 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, groupScanFindings, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
+
+const SCAN_REPORT_TABS = ['findings', 'posture', 'coverage', 'release', 'activity']
 
 function formatScanTypeLabel(scan: any): string {
   if (scan?.scan_type === 'ai_gate' || scan?.run_kind?.startsWith('ai_')) {
@@ -121,9 +125,23 @@ function scanLogBadgeTone(kind: string): string {
 // Active rows loaded for the carried-over summary. Past this, history is reported partial.
 const HISTORY_ROW_CAP = 5000
 
-function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], historyState = 'ready' }: {
+// What qualifies a run's conclusion: posture weaknesses, coverage gaps, unfinished families,
+// families with no candidates, and assurance gaps. Counted on the verdict, listed in Coverage.
+function scanResultLimits(resultPresentation: any, assurance: any) {
+  const assuranceGaps: string[] = (assurance?.gaps || [])
+    .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
+  const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
+    + resultPresentation.coverageGapReasons.length
+    + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
+    + (resultPresentation.candidateGapFamilies.length > 0 ? 1 : 0)
+  const hasLimits = resultPresentation.coverageIncomplete || resultPresentation.missingHeaders.length > 0
+  return { assuranceGaps, limitCount, hasLimits }
+}
+
+function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targetFindings = [], historyState = 'ready', onShowLimits }: {
   scan: any; buildVersion?: string | null; buildFingerprint?: string | null
   decision?: DeploymentDecision | null; targetFindings?: any[]; historyState?: 'loading' | 'error' | 'ready' | 'partial'
+  onShowLimits?: () => void
 }) {
   const severityCounts = countSeverities(scan)
   const severityEntries = SEVERITY_LEVELS
@@ -158,7 +176,6 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
   const scopeSummary = [
     resultPresentation.budgetProfile !== 'unknown' ? `${resultPresentation.budgetProfile} budget` : null,
     resultPresentation.activeTesting ? 'active testing' : 'passive checks',
-    resultPresentation.authenticationRequested ? 'identity unverified' : 'anonymous',
   ].filter(Boolean).join(' · ')
   // The deployment decision carries the server's carried-over summary, computed next to the
   // gate over the target's complete active set. The client computation is the fallback for
@@ -170,12 +187,7 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
     : release?.tone === 'allow'
       ? 'bg-green-900/50 text-green-200'
       : 'bg-amber-900/50 text-amber-200'
-  const limitCount = (resultPresentation.missingHeaders.length > 0 ? 1 : 0)
-    + resultPresentation.coverageGapReasons.length
-    + (resultPresentation.incompleteFamilies.length > 0 ? 1 : 0)
-    + (resultPresentation.candidateGapFamilies.length > 0 ? 1 : 0)
-  const assuranceGaps = (assurance?.gaps || [])
-    .filter((gap: string) => !['required work did not finish', 'a selected check family is incomplete'].includes(gap))
+  const { limitCount, hasLimits } = scanResultLimits(resultPresentation, assurance)
 
   return (
     <Card className="mb-6 overflow-hidden p-0">
@@ -215,6 +227,11 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             {scanTypeLabel && <p className="text-sm text-gray-300">{scanTypeLabel} scan</p>}
             {duration && <p className="mt-0.5">Completed in {duration}</p>}
             <p className="mt-0.5 capitalize">{scopeSummary}</p>
+            {/* Whose traffic the findings describe is part of reading them, so it stays beside the conclusion. */}
+            <p className={`mt-0.5 ${resultPresentation.authenticationRequested ? 'text-amber-200' : ''}`} data-testid="identity-assurance">
+              <span className="sr-only">Identity assurance: </span>
+              <span>{resultPresentation.authenticationAssurance}</span>
+            </p>
           </div>
         </div>
       </section>
@@ -241,7 +258,10 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
             {' '}This is not an overall safety or release score.
             {scoreProjection?.reason === 'historical_policy_preserved' && ' Historical output is preserved; it was not silently rescored.'}
           </p>
-          {scorePresentation.note && <p className="mt-1 text-xs text-amber-200/80">{scorePresentation.note}</p>}
+          {/* The conclusion already says when coverage qualifies the result; repeat it only when it does not. */}
+          {scorePresentation.note && resultPresentation.confidenceTone === 'supporting' && (
+            <p className="mt-1 text-xs text-amber-200/80">{scorePresentation.note}</p>
+          )}
         </div>
 
         <div className="bg-gray-950/80 p-4">
@@ -323,31 +343,85 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
         </div>
       </div>
 
-      <div className="space-y-3 border-t border-gray-800 p-4">
+      {(resultPresentation.testingWarning || quota?.kind === 'reduced' || hasLimits) && (
+        <div className="space-y-2 border-t border-gray-800 px-4 py-3">
+          {resultPresentation.testingWarning && (
+            <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
+              {resultPresentation.testingWarning}
+            </p>
+          )}
+          {quota?.kind === 'reduced' && (
+            <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
+              {quota.label}: {quota.description}
+            </p>
+          )}
+          {hasLimits && (
+            <button
+              type="button"
+              onClick={onShowLimits}
+              className="text-left text-sm font-medium text-amber-200 hover:text-amber-100 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
+              data-testid="limits-link"
+            >
+              What limits this result{limitCount > 0 ? ` (${limitCount})` : ''} →
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 bg-gray-950/70 px-5 py-3 text-xs text-gray-500">
+        <span>Scan ID {scan.id}</span>
+        <div className="text-right">
+          {scanVersion && (
+            <span
+              className={`font-mono ${versionMismatch ? 'font-semibold text-red-400' : ''}`}
+              title={versionMismatch
+                ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan for current detector behavior.`
+                : `Scanner build ${scanVersion}`}
+            >
+              {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
+              {versionMismatch && scanVersion === buildVersion && scanFingerprint && buildFingerprint
+                ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
+                : versionMismatch ? ` ≠ ${buildVersion}` : ''}
+            </span>
+          )}
+          {(() => {
+            const staleAtSubmit = Number((scan?.options as any)?.stale_worker_count_at_submit || 0)
+            const fleetAtSubmit = Number((scan?.options as any)?.worker_fleet_size_at_submit || 0)
+            return staleAtSubmit > 0 ? (
+              <span className="ml-3 font-mono text-amber-400" title="Some workers were build-stale when this scan was submitted.">
+                ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
+              </span>
+            ) : null
+          })()}
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+// The Coverage tab's opening panel: how the run was configured and everything that limits
+// its conclusion. The verdict card counts the limits and links here.
+function ScanRunLimitsPanel({ scan }: { scan: any }) {
+  const assurance = scanAssurance(scan)
+  const resultPresentation = scanResultPresentation(scan, assurance)
+  const { assuranceGaps, limitCount } = scanResultLimits(resultPresentation, assurance)
+  return (
+    <Card className="mb-6 p-0">
+      <h2 className="border-b border-gray-800 px-4 py-3 text-sm font-semibold text-gray-200">Run details and limits</h2>
+      <div className="space-y-3 p-4">
         <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-400">
           <div><dt className="inline text-gray-500">Budget </dt><dd className="inline text-gray-200">{resultPresentation.budgetProfile}</dd></div>
           <div><dt className="inline text-gray-500">Testing </dt><dd className="inline text-gray-200">{resultPresentation.testingSummary}</dd></div>
-          <div><dt className="inline text-gray-500">Identity assurance </dt><dd className="inline text-gray-200">{resultPresentation.authenticationAssurance}</dd></div>
           <div><dt className="inline text-gray-500">HTTP requests used </dt><dd className="inline text-gray-200">{resultPresentation.requestCount === null ? 'Unavailable' : resultPresentation.requestCount.toLocaleString()}</dd></div>
           {resultPresentation.resolvedFamilies.length > 0 && (
             <div><dt className="inline text-gray-500">Selected check families </dt><dd className="inline text-gray-200">{resultPresentation.resolvedFamilies.map((family: string) => family.replaceAll('_', ' ')).join(', ')}</dd></div>
           )}
         </dl>
-        {resultPresentation.testingWarning && (
-          <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="testing-warning">
-            {resultPresentation.testingWarning}
-          </p>
-        )}
-        {quota?.kind === 'reduced' && (
-          <p className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="domain-rate-notice">
-            {quota.label}: {quota.description}
-          </p>
-        )}
         {(resultPresentation.coverageIncomplete || resultPresentation.missingHeaders.length > 0) && (
           <details
             className="rounded-lg border border-amber-500/30 bg-amber-500/10"
             data-testid="coverage-gaps"
-            open={resultPresentation.confidenceTone !== 'supporting'}
+            open
           >
             <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-amber-200">
               What limits this result{limitCount > 0 ? ` (${limitCount})` : ''}
@@ -380,40 +454,12 @@ function ScanVerdictCard({ scan, buildVersion, buildFingerprint, decision, targe
               {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}
               {resultPresentation.coverageIncomplete && (
                 <li className="text-amber-100/60">
-                  Findings above are real; missing or incomplete coverage does not establish absence of vulnerabilities. Coverage details are in the execution section below.
+                  Findings are real; missing or incomplete coverage does not establish absence of vulnerabilities. What ran is detailed below.
                 </li>
               )}
             </ul>
           </details>
         )}
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 bg-gray-950/70 px-5 py-3 text-xs text-gray-500">
-        <span>Scan ID {scan.id}</span>
-        <div className="text-right">
-          {scanVersion && (
-            <span
-              className={`font-mono ${versionMismatch ? 'font-semibold text-red-400' : ''}`}
-              title={versionMismatch
-                ? `This scan ran on build ${scanVersion}, but the current build is ${buildVersion}. Re-scan for current detector behavior.`
-                : `Scanner build ${scanVersion}`}
-            >
-              {versionMismatch ? '⚠ ' : ''}scanner {scanVersion}
-              {versionMismatch && scanVersion === buildVersion && scanFingerprint && buildFingerprint
-                ? ` · build ${scanFingerprint.slice(0, 8)} ≠ ${buildFingerprint.slice(0, 8)}`
-                : versionMismatch ? ` ≠ ${buildVersion}` : ''}
-            </span>
-          )}
-          {(() => {
-            const staleAtSubmit = Number((scan?.options as any)?.stale_worker_count_at_submit || 0)
-            const fleetAtSubmit = Number((scan?.options as any)?.worker_fleet_size_at_submit || 0)
-            return staleAtSubmit > 0 ? (
-              <span className="ml-3 font-mono text-amber-400" title="Some workers were build-stale when this scan was submitted.">
-                ⚠ {staleAtSubmit}/{fleetAtSubmit} workers stale at submit
-              </span>
-            ) : null
-          })()}
-        </div>
       </div>
     </Card>
   )
@@ -621,14 +667,6 @@ function findingLocation(finding: any): string | null {
   }
 }
 
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
-
-// Proven first, then by severity: an unproven critical still outranks a medium lead.
-function findingPriority(finding: any): number {
-  const severityRank = SEVERITY_ORDER[String(finding.severity || 'info').toLowerCase()] ?? 4
-  return (isProvenFinding(finding) ? 0 : 10) + severityRank
-}
-
 function findingProofLabel(finding: any): { label: string; className: string } {
   const state = String(finding?.proof_state || '')
   if (isProvenFinding(finding)) return { label: 'proven', className: 'text-emerald-300' }
@@ -637,30 +675,78 @@ function findingProofLabel(finding: any): { label: string; className: string } {
   return { label: 'unverified', className: 'text-gray-500' }
 }
 
-function ScanFindingRow({ finding }: { finding: any }) {
-  const location = findingLocation(finding)
+type FindingCluster = { key: string; severity: string; title: string; findings: any[] }
+
+const FINDING_GROUPS: Array<{ key: 'proven' | 'verify' | 'informational'; title: string; hint: string }> = [
+  { key: 'proven', title: 'Proven', hint: 'Deterministic evidence confirmed these in this run.' },
+  { key: 'verify', title: 'Needs verification', hint: 'Medium or higher, not yet proven: leads, not confirmed vulnerabilities.' },
+  { key: 'informational', title: 'Informational', hint: 'Low-severity and informational results.' },
+]
+
+// One location of a clustered finding. A saved finding links to its page; a result without a
+// saved record (an unproven scanner candidate) opens its evidence in place.
+function ScanFindingLocation({ finding }: { finding: any }) {
+  const location = findingLocation(finding) || 'location not recorded'
   const proof = findingProofLabel(finding)
-  const title = finding.title || 'Untitled finding'
+  if (finding._persisted && finding.id) {
+    return (
+      <li className="flex items-center gap-3 px-3 py-1.5 text-xs">
+        <Link href={`/findings/${finding.id}`} className="min-w-0 flex-1 truncate font-mono text-gray-300 hover:text-white" title={finding.url || location}>
+          {location}
+        </Link>
+        <span className={`shrink-0 ${proof.className}`}>{proof.label}</span>
+        <Link href={`/findings/${finding.id}`} className="shrink-0 text-blue-300 hover:text-blue-200" aria-label={`Open finding at ${location}`}>
+          Open →
+        </Link>
+      </li>
+    )
+  }
   return (
-    <li className="grid gap-x-3 gap-y-1 px-3 py-2 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center">
-      <div className="flex items-center justify-between gap-2 sm:contents">
-        <span className={`rounded-sm px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(finding.severity)}`}>
-          {String(finding.severity || 'info')}
-        </span>
-        <span className={`text-xs sm:order-last ${proof.className}`}>{proof.label}</span>
-      </div>
-      <div className="min-w-0">
-        {finding.id && finding._persisted ? (
-          <Link href={`/findings/${finding.id}`} className="block truncate text-gray-200 hover:text-white" title={title}>
-            {title}
-          </Link>
-        ) : (
-          <span className="block truncate text-gray-200" title={title}>{title}</span>
-        )}
-        {location && (
-          <span className="block truncate font-mono text-xs text-gray-500" title={location}>{location}</span>
-        )}
-      </div>
+    <li className="px-3 py-1.5 text-xs">
+      <details>
+        <summary className="flex cursor-pointer list-none items-center gap-3 [&::-webkit-details-marker]:hidden">
+          <span className="min-w-0 flex-1 truncate font-mono text-gray-300" title={finding.url || location}>{location}</span>
+          <span className={`shrink-0 ${proof.className}`}>{proof.label}</span>
+          <span className="shrink-0 text-blue-300">Evidence</span>
+        </summary>
+        <div className="mt-2">
+          <FindingCard finding={finding} defaultExpanded />
+        </div>
+      </details>
+    </li>
+  )
+}
+
+function ScanFindingClusterRow({ cluster }: { cluster: FindingCluster }) {
+  const count = cluster.findings.length
+  const locations = cluster.findings.map((finding: any) => findingLocation(finding)).filter(Boolean) as string[]
+  const preview = Array.from(new Set(locations))
+  return (
+    <li>
+      <details className="group">
+        <summary className="grid cursor-pointer list-none grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 px-3 py-2 text-sm hover:bg-gray-800/40 [&::-webkit-details-marker]:hidden">
+          <span className={`rounded-sm px-1.5 py-0.5 text-xs font-medium ${deploySeverityClass(cluster.severity)}`}>
+            {cluster.severity}
+          </span>
+          <span className="min-w-0">
+            <span className="line-clamp-2 block text-gray-100 sm:line-clamp-none sm:truncate" title={cluster.title}>
+              {cluster.title}
+              {count > 1 && <span className="ml-2 text-xs font-medium text-gray-400">×{count}</span>}
+            </span>
+            {preview.length > 0 && (
+              <span className="block truncate font-mono text-xs text-gray-400" title={preview.join(', ')}>
+                {preview.slice(0, 3).join(' · ')}{preview.length > 3 ? ` · +${preview.length - 3} more` : ''}
+              </span>
+            )}
+          </span>
+          <span className="text-xs text-gray-500 transition-transform group-open:rotate-90" aria-hidden="true">›</span>
+        </summary>
+        <ul className="mb-2 ml-3 divide-y divide-gray-800/70 rounded-md border border-gray-800 bg-gray-950/40">
+          {cluster.findings.map((finding: any) => (
+            <ScanFindingLocation key={finding._rowKey} finding={finding} />
+          ))}
+        </ul>
+      </details>
     </li>
   )
 }
@@ -671,70 +757,91 @@ function ScanFindingContextCard({
   targetFindingsTotal,
   loading,
   error,
+  carriedCount,
 }: {
   scan: any
   targetFindings: Finding[]
   targetFindingsTotal: number
   loading: boolean
   error: string | null
+  /** The release gate's carried-over count, when known, so the page shows one number. */
+  carriedCount?: number | null
 }) {
-  if (!scan?.target_id) return null
   const { current, persistedCurrentCount } = reconciledScanFindings(scan, targetFindings)
-  // The list is what an operator reads first, so the proven critical must not sit under a
-  // thousand informational candidates: proven first, then severity, keeping the server's
-  // order within a tier.
-  current.sort((a: any, b: any) => findingPriority(a) - findingPriority(b))
-  const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrentCount)
+  if (!scan?.target_id && current.length === 0) return null
+  const groups = groupScanFindings(current)
+  const existingTotal = typeof carriedCount === 'number'
+    ? carriedCount
+    : Math.max(0, targetFindingsTotal - persistedCurrentCount)
   const provenCount = current.filter(isProvenFinding).length
+  const targetFindingsHref = `/findings?target_id=${scan.target_id}&status=active&freshness=all`
 
   return (
-    <Card className="mb-6 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-gray-200">Findings observed in this scan</h2>
-          <p className="mt-1 text-xs text-gray-500">
-            This run's observations are kept separate from findings that were not observed in this run.
-          </p>
+    <Card className="mb-6 p-0">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <h2 className="mr-1 text-sm font-semibold text-gray-200">Findings observed in this scan</h2>
+          <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
+          {scan?.target_id && (
+            <Link href={targetFindingsHref} className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300 hover:text-white"
+              title="Open findings on this target that earlier scans found and this run did not observe; they count toward the release decision">
+              {existingTotal} not observed in this scan
+            </Link>
+          )}
+          {current.length > 0 && (
+            <span className="text-gray-500">{provenCount} proven · {current.length - provenCount} {current.length - provenCount === 1 ? 'needs' : 'need'} verification</span>
+          )}
         </div>
-        <Link href={`/findings?target_id=${scan.target_id}&freshness=all`} className="text-xs text-blue-300 hover:text-blue-200">
-          Open all target findings
-        </Link>
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-blue-200">{current.length} observed in this scan</span>
-        <span className="rounded-sm bg-gray-800 px-2 py-1 text-gray-300">{existingTotal} not observed in this scan</span>
-        {current.length > 0 && (
-          <span className="text-gray-500">
-            {provenCount} proven · {current.length - provenCount} {current.length - provenCount === 1 ? 'needs' : 'need'} verification
-          </span>
+        {scan?.target_id && (
+          <Link href={targetFindingsHref} className="text-xs text-blue-300 hover:text-blue-200">
+            Open all target findings
+          </Link>
         )}
       </div>
       {loading ? (
-        <p className="mt-3 text-sm text-gray-500">Loading target finding history…</p>
+        <p className="px-4 py-3 text-sm text-gray-500">Loading target finding history…</p>
       ) : error ? (
-        <p role="alert" className="mt-3 text-sm text-amber-300">{error}</p>
+        <p role="alert" className="px-4 py-3 text-sm text-amber-300">{error}</p>
       ) : current.length === 0 ? (
-        <p className="mt-3 text-sm text-gray-500">
+        <p className="px-4 py-3 text-sm text-gray-500">
           No findings were reported by this scan.{existingTotal > 0 ? ` The target has ${existingTotal} earlier saved findings; use the link above to review them.` : ''}
         </p>
       ) : (
-        <ul className="mt-3 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {current.slice(0, 6).map((finding: any) => (
-            <ScanFindingRow key={finding._rowKey} finding={finding} />
-          ))}
-        </ul>
-      )}
-      {current.length > 6 && !loading && !error && (
-        <details className="mt-2 rounded-lg border border-gray-800 bg-gray-950/50">
-          <summary className="cursor-pointer px-3 py-2 text-xs text-gray-400 hover:text-gray-200">
-            Show {current.length - 6} more findings observed in this scan
-          </summary>
-          <ul className="divide-y divide-gray-800 border-t border-gray-800">
-            {current.slice(6).map((finding: any) => (
-              <ScanFindingRow key={finding._rowKey} finding={finding} />
-            ))}
-          </ul>
-        </details>
+        // Only this run's observations are listed; earlier findings on the target stay a count and
+        // a link above, so the current run is never buried under historical rows.
+        <div className="divide-y divide-gray-800">
+          {FINDING_GROUPS.map((group) => {
+            const clusters = groups[group.key] as FindingCluster[]
+            if (clusters.length === 0) return null
+            const total = clusters.reduce((sum, cluster) => sum + cluster.findings.length, 0)
+            const list = (
+              <ul className="divide-y divide-gray-800/70">
+                {clusters.map((cluster) => <ScanFindingClusterRow key={cluster.key} cluster={cluster} />)}
+              </ul>
+            )
+            const heading = (
+              <>
+                <span className={group.key === 'proven' ? 'text-emerald-300' : group.key === 'verify' ? 'text-amber-200' : 'text-gray-300'}>
+                  {group.title}
+                </span>
+                <span className="text-gray-500"> · {total}</span>
+              </>
+            )
+            return group.key === 'informational' ? (
+              <details key={group.key} data-testid={`scan-findings-${group.key}`}>
+                <summary className="cursor-pointer px-4 py-2 text-xs font-semibold uppercase tracking-wide hover:bg-gray-800/40" title={group.hint}>
+                  {heading}
+                </summary>
+                {list}
+              </details>
+            ) : (
+              <section key={group.key} data-testid={`scan-findings-${group.key}`}>
+                <h3 className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide" title={group.hint}>{heading}</h3>
+                {list}
+              </section>
+            )
+          })}
+        </div>
       )}
     </Card>
   )
@@ -1816,6 +1923,7 @@ function ScanDetailContent() {
   const [targetPosture, setTargetPosture] = useState<TargetPosture | null>(null)
   const [targetPostureLoading, setTargetPostureLoading] = useState(false)
   const [targetPostureError, setTargetPostureError] = useState<string | null>(null)
+  const [reportTab, setReportTab] = useSectionTab(SCAN_REPORT_TABS, 'findings')
   const logsRef = useRef<HTMLDivElement | null>(null)
   // Latest known scan status, read inside the polling interval so the "should we
   // keep polling?" decision always sees the current value (not a stale closure
@@ -2307,10 +2415,36 @@ function ScanDetailContent() {
     )
   }
 
+  const currentFindingCount = reconciledScanFindings(scan, targetFindings).current.length
+  const releaseVerdict = String(deploymentDecision?.decision || deploymentDecision?.deploy_decision || '').toLowerCase()
+  const targetWarning = scan.warning || scan.options?._target_warning
+  const originalTarget = scan.original_target || scan.options?._original_target
+  const tabs: SectionTab[] = [
+    { key: 'findings', label: 'Findings', badge: currentFindingCount || undefined },
+    { key: 'posture', label: 'Posture' },
+    { key: 'coverage', label: 'Coverage' },
+    {
+      key: 'release', label: 'Release gate',
+      badge: releaseVerdict ? releaseVerdict.replace(/_/g, ' ') : undefined,
+      badgeTone: releaseVerdict === 'block' || releaseVerdict === 'blocked' ? 'danger' : releaseVerdict === 'allow' ? 'success' : 'warning',
+    },
+    { key: 'activity', label: 'Activity' },
+  ]
+
   return (
     <div>
-      <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+      <PageHeader
+        title={scan.target_url}
+        backHref={backUrl}
+        backLabel="Back to scans"
+        actions={<ReportDownloads scan={scan} isAuthenticated={true} />}
+      />
       <ShardContextBanner scan={scan} />
+      {targetWarning && (
+        <p className="mb-4 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          {targetWarning}{originalTarget ? ` Original target: ${originalTarget}` : ''}
+        </p>
+      )}
       {scan.status === 'completed' && (
         <ScanVerdictCard
           scan={scan}
@@ -2319,45 +2453,54 @@ function ScanDetailContent() {
           decision={deploymentDecision}
           targetFindings={targetFindings}
           historyState={targetFindingsLoading ? 'loading' : targetFindingsError ? 'error' : targetFindingsPartial ? 'partial' : 'ready'}
+          onShowLimits={() => {
+            setReportTab('coverage')
+            document.getElementById('scan-report-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          }}
         />
       )}
-      {scan.status === 'completed' && scan.target_id && (
-        <TargetPostureCard posture={targetPosture} currentScanId={String(scan.id)} targetId={String(scan.target_id)} loading={targetPostureLoading} error={targetPostureError} />
-      )}
-      <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} />
-      <DeploymentDecisionCard
-        decision={deploymentDecision}
-        persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
-        loading={deploymentDecisionLoading}
-        onRefresh={refreshDeploymentDecision}
-      />
-      <HttpArchiveExport ownerKind="scan" ownerId={scan.id} />
-      <AiGateCampaignReviewCard scan={scan} />
 
-      <details className="mb-4 rounded-lg border border-gray-800 bg-gray-900/50">
-        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
-          Full technical report and finding evidence
-        </summary>
-        <div className="px-4 pb-4">
-          <ReportView
-            scan={scan}
-            isAuthenticated={true}
-            enableRemediationTracking={true}
-          />
-        </div>
-      </details>
+      <div id="scan-report-tabs" className="scroll-mt-4">
+        <SectionTabs id="scan-report" tabs={tabs} active={reportTab} onChange={setReportTab} ariaLabel="Scan report sections" />
+      </div>
 
-      <details className="rounded-lg border border-gray-800 bg-gray-900/50">
-        <summary className="cursor-pointer px-4 py-3 font-medium text-gray-200 hover:text-white">
-          Coverage, execution plan, and logs
-        </summary>
-        <div className="px-4 pb-4">
-          <ParallelShardRollup scan={scan} />
-          <ParentCoverageRollup scan={scan} />
-          <ExecutionPlanCard scan={scan} />
-          {renderStoredScanLogs()}
-        </div>
-      </details>
+      <SectionTabPanel id="scan-report" tab="findings" active={reportTab}>
+        <ScanFindingContextCard scan={scan} targetFindings={targetFindings} targetFindingsTotal={targetFindingsTotal} loading={targetFindingsLoading} error={targetFindingsError} carriedCount={carriedOverFromDecision(deploymentDecision)?.count ?? null} />
+        <AiGateCampaignReviewCard scan={scan} />
+        <ReportView scan={scan} isAuthenticated={true} section="findings" />
+      </SectionTabPanel>
+
+      <SectionTabPanel id="scan-report" tab="posture" active={reportTab}>
+        {scan.target_id && (
+          <TargetPostureCard posture={targetPosture} currentScanId={String(scan.id)} targetId={String(scan.target_id)} loading={targetPostureLoading} error={targetPostureError} />
+        )}
+        <ReportView scan={scan} isAuthenticated={true} section="posture" />
+      </SectionTabPanel>
+
+      <SectionTabPanel id="scan-report" tab="coverage" active={reportTab}>
+        {scan.status === 'completed' && <ScanRunLimitsPanel scan={scan} />}
+        <ExecutionPlanCard scan={scan} />
+        <ReportView scan={scan} isAuthenticated={true} section="coverage" />
+        <ParallelShardRollup scan={scan} />
+        <ParentCoverageRollup scan={scan} />
+      </SectionTabPanel>
+
+      <SectionTabPanel id="scan-report" tab="release" active={reportTab}>
+        <DeploymentDecisionCard
+          decision={deploymentDecision}
+          persistedFindings={[...(Array.isArray(scan?.findings) ? scan.findings : []), ...targetFindings]}
+          loading={deploymentDecisionLoading}
+          onRefresh={refreshDeploymentDecision}
+        />
+        {!deploymentDecision && !deploymentDecisionLoading && (
+          <p className="text-sm text-gray-500">No release decision is recorded for this scan.</p>
+        )}
+      </SectionTabPanel>
+
+      <SectionTabPanel id="scan-report" tab="activity" active={reportTab}>
+        <HttpArchiveExport ownerKind="scan" ownerId={scan.id} />
+        {renderStoredScanLogs(true)}
+      </SectionTabPanel>
     </div>
   )
 }

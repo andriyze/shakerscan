@@ -9,6 +9,14 @@ import { getFindings, getDomains, bulkUpdateFindings, getFindingResearchProvenan
 import { useUrlFilters } from '@/lib/useUrlFilters'
 import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
 import {
+  effectiveStatusView,
+  findingCountSummary,
+  groupFindings,
+  statusViewParam,
+  type StatusView,
+} from '@/lib/findingGroups'
+import { FindingGroupRow } from '@/components/findings/list/FindingGroupRow'
+import {
   FINDING_STATUSES,
   FINDING_STATUS_LABELS,
   CLEANUP_AGE_OPTIONS,
@@ -32,12 +40,24 @@ import {
 } from '@/components/ui'
 import { BadgeLegendModal } from './BadgeLegendModal'
 import { FindingRow } from './FindingRow'
-import { FindingsToolbar } from './FindingsToolbar'
+import { FindingsToolbar, type FreshnessView } from './FindingsToolbar'
 import { TriageDock } from './TriageDock'
 import { triageOutcomeMessage } from './triage'
 
 const PAGE_SIZE = 50
+// Grouping needs the whole result set on one page, or a group would be cut between pages.
+// 500 is the API's ceiling; a larger set is paged and the count line says groups cover the
+// loaded rows only.
+const GROUPED_PAGE_SIZE = 500
 const SEARCH_DEBOUNCE_MS = 300
+
+const STATUS_VIEW_NOUNS: Record<StatusView, string> = {
+  active: 'open',
+  resolved: 'resolved',
+  false_positive: 'false positive',
+  accepted_risk: 'accepted-risk',
+  all: '',
+}
 
 interface FindingsFilters {
   [key: string]: string | number | undefined
@@ -62,6 +82,7 @@ interface FindingsFilters {
   sort_by?: string
   sort_order?: string
   page?: number
+  group?: string
 }
 
 type FindingSourceTypeFilter = 'dast' | 'device' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
@@ -148,7 +169,6 @@ function FindingsContent() {
   const canDeleteRecords = featureEnabled('record_deletion') && featureEnabled('engine_admin')
 
   const severityFilter = filters.severity || ''
-  const statusFilter = filters.status || ''
   const sourceTypeFilter = filters.source_type || ''
   const domainFilter = filters.domain || ''
   const scanIdFilter = filters.scan_id || ''
@@ -167,7 +187,14 @@ function FindingsContent() {
   // choice is more specific, so it wins.
   // A scan-scoped view is that scan's evidence, however old, so it defaults to all
   // rows; an explicit freshness choice still wins.
-  const freshnessFilter = lastSeenFilter ? 'all' : (filters.freshness || (scanIdFilter ? 'all' : 'current'))
+  const freshnessFilter = (lastSeenFilter ? 'all' : (filters.freshness || (scanIdFilter ? 'all' : 'current'))) as FreshnessView
+  // Open work by default. A scan's or a Hunt run's findings are that run's evidence, so those
+  // views default to every status (freshness above does the same for a scan).
+  const evidenceScoped = Boolean(scanIdFilter || researchCampaignFilter)
+  const statusView = effectiveStatusView(filters.status, evidenceScoped)
+  const statusFilter = statusView === 'all' ? '' : statusView
+  const grouped = filters.group !== 'off'
+  const pageSize = grouped ? GROUPED_PAGE_SIZE : PAGE_SIZE
   const firstSeenWithinFilter = filters.first_seen_within ? Number(filters.first_seen_within) : 0
   const resolvedWithinFilter = filters.resolved_within ? Number(filters.resolved_within) : 0
   const verificationVerdictFilter = filters.verification_verdict || ''
@@ -179,7 +206,7 @@ function FindingsContent() {
   const rawPage = Math.max(1, filters.page || 1)
 
   const hasActiveFilters = Boolean(
-    severityFilter || statusFilter || sourceTypeFilter || domainFilter ||
+    severityFilter || (statusView !== 'all' && statusView !== 'active') || sourceTypeFilter || domainFilter ||
     scanIdFilter || targetIdFilter || aiTargetIdFilter || deviceTargetIdFilter || drivenByFilter || researchCampaignFilter ||
     searchQuery || lastSeenFilter ||
     firstSeenWithinFilter || resolvedWithinFilter ||
@@ -214,7 +241,7 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, freshnessFilter, rawPage, sortBy, sortOrder])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, freshnessFilter, rawPage, sortBy, sortOrder, pageSize])
 
   async function fetchFindings() {
     try {
@@ -240,11 +267,11 @@ function FindingsContent() {
         research_campaign_id: researchCampaignFilter || undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
-        limit: PAGE_SIZE,
-        offset: (rawPage - 1) * PAGE_SIZE
+        limit: pageSize,
+        offset: (rawPage - 1) * pageSize
       })
       const fetchedTotal = data.total || 0
-      const maxPage = Math.max(1, Math.ceil(fetchedTotal / PAGE_SIZE))
+      const maxPage = Math.max(1, Math.ceil(fetchedTotal / pageSize))
 
       // If page is out of range and there are results, redirect to last valid page
       if (rawPage > maxPage && fetchedTotal > 0) {
@@ -390,7 +417,7 @@ function FindingsContent() {
     }
   }
 
-  const totalPages = Math.ceil(total / PAGE_SIZE)
+  const totalPages = Math.ceil(total / pageSize)
 
   // Clamp page to valid range for display
   const page = Math.min(rawPage, Math.max(1, totalPages))
@@ -400,7 +427,7 @@ function FindingsContent() {
     if (finding.is_candidate) return '/findings/candidates'
     const params = new URLSearchParams()
     if (severityFilter) params.set('return_severity', severityFilter)
-    if (statusFilter) params.set('return_status', statusFilter)
+    if (filters.status) params.set('return_status', filters.status)
     if (sourceTypeFilter) params.set('return_source_type', sourceTypeFilter)
     if (domainFilter) params.set('return_domain', domainFilter)
     if (scanIdFilter) params.set('return_scan_id', scanIdFilter)
@@ -445,9 +472,34 @@ function FindingsContent() {
     ) : null
   )
 
-  const rangeStart = (page - 1) * PAGE_SIZE + 1
-  const rangeEnd = Math.min(page * PAGE_SIZE, total)
+  const rangeStart = (page - 1) * pageSize + 1
+  const rangeEnd = Math.min(page * pageSize, total)
   const dockVisible = selectedIds.size > 0
+  const groups = grouped ? groupFindings(findings) : []
+  const countSummary = findingCountSummary({
+    total,
+    loaded: findings.length,
+    offset: (page - 1) * pageSize,
+    groups: grouped ? groups.length : null,
+    statusLabel: STATUS_VIEW_NOUNS[statusView],
+  })
+  function setStatusView(view: StatusView) {
+    setFilters({ status: statusViewParam(view, evidenceScoped), page: undefined })
+  }
+
+  function setFreshnessView(view: FreshnessView) {
+    setFilters({ freshness: view === (scanIdFilter ? 'all' : 'current') ? undefined : view, last_seen: undefined, page: undefined })
+  }
+
+  function toggleFindings(ids: string[], checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      for (const id of ids) {
+        if (checked) next.add(id); else next.delete(id)
+      }
+      return next
+    })
+  }
 
   return (
     <div className={cn('space-y-5', dockVisible && 'pb-40 sm:pb-28')}>
@@ -531,62 +583,13 @@ function FindingsContent() {
           setShowCleanup(false); setCleanupPreview(null); void fetchFindings()
         }} />
 
-      {/* Current / Stale / All. Placed above the toolbar because which findings
-          are even in view matters more than how they are sorted, and because a
-          list defaulting to every historical row buried this scan's real
-          results among months-old ones. */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="inline-flex rounded-sm border border-gray-800 bg-gray-900/60 p-0.5" role="group" aria-label="Finding freshness">
-          {([
-            ['current', 'Current', `Seen by a scan in the last ${STALE_AFTER_DAYS} days`],
-            ['stale', 'Not seen recently', `Not observed by any scan in the last ${STALE_AFTER_DAYS} days`],
-            ['all', 'All', 'Every finding on record, regardless of when it was last seen'],
-          ] as const).map(([value, label, hint]) => (
-            <button
-              key={value}
-              type="button"
-              title={hint}
-              aria-pressed={freshnessFilter === value}
-              onClick={() => setFilters({
-                freshness: value === 'current' ? undefined : value,
-                last_seen: undefined,
-                page: undefined,
-              })}
-              className={`px-3 py-1 text-xs rounded ${
-                freshnessFilter === value
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {freshnessFilter === 'current' && hiddenOlder > 0 && (
-          <span className="text-xs text-gray-400">
-            {hiddenOlder} older finding{hiddenOlder === 1 ? '' : 's'} not shown
-            {' '}
-            <button
-              type="button"
-              className="text-blue-400 hover:text-blue-300 underline"
-              onClick={() => setFilters({ freshness: 'all', last_seen: undefined, page: undefined })}
-            >
-              show all
-            </button>
-          </span>
-        )}
-        {freshnessFilter === 'stale' && (
-          <span className="text-xs text-amber-300/90">
-            Not seen recently is not the same as fixed: a later scan may never have reached these routes.
-          </span>
-        )}
-      </div>
-
       <FindingsToolbar
         searchInput={searchInput}
         onSearchInputChange={setSearchInput}
         values={{
-          status: statusFilter,
+          status: statusView,
+          freshness: freshnessFilter,
+          freshnessExplicit: Boolean(filters.freshness),
           severity: severityFilter,
           sourceType: sourceTypeFilter,
           domain: domainFilter,
@@ -599,6 +602,8 @@ function FindingsContent() {
         }}
         setFilter={setFilter}
         setFilters={setFilters}
+        onStatusChange={setStatusView}
+        onFreshnessChange={setFreshnessView}
         domains={domains}
       />
 
@@ -641,15 +646,37 @@ function FindingsContent() {
         </div>
       )}
 
-      {/* Results line: count, legend, selection toggle, pagination */}
+      {/* Results line: what is shown and what the default view leaves out, then view controls. */}
       {total > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-gray-400 tabular-nums" aria-live="polite">
-            <span className="font-medium text-gray-200">{total.toLocaleString()}</span>
-            {` finding${total !== 1 ? 's' : ''}`}
-            {total > PAGE_SIZE && <span className="text-gray-500">{` · showing ${rangeStart}–${rangeEnd}`}</span>}
+            <span className="font-medium text-gray-200">{countSummary}</span>
+            {freshnessFilter === 'current' && (
+              <span className="text-gray-500">{` · seen in the last ${STALE_AFTER_DAYS} days`}</span>
+            )}
+            {freshnessFilter === 'current' && hiddenOlder > 0 && (
+              <>
+                <span className="text-gray-500">{` · ${hiddenOlder.toLocaleString()} older not shown `}</span>
+                <button
+                  type="button"
+                  className="text-blue-400 underline hover:text-blue-300"
+                  onClick={() => setFreshnessView('all')}
+                >
+                  show all
+                </button>
+              </>
+            )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant={grouped ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={grouped}
+              onClick={() => setFilters({ group: grouped ? 'off' : undefined, page: undefined })}
+              title="One row per issue and subject, with its locations inside"
+            >
+              Group similar
+            </Button>
             <Button variant="ghost" size="sm" onClick={() => setLegendOpen(true)}>
               What the badges mean
             </Button>
@@ -668,6 +695,11 @@ function FindingsContent() {
           </div>
         </div>
       )}
+      {freshnessFilter === 'stale' && (
+        <p className="text-xs text-amber-300/90">
+          Not seen recently is not the same as fixed: a later scan may never have reached these routes.
+        </p>
+      )}
 
       <BadgeLegendModal open={legendOpen} onClose={() => setLegendOpen(false)} />
 
@@ -684,6 +716,13 @@ function FindingsContent() {
       ) : findings.length === 0 ? (
         hasActiveFilters ? (
           <EmptyState message="No findings found matching your filters." />
+        ) : statusView === 'active' ? (
+          <EmptyState
+            message="No open findings."
+            hint={freshnessFilter === 'current' && hiddenOlder > 0
+              ? `${hiddenOlder.toLocaleString()} older findings are not shown; resolved and dismissed ones are under All.`
+              : 'Resolved and dismissed findings are under All.'}
+          />
         ) : (
           <EmptyState
             message="No findings yet."
@@ -703,29 +742,43 @@ function FindingsContent() {
                   checked={allOnPageSelected}
                   onChange={(event) => setSelectedIds(new Set(event.target.checked ? selectableFindings.map((finding) => finding.id) : []))}
                 />
-                Select this page
+                Select all shown
               </label>
               <span className="text-xs text-gray-500 tabular-nums">{selectableFindings.length} on this page</span>
             </div>
           )}
           <div>
-            {findings.map((finding) => (
-              <FindingRow
-                key={finding.id}
-                finding={finding}
-                href={buildDetailUrl(finding)}
-                sourceType={getFindingSourceType(finding)}
-                selecting={selecting}
-                selected={selectedIds.has(finding.id)}
-                onToggle={(checked) => toggleFinding(finding.id, checked)}
-              />
-            ))}
+            {grouped
+              ? groups.map((group) => (
+                <FindingGroupRow
+                  key={group.key}
+                  group={group}
+                  hrefFor={buildDetailUrl}
+                  sourceType={getFindingSourceType(group.lead)}
+                  selecting={selecting}
+                  selectedIds={selectedIds}
+                  onToggle={toggleFindings}
+                  showStatus={statusView === 'all'}
+                />
+              ))
+              : findings.map((finding) => (
+                <FindingRow
+                  key={finding.id}
+                  finding={finding}
+                  href={buildDetailUrl(finding)}
+                  sourceType={getFindingSourceType(finding)}
+                  selecting={selecting}
+                  selected={selectedIds.has(finding.id)}
+                  onToggle={(checked) => toggleFinding(finding.id, checked)}
+                  showStatus={statusView === 'all'}
+                />
+              ))}
           </div>
         </Card>
       )}
 
       {/* Bottom Pagination */}
-      {total > PAGE_SIZE && (
+      {total > pageSize && (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="text-sm text-gray-500 tabular-nums">
             {`Showing ${rangeStart}–${rangeEnd} of ${total.toLocaleString()}`}
@@ -738,7 +791,7 @@ function FindingsContent() {
         <TriageDock
           count={selectedIds.size}
           busy={triageBusy || deleteBusy}
-          hideStatus={statusFilter || undefined}
+          hideStatus={statusView === 'all' ? undefined : statusView}
           onTriage={handleBulkTriage}
           onClear={clearSelection}
           onDelete={canDeleteRecords ? handleDeleteSelected : undefined}

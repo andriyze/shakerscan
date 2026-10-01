@@ -263,6 +263,13 @@ const COVERAGE_REASON_LABELS = {
   policy_disabled: 'A planned step was disabled by the scan policy',
   worker_lost: 'A worker was lost before all planned work finished',
   authentication_uncertain: 'Credential authority could not be confirmed',
+  output_truncated: 'A step produced more output than it may keep, so part of its result was cut off',
+  parallel_child_incomplete: 'One of the parallel parts of this scan did not finish',
+  connection_limit_exceeded: 'A step hit its connection limit before it finished',
+  unproven_critical_high: 'A critical or high result is still unproven',
+  parser_promoted_or_degraded_output: 'A step returned output that could only be partly read',
+  nmap_timeout_reported: 'The port scan ran out of time before it finished',
+  malformed_naabu_jsonl: 'The port discovery step returned output that could not be read',
 }
 
 // Why no application response was observed. The finalizer records the cause as a coverage
@@ -419,6 +426,34 @@ export function releaseLine(decision, scanId, confirmedCount) {
 // proven critical exposures as "0 proven, need verification".
 export function isProvenFinding(finding) {
   return String(finding?.proof_state || '') === 'verified'
+}
+
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+
+// The scan page's Findings tab: what this run proved, what still needs verification, and the
+// informational rest. A title is listed once with every location it was observed at, so five
+// identical "cloud credential material" exposures read as one row of five, not five rows.
+export function groupScanFindings(findings) {
+  const groups = { proven: [], verify: [], informational: [] }
+  const clusters = new Map()
+  for (const finding of Array.isArray(findings) ? findings : []) {
+    const severity = String(finding?.severity || 'info').toLowerCase()
+    const group = isProvenFinding(finding) ? 'proven' : MATERIAL_SEVERITIES.has(severity) ? 'verify' : 'informational'
+    const title = String(finding?.title || 'Untitled finding').trim() || 'Untitled finding'
+    const key = `${group}|${severity}|${title.toLowerCase()}`
+    let cluster = clusters.get(key)
+    if (!cluster) {
+      cluster = { key, group, severity, title, findings: [] }
+      clusters.set(key, cluster)
+      groups[group].push(cluster)
+    }
+    cluster.findings.push(finding)
+  }
+  for (const list of Object.values(groups)) {
+    list.sort((a, b) => ((SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4))
+      || (b.findings.length - a.findings.length))
+  }
+  return groups
 }
 
 export function scanResultPresentation(scan, assurance) {

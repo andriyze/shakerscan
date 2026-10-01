@@ -15,7 +15,8 @@ test('scan details load log history after a scan reaches a terminal state', () =
 test('completed and failed DAST views retain a readable execution log', () => {
   assert.match(detail, /Scan execution log \(\{logs\.length\} lines\)/)
   assert.match(detail, /\{renderStoredScanLogs\(true\)\}/)
-  assert.match(detail, /\{renderStoredScanLogs\(\)\}/)
+  // A completed scan keeps its log on the Activity tab, open: it is that tab's content.
+  assert.match(detail, /tab="activity" active=\{reportTab\}>[\s\S]*?\{renderStoredScanLogs\(true\)\}/)
 })
 
 test('running scans lead with readable progress and searchable live activity', () => {

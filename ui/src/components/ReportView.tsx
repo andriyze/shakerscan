@@ -31,12 +31,26 @@ type RemediationData = {
   notes?: string
 }
 
+// Embedded in the scan page's tabs, the report's blocks take the page's card style (one surface,
+// one heading scale) instead of the standalone report's larger headings.
+const EMBEDDED_SECTION_CLASSES = [
+  'flex flex-col [&>*:last-child]:mb-0',
+  '[&>div]:mb-6 [&>div]:rounded-lg [&>div]:border [&>div]:border-gray-800 [&>div]:bg-gray-900 [&>div]:p-5 [&>div]:backdrop-blur-none',
+  '[&>div>h2]:mb-3 [&>div>h2]:text-base [&>div>h2]:font-semibold [&>div>h2]:text-gray-200',
+  '[&>div>div>h2]:text-base [&>div>div>h2]:font-semibold [&>div>div>h2]:text-gray-200',
+].join(' ')
+
+// Which part of the report to render. 'all' is the standalone report; the scan page shows the
+// others in its Findings, Posture and Coverage tabs, so each block appears in exactly one place.
+export type ReportSection = 'all' | 'findings' | 'posture' | 'coverage'
+
 type Props = {
   scan: any
   shareControls?: React.ReactNode
   isAuthenticated?: boolean
   remediations?: RemediationData[]
   enableRemediationTracking?: boolean
+  section?: ReportSection
 }
 
 function getSeverityPill(severity?: string) {
@@ -536,7 +550,64 @@ function ModelIntakeSbomDownload({ scanId }: { scanId: string }) {
   )
 }
 
-export default function ReportView({ scan, shareControls, isAuthenticated, remediations = [], enableRemediationTracking = false }: Props) {
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
+function downloadScanJson(scan: any) {
+  const scanData = scan?.result || scan?.results || {}
+  const host = scanData?.input?.normalized_host || 'result'
+  saveBlob(new Blob([JSON.stringify(scanData, null, 2)], { type: 'application/json' }),
+    `scan-${host}-${new Date().toISOString().slice(0, 10)}.json`)
+}
+
+async function downloadAIRedTeamReport(scanId: string, format: 'json' | 'markdown') {
+  const res = await fetch(`${getApiUrl()}/scans/${scanId}/ai-redteam-report?format=${format}`)
+  if (!res.ok) {
+    console.error('Failed to download AI red-team report')
+    return
+  }
+  const text = format === 'json' ? JSON.stringify(await res.json(), null, 2) : await res.text()
+  saveBlob(new Blob([text], { type: format === 'json' ? 'application/json' : 'text/markdown' }),
+    `shakerscan-ai-redteam-${scanId}.${format === 'json' ? 'json' : 'md'}`)
+}
+
+// The report's export actions, for a page that shows the report in sections (the scan page
+// header). Export PDF prints every section.
+export function ReportDownloads({ scan, isAuthenticated }: { scan: any; isAuthenticated?: boolean }) {
+  const isAIScan = Boolean(scan?.result?.ai_gate) || scan?.scan_type === 'ai_gate' || String(scan?.run_kind || '').startsWith('ai_')
+  const buttonClass = 'px-3 py-2 rounded-sm border text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
+  return (
+    <div className="flex flex-wrap items-center gap-2 no-print">
+      <ExportPDFButton />
+      {isAuthenticated && isAIScan && (
+        <>
+          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'markdown')} className={`${buttonClass} border-purple-500/60 text-purple-300 hover:bg-purple-500/10`}>
+            AI Report MD
+          </button>
+          <button type="button" onClick={() => downloadAIRedTeamReport(String(scan.id), 'json')} className={`${buttonClass} border-purple-500/60 text-purple-300 hover:bg-purple-500/10`}>
+            AI Report JSON
+          </button>
+        </>
+      )}
+      {isAuthenticated && (
+        <button type="button" onClick={() => downloadScanJson(scan)} className={`${buttonClass} border-blue-500/60 text-blue-300 hover:bg-blue-500/10`}>
+          Download JSON
+        </button>
+      )}
+    </div>
+  )
+}
+
+export default function ReportView({ scan, shareControls, isAuthenticated, remediations = [], enableRemediationTracking = false, section = 'all' }: Props) {
+  const show = (part: Exclude<ReportSection, 'all'>) => section === 'all' || section === part
   const [remediationData, setRemediationData] = useState<RemediationData[]>(remediations)
   const scanData = scan.result || scan.results || {}
   const input = scanData.input || {}
@@ -996,9 +1067,9 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
   })()
 
   return (
-    <div className="max-w-7xl mx-auto flex flex-col px-4 sm:px-6 lg:px-8 py-8">
+    <div className={section === 'all' ? 'max-w-7xl mx-auto flex flex-col px-4 sm:px-6 lg:px-8 py-8' : EMBEDDED_SECTION_CLASSES}>
       {/* Scan Summary */}
-      {!isModelIntakeScan && <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
+      {!isModelIntakeScan && section === 'all' && <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
         <div className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
             {isModelIntakeScan ? (
@@ -1127,7 +1198,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       </div>}
 
-      {isDeviceScan && devicePosture && (
+      {show('findings') && isDeviceScan && devicePosture && (
         <section className="mb-8 rounded-lg border border-gray-700 bg-gray-800/50 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -1249,7 +1320,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </section>
       )}
 
-      {isAsmRecon && (
+      {show('findings') && isAsmRecon && (
         <div className="mb-8 rounded-lg border border-blue-500/40 bg-blue-950/20 p-4">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-blue-300" />
@@ -1268,7 +1339,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
         </div>
       )}
 
-      {showCompletionBanner && (
+      {show('coverage') && showCompletionBanner && (
         <div className={`mb-8 rounded-lg border p-4 ${
           scanCompletionStatus.complete === false
             ? 'border-yellow-500/40 bg-yellow-950/20'
@@ -1336,7 +1407,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* AI Gate */}
-      {ai_gate && (
+      {show('findings') && ai_gate && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
             <div>
@@ -1795,7 +1866,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Model Intake */}
-      {model_intake && (
+      {show('findings') && model_intake && (
         <div className="order-first bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
             <div>
@@ -2259,7 +2330,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Triage + Coverage Gaps */}
-      {(triage?.confirmed?.count !== undefined || coverageGapIssues.length > 0) && (
+      {show('coverage') && (triage?.confirmed?.count !== undefined || coverageGapIssues.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Triage & Coverage</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
@@ -2300,20 +2371,20 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Compliance */}
-      {result?.compliance && <ComplianceSection compliance={result.compliance} />}
+      {show('findings') && result?.compliance && <ComplianceSection compliance={result.compliance} />}
 
       {/* Remediation Summary */}
-      <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-4 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
+      {section === 'all' && <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-4 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
         <summary className={isModelIntakeScan ? 'cursor-pointer px-5 py-4 text-sm font-semibold text-gray-200' : 'hidden'}>
           Remediation tracking ({findings.length} raw finding{findings.length === 1 ? '' : 's'})
         </summary>
         {enableRemediationTracking && findings.length > 0 && (
           <RemediationSummary remediations={remediationData} totalFindings={findings.length} />
         )}
-      </details>
+      </details>}
 
       {/* WAF Detection */}
-      {discovery.waf_detection?.detected && (
+      {show('posture') && discovery.waf_detection?.detected && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">WAF Detection</h2>
           <div className="bg-yellow-900/20 border border-yellow-500/40 rounded-lg p-4">
@@ -2340,10 +2411,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Informational target infrastructure */}
-      <InfrastructureIntelligenceSection infrastructure={infrastructure} />
+      {show('posture') && <InfrastructureIntelligenceSection infrastructure={infrastructure} />}
 
       {/* DNS */}
-      {dns && Object.keys(dns).length > 0 && (
+      {show('posture') && dns && Object.keys(dns).length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">DNS Configuration</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2369,7 +2440,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* TLS */}
-      {tls && (tls.certificate || tls.protocol || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap || tls.supported_protocols) && (
+      {show('posture') && tls && (tls.certificate || tls.protocol || tls.cipher_suites || tls.sslyze || tls.testssl || tls.nmap || tls.supported_protocols) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">TLS/SSL Configuration</h2>
           {tls.certificate && (
@@ -2778,7 +2849,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Open Ports & Services */}
-      {(network_scan.open_ports?.length > 0 || network_scan.services?.length > 0) && (
+      {show('posture') && (network_scan.open_ports?.length > 0 || network_scan.services?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Open Ports & Services</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
@@ -2829,7 +2900,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Network Services Exposure */}
-      {(network_services.vpn_endpoints?.length > 0 || network_services.remote_desktop?.length > 0 || network_services.database_exposure?.length > 0) && (
+      {show('posture') && (network_services.vpn_endpoints?.length > 0 || network_services.remote_desktop?.length > 0 || network_services.database_exposure?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Network Services Exposure</h2>
           <div className="space-y-4">
@@ -2877,7 +2948,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* HTTP Security Headers */}
-      {http && http.security_headers && (
+      {show('posture') && http && http.security_headers && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">HTTP Security Headers</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -2909,7 +2980,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* CSP Evaluation */}
-      {http?.csp_evaluation && (
+      {show('posture') && http?.csp_evaluation && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-bold">Content Security Policy</h2>
@@ -2961,7 +3032,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Technology Stack */}
-      {(discovery.tech?.items?.length > 0 || discovery.tech_stack_guess?.length > 0 || js_dependencies.vulnerable_libraries?.length > 0) && (
+      {show('posture') && (discovery.tech?.items?.length > 0 || discovery.tech_stack_guess?.length > 0 || js_dependencies.vulnerable_libraries?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Technology Stack</h2>
           {js_dependencies.vulnerable_libraries?.length > 0 && (
@@ -3007,7 +3078,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Discovered API Endpoints */}
-      {discovery.browser_api_endpoints?.length > 0 && (
+      {show('posture') && discovery.browser_api_endpoints?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Discovered API Endpoints</h2>
           <div className="space-y-2">
@@ -3029,7 +3100,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Active Checks Results */}
-      {(active_checks.xss || active_checks.sqli || active_checks.endpoints_tested || activeEndpointAttempts.length > 0 || activeCheckFamilyScopeLabel) && (
+      {show('coverage') && (active_checks.xss || active_checks.sqli || active_checks.endpoints_tested || activeEndpointAttempts.length > 0 || activeCheckFamilyScopeLabel) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <h2 className="text-2xl font-bold">Active Security Testing</h2>
@@ -3177,7 +3248,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Access Control Testing */}
-      {(access_control.forced_browsing || access_control.mass_assignment || access_control.bola_idor || access_control.bola) && (() => {
+      {show('coverage') && (access_control.forced_browsing || access_control.mass_assignment || access_control.bola_idor || access_control.bola) && (() => {
         const fb = access_control.forced_browsing
         const bola = access_control.bola_idor || access_control.bola
         const fbFindings = fb?.findings || []
@@ -3397,7 +3468,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       })()}
 
       {/* Cloud & Infrastructure Exposure */}
-      {(cloud_buckets.findings?.length > 0 || cloud_ssrf.vulnerable || kubernetes_exposure.findings?.length > 0 || container_registry.exposed || cicd_exposure.findings?.length > 0) && (
+      {show('findings') && (cloud_buckets.findings?.length > 0 || cloud_ssrf.vulnerable || kubernetes_exposure.findings?.length > 0 || container_registry.exposed || cicd_exposure.findings?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Cloud & Infrastructure Exposure</h2>
           <div className="space-y-4">
@@ -3453,7 +3524,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Findings */}
-      <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-8 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
+      {section === 'all' && <details open={!isModelIntakeScan} className={isModelIntakeScan ? 'mb-8 rounded-lg border border-gray-700 bg-gray-800/50' : 'contents'}>
         <summary className={isModelIntakeScan ? 'cursor-pointer px-5 py-4 text-sm font-semibold text-gray-200' : 'hidden'}>
           Raw findings and remediation detail ({findings.length})
         </summary>
@@ -3520,10 +3591,10 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
           </div>
         </div>
       )}
-      </details>
+      </details>}
 
       {/* Client-Side Vulnerabilities */}
-      {client_side_vulns.vulnerable && client_side_vulns.findings?.length > 0 && (
+      {show('findings') && client_side_vulns.vulnerable && client_side_vulns.findings?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Client-Side Vulnerabilities</h2>
           <p className="text-gray-400 mb-4">
@@ -3553,7 +3624,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Authentication Security */}
-      {(auth_checks.bruteforce_protection?.vulnerable || auth_checks.session_management?.issues?.length > 0) && (
+      {show('findings') && (auth_checks.bruteforce_protection?.vulnerable || auth_checks.session_management?.issues?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Authentication Security</h2>
 
@@ -3596,7 +3667,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* WebSocket Security */}
-      {websocket_security.endpoints?.length > 0 && (
+      {show('findings') && websocket_security.endpoints?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">WebSocket Security</h2>
           <p className="text-gray-400 mb-4">
@@ -3631,7 +3702,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Security Tests Summary */}
-      {(api_security_web.endpoints_tested > 0 || business_logic.endpoints_tested > 0 ||
+      {show('coverage') && (api_security_web.endpoints_tested > 0 || business_logic.endpoints_tested > 0 ||
         file_upload.tested || host_header_injection.tested ||
         open_redirect.tested || directory_listing.tested) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
@@ -3708,7 +3779,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Discovery */}
-      {discovery.katana_sample?.length > 0 && (
+      {show('coverage') && discovery.katana_sample?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Discovery</h2>
           <div className="max-h-48 overflow-y-auto bg-gray-700/30 rounded-sm p-3">
@@ -3720,7 +3791,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Exposed Secrets */}
-      {js_secrets.vulnerable && js_secrets.secrets_found?.length > 0 && (
+      {show('findings') && js_secrets.vulnerable && js_secrets.secrets_found?.length > 0 && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <h2 className="text-2xl font-bold mb-4">Exposed Secrets</h2>
           <div className="space-y-3">
@@ -3735,10 +3806,12 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Historical coverage payload, rendered with canonical product language. */}
-      <ScanCoverageSection coverage={smart_coverage} />
+      {show('coverage') && <ScanCoverageSection coverage={smart_coverage} />}
 
       {/* Attack Chains Analysis */}
-      {attack_chains && !isAIScan && !isModelIntakeScan && (
+      {show('findings') && attack_chains && !isAIScan && !isModelIntakeScan
+        && (section === 'all' || Number(attack_chains.summary?.total_chains || 0) > 0
+          || attack_chains.chains?.length > 0 || attack_chains.partial_chains?.length > 0) && (
         <div className="bg-gray-800/50 backdrop-blur-lg rounded-lg p-6 mb-8">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
             <h2 className="text-2xl font-bold">Attack Chain Analysis</h2>
@@ -4008,7 +4081,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
       )}
 
       {/* Scan Metadata & Coverage */}
-      {(scan_metadata.scanner_version || scan_metadata.schema_version || scan_metadata.completed_at
+      {show('coverage') && (scan_metadata.scanner_version || scan_metadata.schema_version || scan_metadata.completed_at
         || scan_metadata.duration_seconds !== undefined || coverage.coverage_percentage !== undefined
         || coverage.modules_completed?.length > 0 || scan_metadata.checks_skipped?.length > 0
         || (scan_metadata.options && Object.keys(scan_metadata.options).length > 0)) && (
