@@ -50,3 +50,17 @@ def project_and_filter_by_proof(
         if item.get("proof_state") in wanted:
             matches.append(item)
     return matches
+
+
+# The host part of a URL or locator ("https://user@app.example.com:8443/x", "app.example.com:22").
+_HOST_PATTERN = "^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/]*@)?([^/:?#]+)"
+
+
+def host_in_domain_sql(column: str, param: str) -> str:
+    """SQL: the host in ``column`` is the domain in ``param`` or one of its subdomains.
+
+    A substring match let example.com select notexample.com; ``right`` avoids LIKE, whose ``_``
+    wildcard a domain could contain.
+    """
+    host = f"substring(LOWER({column}) from '{_HOST_PATTERN}')"
+    return f"({host} = LOWER({param}) OR right({host}, length({param}) + 1) = '.' || LOWER({param}))"

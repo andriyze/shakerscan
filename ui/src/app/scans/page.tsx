@@ -150,6 +150,7 @@ function huntMatchesFilters(campaign: Campaign, status: string, domain: string, 
 interface ScansFilters {
   [key: string]: string | number | undefined
   status?: string
+  target_id?: string
   domain?: string
   search?: string
   page?: number
@@ -182,6 +183,7 @@ function ScansContent() {
   // Time cohort (?within=7) — exposure "What changed" links use it so the
   // destination shows the same windowed slice the tile counted.
   const withinFilter = filters.within ? Number(filters.within) : 0
+  const targetIdFilter = filters.target_id || ''
   // Continuous-ASM batch/recon scans are hidden from this list by default (they
   // are internal coverage work, not user-initiated scans). This opt-in surfaces
   // them so an "active ASM scan" is reachable here too.
@@ -224,6 +226,7 @@ function ScansContent() {
       const data = await getScans({
         status: statusFilter || undefined,
         root_domain: domainFilter || undefined,
+        target_id: targetIdFilter || undefined,
         target: searchQuery || undefined,
         created_within_days: withinFilter || undefined,
         include_internal: includeInternal || undefined,
@@ -255,7 +258,7 @@ function ScansContent() {
       }
       return false
     }
-  }, [statusFilter, domainFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
+  }, [statusFilter, domainFilter, targetIdFilter, searchQuery, withinFilter, includeInternal, rawPage, setFilter])
 
   const fetchActiveHunts = useCallback(async (): Promise<boolean> => {
     if (!featureEnabled('hunt')) return true
@@ -453,6 +456,20 @@ function ScansContent() {
           Show ASM/internal scans
         </label>
 
+        {/* Target chip (deep-linked from a target's scan history) */}
+        {targetIdFilter && (
+          <button
+            type="button"
+            onClick={() => setFilter('target_id', undefined)}
+            aria-label="Remove filter: one target"
+            data-testid="scans-target-filter"
+            className="inline-flex items-center gap-1.5 self-center rounded-lg border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            {scans.find((scan) => scan.target_id === targetIdFilter)?.target_url || 'One target'}
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
+
         {/* Time cohort chip (deep-linked from exposure "What changed") */}
         {withinFilter > 0 && (
           <button
@@ -578,6 +595,8 @@ function ScansContent() {
                         return_status: statusFilter,
                         return_domain: domainFilter,
                         return_search: searchQuery,
+                        return_target_id: targetIdFilter || undefined,
+                        return_within: withinFilter || undefined,
                         return_page: page > 1 ? page : undefined,
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}
@@ -680,7 +699,7 @@ function ScansContent() {
                     <td className="px-4 py-3 text-gray-600">—</td>
                     <td className="px-4 py-3">
                       {found > 0 && campaign.target_id ? (
-                        <Link href={`/findings?target_id=${campaign.target_id}&status=active`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
+                        <Link href={`/findings?target_id=${campaign.target_id}&status=active&freshness=all`} className="text-sm text-emerald-300 hover:text-emerald-200">{found}</Link>
                       ) : <span className="text-sm text-gray-400">{found}</span>}
                     </td>
                     <td className="hidden px-4 py-3 text-sm text-gray-400 xl:table-cell">{duration}</td>
@@ -712,6 +731,8 @@ function ScansContent() {
                         return_status: statusFilter,
                         return_domain: domainFilter,
                         return_search: searchQuery,
+                        return_target_id: targetIdFilter || undefined,
+                        return_within: withinFilter || undefined,
                         return_page: page > 1 ? page : undefined,
                         return_include_internal: includeInternal ? 'true' : undefined
                       })}

@@ -25,9 +25,11 @@ test('target-bound forms hide inactive and unnamed web targets', () => {
 
 test('secret-bearing forms require an explicit target choice', () => {
   for (const page of [credentialsPage, collectionsPage]) {
-    assert.match(page, /targetId && !choices\.some/)
     assert.match(page, /Choose a target…/)
   }
+  // A target ID from the URL is used only once it is one of the choices.
+  assert.match(credentialsPage, /choices\.some\(\(item\) => item\.id === targetId\) \? targetId : ''/)
+  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| choices\.some\(\(choice\) => choice\.id === targetId\)\) return/)
   assert.match(credentialsPage, /Choose a bound target/)
   assert.match(collectionsPage, /Choose a collection owner/)
 })

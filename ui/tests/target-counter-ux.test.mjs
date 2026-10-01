@@ -12,10 +12,11 @@ test('target scan counters describe completed scans instead of all linked histor
 })
 
 test('per-target scan counters preserve exact target history context', () => {
-  assert.match(targets, /function scanHistoryHref\(rootDomain: string, targetUrl: string\)/)
-  assert.match(targets, /new URLSearchParams\(\{\s*domain: rootDomain,\s*search: targetUrl,/)
-  assert.match(targets, /scanHistoryHref\(domain\.root_domain, domain\.root_target\.url\)/)
-  assert.match(targets, /scanHistoryHref\(domain\.root_domain, subdomain\.url\)/)
+  // Exact target history: the target's own completed runs, not a URL substring across hosts.
+  assert.match(targets, /function scanHistoryHref\(targetId: string\)/)
+  assert.match(targets, /new URLSearchParams\(\{ target_id: targetId, status: 'completed' \}\)/)
+  assert.match(targets, /scanHistoryHref\(domain\.root_target\.id\)/)
+  assert.match(targets, /scanHistoryHref\(subdomain\.id\)/)
   assert.doesNotMatch(targets, /href=\{`\/scans\?domain=\$\{domain\.root_domain\}`\}/)
 })
 

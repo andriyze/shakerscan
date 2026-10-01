@@ -5504,6 +5504,10 @@ configure_devices_router(
 )
 app.include_router(devices_router)
 try:
+    from scan_list_filters import scan_list_filters
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.scan_list_filters import scan_list_filters
+try:
     from scan_finding_proof import SCAN_DETAIL_FINDINGS_SQL, project_scan_finding_proof
 except ModuleNotFoundError:  # package import in host-side tests
     from api.scan_finding_proof import SCAN_DETAIL_FINDINGS_SQL, project_scan_finding_proof
@@ -11663,6 +11667,7 @@ async def _submit_batch(
 @app.get("/scans")
 async def list_scans(
     status: Optional[str] = None,
+    target_id: Optional[str] = None,
     target: Optional[str] = None,
     root_domain: Optional[str] = None,
     created_within_days: Optional[int] = Query(None, ge=1),
@@ -11734,42 +11739,17 @@ async def list_scans(
             query += device_filter
             count_query += device_filter
 
-        params = []
-        count_params = []
-        param_idx = 1
-        count_param_idx = 1
-
-        if status:
-            query += f" AND s.status = ${param_idx}"
-            count_query += f" AND s.status = ${count_param_idx}"
-            params.append(status)
-            count_params.append(status)
-            param_idx += 1
-            count_param_idx += 1
-
-        if target:
-            query += f" AND s.target_url ILIKE ${param_idx}"
-            count_query += f" AND s.target_url ILIKE ${count_param_idx}"
-            params.append(f"%{target}%")
-            count_params.append(f"%{target}%")
-            param_idx += 1
-            count_param_idx += 1
-
-        if root_domain:
-            query += f" AND t.root_domain = ${param_idx}"
-            count_query += f" AND t.root_domain = ${count_param_idx}"
-            params.append(root_domain)
-            count_params.append(root_domain)
-            param_idx += 1
-            count_param_idx += 1
-
-        if created_within_days:
-            query += f" AND s.created_at >= NOW() - INTERVAL '1 day' * ${param_idx}"
-            count_query += f" AND s.created_at >= NOW() - INTERVAL '1 day' * ${count_param_idx}"
-            params.append(created_within_days)
-            count_params.append(created_within_days)
-            param_idx += 1
-            count_param_idx += 1
+        try:
+            filter_sql, params = scan_list_filters(
+                status=status, target_id=target_id, target=target,
+                root_domain=root_domain, created_within_days=created_within_days,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        query += filter_sql
+        count_query += filter_sql
+        count_params = list(params)
+        param_idx = len(params) + 1
 
         query += f" ORDER BY s.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])

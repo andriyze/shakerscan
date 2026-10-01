@@ -34,14 +34,15 @@ def test_granular_values_are_distinct():
 
 def test_deep_hunt_is_the_user_facing_hunt_source():
     deep_hunt = f("deep_hunt")
-    assert "f.source = 'autonomous'" in deep_hunt
+    # Hunt findings are stored as source 'autonomous' (agent claims) and 'deep_hunt' (run actions).
+    assert "f.source IN ('autonomous', 'deep_hunt')" in deep_hunt
     assert "autonomous_workflow" in deep_hunt
     assert "autonomous_research" in deep_hunt
 
 
 def test_dast_excludes_other_product_sources_and_hunt_driven_scans():
     dast = f("dast")
-    for source in ("asm", "manual", "ai_gate", "ai_session", "autonomous", "model_intake", "device"):
+    for source in ("asm", "manual", "ai_gate", "ai_session", "autonomous", "deep_hunt", "model_intake", "device"):
         assert source in dast
     assert "autonomous_research" in dast
     assert "<>" in dast

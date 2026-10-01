@@ -1236,7 +1236,7 @@ function FindingDetailContent() {
               )}
               {finding.target_id && (
                 <p>
-                  <Link href={`/findings?target_id=${encodeURIComponent(finding.target_id)}&status=active`} className="text-blue-400 hover:text-blue-300">
+                  <Link href={`/findings?target_id=${encodeURIComponent(finding.target_id)}&status=active&freshness=all`} className="text-blue-400 hover:text-blue-300">
                     Other open findings on this target →
                   </Link>
                 </p>

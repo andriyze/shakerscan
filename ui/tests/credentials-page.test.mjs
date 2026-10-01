@@ -21,9 +21,9 @@ test('shared Credentials UI binds profiles to an exact supported target kind', (
 
 test('changing credential target kind cannot query with the previous kind target ID', () => {
   const changeKind = page.match(/function changeTargetKind[\s\S]*?\n  }/)?.[0] || ''
-  assert.match(changeKind, /setTargetId\(''\)/)
+  // Kind and target change in one URL update, so no render pairs the new kind with the old ID.
+  assert.match(changeKind, /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind, target_id: undefined/)
   assert.match(changeKind, /setProfiles\(\[\]\)/)
-  assert.match(changeKind, /setTargetKind\(kind\)/)
   assert.match(page, /onChange=\{\(event\) => changeTargetKind\(event\.target\.value as CredentialTargetKind\)\}/)
 })
 
