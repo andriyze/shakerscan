@@ -1,0 +1,71 @@
+
+> shakerscan-ui@1.0.0 build
+> next build
+
+▲ Next.js 16.3.6 (Turbopack)
+✓ Running next.config.js took 12ms
+⚠ No build cache found. Please configure build caching for faster rebuilds. Read more: https://nextjs.org/docs/messages/no-cache
+Attention: Next.js now collects completely anonymous telemetry regarding usage.
+This information is used to shape Next.js' roadmap and prioritize features.
+You can learn more, including how to opt-out if you'd not like to participate in this anonymous program, by visiting the following URL:
+https://nextjs.org/telemetry
+
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 9.1s
+  Running TypeScript ...
+  Finished TypeScript in 1186ms ...
+  Collecting page data using 3 workers ...
+  Generating static pages using 3 workers (0/1) ...
+✓ Generating static pages using 3 workers (1/1) in 66ms
+  Finalizing page optimization ...
+
+Route (app)
+┌ ƒ /
+├ ƒ /_not-found
+├ ƒ /ai-gate
+├ ƒ /ai-gate/boundary
+├ ƒ /api/build-identity
+├ ƒ /api/model-intake/operator-credential
+├ ƒ /api/runtime-config
+├ ƒ /asm
+├ ƒ /campaigns
+├ ƒ /campaigns/[id]
+├ ƒ /credentials
+├ ƒ /deep-hunt
+├ ƒ /deep-hunt/experiment
+├ ƒ /deep-hunt/explorer
+├ ƒ /deep-hunt/leads
+├ ƒ /deep-hunt/operator
+├ ƒ /deep-hunt/runs/[id]
+├ ƒ /devices
+├ ƒ /devices/[id]
+├ ƒ /devices/[id]/agent
+├ ƒ /devices/policies
+├ ƒ /docs
+├ ƒ /evidence
+├ ƒ /exposure
+├ ƒ /findings
+├ ƒ /findings/[id]
+├ ƒ /findings/candidates
+├ ƒ /fleet
+├ ƒ /hunt
+├ ƒ /hunts
+├ ƒ /model-intake
+├ ƒ /request-collections
+├ ƒ /scan/new
+├ ƒ /scans
+├ ƒ /scans/[id]
+├ ƒ /schedules
+├ ƒ /settings
+├ ƒ /settings/arsenal
+├ ƒ /settings/policy-profiles
+├ ƒ /targets
+├ ƒ /targets/[id]/asset
+├ ƒ /targets/[id]/graph
+├ ƒ /timeline
+└ ƒ /workers
+
+
+ƒ  (Dynamic)  server-rendered on demand
+

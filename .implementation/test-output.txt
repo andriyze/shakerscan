@@ -1,33 +1,28 @@
-.............F.                                                          [100%]
-=================================== FAILURES ===================================
-__________ test_real_startup_upgrade_and_restart_preserve_new_writes ___________
-tests/test_target_asset_startup_postgres.py:29: in test_real_startup_upgrade_and_restart_preserve_new_writes
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_startup_postgres.py:20: in run
-    await module.run_schema_migrations(BoundConnectionPool(conn))
-api/retest_contract.py:1069: in run_schema_migrations
-    await run_unified_startup(db_pool, _run_schema_migrations_26_baseline)
-api/targets/asset_migration.py:206: in run_unified_startup
-    await baseline(BoundConnectionPool(conn))
-api/retest_contract.py:1082: in _run_schema_migrations_26_baseline
-    await _run_schema_migrations_once(pool)
-api/retest_contract.py:1123: in _run_schema_migrations_once
-    await assert_base_schema(conn)
-api/retest_contract.py:1113: in assert_base_schema
-    raise MissingBaseSchemaError(MISSING_BASE_SCHEMA_MESSAGE)
-E   retest_contract.MissingBaseSchemaError: the engine database has no ShakerScan schema (table 'scans' is missing). db/init.sql runs only when PostgreSQL initializes an empty data volume; it is skipped, with 'Permission denied' in the postgres log, when the file is not readable by the postgres container (for example mode 0600). Make the runtime directory world-readable (chmod -R a+rX), remove the database volume (docker compose down -v) and start again, or apply db/init.sql by hand.
+
+==================================== ERRORS ====================================
+________ ERROR collecting tests/test_target_asset_authority_postgres.py ________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_authority_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+api/target_authorization.py:21: in <module>
+    from action_scope import evaluate_scope, receipt_to_dict
+E   ModuleNotFoundError: No module named 'action_scope'
+
+During handling of the above exception, another exception occurred:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_authority_postgres.py:6: in <module>
+    from api import target_authorization
+api/target_authorization.py:23: in <module>
+    from api.action_scope import evaluate_scope, receipt_to_dict
+api/action_scope.py:18: in <module>
+    import deployment_policy
+E   ModuleNotFoundError: No module named 'deployment_policy'
 =========================== short test summary info ============================
-FAILED tests/test_target_asset_startup_postgres.py::test_real_startup_upgrade_and_restart_preserve_new_writes - retest_contract.MissingBaseSchemaError: the engine database has no ShakerScan schema (table 'scans' is missing). db/init.sql runs only when PostgreSQL initializes an empty data volume; it is skipped, with 'Permission denied' in the postgres log, when the file is not readable by the postgres container (for example mode 0600). Make the runtime directory world-readable (chmod -R a+rX), remove the database volume (docker compose down -v) and start again, or apply db/init.sql by hand.
-1 failed, 14 passed in 15.52s
+ERROR tests/test_target_asset_authority_postgres.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.99s
 module size ratchet: OK
 
-pytest_exit=1 module_size_exit=0
+pytest_exit=2 module_size_exit=0 ui_tests_exit=1 types_exit=0 build_exit=0
