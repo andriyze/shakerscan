@@ -114,3 +114,36 @@ test('secondary filters fold behind a counted Filters button', async ({ page }) 
   await filters.click()
   await expect(page.getByRole('group', { name: 'Filter by source' })).toBeVisible()
 })
+
+test('open work is the default view and repeats group into one expandable row', async ({ page }) => {
+  const requests: URL[] = []
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/findings') {
+      requests.push(url)
+      const base = {
+        title: 'Exposed secret', severity: 'critical', status: 'active', proof_state: 'verified', target_id: 't-app',
+        first_seen_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-02T00:00:00Z',
+      }
+      return route.fulfill({ json: { total: 2, findings: [
+        { ...base, id: alphaId, url: 'https://app.example.test/.env' },
+        { ...base, id: betaId, url: 'https://app.example.test/.git/config' },
+      ] } })
+    }
+    if (url.pathname === '/domains') return route.fulfill({ json: { domains: [] } })
+    return route.fulfill({ json: { status: 'healthy', workers: [], total: 0 } })
+  })
+  await page.goto('/findings')
+  await expect(page.getByText('2 open findings in 1 group')).toBeVisible()
+  // Grouping loads the whole result set so no group is cut between pages.
+  expect(requests[0].searchParams.get('status')).toBe('active')
+  expect(requests[0].searchParams.get('limit')).toBe('500')
+  const group = page.getByRole('button', { name: /Exposed secret/ })
+  await expect(group).toHaveAttribute('aria-expanded', 'false')
+  await group.click()
+  await expect(group).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.getByRole('link', { name: /\/\.git\/config/ })).toHaveAttribute('href', new RegExp(betaId))
+  await page.getByRole('button', { name: 'All', exact: true }).click()
+  await expect.poll(() => requests.at(-1)?.searchParams.get('status')).toBeNull()
+})
