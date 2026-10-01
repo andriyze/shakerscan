@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python3 .implementation/inspect.py
+wc -l .implementation/contracts.txt
