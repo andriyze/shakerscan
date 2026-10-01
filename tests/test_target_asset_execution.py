@@ -3,7 +3,7 @@ import ast
 from pathlib import Path
 import uuid
 
-from api.targets.asset_execution import execution_target_refs
+from targets.asset_execution import execution_target_refs
 
 
 def test_device_with_canonical_target_retains_device_finding_writer():

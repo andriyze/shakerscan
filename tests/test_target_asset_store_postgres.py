@@ -1,10 +1,10 @@
 """One asset count and history across network scans and distinct web origins."""
 import asyncio
 
-from api.targets.asset_migration import migrate_target_assets
-from api.targets.asset_inputs_migration import migrate_asset_inputs
-from api.targets.asset_store import list_assets, asset_detail, asset_history
-from api.targets.asset_router import ensure_device_profile, DeviceProfileCreate
+from targets.asset_migration import migrate_target_assets
+from targets.asset_inputs_migration import migrate_asset_inputs
+from targets.asset_store import list_assets, asset_detail, asset_history
+from targets.asset_router import ensure_device_profile, DeviceProfileCreate
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare, encryption
 

@@ -6,10 +6,10 @@ import uuid
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "api"))
-from api import target_authorization
-from api.targets.asset_authority import standing_authorization_matches_target
-from api.targets.asset_migration import migrate_target_assets
-from api.targets.asset_inputs_migration import migrate_asset_inputs
+import target_authorization
+from targets.asset_authority import standing_authorization_matches_target
+from targets.asset_migration import migrate_target_assets
+from targets.asset_inputs_migration import migrate_asset_inputs
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare
 
@@ -69,7 +69,7 @@ def test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host(
 
 
 def test_worker_revalidates_parent_authority_not_a_client_flag():
-    from api.scan.authorization import revalidate_scan_action_authority, ActionAuthorityDecision, revalidate_action_authority
+    from scan.authorization import revalidate_scan_action_authority, ActionAuthorityDecision, revalidate_action_authority
     async def run():
         async with database() as conn:
             await prepare(conn)

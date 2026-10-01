@@ -10,11 +10,11 @@ import uuid
 
 import pytest
 
-from api.runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
-from api.runtime.credentials import build_credential_secret, parse_credential_secret, public_credential_configuration
-from api.runtime.request_collection_store import PostgresRequestCollectionStore
-from api.targets.asset_inputs_migration import migrate_asset_inputs
-from api.targets.asset_migration import migrate_target_assets
+from runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
+from runtime.credentials import build_credential_secret, parse_credential_secret, public_credential_configuration
+from runtime.request_collection_store import PostgresRequestCollectionStore
+from targets.asset_inputs_migration import migrate_asset_inputs
+from targets.asset_migration import migrate_target_assets
 from tests.test_target_asset_migration_postgres import database
 
 

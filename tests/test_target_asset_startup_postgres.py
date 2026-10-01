@@ -4,7 +4,7 @@ import importlib
 from pathlib import Path
 import sys
 
-from api.targets.asset_migration import BoundConnectionPool
+from targets.asset_migration import BoundConnectionPool
 from contextlib import asynccontextmanager
 import os
 import uuid

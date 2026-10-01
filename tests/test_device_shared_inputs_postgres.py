@@ -8,14 +8,14 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from api.devices.shared_credentials import (
+from devices.shared_credentials import (
     create_device_profile, rotate_device_profile, deactivate_device_profile,
     resolve_device_credential, worker_material,
 )
-from api.devices.shared_collections import save_device_collection, deactivate_device_collection
-from api.runtime.credential_store import CredentialStoreError
-from api.targets.asset_inputs_migration import migrate_asset_inputs
-from api.targets.asset_migration import migrate_target_assets
+from devices.shared_collections import save_device_collection, deactivate_device_collection
+from runtime.credential_store import CredentialStoreError
+from targets.asset_inputs_migration import migrate_asset_inputs
+from targets.asset_migration import migrate_target_assets
 from tests.test_target_asset_inputs_postgres import encryption, prepare
 from tests.test_target_asset_migration_postgres import database
 

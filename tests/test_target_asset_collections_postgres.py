@@ -5,10 +5,10 @@ import json
 import pytest
 from fastapi import HTTPException
 
-from api.devices.shared_collections import save_device_collection
-from api.targets.asset_collections import asset_collection_binding
-from api.targets.asset_migration import migrate_target_assets
-from api.targets.asset_inputs_migration import migrate_asset_inputs
+from devices.shared_collections import save_device_collection
+from targets.asset_collections import asset_collection_binding
+from targets.asset_migration import migrate_target_assets
+from targets.asset_inputs_migration import migrate_asset_inputs
 from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import encryption, prepare
 

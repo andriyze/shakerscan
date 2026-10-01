@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from api.targets.asset_migration import host_url, locator_from_url, migrate_target_assets
+from targets.asset_migration import host_url, locator_from_url, migrate_target_assets
 
 ROOT = Path(__file__).resolve().parents[1]
 
