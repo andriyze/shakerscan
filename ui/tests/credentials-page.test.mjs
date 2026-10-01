@@ -20,10 +20,11 @@ test('shared Credentials UI binds profiles to an exact supported target kind', (
   assert.match(credentialApi, /target_id: params\.target_id/)
 })
 
-test('changing credential target kind cannot query with the previous kind target ID', () => {
+test('changing the view kind preserves the canonical asset ID and reloads profiles', () => {
   const changeKind = page.match(/function changeTargetKind[\s\S]*?\n  }/)?.[0] || ''
-  // Kind and target change in one URL update, so no render pairs the new kind with the old ID.
-  assert.match(changeKind, /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind, target_id: undefined/)
+  // Kind selects a view of the same canonical target, not another inventory.
+  assert.match(changeKind, /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind/)
+  assert.doesNotMatch(changeKind, /target_id: undefined/)
   assert.match(changeKind, /setProfiles\(\[\]\)/)
   assert.match(page, /onChange=\{\(event\) => changeTargetKind\(event\.target\.value as CredentialTargetKind\)\}/)
 })

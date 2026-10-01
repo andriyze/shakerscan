@@ -13311,6 +13311,7 @@ async def process_scan_job(job_data: dict):
     r.delete(f"scan:{scan_id}:device_activity")
 
     # Update database
+    canonical_target_id = None
     target_id = None
     ai_target_id = None
     device_target_id = None
@@ -13341,9 +13342,14 @@ async def process_scan_job(job_data: dict):
         # Get target references
         row = await conn.fetchrow("SELECT target_id, ai_target_id, device_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
         if row:
-            target_id = str(row['target_id']) if row['target_id'] else None
-            ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
-            device_target_id = str(row['device_target_id']) if row['device_target_id'] else None
+            from targets.asset_execution import execution_target_refs
+            references = execution_target_refs(row)
+            # target_id below is the application-only persistence path. Device scans
+            # retain their canonical target_id in the database and execution receipts.
+            canonical_target_id = references.canonical_target_id
+            target_id = references.web_target_id
+            ai_target_id = references.ai_target_id
+            device_target_id = references.device_target_id
 
     # A broker ingest job carries immutable output from execution that already
     # happened on the remote node. It must not reserve execution budget again:
@@ -13605,7 +13611,7 @@ async def process_scan_job(job_data: dict):
                 scan_id=scan_id,
                 job_id=job_id,
                 target=target,
-                target_id=target_id,
+                target_id=canonical_target_id,
                 ai_target_id=ai_target_id,
                 options=options,
                 result=result,

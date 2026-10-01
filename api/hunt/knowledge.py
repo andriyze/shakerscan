@@ -201,8 +201,13 @@ async def query_knowledge_page(
     if kind in {"receipts", "notes"}:
         where = [f"target_scope->>'target_id'={bind(str(target_id))}"]
     else:
-        column = "device_target_id" if device else "target_id"
-        where = [f"{column}={bind(target_id)}"]
+        owner = bind(target_id)
+        if kind == "collections":
+            where = [f"target_collection_visible(id,{owner})"]
+        elif device and kind in {"findings", "scans", "candidates"}:
+            where = [f"target_id IN (SELECT id FROM targets WHERE id={owner} OR asset_owner_id={owner})"]
+        else:
+            where = [f"target_id={owner}"]
     if kind == "endpoints":
         where.append("COALESCE(test_status,'')<>'gone'")
     if kind in {"principals", "collections"}:

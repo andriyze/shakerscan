@@ -37,6 +37,16 @@ def encryption(monkeypatch):
 async def prepare(conn):
     await PostgresCredentialProfileStore().ensure_schema(conn)
     await PostgresRequestCollectionStore().ensure_schema(conn)
+    # Use the real baseline authority DDL, not a reduced mock schema.
+    import ast
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / 'api/retest_contract.py').read_text()
+    constants = [node.value for node in ast.walk(ast.parse(source))
+                 if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    for table in ('scope_receipts', 'approval_receipts'):
+        ddl = [sql for sql in constants if f'CREATE TABLE IF NOT EXISTS {table} (' in sql]
+        assert len(ddl) == 1, f'Baseline schema for {table} changed'
+        await conn.execute(ddl[0])
 
 
 def test_device_input_migration_keeps_ids_and_one_ciphertext_source(monkeypatch):

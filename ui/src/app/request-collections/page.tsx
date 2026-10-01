@@ -152,7 +152,7 @@ function RequestCollectionsContent() {
   }, [])
 
   const choices = useMemo<Choice[]>(() => assets.map((asset) => ({
-    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',
+    id:asset.id,label:(asset.name || asset.locator).slice(0, 240),detail:asset.locator,locator:asset.url,ownerKind:'network',
   })),[assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
   useEffect(() => {
