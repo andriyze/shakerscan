@@ -38,7 +38,6 @@ import {
   Button,
   ConfirmDialog,
   ErrorState,
-  FindingStatusBadge,
   ProofStateBadge,
   RetestVerdictBadge,
   SeverityBadge,
@@ -709,7 +708,6 @@ function FindingDetailContent() {
             <div className="flex flex-wrap items-center gap-2">
               <SeverityBadge severity={finding.severity} />
               <ProofStateBadge proofState={finding.proof_state} />
-              <FindingStatusBadge status={finding.status} />
               <SourceTypeBadge type={getFindingSourceType(finding)} />
             </div>
             <h1 className="mt-2 text-2xl font-semibold leading-tight text-white wrap-break-word">{finding.title}</h1>
