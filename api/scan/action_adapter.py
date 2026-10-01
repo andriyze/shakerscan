@@ -364,6 +364,22 @@ def proof_request_for_candidate(
 _BATCH_SUCCESS_STATUSES = frozenset({"success", "succeeded", "completed"})
 
 
+def _batch_candidate_id(row: Mapping[str, Any], manifest_index: int) -> str:
+    """The stable identity of one ranked-manifest entry inside a batch action."""
+    return str(
+        row.get("candidate_id") or row.get("route_id")
+        or hashlib.sha256(str(manifest_index).encode()).hexdigest()
+    )
+
+
+def _no_tool_output(observations: Any) -> bool:
+    """True when a checkpointed attempt holds only its own bookkeeping record."""
+    return all(
+        isinstance(item, Mapping) and item.get("kind") == "candidate_attempt"
+        for item in observations or ()
+    )
+
+
 def batch_outcome(
     attempts: Sequence[Any], unattempted: int,
 ) -> tuple[str, bool, bool]:
@@ -2800,7 +2816,34 @@ class DatabaseNeutralScanActionDispatcher:
         primary = resolve_scan_http_principal(
             self.options, lane="primary", capability_name=legacy_capability,
         )
-        for offset, (manifest_index, row) in enumerate(rows):
+        # A template sweep attempt that hits its wall before the tool reported anything examined
+        # nothing: on a CPU- or network-starved host every endpoint of a slice could die that way
+        # and the batch reported zero findings with every candidate "attempted". Such an endpoint
+        # gets one retry after the first pass, funded only by what this reservation has left and
+        # only when that share is larger than the one it timed out on; an endpoint that still
+        # produced nothing is reported as unexamined. Shares in the first pass are unchanged.
+        retry_empty_timeouts = tool == "nuclei"
+        empty_timeouts: dict[str, int] = {}
+        deferred_errors: dict[str, list[str]] = {}
+        still_empty: set[str] = set()
+        recovered: set[str] = set()
+        retried = 0
+        attempt_log: list[tuple[str, int, bool, bool]] = []
+        work = [(manifest_index, row, 0) for manifest_index, row in rows]
+        first_pass = len(work)
+        position = 0
+        while True:
+            if position >= len(work):
+                if position != first_pass or not still_empty or self.cancelled():
+                    break
+                work.extend(
+                    (manifest_index, row, 1) for manifest_index, row in rows
+                    if _batch_candidate_id(row, manifest_index) in still_empty
+                )
+                if position >= len(work):
+                    break
+            manifest_index, row, retry_round = work[position]
+            position += 1
             # A path-segment candidate (family_hints: ["sqli"]) carries the sqlmap ``*`` marker in
             # its URL; only the SQLi verifier understands it. Dalfox and the template sweeps would
             # test the literal ``*`` as a value, so they skip it. The skip is recorded and kept
@@ -2816,17 +2859,18 @@ class DatabaseNeutralScanActionDispatcher:
                     "reason": "path_segment_candidate",
                 })
                 continue
-            candidate_id = str(
-                row.get("candidate_id") or row.get("route_id")
-                or hashlib.sha256(str(manifest_index).encode()).hexdigest()
-            )
-            attempt_id = hashlib.sha256(
-                f"{manifest_digest}:{family}:{candidate_id}".encode()
-            ).hexdigest()
+            candidate_id = _batch_candidate_id(row, manifest_index)
+            attempt_key = f"{manifest_digest}:{family}:{candidate_id}"
+            if retry_round:
+                attempt_key += f":retry:{retry_round}"
+            attempt_id = hashlib.sha256(attempt_key.encode()).hexdigest()
             prior = completed.get(attempt_id)
             if prior is not None:
                 resumed += 1
-                attempted += 1
+                if retry_round:
+                    retried += 1
+                else:
+                    attempted += 1
                 # A resumed attempt keeps the outcome its checkpoint recorded. Counting it
                 # as merely "attempted" let a restart launder failure into success: every
                 # attempt of a wall-killed batch is checkpointed, so replaying them all
@@ -2838,7 +2882,27 @@ class DatabaseNeutralScanActionDispatcher:
                 if prior_status in {"timed_out", "partial"}:
                     attempt_timed_out = True
                 observations.extend(prior.get("observations") or ())
-                errors.extend(str(item) for item in prior.get("errors") or ())
+                prior_timed_out = (
+                    prior_status in {"timed_out", "partial"} or bool(prior.get("timed_out"))
+                )
+                prior_empty = retry_empty_timeouts and prior_timed_out and _no_tool_output(
+                    prior.get("observations") or (),
+                )
+                self._settle_template_attempt(
+                    candidate_id, retry_round, prior_empty,
+                    succeeded=prior_status in _BATCH_SUCCESS_STATUSES,
+                    granted_wall=int(dict(prior.get("budget_consumed") or {}).get(
+                        "tool_wall_seconds", 0,
+                    )),
+                    attempt_errors=[str(item) for item in prior.get("errors") or ()],
+                    errors=errors, empty_timeouts=empty_timeouts,
+                    deferred_errors=deferred_errors, still_empty=still_empty,
+                    recovered=recovered,
+                )
+                attempt_log.append((
+                    candidate_id, retry_round,
+                    prior_status in _BATCH_SUCCESS_STATUSES, prior_timed_out,
+                ))
                 for name, amount in dict(prior.get("budget_consumed") or {}).items():
                     consumed[name] = consumed.get(name, 0) + int(amount)
                 if str(prior.get("status") or "") not in _BATCH_SUCCESS_STATUSES:
@@ -2869,7 +2933,7 @@ class DatabaseNeutralScanActionDispatcher:
                     execution_target = execution_url_for_manifest_endpoint(
                         manifest, manifest_index,
                     )
-                remaining_attempts = max(1, len(rows) - offset)
+                remaining_attempts = max(1, len(work) - position + 1)
                 remaining_budget = {
                     name: max(0, int(limit) - int(consumed.get(name, 0)))
                     for name, limit in action.requested_budget.items()
@@ -2914,6 +2978,12 @@ class DatabaseNeutralScanActionDispatcher:
                         )
                 if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                     break
+                if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
+                    candidate_id, 0,
+                ):
+                    # The residual would grant no more wall than the attempt that timed out
+                    # empty: retrying it would fail the same way. It stays unexamined.
+                    continue
                 parsed = urllib.parse.urlsplit(execution_target)
                 registered_target = urllib.parse.urlunsplit(
                     (parsed.scheme, parsed.netloc, "", "", "")
@@ -3003,6 +3073,7 @@ class DatabaseNeutralScanActionDispatcher:
                         "proof_state": proof_state,
                         "response_hashes": response_hashes,
                         "budget_consumed": dict(result.actual_budget),
+                        **({"retry_round": retry_round} if retry_round else {}),
                     },
                     *attempt_observations,
                 )
@@ -3018,9 +3089,29 @@ class DatabaseNeutralScanActionDispatcher:
                 }
                 if result.status != "cancelled":
                     await checkpoint_attempt(action.action_id, attempt)
-                attempted += 1
+                if retry_round:
+                    retried += 1
+                else:
+                    attempted += 1
                 observations.extend(attempt_observations)
-                errors.extend(str(item) for item in result.errors)
+                result_timed_out = (
+                    result.status in {"timed_out", "partial"}
+                    or bool(getattr(result, "timed_out", False))
+                )
+                self._settle_template_attempt(
+                    candidate_id, retry_round,
+                    retry_empty_timeouts and result_timed_out and not result.observations,
+                    succeeded=result.status in _BATCH_SUCCESS_STATUSES,
+                    granted_wall=int(sub_budget.get("tool_wall_seconds", 0)),
+                    attempt_errors=[str(item) for item in result.errors],
+                    errors=errors, empty_timeouts=empty_timeouts,
+                    deferred_errors=deferred_errors, still_empty=still_empty,
+                    recovered=recovered,
+                )
+                attempt_log.append((
+                    candidate_id, retry_round,
+                    result.status in _BATCH_SUCCESS_STATUSES, result_timed_out,
+                ))
                 for name, amount in result.actual_budget.items():
                     consumed[name] = min(
                         int(action.requested_budget.get(name, 0)),
@@ -3060,10 +3151,26 @@ class DatabaseNeutralScanActionDispatcher:
                     await checkpoint_attempt(action.action_id, failed_attempt)
                 except Exception:
                     pass
-                attempted += 1
+                if retry_round:
+                    retried += 1
+                    still_empty.discard(candidate_id)
+                else:
+                    attempted += 1
                 terminal_failure = True
+                attempt_log.append((candidate_id, retry_round, False, False))
                 errors.append(f"candidate_failed:{type(exc).__name__}")
                 continue
+        for candidate_id, held in deferred_errors.items():
+            if candidate_id not in recovered:
+                errors.extend(held)
+        if recovered:
+            # A first attempt a retry recovered no longer stands; every other attempt does.
+            standing = [
+                entry for entry in attempt_log
+                if not (entry[1] == 0 and entry[0] in recovered)
+            ]
+            terminal_failure = any(not succeeded for _, _, succeeded, _ in standing)
+            attempt_timed_out = any(timed_out for _, _, _, timed_out in standing)
         unattempted = max(0, len(rows) - attempted - inapplicable)
         partial = unattempted > 0 or terminal_failure
         # Say why, ahead of any per-attempt tool errors, so the durable reason is
@@ -3112,9 +3219,41 @@ class DatabaseNeutralScanActionDispatcher:
                 "resumed_count": resumed,
                 "inapplicable_count": inapplicable,
                 "unattempted_count": unattempted,
+                "retried_count": retried,
+                "recovered_count": len(recovered),
+                "unexamined_count": len(still_empty),
+                "unexamined_candidate_ids": sorted(still_empty)[:50],
                 "checkpoint_mode": "after_each_candidate",
             },
         )
+
+    @staticmethod
+    def _settle_template_attempt(
+        candidate_id: str,
+        retry_round: int,
+        empty: bool,
+        *,
+        succeeded: bool,
+        granted_wall: int,
+        attempt_errors: list[str],
+        errors: list[str],
+        empty_timeouts: dict[str, int],
+        deferred_errors: dict[str, list[str]],
+        still_empty: set[str],
+        recovered: set[str],
+    ) -> None:
+        """Record one template attempt: hold back an empty first timeout, settle a retry."""
+        if retry_round == 0 and empty:
+            empty_timeouts[candidate_id] = granted_wall
+            deferred_errors[candidate_id] = attempt_errors
+            still_empty.add(candidate_id)
+            return
+        errors.extend(attempt_errors)
+        if retry_round:
+            if not empty:
+                still_empty.discard(candidate_id)
+            if succeeded:
+                recovered.add(candidate_id)
 
     async def _authz(self, action: ScanAction, heartbeat: ActionHeartbeat) -> CapabilityReceipt:
         primary = resolve_scan_http_principal(
