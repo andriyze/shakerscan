@@ -8,6 +8,7 @@ schema is installed: these tests exercise the grant SQL itself, not a fake of it
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -287,3 +288,104 @@ def test_sharing_active_capabilities_needs_the_receiving_targets_approval():
                            json={"target_kind": "api", "target_id": str(OTHER)}).status_code == 201
         assert len(approvals) == count
     _routes(scenario)
+
+
+# --- Reusing a live login across runs ------------------------------------------------------------
+
+def test_a_live_login_is_reused_only_for_the_same_target_credential_version_and_origin(monkeypatch):
+    from cryptography.fernet import Fernet
+    import secret_store
+
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_store, "_fernet", None)
+    monkeypatch.setattr(secret_store, "_loaded", False)
+    from capabilities.auth import TargetBoundSessionCredential
+    from capabilities.session_reuse import reuse_or_establish_session
+    from runtime.auth_session_store import AUTH_SESSION_SCHEMA_SQL
+    from runtime.models import TargetBinding
+
+    origin = "https://app.example.test"
+
+    def target_for(target_id):
+        return TargetBinding(
+            target_id=str(target_id), target_kind="web", canonical_host="app.example.test",
+            allowed_origins=(origin,), allowed_addresses=("192.0.2.10",),
+            allowed_root_domains=("example.test",), environment="test", scope_receipt_id="scope-new-run",
+        )
+
+    async def scenario(conn):
+        await conn.execute(AUTH_SESSION_SCHEMA_SQL)
+        # The service-origin column comes from the Hunt session migration (which also touches
+        # unrelated graph tables this database does not have).
+        await conn.execute("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS service_origin TEXT")
+        configuration = {"schema_version": 1, "auth_kind": "form_login", "secret_configured": True,
+                         "username_configured": True, "endpoint_configured": True, "secret_values_visible": False}
+        profile = await STORE.create_profile(
+            conn, target_kind="web", target_id=HOME, name="login", auth_kind="form_login",
+            principal_slot="primary", principal_label="alice", configuration=configuration,
+            encrypted_secret="enc:fernet:x", encrypted_metadata="enc:fernet:y", expires_at=NOW + timedelta(days=30),
+            allowed_capabilities=["auth.session.establish", "http.request"], created_by="test", now=NOW,
+        )
+        await STORE.grant_profile(conn, profile_id=profile.profile_id, target_kind="web", target_id=SHARED,
+                                  granted_by="op", now=NOW)
+
+        async def store_session(target_id, *, expires_in=timedelta(hours=1), service_origin=origin, version=1):
+            await conn.execute(
+                """INSERT INTO auth_sessions (id, owner_kind, owner_id, target_kind, target_id, target_binding_digest,
+                       service_origin, profile_id, profile_version, principal_slot, principal_label, auth_kind,
+                       compatible_capabilities, encrypted_headers, status, established_at, expires_at, refresh_after,
+                       evidence_receipt_digest, source_action_id)
+                   VALUES ($1,'hunt',$2,'web',$3,$4,$5,$6,$7,'primary','alice','form_login','["http.request"]'::jsonb,
+                           $8,'active',$9,$10,$11,$12,$13)""",
+                uuid.uuid4(), uuid.uuid4(), target_id, "a" * 64, service_origin, uuid.UUID(profile.profile_id), version,
+                secret_store.encrypt_secret(json.dumps({"Cookie": f"sid={target_id}"})),
+                NOW - timedelta(minutes=10), NOW + expires_in, NOW + min(expires_in, timedelta(minutes=30)) - timedelta(seconds=1),
+                "b" * 64, uuid.uuid4(),
+            )
+
+        class Pool:
+            @asynccontextmanager
+            async def acquire(self):
+                yield conn
+
+        async def reused(target_id, *, version=1, endpoint=f"{origin}/login"):
+            target = target_for(target_id)
+            credential = TargetBoundSessionCredential(
+                lane="primary", auth_kind="form_login", endpoint_url=endpoint, binding_digest=target.digest,
+                username="alice", secret="never-sent", profile_id=profile.profile_id, profile_version=version,
+                principal="alice", compatible_capabilities=("http.request",),
+            )
+
+            async def login(_credential, *, target):
+                return None
+
+            session = await reuse_or_establish_session(Pool(), credential, target=target, now=NOW, establish=login)
+            return session.headers() if session is not None else None
+
+        await store_session(HOME)
+        assert await reused(HOME) == {"Cookie": f"sid={HOME}"}
+        # A login is bound to the target it was made on, even when the credential is shared.
+        assert await reused(SHARED) is None
+        await store_session(SHARED)
+        assert await reused(SHARED) == {"Cookie": f"sid={SHARED}"}
+        # Revoking the share stops reuse there at once.
+        await STORE.revoke_grant(conn, profile_id=profile.profile_id, target_id=SHARED, now=NOW)
+        assert await reused(SHARED) is None
+        # A different service origin, or too little time left, is not reused.
+        await conn.execute("UPDATE auth_sessions SET service_origin='https://other.example.test' WHERE target_id=$1", HOME)
+        assert await reused(HOME) is None
+        await conn.execute("UPDATE auth_sessions SET service_origin=$2 WHERE target_id=$1", HOME, origin)
+        await conn.execute("UPDATE auth_sessions SET expires_at=$2, refresh_after=$3 WHERE target_id=$1",
+                           HOME, NOW + timedelta(minutes=3), NOW + timedelta(minutes=2))
+        assert await reused(HOME) is None
+        await conn.execute("UPDATE auth_sessions SET expires_at=$2, refresh_after=$3 WHERE target_id=$1",
+                           HOME, NOW + timedelta(hours=1), NOW + timedelta(minutes=30))
+        assert await reused(HOME) == {"Cookie": f"sid={HOME}"}
+        # A rotated credential never reuses a login made with its previous version.
+        await STORE.rotate_profile(conn, profile_id=profile.profile_id, target_kind="web", target_id=HOME,
+                                   expected_record_version=(await STORE.get_profile(conn, profile_id=profile.profile_id)).record_version,
+                                   encrypted_secret="enc:fernet:z", encrypted_metadata="enc:fernet:w",
+                                   configuration=configuration, expires_at=NOW + timedelta(days=30),
+                                   created_by="test", now=NOW + timedelta(seconds=1))
+        assert await reused(HOME, version=2) is None
+    run(scenario)

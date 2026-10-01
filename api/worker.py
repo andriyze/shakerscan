@@ -91,6 +91,7 @@ from capabilities.auth import (
     TargetBoundSessionCredential,
     establish_target_bound_http_session,
 )
+from capabilities.session_reuse import reuse_or_establish_session
 from capabilities.authz import (
     authz_route_inventory_digest,
     verify_target_bound_object_authorization,
@@ -9648,8 +9649,8 @@ async def _execute_scan_auth_session_capability(
     request_limit = 2 if credential.auth_kind == "form_login" else 1
 
     async def establish_session() -> Mapping[str, Any]:
-        session = await establish_target_bound_http_session(
-            credential.session_credential(), target=target,
+        session = await reuse_or_establish_session(
+            db_pool, credential.session_credential(), target=target, establish=establish_target_bound_http_session,
         )
         private_session_holder["session"] = session
         result = dict(session.execution_result())
@@ -22146,8 +22147,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
 
             async def establish_session_operation() -> dict[str, Any]:
                 nonlocal private_session
-                private_session = await establish_target_bound_http_session(
-                    credential, target=target,
+                private_session = await reuse_or_establish_session(
+                    db_pool, credential, target=target, establish=establish_target_bound_http_session,
                 )
                 return private_session.execution_result()
 

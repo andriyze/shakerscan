@@ -143,6 +143,10 @@ Reusable secrets belong only in encrypted credential profiles or request collect
   private keys, client secrets, secret headers, or raw environment values.
 - Workers decrypt only after an active grant for the consuming target, capability, approval,
   version, expiry, and policy validation.
+- A run about to log in starts from another run's live login when one exists for the same
+  target, credential version, principal slot, login kind and service origin (Hunts adopt it into
+  their own session row). Reuse never crosses targets, never survives a rotated, deactivated or
+  ungranted credential, and adds no authority: it happens after the run's own checks.
 - APIs, planner context, logs, and receipts remain metadata-only or redacted unless the user
   deliberately requests a raw sensitive export.
 - Primary, secondary, service, and SSH slots are distinct. BOLA needs distinct principals.
