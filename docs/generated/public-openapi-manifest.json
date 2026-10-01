@@ -72,7 +72,7 @@
     "DeviceProfileCreate": "c9422137329d68dd41c6c0be9d362b4e9e135dbeecb53c2ead1f7e807cbb3ed7",
     "DeviceRequestCollectionCreate": "3009cf19fcbaa9e3f474f05885c01a3dd1edb31776f977f017865d1b1aa3ab72",
     "DeviceRequestCollectionUpdate": "25bb49b2f0399f599863fd16ee789f8221dd9a25f5cd52f9e47470deefb0bb2d",
-    "DeviceScanRequest": "58a2bfaa4a2761b2dee66c68157bf104e0c23526110297a240b9e6f4d92ab953",
+    "DeviceScanRequest": "9013ad34534fd86a89b02441066559064d90654588cd9401549676faba84a43b",
     "DeviceServiceVerifyRequest": "076ea2407f46f4ea0593afb26f390b8cec6d32d5d7712d5718aeaecb3370c784",
     "DeviceTargetCreate": "a9cba09797e967f36606de07aea1047860a91727ef3d9007d89e24a4980467ec",
     "DeviceTargetUpdate": "1bb3225d4fcac87d7fd6f2eb0fe28db0b6c589d9f6003d908355b86b8881561f",
@@ -195,9 +195,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "a9ad913b6fe4cc3e5739c2fcc004fd26aa6158fb0172d59f0733c322f7c3661f",
+  "contract_sha256": "da42b69a6d58d21a83078664dc26aca637999534f7fead9da27416d669a2666f",
   "openapi": "3.1.0",
-  "operation_count": 435,
+  "operation_count": 436,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -5783,6 +5783,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "POST /targets/{target_id}/network-scans": {
+      "deprecated": false,
+      "operation_id": "start_target_network_scan_targets__target_id__network_scans_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "99153c3e38de75b60595bcf49d67800633fe33b0e5541f4e3b26b89b11a3444d",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "POST /targets/{target_id}/principal-matrix": {
       "deprecated": false,
