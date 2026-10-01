@@ -45,6 +45,7 @@ import {
   useToast,
 } from '@/components/ui'
 import { CopyButton } from '@/components/findings/detail/CopyButton'
+import { HowToFix } from '@/components/findings/detail/HowToFix'
 import { EvidenceObjectsList } from '@/components/findings/detail/EvidenceObjectsList'
 import { ExceptionDialog, type ExceptionFormValues } from '@/components/findings/detail/ExceptionDialog'
 import { Fact, Section } from '@/components/findings/detail/Section'
@@ -856,18 +857,7 @@ function FindingDetailContent() {
             } : null}
           />
 
-          {evidence.remediation.length > 0 && (
-            <Section id="remediation" title="How to fix">
-              <ol className="space-y-2">
-                {evidence.remediation.map((step, i) => (
-                  <li key={i} className="flex items-start gap-3 text-sm">
-                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-gray-600 text-xs text-gray-500">{i + 1}</span>
-                    <span className="text-gray-300">{step}</span>
-                  </li>
-                ))}
-              </ol>
-            </Section>
-          )}
+          <HowToFix remediation={finding.remediation} toolSteps={evidence.remediation} />
 
           {locations.length > 0 && (
             <Section

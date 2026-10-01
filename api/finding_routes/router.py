@@ -59,6 +59,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 
 from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
+from .list_filters import (
+    PROOF_FILTER_MAX_ROWS, PROOF_STATES, SEVERITIES, parse_choice_list, project_and_filter_by_proof,
+)
+from .remediation import finding_remediation
 
 
 router = APIRouter()
@@ -364,6 +368,7 @@ async def list_findings(
     verification_verdict: Optional[str] = Query(None, pattern="^(exploited|likely_vulnerable|blocked_by_security|out_of_scope_internal|false_positive|likely_fixed|inconclusive|error)$"),
     verification_mode: Optional[str] = Query(None, pattern="^(deterministic|ai_driven)$"),
     verified_only: bool = False,
+    proof_state: Optional[str] = None,
     driven_by: Optional[str] = Query(None, pattern="^(autonomous_research)$"),
     research_campaign_id: Optional[str] = None,
     search: Optional[str] = None,
@@ -393,7 +398,7 @@ async def list_findings(
     allowed_params = {
         "severity", "status", "source_type", "target_id", "ai_target_id", "device_target_id",
         "scan_id", "hunt_id", "root_domain", "verification_verdict", "verification_mode",
-        "verified_only", "driven_by", "research_campaign_id", "search",
+        "verified_only", "proof_state", "driven_by", "research_campaign_id", "search",
         "seen_within_days", "not_seen_within_days", "first_seen_within_days",
         "resolved_within_days", "sort_by", "sort_order",
         "include_candidates", "include_details", "limit", "offset",
@@ -410,6 +415,13 @@ async def list_findings(
                 f"Allowed: {', '.join(sorted(allowed_params))}"
             ),
         )
+
+    # Both take several comma-separated values: severity=critical,high, proof_state=verified.
+    try:
+        severities = parse_choice_list(severity, SEVERITIES, "severity")
+        proof_states = parse_choice_list(proof_state, PROOF_STATES, "proof_state")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async with _pool().acquire() as conn:
         query = """
@@ -442,9 +454,9 @@ async def list_findings(
         params: list = []
         param_idx = 1
 
-        if severity:
-            query += f" AND f.severity = ${param_idx}"
-            params.append(severity)
+        if severities:
+            query += f" AND f.severity = ANY(${param_idx}::text[])"
+            params.append(severities)
             param_idx += 1
 
         if status:
@@ -586,10 +598,20 @@ async def list_findings(
                 scan_id or ai_target_id or device_target_id or verification_verdict
                 or verification_mode or verified_only or driven_by
                 or research_campaign_id or resolved_within_days
+                # Candidates carry no proof; a proof filter is a question about findings.
+                or proof_states
             )
         )
 
-        if candidates_included:
+        if proof_states:
+            # Proof is projected per row, so every row the other filters leave is read,
+            # projected, and paginated here; a bounded read keeps that honest.
+            query += f"""
+                ORDER BY {order_clause}
+                LIMIT ${param_idx}
+            """
+            params.append(PROOF_FILTER_MAX_ROWS + 1)
+        elif candidates_included:
             # The Python merge below applies offset/limit over the combined list, so the
             # findings side only needs the same bounded prefix window, not its own OFFSET.
             query += f"""
@@ -606,12 +628,25 @@ async def list_findings(
 
         rows = await conn.fetch(query, *params)
 
+        proof_matches: list[dict[str, Any]] | None = None
+        if proof_states:
+            if len(rows) > PROOF_FILTER_MAX_ROWS:
+                raise HTTPException(status_code=422, detail=(
+                    f"The proof filter checks at most {PROOF_FILTER_MAX_ROWS:,} findings and more than "
+                    "that match the other filters. Narrow the list (status, severity, target or a "
+                    "time window) and filter by proof again."
+                ))
+            proof_matches = project_and_filter_by_proof(rows, proof_states, finding_proof_fields)
+            rows = []
+
         # `total_count` is identical on every row of the window. The empty
         # result set is ambiguous (truly no matches vs offset past end), so
         # only trust the window count when we got rows back. With offset > 0
         # and no rows we fall back to a dedicated COUNT(*) query so the UI
         # paginator can render correctly.
-        if rows:
+        if proof_matches is not None:
+            total = len(proof_matches)
+        elif rows:
             total = rows[0]["total_count"]
         elif offset > 0:
             # Strip the window column from the SELECT, drop the LIMIT/OFFSET
@@ -645,9 +680,9 @@ async def list_findings(
                 candidate_query += " AND " + candidate_hunt_predicate(cand_idx)
                 candidate_params.append(hunt_uuid)
                 cand_idx += 1
-            if severity:
-                candidate_query += f" AND c.claimed_severity = ${cand_idx}"
-                candidate_params.append(severity)
+            if severities:
+                candidate_query += f" AND c.claimed_severity = ANY(${cand_idx}::text[])"
+                candidate_params.append(severities)
                 cand_idx += 1
             if target_id:
                 candidate_query += f" AND c.target_id = ${cand_idx}"
@@ -706,12 +741,15 @@ async def list_findings(
                 candidate_items.append(_candidate_to_pseudo_finding(cand_dict))
 
     findings_out = []
-    for row in rows:
+    # A proof-filtered page is already projected (the filter needed the projection).
+    page_rows = proof_matches[offset:offset + limit] if proof_matches is not None else rows
+    for row in page_rows:
         row_dict = dict(row)
         row_dict.pop("total_count", None)
-        # Single proof-state so the list distinguishes proven vs suspected at a
-        # glance and agrees with the detail page (docs §7).
-        row_dict.update(finding_proof_fields(row_dict))
+        if proof_matches is None:
+            # Single proof-state so the list distinguishes proven vs suspected at a
+            # glance and agrees with the detail page (docs §7).
+            row_dict.update(finding_proof_fields(row_dict))
         if not include_details:
             for key in _FINDING_DETAIL_ONLY_FIELDS:
                 row_dict.pop(key, None)
@@ -775,6 +813,7 @@ async def get_finding(finding_id: str):
     result = dict(finding)
     # Same single proof-state the list uses, so list and detail never disagree (§7).
     result.update(finding_proof_fields(result))
+    result["remediation"] = finding_remediation(result)
 
     # Retest capability hints so the UI can gate the retest button instead of
     # surfacing a 400 after the click.
