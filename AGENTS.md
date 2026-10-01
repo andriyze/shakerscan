@@ -239,6 +239,9 @@ Severities are `critical`, `high`, `medium`, `low`, and `info`. Triage states ar
 Evidence retention cleanup is destructive and interactive-only. It starts with a target-scoped
 dry-run preview, binds an immutable snapshot, uses a one-use dangerous approval for that preview,
 revalidates under lock, and remains idempotent. Never schedule deletion or bypass preview/approval.
+The one scheduled deletion is the PostgreSQL major-upgrade rollback copy (a stale duplicate, not
+evidence): it expires after `SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS` (default 30) with a week of
+notice, and never when a rollback used it after the copy. Keep those safeguards.
 
 ## Hunt workflow
 

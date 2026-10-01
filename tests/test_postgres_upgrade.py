@@ -291,3 +291,98 @@ def test_the_cli_offers_both_ways_to_resolve_a_rollback():
     result = _bash(script)
     assert result.stdout.splitlines()[:2] == ["REMIGRATE", "KEEP"]
     assert "--remigrate|--keep-current" in result.stderr
+
+
+# --- Retention of the rollback data -------------------------------------------------------------
+
+def _retention_plan(retention: int, age: str, state: str, has_data: str = "1") -> str:
+    result = _bash(f'source "{MODULE}"; postgres_retention_plan {retention} "{age}" "{state}" "{has_data}"')
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("retention", "age", "state", "has_data", "expected"),
+    [
+        (30, "3", "unchanged", "1", "wait 27"),
+        # The last week before deletion is announced on every start.
+        (30, "23", "unchanged", "1", "notice 7"),
+        (30, "29", "unchanged", "1", "notice 1"),
+        (30, "30", "unchanged", "1", "expire"),
+        (30, "400", "unchanged", "1", "expire"),
+        # 0 keeps it until an operator removes it.
+        (0, "400", "unchanged", "1", "keep"),
+        # Data a rollback wrote to, or a copy that predates fingerprints or timestamps, is never
+        # deleted automatically.
+        (30, "400", "diverged", "1", "hold"),
+        (30, "400", "unrecorded", "1", "hold"),
+        (30, "", "unchanged", "1", "hold"),
+        (30, "400", "unchanged", "", "none"),
+    ],
+)
+def test_the_retention_plan(retention, age, state, has_data, expected):
+    assert _retention_plan(retention, age, state, has_data) == expected
+
+
+def _retention_days(env: dict[str, str], dotenv: str = "") -> subprocess.CompletedProcess:
+    return _bash(
+        f'source "{MODULE}"; '
+        f"read_dotenv_value() {{ [ \"$1\" = SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS ] && printf '%s' '{dotenv}'; return 0; }}; "
+        "postgres_legacy_retention_days",
+        env=env,
+    )
+
+
+def test_the_retention_setting_defaults_to_30_days_and_reads_the_shell_then_dotenv():
+    assert _retention_days({}).stdout.strip() == "30"
+    assert _retention_days({}, dotenv="90").stdout.strip() == "90"
+    assert _retention_days({"SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS": "0"}, dotenv="90").stdout.strip() == "0"
+    assert _retention_days({"SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS": "007"}).stdout.strip() == "7"
+    for bad in ("thirty", "-1", "1.5"):
+        assert _retention_days({"SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS": bad}).returncode == 1, bad
+
+
+def _stamp(days_ago: int) -> str:
+    import datetime
+    moment = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago, hours=1)
+    return moment.strftime("%Y%m%dT%H%M%SZ")
+
+
+def test_receipt_ages_and_deletion_dates():
+    result = _bash(
+        f'source "{MODULE}"; postgres_days_since {_stamp(31)}; postgres_days_since {_stamp(0)}; '
+        "postgres_date_after 20261001T004718Z 30; postgres_days_since not-a-stamp || echo unparsable",
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"},
+    )
+    assert result.stdout.split() == ["31", "0", "2026-10-31", "unparsable"]
+
+
+def test_the_notice_names_every_piece_of_rollback_data():
+    result = _bash(
+        f'source "{MODULE}"; COMPOSE_PROJECT_NAME=demo; '
+        'postgres_describe_rollback_data "$(printf "legacy 16\\ncluster 17")"'
+    )
+    assert result.stdout == ("the PostgreSQL 16 volume demo_postgres-data and the PostgreSQL 17 directory "
+                             "in demo_postgres-cluster")
+
+
+def test_old_upgrade_dumps_expire_and_other_backups_are_never_touched(tmp_path):
+    old = tmp_path / "backups" / f"postgres-16-to-18-{_stamp(31)}"
+    recent = tmp_path / "backups" / f"postgres-16-to-18-{_stamp(5)}"
+    operator_backup = tmp_path / "backups" / f"shakerscan-{_stamp(400)}"
+    for directory in (old, recent, operator_backup):
+        directory.mkdir(parents=True)
+    for directory in (old, recent):
+        (directory / "pg_dumpall.sql.gz").write_bytes(b"dump")
+        (directory / "source-fingerprint.txt").write_text("kept as the upgrade's audit record")
+    (operator_backup / "postgres.dump").write_bytes(b"operator backup")
+    result = _bash(
+        f'source "{MODULE}"; SCRIPT_DIR="{tmp_path}"; postgres_expire_aged_copies "replaced_dirs=" unused 30',
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (old / "pg_dumpall.sql.gz").exists()
+    assert "removed" in (old / "DUMP-REMOVED.txt").read_text()
+    assert (old / "source-fingerprint.txt").exists()
+    assert (recent / "pg_dumpall.sql.gz").exists()
+    assert (operator_backup / "postgres.dump").exists()

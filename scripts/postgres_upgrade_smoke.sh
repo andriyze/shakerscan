@@ -12,7 +12,10 @@
 #   4. a restore error (an extension 18 no longer ships) publishes nothing, and a retry after fixing
 #      the source succeeds;
 #   5. a host without data creates no volumes;
-#   6. a POSTGRES_IMAGE override older than 18 is refused.
+#   6. a POSTGRES_IMAGE override older than 18 is refused;
+#   7. the rollback data expires after SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS (default 30): starts
+#      announce the date in the last week, 0 keeps it, and expiry removes the 16 volume and the
+#      upgrade dump while the 18 data stays intact.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -251,5 +254,44 @@ if out="$(cd "$WORK/$P5" && COMPOSE_PROJECT_NAME="$P5" POSTGRES_IMAGE="$LEGACY_I
 fi
 show "$out"
 echo "$out" | grep -q "requires PostgreSQL 18 or newer" || { echo "$out"; fail "old target image was not explained"; }
+
+echo "== 7. rollback data expires after the retention period, announced in the last week"
+P7="${PREFIX}g"
+make_install "$P7" > /dev/null
+seed_legacy "$P7"
+out="$(launcher "$P7" db-upgrade 2>&1)" || { echo "$out"; fail "db-upgrade failed in the retention scenario"; }
+echo "$out" | grep -q "Rollback data: *deleted automatically on .* (30 day(s) left" || \
+    { echo "$out"; fail "status does not show the retention date"; }
+# Pretend the upgrade happened N days ago: the receipt's timestamp and the dump directory's stamp.
+age_upgrade() {
+    local stamp dir
+    stamp="$(python3 -c 'import datetime, sys
+print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=int(sys.argv[1]), hours=1)).strftime("%Y%m%dT%H%M%SZ"))' "$1")"
+    docker run --rm -v "${P7}_postgres-cluster:/c" --entrypoint sh "$TARGET_IMAGE" -c \
+        "sed -i 's/^migrated_at=.*/migrated_at=$stamp/' /c/18/shakerscan-migration.txt"
+    dir="$(find "$WORK/$P7/backups" -maxdepth 1 -type d -name 'postgres-16-to-*' | head -n 1)"
+    mv "$dir" "$WORK/$P7/backups/postgres-16-to-18-$stamp"
+}
+age_upgrade 25
+out="$(launcher "$P7" db-upgrade 2>&1)" || { echo "$out"; fail "a start in the notice week failed"; }
+show "$out"
+echo "$out" | grep -q "is deleted automatically on" || { echo "$out"; fail "the last week does not announce the deletion"; }
+docker volume inspect "${P7}_postgres-data" > /dev/null 2>&1 || fail "the notice week removed the 16 volume"
+age_upgrade 40
+out="$(cd "$WORK/$P7" && COMPOSE_PROJECT_NAME="$P7" SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS=0 ./scanner.sh db-upgrade 2>&1)" || \
+    { echo "$out"; fail "a start with retention 0 failed"; }
+docker volume inspect "${P7}_postgres-data" > /dev/null 2>&1 || fail "retention 0 removed the 16 volume"
+echo "$out" | grep -q "kept until removed (SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS=0)" || { echo "$out"; fail "retention 0 not reported"; }
+out="$(launcher "$P7" db-upgrade 2>&1)" || { echo "$out"; fail "the expiring start failed"; }
+show "$out"
+echo "$out" | grep -q "Removed the PostgreSQL 16 rollback volume" || { echo "$out"; fail "expiry did not remove the 16 volume"; }
+docker volume inspect "${P7}_postgres-data" > /dev/null 2>&1 && fail "the 16 volume survived its retention"
+dump_dir="$(find "$WORK/$P7/backups" -maxdepth 1 -type d -name 'postgres-16-to-*' | head -n 1)"
+[ ! -e "$dump_dir/pg_dumpall.sql.gz" ] && [ -f "$dump_dir/DUMP-REMOVED.txt" ] || fail "expiry did not remove the upgrade dump"
+docker run -d --name "${P7}-pg18" -e POSTGRES_PASSWORD=unused -v "${P7}_postgres-cluster:/var/lib/postgresql" \
+    "$TARGET_IMAGE" > /dev/null
+wait_ready "${P7}-pg18"
+[ "$(count "${P7}-pg18" scanner "SELECT count(*) FROM smoke_rows")" = "20000" ] || fail "expiry touched the 18 data"
+docker rm -f "${P7}-pg18" > /dev/null
 
 echo "PostgreSQL upgrade smoke: all scenarios passed"

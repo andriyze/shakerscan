@@ -9,8 +9,9 @@
 # PostgreSQL, the launcher copies an older cluster into the target major with pg_dumpall, checks
 # every table's row count, every sequence and every role, and only then publishes the new data
 # directory. The upgrade only reads the source data (PostgreSQL's own startup and shutdown aside),
-# and the source volume stays available for rollback until the operator removes it with
-# `db-upgrade --remove-legacy`.
+# and the source volume stays available for rollback. A start deletes it, with the upgrade's dump
+# and any set-aside copies, once it is SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS old (default 30,
+# 0 keeps it), announcing the date during the last week; `db-upgrade --remove-legacy` deletes it now.
 #
 # Invariant: the target data directory <major>/docker exists only after a verified copy (the copy is
 # built in <major>/migrating and renamed), or after PostgreSQL initialized an empty cluster on a host
@@ -22,6 +23,8 @@ POSTGRES_CLUSTER_VOLUME_NAME="postgres-cluster"
 POSTGRES_MIGRATION_RECEIPT="shakerscan-migration.txt"
 POSTGRES_MIN_CLUSTER_MAJOR=18
 POSTGRES_CLUSTER_CHECKED=0
+POSTGRES_LEGACY_RETENTION_DEFAULT_DAYS=30
+POSTGRES_LEGACY_NOTICE_DAYS=7
 
 # Images that can read each older major's data. Every release before the cluster layout shipped 16.
 postgres_source_image_for_major() {
@@ -121,7 +124,7 @@ postgres_probe_volumes() {
             receipt="$dir/'"$POSTGRES_MIGRATION_RECEIPT"'"
             if [ -f "$receipt" ]; then
                 receipts="$receipts $major"
-                sed -nE "s/^(from_kind|from_major|from_volume|source_control)=/receipt_${major}_\1=/p" "$receipt"
+                sed -nE "s/^(from_kind|from_major|from_volume|source_control|migrated_at|accepted_at)=/receipt_${major}_\1=/p" "$receipt"
             fi
         done
         printf "legacy_major=%s\ncluster_majors=%s\nreceipt_majors=%s\nreplaced_dirs=%s\n" \
@@ -469,6 +472,156 @@ migrate_postgres_cluster() {
     echo "    $(cli_hint) db-upgrade --remove-legacy"
 }
 
+# Days the rollback data is kept after a verified upgrade; 0 keeps it until it is removed by hand.
+postgres_legacy_retention_days() {
+    local days="${SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS:-}"
+    [ -n "$days" ] || days="$(read_dotenv_value SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS)"
+    [ -n "$days" ] || days="$POSTGRES_LEGACY_RETENTION_DEFAULT_DAYS"
+    case "$days" in
+        *[!0-9]*) return 1 ;;
+    esac
+    echo "$((10#$days))"
+}
+
+# Whole days from a receipt timestamp such as 20261001T004718Z to now (python3 is a launcher dependency).
+postgres_days_since() {
+    python3 -c 'import datetime, sys
+start = datetime.datetime.strptime(sys.argv[1], "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+print(int((datetime.datetime.now(datetime.timezone.utc) - start).total_seconds() // 86400))' "$1" 2>/dev/null
+}
+
+postgres_date_after() {
+    python3 -c 'import datetime, sys
+start = datetime.datetime.strptime(sys.argv[1], "%Y%m%dT%H%M%SZ")
+print((start + datetime.timedelta(days=int(sys.argv[2]))).strftime("%Y-%m-%d"))' "$1" "$2" 2>/dev/null
+}
+
+# When the current copy last became the one to keep: a later --keep-current restarts the clock.
+postgres_retention_start() {
+    local probe="$1" target="$2" accepted
+    accepted="$(postgres_probe_value "$probe" "receipt_${target}_accepted_at")"
+    if [ -n "$accepted" ]; then
+        echo "$accepted"
+    else
+        postgres_probe_value "$probe" "receipt_${target}_migrated_at"
+    fi
+}
+
+# The rollback data a ready cluster leaves behind: the legacy volume and older major directories.
+postgres_rollback_data() {
+    local probe="$1" target="$2" major
+    [ -n "$(postgres_probe_value "$probe" legacy_major)" ] && echo "legacy $(postgres_probe_value "$probe" legacy_major)"
+    for major in $(postgres_probe_value "$probe" cluster_majors); do
+        [ "$major" -lt "$target" ] && echo "cluster $major"
+    done
+    return 0
+}
+
+# What retention does with a ready cluster's rollback data. Prints one of:
+#   none | keep | hold | wait <days left> | notice <days left> | expire
+# keep: retention is 0. hold: the data cannot be shown safe to drop (it was used after the copy, or
+# the copy predates source fingerprints or timestamps), so only an operator removes it. notice: the
+# last POSTGRES_LEGACY_NOTICE_DAYS before expiry, when starts announce the date.
+postgres_retention_plan() {
+    local retention="$1" age="$2" source_state="$3" has_data="$4"
+    if [ "$has_data" != "1" ]; then
+        echo "none"
+    elif [ "$retention" -eq 0 ]; then
+        echo "keep"
+    elif [ "$source_state" != "unchanged" ] || [ -z "$age" ]; then
+        echo "hold"
+    elif [ "$age" -ge "$retention" ]; then
+        echo "expire"
+    elif [ $((retention - age)) -le "$POSTGRES_LEGACY_NOTICE_DAYS" ]; then
+        echo "notice $((retention - age))"
+    else
+        echo "wait $((retention - age))"
+    fi
+}
+
+# "legacy 16" / "cluster 18" lines (from postgres_rollback_data) as one readable phrase.
+postgres_describe_rollback_data() {
+    local item described=""
+    while read -r item; do
+        case "$item" in
+            legacy\ *) described="${described:+$described and }the PostgreSQL ${item#legacy } volume $(postgres_legacy_volume)" ;;
+            cluster\ *) described="${described:+$described and }the PostgreSQL ${item#cluster } directory in $(postgres_cluster_volume)" ;;
+        esac
+    done <<EOF
+$1
+EOF
+    printf '%s' "$described"
+}
+
+# Delete rollback data whose retention ran out. Never fails a start: anything that cannot be removed
+# now (a container still holds it) is reported and retried on a later start.
+postgres_expire_rollback_data() {
+    local probe="$1" target="$2" image="$3" retention="$4" item major legacy
+    legacy="$(postgres_legacy_volume)"
+    while read -r item; do
+        [ -n "$item" ] || continue
+        major="${item#* }"
+        if [ "${item%% *}" = "legacy" ]; then
+            if [ -n "$(docker_cli ps -aq --filter "volume=$legacy")" ]; then
+                echo -e "${YELLOW}The PostgreSQL $major rollback volume $legacy is past its $retention-day retention but a container still uses it; it is removed on a later start.${NC}"
+            elif docker_cli volume rm "$legacy" > /dev/null 2>&1; then
+                echo "Removed the PostgreSQL $major rollback volume $legacy ($retention days after the upgrade)."
+            fi
+        elif postgres_cluster_shell "$image" "rm -rf /var/lib/postgresql/$major" > /dev/null 2>&1; then
+            echo "Removed the PostgreSQL $major rollback directory ($retention days after the upgrade)."
+        fi
+    done <<EOF
+$(postgres_rollback_data "$probe" "$target")
+EOF
+}
+
+# Set-aside copies (from --remigrate) and upgrade dumps age on their own timestamps.
+postgres_expire_aged_copies() {
+    local probe="$1" image="$2" retention="$3" aside dump_dir age
+    for aside in $(postgres_probe_value "$probe" replaced_dirs); do
+        age="$(postgres_days_since "${aside##*/replaced-}")"
+        if [ -n "$age" ] && [ "$age" -ge "$retention" ] && \
+            postgres_cluster_shell "$image" "rm -rf '/var/lib/postgresql/$aside'" > /dev/null 2>&1; then
+            echo "Removed the set-aside copy $aside ($retention days old)."
+        fi
+    done
+    for dump_dir in "$SCRIPT_DIR"/backups/postgres-*-to-*-*; do
+        [ -f "$dump_dir/pg_dumpall.sql.gz" ] || continue
+        age="$(postgres_days_since "${dump_dir##*-}")"
+        if [ -n "$age" ] && [ "$age" -ge "$retention" ] && rm -f "$dump_dir/pg_dumpall.sql.gz"; then
+            printf 'pg_dumpall.sql.gz removed %s, %s days after the upgrade (SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS).\n' \
+                "$(date -u +%Y-%m-%d)" "$retention" > "$dump_dir/DUMP-REMOVED.txt"
+            echo "Removed the upgrade dump in ${dump_dir#"$SCRIPT_DIR"/} ($retention days old)."
+        fi
+    done
+}
+
+# Run on every start of a ready cluster, after the divergence check.
+postgres_apply_legacy_retention() {
+    local probe="$1" target="$2" image="$3" retention start age state data plan
+    if ! retention="$(postgres_legacy_retention_days)"; then
+        echo -e "${YELLOW}SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS must be a whole number of days; keeping the PostgreSQL rollback data.${NC}"
+        return 0
+    fi
+    [ "$retention" -gt 0 ] || return 0
+    start="$(postgres_retention_start "$probe" "$target")"
+    age=""
+    [ -z "$start" ] || age="$(postgres_days_since "$start")"
+    state="$(postgres_source_state "$probe" "$target")"
+    data="$(postgres_rollback_data "$probe" "$target")"
+    plan="$(postgres_retention_plan "$retention" "$age" "${state%% *}" "$([ -n "$data" ] && echo 1)")"
+    case "$plan" in
+        expire)
+            postgres_expire_rollback_data "$probe" "$target" "$image" "$retention"
+            ;;
+        notice*)
+            echo -e "${YELLOW}$(postgres_describe_rollback_data "$data"), kept for rolling back the PostgreSQL $target upgrade, is deleted automatically on $(postgres_date_after "$start" "$retention") (${plan#notice } day(s) left).${NC}"
+            echo "  Keep it: set SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS=0 in .env. Delete it now: $(cli_hint) db-upgrade --remove-legacy"
+            ;;
+    esac
+    postgres_expire_aged_copies "$probe" "$image" "$retention"
+}
+
 postgres_report_diverged() {
     local target="$1" state="$2" kind major source
     kind="$(printf '%s' "$state" | awk '{print $2}')"
@@ -515,6 +668,7 @@ ensure_postgres_cluster_current() {
                 postgres_report_diverged "$target" "$source_state"
                 return 1
             fi
+            postgres_apply_legacy_retention "$probe" "$target" "$target_image"
             ;;
         fresh)
             ;;
@@ -568,6 +722,33 @@ postgres_upgrade_status() {
     if [ -n "$(postgres_probe_value "$probe" replaced_dirs)" ]; then
         echo "Set aside:      $(postgres_probe_value "$probe" replaced_dirs) (reclaim with db-upgrade --remove-legacy)"
     fi
+    postgres_retention_status "$probe" "$target"
+}
+
+postgres_retention_status() {
+    local probe="$1" target="$2" retention start age state data plan
+    data="$(postgres_rollback_data "$probe" "$target")"
+    [ -n "$data" ] || return 0
+    if ! retention="$(postgres_legacy_retention_days)"; then
+        echo "Rollback data:  kept (SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS is not a whole number of days)"
+        return 0
+    fi
+    start="$(postgres_retention_start "$probe" "$target")"
+    age=""
+    [ -z "$start" ] || age="$(postgres_days_since "$start")"
+    state="$(postgres_source_state "$probe" "$target")"
+    plan="$(postgres_retention_plan "$retention" "$age" "${state%% *}" 1)"
+    case "$plan" in
+        keep) echo "Rollback data:  kept until removed (SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS=0)" ;;
+        hold)
+            case "$state" in
+                unrecorded) echo "Rollback data:  kept until removed by hand (this copy predates source fingerprints); db-upgrade --remove-legacy deletes it" ;;
+                *) echo "Rollback data:  kept until removed by hand (no upgrade timestamp); db-upgrade --remove-legacy deletes it" ;;
+            esac
+            ;;
+        expire) echo "Rollback data:  past its $retention-day retention; the next start deletes it" ;;
+        wait*|notice*) echo "Rollback data:  deleted automatically on $(postgres_date_after "$start" "$retention") (${plan#* } day(s) left; SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS=$retention)" ;;
+    esac
 }
 
 # The older data a target cluster comes from: the receipt's record, else what a migration would use.
@@ -662,7 +843,7 @@ keep_current_postgres_cluster() {
     fi
     postgres_cluster_shell "$target_image" "set -e
         receipt=/var/lib/postgresql/$target/$POSTGRES_MIGRATION_RECEIPT
-        sed -i '/^source_control=/d' \"\$receipt\"
+        sed -i '/^source_control=/d; /^accepted_at=/d' \"\$receipt\"
         printf 'source_control=%s\naccepted_at=%s\n' '$current' '$(date -u +%Y%m%dT%H%M%SZ)' >> \"\$receipt\"" || return 1
     echo "Kept the PostgreSQL $target data. The PostgreSQL $major data stays for rollback."
 }
