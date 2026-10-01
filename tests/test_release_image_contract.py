@@ -186,9 +186,13 @@ def test_release_component_builds_have_independent_retry_domains():
             assert step["with"]["cache-from"] == (
                 f"type=gha,scope={scope}-${{{{ env.PLATFORM_PAIR }}}}"
             )
+            # Exporting the cache is optional: a cache-service error (`error writing layer blob:
+            # not_found`) after a successful build and push must not fail the job. The build,
+            # push, provenance and digest steps themselves stay fatal.
             assert step["with"]["cache-to"] == (
-                f"type=gha,mode=max,scope={scope}-${{{{ env.PLATFORM_PAIR }}}}"
+                f"type=gha,mode=max,scope={scope}-${{{{ env.PLATFORM_PAIR }}}},ignore-error=true"
             )
+            assert not step.get("continue-on-error")
 
 
 def test_scanner_image_bakes_release_identity_for_broker_workers():

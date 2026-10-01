@@ -519,7 +519,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=scanner-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=scanner-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=scanner-${{ env.PLATFORM_PAIR }},ignore-error=true
           outputs: type=image,name=${{ env.SCANNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push API control plane by digest
@@ -548,7 +548,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=api-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }},ignore-error=true
           outputs: type=image,name=${{ env.API_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push Model Intake by digest
@@ -575,7 +575,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=model-intake-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=model-intake-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=model-intake-${{ env.PLATFORM_PAIR }},ignore-error=true
           outputs: type=image,name=${{ env.MODEL_INTAKE_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Verify baked scanner release identity
@@ -690,7 +690,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=ui-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=ui-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=ui-${{ env.PLATFORM_PAIR }},ignore-error=true
           outputs: type=image,name=${{ env.UI_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export UI digest
@@ -769,7 +769,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=signer-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=signer-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=signer-${{ env.PLATFORM_PAIR }},ignore-error=true
           outputs: type=image,name=${{ env.SIGNER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export signer digest
