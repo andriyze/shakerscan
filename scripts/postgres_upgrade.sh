@@ -12,6 +12,8 @@
 # and the source volume stays available for rollback. A start deletes it, with the upgrade's dump
 # and any set-aside copies, once it is SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS old (default 30,
 # 0 keeps it), announcing the date during the last week; `db-upgrade --remove-legacy` deletes it now.
+# Neither deletes a directory a container still uses as its data (a recovery run on a set-aside
+# copy, say), and every operation on the data holds one lock, so retention never runs mid-migration.
 #
 # Invariant: the target data directory <major>/docker exists only after a verified copy (the copy is
 # built in <major>/migrating and renamed), or after PostgreSQL initialized an empty cluster on a host
@@ -54,6 +56,116 @@ postgres_cluster_volume() {
 
 postgres_volume_exists() {
     docker_cli volume inspect "$1" > /dev/null 2>&1
+}
+
+# One PostgreSQL data operation at a time: a migration, --remigrate, --keep-current, --remove-legacy
+# and retention all take this lock, so retention never deletes a directory another launcher process
+# is migrating from or recovering into. A directory lock (macOS has no flock) recording the holder's
+# PID; a lock whose holder is gone is taken over. Re-entrant within one process.
+POSTGRES_LOCK_DEPTH=0
+POSTGRES_LOCK_HOLDER=""
+
+postgres_lock_dir() {
+    echo "$SCRIPT_DIR/.shakerscan-postgres.lock"
+}
+
+postgres_lock_acquire() {
+    local lock holder
+    if [ "$POSTGRES_LOCK_DEPTH" -gt 0 ]; then
+        POSTGRES_LOCK_DEPTH=$((POSTGRES_LOCK_DEPTH + 1))
+        return 0
+    fi
+    lock="$(postgres_lock_dir)"
+    if ! mkdir "$lock" 2> /dev/null; then
+        holder="$(cat "$lock/pid" 2> /dev/null || true)"
+        if [ -n "$holder" ] && { kill -0 "$holder" 2> /dev/null || [ -d "/proc/$holder" ]; }; then
+            POSTGRES_LOCK_HOLDER="$holder"
+            return 1
+        fi
+        # No live holder. A lock still without a PID was taken a moment ago unless it is old.
+        if [ -z "$holder" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin +10 2> /dev/null)" ]; then
+            POSTGRES_LOCK_HOLDER="unknown"
+            return 1
+        fi
+        rm -rf -- "$lock"
+        if ! mkdir "$lock" 2> /dev/null; then
+            POSTGRES_LOCK_HOLDER="unknown"
+            return 1
+        fi
+    fi
+    echo "$$" > "$lock/pid"
+    POSTGRES_LOCK_DEPTH=1
+}
+
+postgres_lock_release() {
+    [ "$POSTGRES_LOCK_DEPTH" -gt 0 ] || return 0
+    POSTGRES_LOCK_DEPTH=$((POSTGRES_LOCK_DEPTH - 1))
+    [ "$POSTGRES_LOCK_DEPTH" -eq 0 ] && rm -rf -- "$(postgres_lock_dir)"
+    return 0
+}
+
+# Run an interactive PostgreSQL data operation under the lock, or refuse while another one runs.
+postgres_locked() {
+    local status=0
+    if ! postgres_lock_acquire; then
+        echo -e "${RED}Error: another PostgreSQL data operation is running (process $POSTGRES_LOCK_HOLDER); nothing was changed. Retry when it has finished.${NC}" >&2
+        return 1
+    fi
+    "$@" || status=$?
+    postgres_lock_release
+    return "$status"
+}
+
+# The containers, running or stopped, that use the cluster volume directory $1 (relative to the
+# volume, such as 17 or 18/replaced-<stamp>) as their PostgreSQL data, one name per line. A
+# container holds it when its PGDATA is that directory, inside it, or contains it. A container that
+# mounts the volume with no PGDATA inside the mount could be using any of it, so it holds every
+# directory. Fails (deletion must not proceed) when Docker cannot answer.
+postgres_directory_holders() {
+    local directory="$1" volume ids
+    volume="$(postgres_cluster_volume)"
+    ids="$(docker_cli ps -aq --filter "volume=$volume")" || return 1
+    [ -n "$ids" ] || return 0
+    # shellcheck disable=SC2086 # one argument per container ID
+    docker_cli inspect $ids | python3 -c '
+import json, posixpath, sys
+
+volume, directory = sys.argv[1], posixpath.normpath(sys.argv[2].strip("/"))
+for container in json.load(sys.stdin):
+    name = (container.get("Name") or container.get("Id", "")[:12]).lstrip("/")
+    env = dict(item.split("=", 1) for item in (container.get("Config") or {}).get("Env") or [] if "=" in item)
+    pgdata = posixpath.normpath(env["PGDATA"]) if env.get("PGDATA") else ""
+    relative = None
+    for mount in container.get("Mounts") or []:
+        if mount.get("Name") != volume:
+            continue
+        destination = posixpath.normpath(mount.get("Destination") or "/")
+        if pgdata == destination:
+            relative = ""
+        elif pgdata.startswith(destination.rstrip("/") + "/"):
+            relative = pgdata[len(destination.rstrip("/")) + 1:]
+    if relative is None or relative == "" or relative == directory \
+            or relative.startswith(directory + "/") or directory.startswith(relative + "/"):
+        print(name)
+' "$volume" "$directory"
+}
+
+# Remove directory $2 of the cluster volume unless a container holds it. When it is kept, prints the
+# reason (for "... but <reason>") and fails.
+postgres_remove_cluster_directory() {
+    local image="$1" directory="$2" holders
+    if ! holders="$(postgres_directory_holders "$directory")"; then
+        echo "Docker could not report which containers use $(postgres_cluster_volume)"
+        return 1
+    fi
+    if [ -n "$holders" ]; then
+        echo "container $(printf '%s' "$holders" | paste -sd, - | sed 's/,/, /g') still uses it"
+        return 1
+    fi
+    postgres_cluster_shell "$image" "rm -rf '/var/lib/postgresql/$directory'" > /dev/null 2>&1 || {
+        echo "it could not be deleted"
+        return 1
+    }
 }
 
 # The image Compose will run: POSTGRES_IMAGE from the shell or .env, else the compose default.
@@ -229,24 +341,51 @@ postgres_wait_ready() {
     return 1
 }
 
-# Row count of every table, last value of every sequence and every role with a digest of its
-# password hash, one sorted line each, so source and copy compare as text.
+# Row count of every table, last value of every sequence, every database and every role with a
+# digest of its password hash, one line each, so source and copy compare as text once sorted.
+# Fails when any query fails: a fingerprint missing a database's lines must never compare equal to
+# another one missing the same lines.
 postgres_cluster_fingerprint() {
     docker_cli exec -i "$1" sh -s <<'EOF'
 set -e
 psql -X -U scanner -d postgres -At -v ON_ERROR_STOP=1 -c "
     SELECT 'role|' || rolname || '|' || rolsuper || '|' || rolcanlogin || '|' || md5(coalesce(rolpassword, ''))
     FROM pg_authid WHERE rolname !~ '^pg_' ORDER BY 1"
-for db in $(psql -X -U scanner -d postgres -At -c "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1"); do
-    psql -X -U scanner -d "$db" -At -v ON_ERROR_STOP=1 <<'SQL' | sed "s/^/db|$db|/"
-SELECT format('SELECT %L || count(*) FROM %I.%I', 'table|' || n.nspname || '.' || c.relname || '|', n.nspname, c.relname)
+databases="$(psql -X -U scanner -d postgres -At -v ON_ERROR_STOP=1 \
+    -c "SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")"
+if [ -z "$databases" ]; then
+    echo "no databases were listed" >&2
+    exit 1
+fi
+table_sql="SELECT format('SELECT %L || count(*) FROM %I.%I', 'table|' || n.nspname || '.' || c.relname || '|', n.nspname, c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%'
 ORDER BY 1 \gexec
-SELECT 'sequence|' || schemaname || '.' || sequencename || '|' || coalesce(last_value::text, '') FROM pg_sequences ORDER BY 1;
-SQL
-done
+SELECT 'sequence|' || schemaname || '.' || sequencename || '|' || coalesce(last_value::text, '') FROM pg_sequences ORDER BY 1;"
+# One name per line, never split on spaces; each database's output is captured first, so a failed
+# query stops the script instead of vanishing into a pipeline.
+while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    rows="$(printf '%s\n' "$table_sql" | psql -X -U scanner -d "$db" -At -v ON_ERROR_STOP=1)"
+    printf 'db|%s|present\n' "$db"
+    if [ -n "$rows" ]; then
+        printf '%s\n' "$rows" | while IFS= read -r row; do
+            printf 'db|%s|%s\n' "$db" "$row"
+        done
+    fi
+done <<DATABASES
+$databases
+DATABASES
 EOF
+}
+
+# The sorted fingerprint of the cluster in container $1, written to $2. Fails when the fingerprint
+# does: sorting it in a pipeline would report sort's success instead.
+postgres_write_fingerprint() {
+    local container="$1" output="$2"
+    postgres_cluster_fingerprint "$container" > "$output.unsorted" || return 1
+    sort "$output.unsorted" > "$output" || return 1
+    rm -f "$output.unsorted"
 }
 
 postgres_remove_upgrade_containers() {
@@ -366,7 +505,7 @@ migrate_postgres_cluster() {
     fi
 
     echo "Recording row counts, sequences, and roles..."
-    if ! postgres_cluster_fingerprint "$src" | sort > "$backup_dir/source-fingerprint.txt"; then
+    if ! postgres_write_fingerprint "$src" "$backup_dir/source-fingerprint.txt"; then
         postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "could not read the source tables"
         return 1
     fi
@@ -437,7 +576,7 @@ migrate_postgres_cluster() {
     fi
 
     echo "Verifying the copy..."
-    if ! postgres_cluster_fingerprint "$dst" | sort > "$backup_dir/target-fingerprint.txt"; then
+    if ! postgres_write_fingerprint "$dst" "$backup_dir/target-fingerprint.txt"; then
         postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "could not read the restored tables"
         return 1
     fi
@@ -556,7 +695,7 @@ EOF
 # Delete rollback data whose retention ran out. Never fails a start: anything that cannot be removed
 # now (a container still holds it) is reported and retried on a later start.
 postgres_expire_rollback_data() {
-    local probe="$1" target="$2" image="$3" retention="$4" item major legacy
+    local probe="$1" target="$2" image="$3" retention="$4" item major legacy reason
     legacy="$(postgres_legacy_volume)"
     while read -r item; do
         [ -n "$item" ] || continue
@@ -567,8 +706,10 @@ postgres_expire_rollback_data() {
             elif docker_cli volume rm "$legacy" > /dev/null 2>&1; then
                 echo "Removed the PostgreSQL $major rollback volume $legacy ($retention days after the upgrade)."
             fi
-        elif postgres_cluster_shell "$image" "rm -rf /var/lib/postgresql/$major" > /dev/null 2>&1; then
+        elif reason="$(postgres_remove_cluster_directory "$image" "$major")"; then
             echo "Removed the PostgreSQL $major rollback directory ($retention days after the upgrade)."
+        else
+            echo -e "${YELLOW}The PostgreSQL $major rollback directory in $(postgres_cluster_volume) is past its $retention-day retention but $reason; it is removed on a later start.${NC}"
         fi
     done <<EOF
 $(postgres_rollback_data "$probe" "$target")
@@ -577,12 +718,16 @@ EOF
 
 # Set-aside copies (from --remigrate) and upgrade dumps age on their own timestamps.
 postgres_expire_aged_copies() {
-    local probe="$1" image="$2" retention="$3" aside dump_dir age
+    local probe="$1" image="$2" retention="$3" aside dump_dir age reason
     for aside in $(postgres_probe_value "$probe" replaced_dirs); do
         age="$(postgres_days_since "${aside##*/replaced-}")"
-        if [ -n "$age" ] && [ "$age" -ge "$retention" ] && \
-            postgres_cluster_shell "$image" "rm -rf '/var/lib/postgresql/$aside'" > /dev/null 2>&1; then
+        [ -n "$age" ] && [ "$age" -ge "$retention" ] || continue
+        # A recovery container may run on a set-aside copy: Docker refuses to remove a volume in use,
+        # but nothing stops deleting a directory inside one.
+        if reason="$(postgres_remove_cluster_directory "$image" "$aside")"; then
             echo "Removed the set-aside copy $aside ($retention days old)."
+        else
+            echo -e "${YELLOW}The set-aside copy $aside is past its $retention-day retention but $reason; it is removed on a later start.${NC}"
         fi
     done
     for dump_dir in "$SCRIPT_DIR"/backups/postgres-*-to-*-*; do
@@ -596,8 +741,17 @@ postgres_expire_aged_copies() {
     done
 }
 
-# Run on every start of a ready cluster, after the divergence check.
+# Run on every start of a ready cluster, after the divergence check. Never fails a start.
 postgres_apply_legacy_retention() {
+    if ! postgres_lock_acquire; then
+        echo -e "${YELLOW}Another PostgreSQL data operation is running (process $POSTGRES_LOCK_HOLDER); the rollback data is checked on a later start.${NC}"
+        return 0
+    fi
+    postgres_expire_legacy_data "$@" || true
+    postgres_lock_release
+}
+
+postgres_expire_legacy_data() {
     local probe="$1" target="$2" image="$3" retention start age state data plan
     if ! retention="$(postgres_legacy_retention_days)"; then
         echo -e "${YELLOW}SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS must be a whole number of days; keeping the PostgreSQL rollback data.${NC}"
@@ -673,7 +827,7 @@ ensure_postgres_cluster_current() {
         fresh)
             ;;
         migrate)
-            migrate_postgres_cluster "${detail%% *}" "${detail#* }" "$target_image" "$target" || return 1
+            postgres_locked migrate_postgres_cluster "${detail%% *}" "${detail#* }" "$target_image" "$target" || return 1
             ;;
         conflict)
             echo -e "${RED}Error: $(postgres_cluster_volume) already holds a PostgreSQL $target cluster that was not migrated,${NC}" >&2
@@ -777,6 +931,10 @@ postgres_upgrade_source() {
 # Interactive only: set the current cluster aside (not deleted) and copy the older data again. For a
 # rollback that wrote to the old data, or a cluster PostgreSQL initialized before the upgrade ran.
 remigrate_postgres_cluster() {
+    postgres_locked postgres_remigrate_under_lock
+}
+
+postgres_remigrate_under_lock() {
     local target_image target probe source kind major stamp confirm
     target_image="$(postgres_target_image)" || return 1
     target="$(postgres_image_major "$target_image")" || return 1
@@ -819,6 +977,10 @@ remigrate_postgres_cluster() {
 # Interactive only: keep the current cluster after a rollback ran on the older data, and accept that
 # what was written there since the copy is not carried over. The older data stays for rollback.
 keep_current_postgres_cluster() {
+    postgres_locked postgres_keep_current_under_lock
+}
+
+postgres_keep_current_under_lock() {
     local target_image target probe state kind major current confirm
     target_image="$(postgres_target_image)" || return 1
     target="$(postgres_image_major "$target_image")" || return 1
@@ -850,7 +1012,11 @@ keep_current_postgres_cluster() {
 
 # Interactive only: delete the data that a verified upgrade left behind for rollback.
 remove_legacy_postgres_data() {
-    local target_image target probe plan legacy older major confirm replaced aside
+    postgres_locked postgres_remove_legacy_under_lock
+}
+
+postgres_remove_legacy_under_lock() {
+    local target_image target probe plan legacy older major confirm replaced aside item holders reason
     target_image="$(postgres_target_image)" || return 1
     target="$(postgres_image_major "$target_image")" || return 1
     probe="$(postgres_probe_volumes "$target_image")" || return 1
@@ -884,20 +1050,37 @@ remove_legacy_postgres_data() {
         echo "Cancelled; nothing was removed."
         return 1
     fi
-    if postgres_volume_exists "$legacy"; then
-        if [ -n "$(docker_cli ps -aq --filter "volume=$legacy")" ]; then
-            echo -e "${RED}Error: a container still references $legacy; stop it and retry.${NC}" >&2
+    if postgres_volume_exists "$legacy" && [ -n "$(docker_cli ps -aq --filter "volume=$legacy")" ]; then
+        echo -e "${RED}Error: a container still references $legacy; stop it and retry. Nothing was removed.${NC}" >&2
+        return 1
+    fi
+    # Check every directory before deleting any, so a refusal leaves all of it in place.
+    for item in $older $replaced; do
+        if ! holders="$(postgres_directory_holders "$item")"; then
+            echo -e "${RED}Error: Docker could not report which containers use $(postgres_cluster_volume); nothing was removed.${NC}" >&2
             return 1
         fi
+        if [ -n "$holders" ]; then
+            echo -e "${RED}Error: container $(printf '%s' "$holders" | paste -sd, - | sed 's/,/, /g') still uses $item in $(postgres_cluster_volume); stop it and retry. Nothing was removed.${NC}" >&2
+            return 1
+        fi
+    done
+    if postgres_volume_exists "$legacy"; then
         docker_cli volume rm "$legacy" > /dev/null || return 1
         echo "Removed volume $legacy"
     fi
     for major in $older; do
-        postgres_cluster_shell "$target_image" "rm -rf /var/lib/postgresql/$major" || return 1
+        reason="$(postgres_remove_cluster_directory "$target_image" "$major")" || {
+            echo -e "${RED}Error: the PostgreSQL $major data directory was not removed: $reason.${NC}" >&2
+            return 1
+        }
         echo "Removed the PostgreSQL $major data directory"
     done
     for aside in $replaced; do
-        postgres_cluster_shell "$target_image" "rm -rf '/var/lib/postgresql/$aside'" || return 1
+        reason="$(postgres_remove_cluster_directory "$target_image" "$aside")" || {
+            echo -e "${RED}Error: the set-aside copy $aside was not removed: $reason.${NC}" >&2
+            return 1
+        }
         echo "Removed the set-aside copy $aside"
     done
 }

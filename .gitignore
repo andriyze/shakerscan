@@ -14,6 +14,7 @@ venv/
 .env.*
 backups/
 .shakerscan-fleet/
+.shakerscan-postgres.lock/
 .shakerscan-model-intake-runner-stage/
 .shakerscan-local-build
 .shakerscan-local-build.tmp.*
