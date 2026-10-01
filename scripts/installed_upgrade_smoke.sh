@@ -81,6 +81,13 @@ psql_scanner() {
     docker exec shakerscan-postgres-1 psql -X -U scanner -d scanner -At -c "$1"
 }
 
+# Capture first: `... | grep -q` under pipefail fails when grep exits before the writer finishes.
+db_status_has() {
+    local status
+    status="$(launcher db-upgrade --status 2>&1)" || { echo "$status"; return 1; }
+    grep -q "$1" <<< "$status" || { echo "$status"; return 1; }
+}
+
 compose_postgres_major() {
     sed -n 's/.*\${POSTGRES_IMAGE:-postgres:\([0-9][0-9]*\)\..*/\1/p' "$1" | head -n 1
 }
@@ -166,7 +173,7 @@ launcher start -y --prebuilt > "$LOG_DIR/upgrade.log" 2>&1 || { tail -40 "$LOG_D
 elapsed upgrade "$(( $(date +%s) - started ))"
 if [ "$BASELINE_MAJOR" -lt "$CANDIDATE_MAJOR" ]; then
     grep -q "PostgreSQL upgraded to $CANDIDATE_MAJOR" "$LOG_DIR/upgrade.log" || fail "the upgrade did not migrate PostgreSQL"
-    launcher db-upgrade --status | grep -q "Source data: *unchanged since the copy" || fail "the migration is not recorded"
+    db_status_has "Source data: *unchanged since the copy" || fail "the migration is not recorded"
 else
     grep -q "Upgrading PostgreSQL" "$LOG_DIR/upgrade.log" && fail "a same-major upgrade migrated"
 fi
@@ -196,7 +203,7 @@ psql_scanner "SELECT count(*) FROM targets WHERE id = '$ROLLBACK_TARGET'" | grep
 if [ "$BASELINE_MAJOR" -lt "$CANDIDATE_MAJOR" ]; then
     printf 'remove\n' | launcher db-upgrade --remove-legacy > "$LOG_DIR/remove-legacy.log" 2>&1 || { cat "$LOG_DIR/remove-legacy.log"; fail "--remove-legacy failed"; }
     docker volume inspect shakerscan_postgres-data > /dev/null 2>&1 && fail "--remove-legacy kept the old volume"
-    launcher db-upgrade --status | grep -q "Plan: *ready" || fail "the cluster is not ready after cleanup"
+    db_status_has "Plan: *ready" || fail "the cluster is not ready after cleanup"
 fi
 [ "$(api GET /health | jq -r '.status')" = "healthy" ] || fail "the upgraded stack is not healthy"
 
