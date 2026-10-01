@@ -381,6 +381,8 @@ def _findings_for_action(
                         cwe="CWE-693",
                         url=origin,
                         evidence={
+                            # Every missing header is CWE-693 on the same origin.
+                            "check": f"missing_header_{header_name}",
                             "url": origin,
                             "status": status,
                             "header": header_name,
@@ -827,27 +829,29 @@ def _findings_for_action(
         elif kind == "authz_differential":
             findings.extend(canonical_authz_findings([item], receipt=receipt))
         elif kind == "tls_protocol":
+            # Each issue names its check: several share a CWE, and the finding identity
+            # keeps them apart only by the check.
             tls_issues = (
                 (item.get("certificate_expired") is True,
-                 "TLS certificate is expired", "high", "CWE-295"),
+                 "TLS certificate is expired", "high", "CWE-295", "tls_certificate_expired"),
                 (item.get("certificate_not_yet_valid") is True,
-                 "TLS certificate is not yet valid", "medium", "CWE-295"),
+                 "TLS certificate is not yet valid", "medium", "CWE-295", "tls_certificate_not_yet_valid"),
                 (item.get("certificate_hostname_matches") is False,
-                 "TLS certificate hostname mismatch", "high", "CWE-295"),
+                 "TLS certificate hostname mismatch", "high", "CWE-295", "tls_certificate_hostname_mismatch"),
                 (item.get("certificate_trust") == "untrusted",
-                 "TLS certificate chain is not trusted", "medium", "CWE-295"),
+                 "TLS certificate chain is not trusted", "medium", "CWE-295", "tls_certificate_untrusted"),
                 (item.get("legacy_protocol_negotiated") is True,
-                 "Legacy TLS protocol negotiated", "high", "CWE-326"),
+                 "Legacy TLS protocol negotiated", "high", "CWE-326", "tls_legacy_protocol"),
                 (item.get("weak_cipher") is True,
-                 "Weak TLS cipher negotiated", "high", "CWE-327"),
+                 "Weak TLS cipher negotiated", "high", "CWE-327", "tls_weak_cipher"),
                 (item.get("certificate_weak_signature") is True,
-                 "TLS certificate uses a weak signature", "high", "CWE-327"),
+                 "TLS certificate uses a weak signature", "high", "CWE-327", "tls_certificate_weak_signature"),
                 (item.get("certificate_weak_public_key") is True,
-                 "TLS certificate uses a weak public key", "high", "CWE-326"),
+                 "TLS certificate uses a weak public key", "high", "CWE-326", "tls_certificate_weak_public_key"),
                 (item.get("certificate_expiring_within_30_days") is True,
-                 "TLS certificate expires within 30 days", "low", "CWE-295"),
+                 "TLS certificate expires within 30 days", "low", "CWE-295", "tls_certificate_expiring"),
             )
-            for present, title, severity, cwe in tls_issues:
+            for present, title, severity, cwe, check in tls_issues:
                 if not present:
                     continue
                 finding = _base_finding(
@@ -857,6 +861,7 @@ def _findings_for_action(
                     cwe=cwe,
                     url=item.get("origin"),
                     evidence={
+                        "check": check,
                         "origin": item.get("origin"),
                         "pinned_address": item.get("pinned_address"),
                         "port": item.get("port"),

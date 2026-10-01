@@ -12,11 +12,11 @@ import hashlib
 from typing import Any, Mapping
 
 try:
-    from findings import templated_finding_identity
+    from findings import pre_check_templated_finding_identity, templated_finding_identity
 except ModuleNotFoundError as exc:  # package layout in host-side tests
     if exc.name != "findings":
         raise
-    from scanner.findings import templated_finding_identity
+    from scanner.findings import pre_check_templated_finding_identity, templated_finding_identity
 
 
 def canonical_finding_fingerprint(finding: Mapping[str, Any]) -> str:
@@ -44,13 +44,21 @@ def _untemplated_fingerprint(finding: Mapping[str, Any]) -> str:
 def finding_identity_keys(finding: Mapping[str, Any]) -> tuple[str, ...]:
     """Every fingerprint a persisted row for this report finding can carry.
 
-    The canonical fingerprint first; then, for an endpoint finding, the untemplated one its row
-    was keyed by before endpoint identities were templated. A reader matching report findings to
-    stored rows checks both, so neither a current row nor an older one is missed.
+    The canonical fingerprint first; then the keys its row was stored under before: for a
+    finding with a CWE that names its check, the key from before the check joined the CWE (a row
+    persistence has not yet moved); and for an endpoint finding, the untemplated one from before
+    endpoint identities were templated. A reader matching report findings to stored rows checks
+    them all, so neither a current row nor an older one is missed.
     """
-    canonical = canonical_finding_fingerprint(finding)
-    untemplated = _untemplated_fingerprint(finding)
-    return (canonical,) if canonical == untemplated else (canonical, untemplated)
+    keys = [canonical_finding_fingerprint(finding)]
+    try:
+        pre_check = pre_check_templated_finding_identity(dict(finding))
+    except Exception:
+        pre_check = None
+    if pre_check:
+        keys.append("t:" + hashlib.sha256(pre_check.encode()).hexdigest()[:16])
+    keys.append(_untemplated_fingerprint(finding))
+    return tuple(dict.fromkeys(keys))
 
 
 __all__ = ["canonical_finding_fingerprint", "finding_identity_keys"]
