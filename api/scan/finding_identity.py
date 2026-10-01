@@ -28,6 +28,12 @@ def canonical_finding_fingerprint(finding: Mapping[str, Any]) -> str:
         templated = None
     if templated:
         return "t:" + hashlib.sha256(templated.encode()).hexdigest()[:16]
+    return _untemplated_fingerprint(finding)
+
+
+def _untemplated_fingerprint(finding: Mapping[str, Any]) -> str:
+    """The identity every finding had before endpoint findings were templated: the scanner ID,
+    else a hash of title, tool, URL and CWE. Rows persisted then still carry it."""
     scanner_id = finding.get("id", "")
     if scanner_id:
         return scanner_id
@@ -35,4 +41,16 @@ def canonical_finding_fingerprint(finding: Mapping[str, Any]) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
-__all__ = ["canonical_finding_fingerprint"]
+def finding_identity_keys(finding: Mapping[str, Any]) -> tuple[str, ...]:
+    """Every fingerprint a persisted row for this report finding can carry.
+
+    The canonical fingerprint first; then, for an endpoint finding, the untemplated one its row
+    was keyed by before endpoint identities were templated. A reader matching report findings to
+    stored rows checks both, so neither a current row nor an older one is missed.
+    """
+    canonical = canonical_finding_fingerprint(finding)
+    untemplated = _untemplated_fingerprint(finding)
+    return (canonical,) if canonical == untemplated else (canonical, untemplated)
+
+
+__all__ = ["canonical_finding_fingerprint", "finding_identity_keys"]

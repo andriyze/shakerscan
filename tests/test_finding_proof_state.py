@@ -52,6 +52,8 @@ import api as api_module  # noqa: E402
 
 pf = api_module.finding_proof_fields
 
+from scan.finding_identity import canonical_finding_fingerprint  # noqa: E402  (the worker's persistence key)
+
 
 def test_deterministic_exploited_retest_is_verified():
     r = pf({
@@ -176,11 +178,18 @@ def _exposure_report_finding(**overrides):
 
 
 def _project(report_findings, persisted_rows):
+    # Wired exactly as GET /scans/{id} wires it.
     report = {"findings": report_findings}
     rows = api_module.project_scan_finding_proof(
-        report, persisted_rows, project=pf, fingerprint=api_module.generate_finding_fingerprint,
+        report, persisted_rows, project=pf, identities=api_module.finding_identity_keys,
     )
     return report["findings"], rows
+
+
+def _stored_row(fingerprint, **fields):
+    """A persisted row with no durable proof of its own: only this run's proof can verify it."""
+    return {"id": fingerprint, "fingerprint": fingerprint, "severity": "critical", "evidence": None,
+            "latest_retest_mode": None, "last_verification_verdict": None, **fields}
 
 
 def test_scan_report_findings_carry_the_findings_api_proof_vocabulary():
@@ -196,7 +205,8 @@ def test_scan_report_findings_carry_the_findings_api_proof_vocabulary():
 
 def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof():
     raw = _exposure_report_finding()
-    row_for_raw = {"id": "a", "fingerprint": api_module.generate_finding_fingerprint(raw), "severity": "critical",
+    # Keyed the way the worker persists it, not by a helper of this module.
+    row_for_raw = {"id": "a", "fingerprint": canonical_finding_fingerprint(raw), "severity": "critical",
                    "evidence": None, "latest_retest_mode": None, "last_verification_verdict": "exploited"}
     retested = {"id": "b", "fingerprint": "elsewhere", "severity": "high", "evidence": "{}",
                 "latest_retest_mode": "deterministic", "last_verification_verdict": "exploited"}
@@ -206,3 +216,60 @@ def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof()
     assert [row["proof_state"] for row in rows] == ["verified", "verified", "suspected"]
     # The projection inputs are not part of the scan detail.
     assert all("evidence" not in row and "latest_retest_mode" not in row for row in rows)
+
+
+# --- A report finding finds its row by the identity persistence stores it under -----------------
+
+def test_the_exposure_row_is_keyed_canonically_not_by_the_old_api_hash():
+    raw = _exposure_report_finding()
+    # The audit's example: the persisted row is templated; the old API helper was not.
+    assert api_module.finding_identity_keys(raw) == ("t:c2f2ffb786643d9c", "b9a1f522b80ef3d9")
+    assert api_module.generate_finding_fingerprint(raw) == "t:c2f2ffb786643d9c"
+    (proven,), (row,) = _project([raw], [_stored_row(canonical_finding_fingerprint(raw))])
+    assert (proven["proof_state"], row["proof_state"]) == ("verified", "verified")
+
+
+def test_rows_collapsed_across_object_ids_and_query_values_are_proven_by_any_variant():
+    bola = {"title": "Broken object level authorization", "tool": "authz", "cwe": "CWE-639",
+            "url": "https://app.example.test/api/orders/46", "proof_of_exploitation": True,
+            "proof_state": "exploited", "verified": True, "severity": "high"}
+    sqli = {"title": "SQL injection", "tool": "sqlmap", "cwe": "CWE-89",
+            "url": "https://app.example.test/search?q=zzz", "proof_of_exploitation": True,
+            "proof_state": "exploited", "verified": True, "severity": "critical"}
+    # The worker stored each row from another object id / query value of the same endpoint.
+    stored = [_stored_row(canonical_finding_fingerprint({**bola, "url": "https://app.example.test/api/orders/12"})),
+              _stored_row(canonical_finding_fingerprint({**sqli, "url": "https://app.example.test/search?q=1%27"}))]
+    reports, rows = _project([bola, sqli], stored)
+    assert [finding["proof_state"] for finding in reports] == ["verified", "verified"]
+    assert [row["proof_state"] for row in rows] == ["verified", "verified"]
+
+
+def test_a_row_stored_under_the_old_identity_is_still_found():
+    raw = _exposure_report_finding()
+    scanner_id = {**raw, "id": "exposure:id_rsa"}
+    # Rows persisted before endpoint identities were templated: the hash, and the scanner ID.
+    _, rows = _project([raw], [_stored_row("b9a1f522b80ef3d9")])
+    assert rows[0]["proof_state"] == "verified"
+    _, rows = _project([scanner_id], [_stored_row("exposure:id_rsa")])
+    assert rows[0]["proof_state"] == "verified"
+
+
+def test_only_this_runs_proof_lifts_a_row_never_a_lead_or_another_finding():
+    # A lead with no proof: its row must not be lifted by another finding's proof.
+    lead = {"severity": "medium", "title": "Directory listing", "tool": "nuclei",
+            "url": "https://honey.example.test/backup/", "proof_state": "candidate",
+            "suspected": True, "needs_verification": True}
+    raw = _exposure_report_finding()
+    other = _stored_row(canonical_finding_fingerprint({**raw, "url": "https://honey.example.test/.env"}))
+    reports, rows = _project([lead, raw], [_stored_row(canonical_finding_fingerprint(lead)), other])
+    assert [finding["proof_state"] for finding in reports] == ["suspected", "verified"]
+    # Neither the lead's row nor a row for a different path is verified by the proven finding.
+    assert [row["is_verified"] for row in rows] == [False, False]
+
+
+def test_scan_time_overrides_reach_the_canonically_keyed_row():
+    raw = _exposure_report_finding()
+    overrides = api_module._scan_result_verification_overrides({"findings": [raw]})
+    assert set(overrides) == {"t:c2f2ffb786643d9c", "b9a1f522b80ef3d9"}
+    assert overrides["t:c2f2ffb786643d9c"]["last_verification_verdict"] == "exploited"
+

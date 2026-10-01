@@ -53,7 +53,7 @@ except ModuleNotFoundError:
     from scanner.release_identity import published_scanner_version
 from scan.assessment import SCAN_LIST_ASSESSMENT_COLUMNS, project_scan_assessment_row
 from scan.carried_over import gate_findings_from_rows, load_target_history, merge_target_active_blockers, summarize_carried_over
-from scan.finding_identity import canonical_finding_fingerprint
+from scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
 from scan.admission_actions import _compile_allocated_scan_action_plan, _compile_scan_admission_action_authority
 from scan.browser_login import browser_login_scan_limits, admit_scan_browser_login_profiles
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -2049,18 +2049,8 @@ def _coerce_demo_base_url(value: Any, *, default: str = "") -> str:
 
 
 def generate_finding_fingerprint(finding: dict) -> str:
-    """Generate a unique fingerprint for deduplication."""
-    scanner_id = finding.get('id', '')
-    if scanner_id:
-        return scanner_id
-    key_parts = [
-        finding.get('title', ''),
-        finding.get('tool', ''),
-        finding.get('url', ''),
-        finding.get('cwe', '')
-    ]
-    key_string = '|'.join(str(p) for p in key_parts)
-    return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+    """The fingerprint a finding row is persisted under: the canonical identity the worker uses."""
+    return canonical_finding_fingerprint(finding)
 
 
 def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -2074,8 +2064,7 @@ def _scan_result_verification_overrides(scan_result: dict[str, Any] | None) -> d
         fields = _scan_time_verification_fields(finding)
         if not fields:
             continue
-        fingerprint = generate_finding_fingerprint(finding)
-        if fingerprint:
+        for fingerprint in finding_identity_keys(finding):
             overrides[fingerprint] = fields
     return overrides
 
@@ -11845,7 +11834,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
             continue
         merged_findings.append(finding)
     result['findings'] = project_scan_finding_proof(
-        result.get('result'), merged_findings, project=finding_proof_fields, fingerprint=generate_finding_fingerprint,
+        result.get('result'), merged_findings, project=finding_proof_fields, identities=finding_identity_keys,
     )
     if canonical_stage_checkpoint:
         result["canonical_stage_checkpoint"] = dict(
