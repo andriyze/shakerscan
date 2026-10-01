@@ -3,7 +3,8 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyRound, Plus, RefreshCw, RotateCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
 import {
   getDevices,
   getTarget,
@@ -16,7 +17,9 @@ import {
   createCredentialProfile,
   deactivateCredentialProfile,
   listCredentialCapabilities,
+  listCredentialLibrary,
   listCredentialProfiles,
+  revokeCredentialGrant,
   type CredentialCapabilityOption,
   rotateCredentialProfile,
   type CredentialAuthKind,
@@ -256,6 +259,7 @@ function CredentialsContent() {
   const [editorOpen, setEditorOpen] = useState(false)
   const [rotating, setRotating] = useState<CredentialProfile | null>(null)
   const [deactivating, setDeactivating] = useState<CredentialProfile | null>(null)
+  const [sharing, setSharing] = useState<CredentialProfile | null>(null)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [draftErrors, setDraftErrors] = useState<DraftErrors>({})
@@ -282,6 +286,11 @@ function CredentialsContent() {
     ? devices.map((item) => ({ id: item.id, label: item.name, detail: item.primary_locator }))
     : targets.map((item) => ({ id: item.id, label: item.name || item.url, detail: item.url })),
   [targetKind, devices, targets])
+  // Every target a credential could be shared with; the dialog keeps those of the same asset kind.
+  const shareTargets = useMemo<ShareTargetChoice[]>(() => [
+    ...targets.map((item) => ({ id: item.id, kind: 'web' as CredentialTargetKind, label: item.name || item.url, detail: item.url })),
+    ...devices.map((item) => ({ id: item.id, kind: 'device' as CredentialTargetKind, label: item.name, detail: item.primary_locator })),
+  ], [devices, targets])
 
   // A linked target outside the loaded list (500 most recent) is fetched by ID; one that does not
   // exist or cannot hold credentials is reported instead of silently dropped.
@@ -320,17 +329,20 @@ function CredentialsContent() {
     const request = ++latestProfileRequest.current
     // A linked ID is queried only once it is a known target: an unknown one gets the notice above
     // rather than an API error.
-    if (!targetId || !choices.some((item) => item.id === targetId)) {
+    if (targetId && !choices.some((item) => item.id === targetId)) {
       setProfiles([])
       return
     }
     setProfilesLoading(true)
     try {
-      const result = await listCredentialProfiles({
-        target_kind: targetKind,
-        target_id: targetId,
-        include_inactive: includeInactive,
-      })
+      // No target selected: the library of every credential, with where each is shared.
+      const result = targetId
+        ? await listCredentialProfiles({
+            target_kind: targetKind,
+            target_id: targetId,
+            include_inactive: includeInactive,
+          })
+        : await listCredentialLibrary({ include_inactive: includeInactive, limit: 500 })
       if (request !== latestProfileRequest.current) return
       setProfiles(result.profiles || [])
       setError(null)
@@ -478,6 +490,21 @@ function CredentialsContent() {
     }
   }
 
+  // Viewing a target a credential is shared with: remove the share for this target only.
+  async function stopSharingHere(profile: CredentialProfile) {
+    if (!targetId) return
+    setBusy(true)
+    try {
+      await revokeCredentialGrant(profile.id, targetId)
+      toast.success(`${profile.name} is no longer shared with this target`)
+      await loadProfiles()
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Failed to stop sharing')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function deactivate() {
     if (!deactivating) return
     setBusy(true)
@@ -500,7 +527,7 @@ function CredentialsContent() {
     <div className="mx-auto max-w-6xl p-6">
       <PageHeader
         title="Credentials"
-        description="Manage encrypted, target-bound identities used by Scan and Hunt. Secret values are accepted only when creating or rotating a profile and are never returned to this screen."
+        description="Encrypted identities for Scan and Hunt. Each belongs to one target and can be shared with others. Secret values are accepted only when creating or rotating, and never shown again."
         icon={<KeyRound className="h-6 w-6" />}
         actions={<><Button variant="secondary" onClick={() => void loadProfiles()} disabled={!targetId || profilesLoading}><RefreshCw className="h-4 w-4" /> Refresh</Button><Button onClick={openCreate} disabled={!targetId}><Plus className="h-4 w-4" /> New profile</Button></>}
       />
@@ -515,9 +542,9 @@ function CredentialsContent() {
               {featureEnabled('devices') && <option value="device">Connected device</option>}
             </Select>
           </Field>
-          <Field label="Bound target">
+          <Field label="Target">
             <Select value={choices.some((item) => item.id === targetId) ? targetId : ''} onChange={(event) => { setMissingTarget(null); setTargetId(event.target.value) }}>
-              <option value="">{choices.length ? 'Choose a target…' : 'No active targets'}</option>
+              <option value="">All targets</option>
               {choices.map((item) => <option key={item.id} value={item.id}>{item.label} — {item.detail}</option>)}
             </Select>
           </Field>
@@ -533,16 +560,16 @@ function CredentialsContent() {
           The linked target {missingTarget} was not found among active targets that can hold credentials. Choose a target above.
         </div>
       )}
-      {(targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
+      {targetId && (targetKind === 'web' || targetKind === 'api') && <AuthenticationProfiles targetId={targetId} credentials={profiles} />}
       {error && <div className="mb-4 rounded-sm border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
       {profilesLoading ? (
         <Card className="p-6 text-sm text-gray-400">Loading profiles…</Card>
       ) : !profiles.length ? (
         <EmptyState
-          message={targetId ? 'No credential profiles' : 'Choose a bound target'}
+          message={targetId ? 'No credentials for this target' : 'No credentials yet'}
           hint={targetId
-            ? 'Create a profile for this exact target. Workers decrypt it only after approval and destination checks pass.'
-            : 'Select the exact asset that will be allowed to use this credential. ShakerScan never shares profiles across targets.'}
+            ? 'Create one for this target, or share an existing credential from another target. Workers decrypt it only after approval and destination checks pass.'
+            : 'Choose a target to create a credential. You can then share it with other targets.'}
           action={targetId ? { label: 'Create profile', onClick: openCreate } : undefined}
         />
       ) : (
@@ -557,7 +584,30 @@ function CredentialsContent() {
                       {profile.refresh_required && profile.status === 'active' ? 'expiring soon' : profile.status}
                     </span>
                     <span className="rounded-sm bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">{profile.principal_slot}</span>
+                    {profile.shared && (
+                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300" data-testid="shared-from">
+                        shared from {profile.home_target_name || 'another target'}
+                      </span>
+                    )}
+                    {!targetId && (profile.shared_target_count || 0) > 0 && (
+                      <span className="rounded-sm bg-violet-500/10 px-2 py-0.5 text-xs text-violet-300">
+                        shared with {profile.shared_target_count} {profile.shared_target_count === 1 ? 'target' : 'targets'}
+                      </span>
+                    )}
                   </div>
+                  {!targetId && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      Owner{' '}
+                      <button
+                        type="button"
+                        className="text-blue-300 hover:text-blue-200"
+                        onClick={() => setFilters({ target_kind: profile.target_kind === 'device' ? 'device' : undefined, target_id: profile.target_id })}
+                      >
+                        {profile.home_target_name || profile.target_id}
+                      </button>
+                      {profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
+                    </p>
+                  )}
                   <p className="mt-1 text-sm text-gray-400">
                     {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
                     {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
@@ -573,9 +623,17 @@ function CredentialsContent() {
                     <ShieldCheck className="h-3.5 w-3.5" /> encrypted storage · secret values hidden
                   </p>
                 </div>
-                <div className="flex shrink-0 gap-2">
-                  {profile.is_active && <Button size="sm" variant="secondary" onClick={() => openRotate(profile)}><RotateCw className="h-4 w-4" /> Rotate</Button>}
-                  {profile.is_active && <Button size="sm" variant="ghost" onClick={() => setDeactivating(profile)}><Trash2 className="h-4 w-4" /> Deactivate</Button>}
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {profile.shared ? (
+                    // Rotate and deactivate belong to the owner; here it can only stop being shared.
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void stopSharingHere(profile)}><X className="h-4 w-4" /> Stop sharing here</Button>
+                  ) : (
+                    <>
+                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => setSharing(profile)}><Share2 className="h-4 w-4" /> Share…</Button>}
+                      {profile.is_active && <Button size="sm" variant="secondary" onClick={() => openRotate(profile)}><RotateCw className="h-4 w-4" /> Rotate</Button>}
+                      {profile.is_active && <Button size="sm" variant="ghost" onClick={() => setDeactivating(profile)}><Trash2 className="h-4 w-4" /> Deactivate</Button>}
+                    </>
+                  )}
                 </div>
               </div>
             </Card>
@@ -685,10 +743,17 @@ function CredentialsContent() {
         <p className="mt-5 text-xs text-gray-500">The secret is sent once over the local API, encrypted before storage, and resolved only inside an authorized worker action.</p>
       </Modal>
 
+      <ShareCredentialDialog
+        profile={sharing}
+        targets={shareTargets}
+        onClose={() => setSharing(null)}
+        onChanged={() => void loadProfiles()}
+      />
+
       <ConfirmDialog
         open={Boolean(deactivating)}
         title="Deactivate credential profile?"
-        message="New Scan and Hunt actions will no longer be able to resolve this profile. Historical receipts remain intact."
+        message="New Scan and Hunt actions will no longer be able to resolve this profile, on its own target or any target it is shared with. Historical receipts remain intact."
         confirmLabel="Deactivate"
         danger
         busy={busy}
