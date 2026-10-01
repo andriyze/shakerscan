@@ -6,611 +6,1651 @@
 > shakerscan-ui@1.0.0 test:unit
 > node --test 'src/**/*.test.mjs' 'tests/**/*.test.mjs'
 
-(node:3017) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/aiBoundaryPresentation.ts is not specified and it doesn't parse as CommonJS.
+(node:3533) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/aiBoundaryPresentation.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ saved fixture base omits execution fragments and credentials (1.253725ms)
-✔ candidate choices combine run summary and action receipts without duplicates (0.213252ms)
-✔ queued and failed scans do not appear ready for regression export (0.242757ms)
-✔ a pasted artifact must match the source-bound server reconstruction (0.155966ms)
-(node:3018) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/asmCoverage.ts is not specified and it doesn't parse as CommonJS.
+✔ saved fixture base omits execution fragments and credentials (2.427103ms)
+✔ candidate choices combine run summary and action receipts without duplicates (0.387884ms)
+✔ queued and failed scans do not appear ready for regression export (0.308947ms)
+✔ a pasted artifact must match the source-bound server reconstruction (0.242663ms)
+(node:3534) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/asmCoverage.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ stale historical examinations do not inflate current ASM coverage (0.841181ms)
-✔ bands describe coverage, not risk (0.663043ms)
-✔ a missing score is absent, not zero (0.169987ms)
-✔ the current detail projection is preferred over the stored scan row (0.160523ms)
-✔ a report-only score is still read for scans stored before the column existed (0.087893ms)
-✔ gaps are rendered as readable phrases (2.193606ms)
-✔ zero reports that nothing was examined (0.134403ms)
-(node:3038) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/buildIdentity.ts is not specified and it doesn't parse as CommonJS.
+✔ stale historical examinations do not inflate current ASM coverage (1.228664ms)
+✔ bands describe coverage, not risk (1.400716ms)
+✔ a missing score is absent, not zero (0.250548ms)
+✔ the current detail projection is preferred over the stored scan row (0.281236ms)
+✔ a report-only score is still read for scans stored before the column existed (0.218518ms)
+✔ gaps are rendered as readable phrases (2.463951ms)
+✔ zero reports that nothing was examined (0.211576ms)
+(node:3573) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/buildIdentity.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ matching component identities collapse to one version (1.151401ms)
-✔ different Git abbreviation lengths for the same commit do not create false skew (0.301626ms)
-✔ short prefixes and non-Git version labels still require exact equality (0.127222ms)
-✔ dirty UI retains its useful local-checkout marker without causing skew (0.122755ms)
-✔ raw compose dev placeholder is unknown rather than a false mismatch (0.14514ms)
-✔ scoped UI build uses API source fingerprint instead of unrelated Git revision (0.120151ms)
-✔ scoped UI build still reports actual backend source skew (0.085099ms)
-✔ fingerprint-authoritative stale workers produce an explicit mismatch (0.120282ms)
-✔ missing worker heartbeats do not invent a worker version or mismatch (0.275136ms)
-✔ worker reports without an expected denominator are visibly unverified (0.220623ms)
-✔ specialized scanner workers participate in build mismatch reporting (1.061475ms)
-✔ optional specialized pools with no running workers do not invent build skew (0.134593ms)
-(node:3044) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/clientRandom.ts is not specified and it doesn't parse as CommonJS.
+✔ matching component identities collapse to one version (2.418076ms)
+✔ different Git abbreviation lengths for the same commit do not create false skew (0.379679ms)
+✔ short prefixes and non-Git version labels still require exact equality (0.215973ms)
+✔ dirty UI retains its useful local-checkout marker without causing skew (0.231062ms)
+✔ raw compose dev placeholder is unknown rather than a false mismatch (0.306412ms)
+✔ scoped UI build uses API source fingerprint instead of unrelated Git revision (0.231692ms)
+✔ scoped UI build still reports actual backend source skew (0.209972ms)
+✔ fingerprint-authoritative stale workers produce an explicit mismatch (0.307926ms)
+✔ missing worker heartbeats do not invent a worker version or mismatch (0.282819ms)
+✔ worker reports without an expected denominator are visibly unverified (2.57056ms)
+✔ specialized scanner workers participate in build mismatch reporting (0.255667ms)
+✔ optional specialized pools with no running workers do not invent build skew (0.205283ms)
+(node:3580) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/clientRandom.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ generates distinct version 4 UUIDs when randomUUID is absent (4.545963ms)
-(node:3050) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/cn.ts is not specified and it doesn't parse as CommonJS.
+✔ generates distinct version 4 UUIDs when randomUUID is absent (5.907734ms)
+(node:3581) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/cn.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ cn joins truthy class strings with single spaces (0.895083ms)
-✔ cn drops falsy entries (false, null, undefined, empty) (0.182886ms)
-✔ cn returns empty string when nothing is truthy (0.15224ms)
-✔ cn supports the conditional-class idiom (0.144068ms)
-(node:3060) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/credentialDefaults.ts is not specified and it doesn't parse as CommonJS.
+✔ cn joins truthy class strings with single spaces (1.384225ms)
+✔ cn drops falsy entries (false, null, undefined, empty) (0.274783ms)
+✔ cn returns empty string when nothing is truthy (0.208529ms)
+✔ cn supports the conditional-class idiom (0.226283ms)
+(node:3595) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/credentialDefaults.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ a target starts with its own credential before one shared with it (0.781331ms)
-✔ inactive, incompatible and excluded credentials are never chosen (0.187013ms)
-✔ a Hunt fills primary, secondary and service, and never an SSH identity (0.704445ms)
-(node:3061) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/detailReturnUrl.ts is not specified and it doesn't parse as CommonJS.
+✔ a target starts with its own credential before one shared with it (1.279179ms)
+✔ inactive, incompatible and excluded credentials are never chosen (0.234778ms)
+✔ a Hunt fills primary, secondary and service, and never an SSH identity (1.196755ms)
+(node:3596) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/detailReturnUrl.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ every filter in effect travels to the detail page; defaults and blanks do not (1.597125ms)
-✔ an unfiltered list links to the bare detail page (0.212872ms)
-✔ complete device posture retains its final score (2.99605ms)
-✔ incomplete device posture is explicitly provisional (0.358862ms)
-✔ device summaries preserve the latest scan provisional state (0.256547ms)
-✔ device summaries withhold a retained A when latest reachability is inconclusive (0.137137ms)
-✔ device summaries qualify stale positive evidence (0.133522ms)
-✔ unconfirmed device reachability never presents a stored score (0.137097ms)
-✔ non-device score presentation is unchanged (0.123006ms)
-✔ non-device detail prefers current-policy result projection over legacy row score (0.131088ms)
-✔ unreliable DAST grade is explicitly provisional and never displayed as A star (0.129215ms)
-✔ a DAST run that only reached an auth challenge withholds the clean grade (0.230068ms)
-✔ a web scan whose bound origin only redirects says so instead of blaming a login (0.159571ms)
-✔ device activity becomes readable content-free report logs (0.262797ms)
-✔ latest device reachability is not confused with retained service history (0.150868ms)
-✔ explicit no-application evidence withholds even a stale row grade (0.114122ms)
-✔ a missing score is not coerced into a measured zero (0.121023ms)
-(node:3100) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/evidenceRetention.ts is not specified and it doesn't parse as CommonJS.
+✔ every filter in effect travels to the detail page; defaults and blanks do not (2.567064ms)
+✔ an unfiltered list links to the bare detail page (0.2997ms)
+✔ complete device posture retains its final score (6.873157ms)
+✔ incomplete device posture is explicitly provisional (0.816545ms)
+✔ device summaries preserve the latest scan provisional state (0.498681ms)
+✔ device summaries withhold a retained A when latest reachability is inconclusive (0.245919ms)
+✔ device summaries qualify stale positive evidence (0.264244ms)
+✔ unconfirmed device reachability never presents a stored score (0.233856ms)
+✔ non-device score presentation is unchanged (0.213468ms)
+✔ non-device detail prefers current-policy result projection over legacy row score (0.531202ms)
+✔ unreliable DAST grade is explicitly provisional and never displayed as A star (0.782822ms)
+✔ a DAST run that only reached an auth challenge withholds the clean grade (0.651226ms)
+✔ a web scan whose bound origin only redirects says so instead of blaming a login (0.391822ms)
+✔ device activity becomes readable content-free report logs (0.353631ms)
+✔ latest device reachability is not confused with retained service history (1.131233ms)
+✔ explicit no-application evidence withholds even a stale row grade (0.19839ms)
+✔ a missing score is not coerced into a measured zero (0.168915ms)
+(node:3616) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/evidenceRetention.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ retention criteria key changes for every destructive criterion (0.902615ms)
-✔ retention criteria normalize blank and bounded numeric inputs (0.977368ms)
-✔ retention execution request contains only the preview and approval bindings (0.190909ms)
-✔ unfinished execution recovery preserves non-default hidden criteria (0.262056ms)
-(node:3106) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingFreshness.ts is not specified and it doesn't parse as CommonJS.
+✔ retention criteria key changes for every destructive criterion (1.38145ms)
+✔ retention criteria normalize blank and bounded numeric inputs (1.073365ms)
+✔ retention execution request contains only the preview and approval bindings (0.254416ms)
+✔ unfinished execution recovery preserves non-default hidden criteria (0.38553ms)
+(node:3622) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingFreshness.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ a finding observed by a recent scan is unremarkably current (1.347637ms)
-✔ the shakerscan.com case: a critical last observed in May reads as not recent (0.27104ms)
-✔ first seen is only repeated when it differs from last seen (0.15221ms)
-✔ a finding that came back after being resolved says so (0.154243ms)
-✔ a resolved finding reports when it was resolved (0.223518ms)
-✔ a finding no scan ever observed is flagged, not treated as current (0.100723ms)
-✔ the staleness boundary is the documented threshold (0.186231ms)
-✔ relative age stays readable across the ranges it spans (0.098418ms)
-(node:3107) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingGroups.ts is not specified and it doesn't parse as CommonJS.
+✔ a finding observed by a recent scan is unremarkably current (3.094389ms)
+✔ the shakerscan.com case: a critical last observed in May reads as not recent (0.456393ms)
+✔ first seen is only repeated when it differs from last seen (0.59457ms)
+✔ a finding that came back after being resolved says so (1.149417ms)
+✔ a resolved finding reports when it was resolved (0.439762ms)
+✔ a finding no scan ever observed is flagged, not treated as current (0.247943ms)
+✔ the staleness boundary is the documented threshold (0.41771ms)
+✔ relative age stays readable across the ranges it spans (0.290031ms)
+(node:3629) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingGroups.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ repeats of one issue on one subject collapse into a group, in server order (1.588191ms)
-✔ a different subject, proof, or triage state is a different group (0.289077ms)
-✔ the location names the route and parameter names, never their values (0.397101ms)
-✔ open work is the default view, except for a scan-scoped view of its evidence (0.177399ms)
-✔ a retest shows only when it tells the row something new (0.427756ms)
-✔ the count line never presents a partial load as complete (42.273753ms)
-(node:3121) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingObservation.ts is not specified and it doesn't parse as CommonJS.
+✔ repeats of one issue on one subject collapse into a group, in server order (2.527711ms)
+✔ a different subject, proof, or triage state is a different group (0.328664ms)
+✔ the location names the route and parameter names, never their values (0.499282ms)
+✔ open work is the default view, except for a scan-scoped view of its evidence (0.275945ms)
+✔ a retest shows only when it tells the row something new (0.698244ms)
+✔ the count line never presents a partial load as complete (22.372875ms)
+(node:3637) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingObservation.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ an exposure proof reads as what was exposed, how it answered, and the redacted excerpt (1.842566ms)
-✔ an injection proof shows the parameter, technique, repetitions and control/payload statuses (0.401256ms)
-✔ missing or malformed evidence yields an empty observation (0.179031ms)
-✔ a scan-time verdict is not presented as a replay (0.143297ms)
-✔ locations show the host and the path with query names only (0.296277ms)
-(node:3128) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingProof.ts is not specified and it doesn't parse as CommonJS.
+✔ an exposure proof reads as what was exposed, how it answered, and the redacted excerpt (2.628239ms)
+✔ an injection proof shows the parameter, technique, repetitions and control/payload statuses (0.456813ms)
+✔ missing or malformed evidence yields an empty observation (0.473936ms)
+✔ a scan-time verdict is not presented as a replay (0.218368ms)
+✔ locations show the host and the path with query names only (0.512737ms)
+(node:3644) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingProof.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ canonical proof requires the authoritative boolean and matching state (0.960472ms)
-(node:3135) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/huntReviewModel.ts is not specified and it doesn't parse as CommonJS.
+✔ canonical proof requires the authoritative boolean and matching state (1.25836ms)
+(node:3651) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/huntReviewModel.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ historical candidates are neither erased nor described as freshly reproduced (0.821983ms)
-✔ ambiguous and unknown server assessments are not translated into safe or verified (0.247945ms)
-✔ review URL references reject malformed and path-shaped identifiers (0.296168ms)
-(node:3142) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/huntReviewModel.ts is not specified and it doesn't parse as CommonJS.
+✔ historical candidates are neither erased nor described as freshly reproduced (1.405114ms)
+✔ ambiguous and unknown server assessments are not translated into safe or verified (0.394216ms)
+✔ review URL references reject malformed and path-shaped identifiers (0.526544ms)
+(node:3658) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/huntReviewModel.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ history replacement removes a selection from a discarded page (0.722933ms)
-✔ empty history clears selection (0.151138ms)
-✔ refresh retains an existing visible selection (0.130908ms)
-✔ appending history preserves a later-page selection (0.113562ms)
-(node:3143) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/listFilterValues.ts is not specified and it doesn't parse as CommonJS.
+✔ history replacement removes a selection from a discarded page (1.147813ms)
+✔ empty history clears selection (0.196497ms)
+✔ refresh retains an existing visible selection (0.212266ms)
+✔ appending history preserves a later-page selection (0.196297ms)
+(node:3659) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/listFilterValues.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ severity pills add and remove values in a fixed order (0.795983ms)
-✔ a single value from an older link still reads as one selection (0.729443ms)
-✔ no strict null-comparison directly after an optional chain (31.443175ms)
-(node:3163) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/safe.ts is not specified and it doesn't parse as CommonJS.
+✔ severity pills add and remove values in a fixed order (1.327659ms)
+✔ a single value from an older link still reads as one selection (1.16751ms)
+✔ no strict null-comparison directly after an optional chain (48.124578ms)
+(node:3679) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/safe.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ asArray returns real arrays unchanged (1.282149ms)
-✔ asArray coerces undefined / null (missing key) to [] (0.173753ms)
-✔ asArray coerces a malformed / version-skewed non-array to [] (0.170989ms)
-✔ running phases are explained in operator language (1.709745ms)
-✔ progress logs become readable milestones without discarding raw evidence (1.067364ms)
-✔ successful diagnostics with empty error fields remain neutral (0.527197ms)
-✔ structured diagnostic failures and real exceptions remain errors (0.355127ms)
-✔ budget-skipped diagnostics are warnings even when the adapter records an error class (0.213073ms)
-✔ a shallow clean scan leads with an honest conclusion instead of a perfect score (0.514057ms)
-✔ selected active families without candidate actions are named as examination gaps (0.91928ms)
-✔ an unobservable application leads with not examined instead of clean (1.196179ms)
-✔ a bound origin that only redirects is explained as a redirect, not a login wall (0.245792ms)
-✔ confirmed and candidate material findings get distinct conclusions (0.280785ms)
-✔ proof is the server projection, never the scanner word or a second boolean (0.299613ms)
-✔ the Findings tab groups by proof, lists a title once, and orders by severity (0.331341ms)
-✔ ambiguous v3 reports claim posture deductions only when they carry one (0.579426ms)
-✔ raw and persisted forms of the same scan finding share one UI identity (0.2054ms)
-✔ finding identity is the persisted fingerprint when there is one, and paths keep their case (0.164259ms)
-✔ requested coverage failures are promoted into the result summary (0.15229ms)
-✔ the testing tile names what active permission bought, or warns that it bought nothing (0.147312ms)
-✔ the conclusion names the next step for each limit it reports (0.288356ms)
-✔ carried over counts only active rows this run neither wrote, last saw, nor reported by fingerprint (0.267624ms)
-✔ a distinct fingerprint with the same display strings stays carried over (0.0929ms)
-✔ a partial history never reads as an all-clear (0.057677ms)
-✔ a report finding without a fingerprint joins its durable row once (0.330099ms)
-✔ display fallback matches one-to-one and does not collapse distinct fingerprints (0.199552ms)
-✔ history rows from earlier scans stay outside this scan findings (0.066611ms)
-✔ the release line claims an earlier-scan origin only when the decision says so (0.222877ms)
-✔ a parallel child prefix stays visible as the entry origin instead of being eaten as the source (0.121984ms)
-✔ the server summary from the decision wins over the client fallback (0.140542ms)
-✔ an unreachable scheme-less target names the origins that did not answer (0.151709ms)
-✔ a redirect-only origin says where the application is (0.39693ms)
-✔ a quota wait names the domain and the estimated resume time instead of blaming workers (18.667651ms)
-✔ a past wait is not presented as the current reason (0.203417ms)
-✔ a quota budget reduction is shown in plain words (0.099521ms)
-✔ a finding proven in this run stays proven once merged with the row the worker stored (0.292603ms)
-(node:3177) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/scanFailureRecommendation.ts is not specified and it doesn't parse as CommonJS.
+✔ asArray returns real arrays unchanged (1.810712ms)
+✔ asArray coerces undefined / null (missing key) to [] (0.197019ms)
+✔ asArray coerces a malformed / version-skewed non-array to [] (0.202719ms)
+✔ running phases are explained in operator language (2.460765ms)
+✔ progress logs become readable milestones without discarding raw evidence (1.363867ms)
+✔ successful diagnostics with empty error fields remain neutral (0.617513ms)
+✔ structured diagnostic failures and real exceptions remain errors (0.283399ms)
+✔ budget-skipped diagnostics are warnings even when the adapter records an error class (0.26746ms)
+✔ a shallow clean scan leads with an honest conclusion instead of a perfect score (0.768997ms)
+✔ selected active families without candidate actions are named as examination gaps (0.512267ms)
+✔ an unobservable application leads with not examined instead of clean (2.028699ms)
+✔ a bound origin that only redirects is explained as a redirect, not a login wall (0.634705ms)
+✔ confirmed and candidate material findings get distinct conclusions (0.479135ms)
+✔ proof is the server projection, never the scanner word or a second boolean (0.48694ms)
+✔ the Findings tab groups by proof, lists a title once, and orders by severity (0.702321ms)
+✔ ambiguous v3 reports claim posture deductions only when they carry one (1.110304ms)
+✔ raw and persisted forms of the same scan finding share one UI identity (0.261428ms)
+✔ finding identity is the persisted fingerprint when there is one, and paths keep their case (0.234178ms)
+✔ requested coverage failures are promoted into the result summary (0.295121ms)
+✔ the testing tile names what active permission bought, or warns that it bought nothing (0.279923ms)
+✔ the conclusion names the next step for each limit it reports (0.483312ms)
+✔ carried over counts only active rows this run neither wrote, last saw, nor reported by fingerprint (0.434371ms)
+✔ a distinct fingerprint with the same display strings stays carried over (0.150411ms)
+✔ a partial history never reads as an all-clear (0.112139ms)
+✔ a report finding without a fingerprint joins its durable row once (0.676553ms)
+✔ display fallback matches one-to-one and does not collapse distinct fingerprints (0.342219ms)
+✔ history rows from earlier scans stay outside this scan findings (0.382053ms)
+✔ the release line claims an earlier-scan origin only when the decision says so (0.628053ms)
+✔ a parallel child prefix stays visible as the entry origin instead of being eaten as the source (0.381933ms)
+✔ the server summary from the decision wins over the client fallback (0.379459ms)
+✔ an unreachable scheme-less target names the origins that did not answer (0.392133ms)
+✔ a redirect-only origin says where the application is (0.235951ms)
+✔ a quota wait names the domain and the estimated resume time instead of blaming workers (25.063369ms)
+✔ a past wait is not presented as the current reason (0.241391ms)
+✔ a quota budget reduction is shown in plain words (0.173715ms)
+✔ a finding proven in this run stays proven once merged with the row the worker stored (0.446594ms)
+(node:3693) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/scanFailureRecommendation.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ heartbeat timeout is treated as an execution failure, not target reachability (0.944358ms)
-✔ DNS and connection failures still recommend a target reachability check (0.339163ms)
-✔ shards direct the operator to the authoritative parent (0.164158ms)
-(node:3184) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetDns.ts is not specified and it doesn't parse as CommonJS.
+✔ heartbeat timeout is treated as an execution failure, not target reachability (1.434519ms)
+✔ DNS and connection failures still recommend a target reachability check (0.480717ms)
+✔ shards direct the operator to the authoritative parent (0.214781ms)
+(node:3700) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetDns.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ the API detail of a refused scan reaches the operator (30.94415ms)
-✔ FastAPI validation arrays become a readable sentence (0.524784ms)
-✔ a non-JSON error body falls back to the fixed message (0.472034ms)
-✔ Scan All names the distinct refusal reasons (0.903085ms)
-✔ a target registered under its www twin is scanned under that name (0.577012ms)
-✔ a historical target retains its URL so Scan admission reuses its ID and authorization (0.181374ms)
-✔ a finished discovery says how many names were skipped for having no address record (0.669031ms)
-(node:3190) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetValidation.ts is not specified and it doesn't parse as CommonJS.
+✔ the API detail of a refused scan reaches the operator (37.692356ms)
+✔ FastAPI validation arrays become a readable sentence (0.623334ms)
+✔ a non-JSON error body falls back to the fixed message (0.681312ms)
+✔ Scan All names the distinct refusal reasons (1.260825ms)
+✔ a target registered under its www twin is scanned under that name (0.903658ms)
+✔ a historical target retains its URL so Scan admission reuses its ID and authorization (0.300652ms)
+✔ a finished discovery says how many names were skipped for having no address record (0.807568ms)
+(node:3706) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetValidation.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ accepts public and local-lab HTTP targets (4.137225ms)
-✔ rejects malformed and unsupported targets (15.011154ms)
-✔ uses lab scope only for unmistakably local scan targets (0.49628ms)
-(node:3198) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/uploadAttempt.ts is not specified and it doesn't parse as CommonJS.
+✔ accepts public and local-lab HTTP targets (1.980739ms)
+✔ rejects malformed and unsupported targets (29.868263ms)
+✔ uses lab scope only for unmistakably local scan targets (0.769538ms)
+(node:3714) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/uploadAttempt.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ ambiguous upload retries reuse the key without retaining source documents (10.911696ms)
-✔ new successful upload intent gets a new key even for identical content (1.261547ms)
-✔ insecure standalone contexts retain upload support without a weak fingerprint (0.326113ms)
-✔ an opt-in pool with no worker reads as not started, not as a fault (0.812989ms)
-✔ a pool that has workers it cannot use stays a readiness fault (0.202726ms)
-✔ the server remedy wins over the reason token (0.135525ms)
-✔ candidate compilation and verification use bound IDs and explicit operator facts (3.239798ms)
-✔ regression export and evaluation carry artifact unchanged for server validation (0.478053ms)
-✔ server refusal is surfaced instead of presenting a queued scan (0.596803ms)
-✔ summarizes AI Gate campaign matrix, skipped reasons, evidence hashes, and replayable findings (2.089399ms)
-✔ returns unavailable review for non AI Gate results (0.180092ms)
-(node:3238) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/apiConfig.ts is not specified and it doesn't parse as CommonJS.
+✔ ambiguous upload retries reuse the key without retaining source documents (16.910795ms)
+✔ new successful upload intent gets a new key even for identical content (1.708972ms)
+✔ insecure standalone contexts retain upload support without a weak fingerprint (0.336629ms)
+✔ an opt-in pool with no worker reads as not started, not as a fault (1.463033ms)
+✔ a pool that has workers it cannot use stays a readiness fault (0.314387ms)
+✔ the server remedy wins over the reason token (0.217126ms)
+✔ candidate compilation and verification use bound IDs and explicit operator facts (2.687679ms)
+✔ regression export and evaluation carry artifact unchanged for server validation (0.595262ms)
+✔ server refusal is surfaced instead of presenting a queued scan (0.864305ms)
+✔ summarizes AI Gate campaign matrix, skipped reasons, evidence hashes, and replayable findings (2.342926ms)
+✔ returns unavailable review for non AI Gate results (0.191478ms)
+(node:3749) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/apiConfig.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ the API follows the address the page was opened at (1.23685ms)
-✔ the configured address is kept when the page is opened at it (0.201995ms)
-✔ the port and scheme of the configured API are preserved (0.143377ms)
-✔ rewriting a literal host preserves the configured proxy path and query (0.147282ms)
-✔ a forwarded port on loopback is not an address literal and is left alone (0.136566ms)
-✔ a hostname page never redirects the API (0.098308ms)
-✔ a hostname API is never rewritten to the page address (0.104698ms)
-✔ an unparseable configured URL is left exactly as it is (0.116066ms)
-✔ with nothing configured the existing same-host fallback still applies (0.836134ms)
-✔ application graph gives its icon-only return link an accessible name (0.830115ms)
-✔ ASM surfaces use one explicit route/variant/attempt coverage contract (1.463583ms)
-✔ ASM inventory distinguishes candidates, provenance, and reachability without scoring them (0.322848ms)
-✔ query filter history preserves the App Router route identity (2.932904ms)
-✔ exposure filters drive metrics, map, and priorities with one asset set (0.703834ms)
-✔ target groups distinguish domains from hosts and internal identities (0.342198ms)
-✔ finding copy failures and empty presentation have visible fallbacks (0.807381ms)
-✔ finding evidence names original, latest-observation, and producing scans separately (0.759779ms)
-✔ docs and mobile operations expose truthful accessible labels (1.304883ms)
-✔ executive posture defaults to an explicit operational cohort scope (1.656003ms)
-✔ scan submission titles follow the live execution status (0.200604ms)
-✔ scoped dashboard keeps global activity visible without attributing it to a cohort (2.545929ms)
-✔ scan failure summaries do not contradict terminal result state (1.085802ms)
-✔ summarizes replay proof and promotion state (1.403431ms)
-✔ matches interactive sessions by origin (0.169867ms)
-✔ surfaces fail-closed HTTP 200 responses as blocked execution (0.164109ms)
-✔ core privileged workflows create target-bound approval receipts in place (0.907722ms)
-✔ receipt creation carries the scope binding into Hunt and stays duration-bounded (0.206122ms)
-✔ authorized active Scan creates its required target-bound receipt during submission (0.283098ms)
-✔ a new Scan starts with the target credentials that fit each lane, never another target list (0.889545ms)
-✔ a new Hunt starts with the target credentials per slot, and never an SSH identity (0.18478ms)
-✔ client identity-pair kinds match the backend constant exactly (1.209879ms)
-✔ neither half of an identity pair is individually required (0.190759ms)
-✔ a pair kind with neither half is rejected before submit (0.080682ms)
-✔ an empty half is omitted from the payload rather than sent blank (0.068915ms)
-✔ the profile row reports which half a pair-kind profile holds (0.15185ms)
-✔ shared Credentials UI binds profiles to an exact supported target kind (0.853731ms)
-✔ changing credential target kind cannot query with the previous kind target ID (0.293694ms)
-✔ shared Credentials UI supports every canonical credential kind and lifecycle action (0.267845ms)
-✔ credential responses and presentation stay metadata-only (0.248215ms)
-✔ a credential is shared with other targets explicitly, and a shared copy is managed by its owner (0.386163ms)
-✔ credential editor keeps validation visible beside required fields (0.723543ms)
-✔ credential editor exposes a persistent validation summary (0.158821ms)
-✔ ASM schedule create and edit share one bounded option contract (1.337102ms)
-✔ skip reasons never render object coercions and stay bounded (0.352152ms)
-✔ remediation links allow internal routes and reject unsafe destinations (0.121414ms)
-✔ parent and family coverage preserve attempted, completed, and proof facts (0.19181ms)
-✔ device collection summaries tolerate list responses without request previews (1.086222ms)
-✔ device detail and list share the canonical readiness gate (0.236678ms)
-✔ overlapping batch counters are not a unique examination total (1.28351ms)
-✔ a classified scan separates closed from filtered (0.906511ms)
-✔ UDP counts open, closed and no-response probes from the UDP stage (0.341346ms)
-✔ fingerprinting reports how many open ports were identified and versioned (0.197248ms)
-✔ a scan without device posture has no port coverage (0.089065ms)
-✔ service details show product and version, extra detail, TLS and CPE (0.16502ms)
-✔ device collection previews are loaded from the detail endpoint on demand (0.74743ms)
-✔ installed V2 documentation links do not drift to the moving main branch (1.849937ms)
-✔ evidence browse loads bounded rows and expands one full proof on demand (1.303821ms)
-✔ evidence labels both nested family proofs and root proof contracts (0.133793ms)
-✔ evidence detail treats canonical deterministic proof contracts as usable proof (0.411953ms)
-✔ finding detail gives its icon-only return link an accessible name (0.823185ms)
-(node:3445) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingLinkage.ts is not specified and it doesn't parse as CommonJS.
+✔ the API follows the address the page was opened at (1.597623ms)
+✔ the configured address is kept when the page is opened at it (0.215993ms)
+✔ the port and scheme of the configured API are preserved (0.202258ms)
+✔ rewriting a literal host preserves the configured proxy path and query (0.246751ms)
+✔ a forwarded port on loopback is not an address literal and is left alone (0.198541ms)
+✔ a hostname page never redirects the API (0.182481ms)
+✔ a hostname API is never rewritten to the page address (0.187019ms)
+✔ an unparseable configured URL is left exactly as it is (0.255807ms)
+✔ with nothing configured the existing same-host fallback still applies (0.477602ms)
+✔ application graph gives its icon-only return link an accessible name (0.958811ms)
+✔ ASM surfaces use one explicit route/variant/attempt coverage contract (1.587665ms)
+✔ ASM inventory distinguishes candidates, provenance, and reachability without scoring them (0.432267ms)
+✔ query filter history preserves the App Router route identity (2.742793ms)
+✔ exposure filters drive metrics, map, and priorities with one asset set (0.557261ms)
+✔ target groups distinguish domains from hosts and internal identities (0.370251ms)
+✔ finding copy failures and empty presentation have visible fallbacks (1.03307ms)
+✔ finding evidence names original, latest-observation, and producing scans separately (0.956867ms)
+✔ docs and mobile operations expose truthful accessible labels (1.279479ms)
+✔ executive posture defaults to an explicit operational cohort scope (1.695236ms)
+✔ scan submission titles follow the live execution status (0.258363ms)
+✔ scoped dashboard keeps global activity visible without attributing it to a cohort (0.880925ms)
+✔ scan failure summaries do not contradict terminal result state (0.9797ms)
+✔ summarizes replay proof and promotion state (1.80979ms)
+✔ matches interactive sessions by origin (0.293789ms)
+✔ surfaces fail-closed HTTP 200 responses as blocked execution (0.290783ms)
+✔ core privileged workflows create target-bound approval receipts in place (2.016075ms)
+✔ receipt creation carries the scope binding into Hunt and stays duration-bounded (0.292296ms)
+✔ authorized active Scan creates its required target-bound receipt during submission (0.445963ms)
+✔ a new Scan starts with the target credentials that fit each lane, never another target list (1.407511ms)
+✔ a new Hunt starts with the target credentials per slot, and never an SSH identity (0.246751ms)
+✔ client identity-pair kinds match the backend constant exactly (1.868209ms)
+✔ neither half of an identity pair is individually required (0.26265ms)
+✔ a pair kind with neither half is rejected before submit (0.151232ms)
+✔ an empty half is omitted from the payload rather than sent blank (0.162143ms)
+✔ the profile row reports which half a pair-kind profile holds (0.280174ms)
+✔ shared Credentials UI binds profiles to an exact supported target kind (1.676942ms)
+✖ changing credential target kind cannot query with the previous kind target ID (1.419822ms)
+✔ shared Credentials UI supports every canonical credential kind and lifecycle action (0.452686ms)
+✔ credential responses and presentation stay metadata-only (0.479125ms)
+✔ a credential is shared with other targets explicitly, and a shared copy is managed by its owner (0.554184ms)
+✔ credential editor keeps validation visible beside required fields (1.228624ms)
+✔ credential editor exposes a persistent validation summary (0.220011ms)
+✔ ASM schedule create and edit share one bounded option contract (2.428455ms)
+✔ skip reasons never render object coercions and stay bounded (0.528627ms)
+✔ remediation links allow internal routes and reject unsafe destinations (0.298638ms)
+✔ parent and family coverage preserve attempted, completed, and proof facts (1.95435ms)
+✔ device collection summaries tolerate list responses without request previews (1.456791ms)
+✔ device detail and list share the canonical readiness gate (0.25671ms)
+✔ overlapping batch counters are not a unique examination total (3.301836ms)
+✔ a classified scan separates closed from filtered (1.738778ms)
+✔ UDP counts open, closed and no-response probes from the UDP stage (0.62125ms)
+✔ fingerprinting reports how many open ports were identified and versioned (0.435193ms)
+✔ a scan without device posture has no port coverage (0.217116ms)
+✔ service details show product and version, extra detail, TLS and CPE (0.427108ms)
+✔ device collection previews are loaded from the detail endpoint on demand (1.37611ms)
+✔ installed V2 documentation links do not drift to the moving main branch (2.83233ms)
+✔ evidence browse loads bounded rows and expands one full proof on demand (1.312351ms)
+✔ evidence labels both nested family proofs and root proof contracts (0.211695ms)
+✔ evidence detail treats canonical deterministic proof contracts as usable proof (0.300832ms)
+✔ finding detail gives its icon-only return link an accessible name (1.007422ms)
+(node:3984) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/findingLinkage.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ raw scanner results link to persisted findings by stable fingerprint (1.023888ms)
-✔ legacy raw results without IDs link by normalized title and URL (0.25825ms)
-✔ same title on a different endpoint remains unlinked (0.292322ms)
-✔ tool-specific identity wins when legacy records share a title and endpoint (0.216427ms)
-✔ probe-local AI finding IDs resolve only inside the current scan index (0.179881ms)
-✔ a report result is shown as observed by the scan that reported it (0.141584ms)
-✔ finding surfaces distinguish canonical proof from latest retest (1.013482ms)
-✔ severity and proof pills select several values, sent as the comma lists the API takes (0.750554ms)
-✔ the proof filter narrows the list, its older-findings count, and the way back from a finding (0.236968ms)
-✔ a finding shows the server fix guidance, says when it is general, and keeps tool steps (0.171529ms)
-(node:3482) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/app/findings/triage.ts is not specified and it doesn't parse as CommonJS.
+✔ raw scanner results link to persisted findings by stable fingerprint (1.618764ms)
+✔ legacy raw results without IDs link by normalized title and URL (0.310509ms)
+✔ same title on a different endpoint remains unlinked (0.383176ms)
+✔ tool-specific identity wins when legacy records share a title and endpoint (0.365803ms)
+✔ probe-local AI finding IDs resolve only inside the current scan index (0.379549ms)
+✔ a report result is shown as observed by the scan that reported it (0.263191ms)
+✔ finding surfaces distinguish canonical proof from latest retest (1.632048ms)
+✔ severity and proof pills select several values, sent as the comma lists the API takes (1.480335ms)
+✔ the proof filter narrows the list, its older-findings count, and the way back from a finding (0.399587ms)
+✔ a finding shows the server fix guidance, says when it is general, and keeps tool steps (0.229709ms)
+(node:4013) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/app/findings/triage.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ triage toast names the verdict the button promised and reports missing ids (1.17128ms)
-✔ the Filters badge counts only filters that narrow the list (0.226152ms)
-(node:3490) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/labels.ts is not specified and it doesn't parse as CommonJS.
+✔ triage toast names the verdict the button promised and reports missing ids (1.330525ms)
+✔ the Filters badge counts only filters that narrow the list (0.288088ms)
+(node:4026) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/labels.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ fleet access failure does not render an empty fleet as authoritative state (1.251852ms)
-✔ worker labels stay grammatical and completed shards show useful attribution (42.668032ms)
-✔ dashboard distinguishes logical scans, worker jobs, and worker processes (0.305071ms)
-✔ worker capacity copy never implies remote workers when Fleet is off (0.583852ms)
-✔ request archive is browsable as well as downloadable (0.971138ms)
-✔ archive browser supports server-side search, method, status and pagination (0.175826ms)
-✔ HAR export is explicitly raw, sensitive, and confirmation-gated (0.261856ms)
-✔ archive viewer explains historical and partial capture instead of implying completeness (0.239292ms)
-✔ Hunt archive offers a full explicit decision record separately from requests only (0.120832ms)
-✔ Hunt action UI separates reservation ceilings from settled actual use (2.286737ms)
-✔ Hunt detail shows persisted completion time and elapsed duration (0.267694ms)
-✔ Hunt debrief leads with immutable action and evidence facts (0.179251ms)
-✔ unified Hunt binds generic principal profiles without treating SSH proposal as execution (0.98591ms)
-✔ unified Hunt renders and explicitly confirms immutable SSH command plans (0.577704ms)
-✔ active unified Hunts refresh so external planner proposals appear (0.13199ms)
-(node:3518) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/labels.ts is not specified and it doesn't parse as CommonJS.
+✔ fleet access failure does not render an empty fleet as authoritative state (1.835558ms)
+✔ worker labels stay grammatical and completed shards show useful attribution (65.005677ms)
+✔ dashboard distinguishes logical scans, worker jobs, and worker processes (0.374029ms)
+✔ worker capacity copy never implies remote workers when Fleet is off (0.567841ms)
+✔ request archive is browsable as well as downloadable (1.492027ms)
+✔ archive browser supports server-side search, method, status and pagination (0.271277ms)
+✔ HAR export is explicitly raw, sensitive, and confirmation-gated (0.241311ms)
+✔ archive viewer explains historical and partial capture instead of implying completeness (0.293989ms)
+✔ Hunt archive offers a full explicit decision record separately from requests only (0.242393ms)
+✔ Hunt action UI separates reservation ceilings from settled actual use (2.008391ms)
+✔ Hunt detail shows persisted completion time and elapsed duration (0.227896ms)
+✔ Hunt debrief leads with immutable action and evidence facts (0.221804ms)
+✔ unified Hunt binds generic principal profiles without treating SSH proposal as execution (1.406307ms)
+✔ unified Hunt renders and explicitly confirms immutable SSH command plans (0.552402ms)
+✔ active unified Hunts refresh so external planner proposals appear (0.193732ms)
+(node:4055) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/labels.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ legacy device investigation links preserve and load the exact run (0.749884ms)
-✔ legacy history is clearly read-only and links its deterministic scans (0.177959ms)
-✔ canonical Hunt history has durable exact-run links and audit details (0.253724ms)
-✔ a newly started Hunt immediately becomes a reload-safe exact-run URL (0.096145ms)
-✔ open Hunt sessions do not imply background network execution (35.720723ms)
-✔ the legacy device investigation view is history only (1.2304ms)
-✔ finding investigation starts a canonical Hunt, not a Research episode (4.422636ms)
-✔ a managed deployment that authorizes targets itself is named, not guessed (0.743734ms)
-✔ Hunt reuses stored target authorization for selected credentials too (0.253714ms)
-✔ Hunt exposes a real label and description for capability filtering (0.856656ms)
-✔ Hunt explains why it cannot start before privileged prerequisites are ready (0.164689ms)
-✔ Hunt presents compact adaptive methodologies without preloading the catalog (0.184999ms)
-✔ Hunt UI consumes the generated server policy and zero-budget contract (0.929135ms)
-✔ hunt history is reachable from the sidebar (1.117059ms)
-✔ history filter state lives in the URL so a view survives reload and back (0.179491ms)
-✔ search is debounced rather than firing per keystroke (0.161324ms)
-✔ paging is server-side and reports the true total (0.117207ms)
-✔ sorting and filtering cover target, status and kind (0.230108ms)
-✔ a background refresh failure does not blank the rows being read (0.179712ms)
-✔ the page distinguishes loading, empty and error (0.143397ms)
-✔ the launcher no longer renders a failed history fetch as "no hunts" (0.170999ms)
-✔ the launcher links to the full history instead of capping silently (1.020543ms)
-✔ the client sends every supported filter and reads the total (0.405824ms)
-✔ the assurance chip is actually rendered, not just defined (0.476901ms)
-✔ scan report renders target infrastructure as explicitly unscored context (0.894563ms)
-✔ associated names are not presented as authorized or scanned targets (0.19194ms)
-✔ infrastructure section exposes registration, DNS, network, and certificate context (0.969075ms)
-✔ Model Intake exposes its workflow modes as a single-choice control (0.837426ms)
-✔ strict trusted-anchor mode has no blocking failures when operator trust material is present (1.658728ms)
-✔ metadata-supplied signing evidence cannot satisfy strict trusted provenance (0.248656ms)
-✔ checksum-only mode is advisory when policy does not require signature verification (0.138269ms)
-✔ trust mode inference prefers operator trust anchors over metadata claims (0.125419ms)
-✔ scanner readiness surfaces enforceable material freshness and reassessment (1.70656ms)
-✔ adapter readiness never mislabels an installed scanner when its version is unavailable (0.966531ms)
-✔ controlled Model Intake UI exposes every authoritative workflow stage (0.824747ms)
-✔ runner evidence is rendered as phases, network telemetry, and resource telemetry (0.273394ms)
-✔ Codex workflow is prominently advisory and promotion remains a separate operator action (0.194103ms)
-✔ normalized review report has engineer-first UI and export parity (0.480607ms)
-✔ the model reference and deployment target are chosen once and reused downstream (0.325251ms)
-✔ page stages are numbered in the order they are rendered (0.435488ms)
-✔ local installs receive a scoped browser session without the operator secret (0.796574ms)
-✔ artifact acquisition is presented in model-sized units, not a 100MB prefix (0.404863ms)
-✔ model intake renders as one phased pipeline instead of eight stacked panels (0.57528ms)
-✔ queueing a preflight scan hands off to admission instead of navigating away (0.300865ms)
-✔ using generated evidence carries the selected scan subject into admission (0.236067ms)
-✔ binding generated evidence is a picker over completed scans (0.140913ms)
-✔ cross-phase navigation targets the phase that renders the control (0.182737ms)
-✔ operator credential delivery cannot be enabled by spoofed deployment headers (0.189927ms)
-✔ credential messaging leads with impact and keeps ops detail behind a disclosure (2.44031ms)
-✔ an unavailable microVM tier reads as unavailable, not broken (0.226032ms)
-✔ pasting a model reference produces the complete evidence set by default (0.360165ms)
-✔ one pasted Hugging Face link queues the complete technical review (0.643724ms)
-✔ model intake exposes the authoritative check catalog in an information dialog (0.131829ms)
-✔ automatic review JSONB values cannot crash the Model Intake route (0.153482ms)
-✔ model intake reports lead with outcomes and collapse technical bulk (0.851757ms)
-✔ a Linux host with no CPU virtualization is named precisely, not "n/a on linux" (0.160243ms)
-✔ the microVM tier is offered as an opt-in install, not executed by the API (0.33725ms)
-✔ runner storage is visible, bounded before queueing, and safely cleanable (0.279732ms)
-✔ local PEM is the default runner signer and KMS remains opt-in (0.077998ms)
-✔ the runner chip is the way to reach the runner setup (0.115014ms)
-✔ the runner stage never ships a deployment bundle that cannot validate (0.179842ms)
-✔ the deployment bundle arrives prefilled from the scanned revision (0.161304ms)
-✔ fields the operator should not have to invent are offered, not demanded (0.103176ms)
-✔ a disabled queue button always states what is blocking it (0.370159ms)
-✔ undeclared embedding fields render empty, highlighted, and listed once (0.140713ms)
-✔ re-seeding refreshes digests without discarding declared embedding values (0.09225ms)
-✔ the default preflight actually scans the model (0.132841ms)
-✔ a full scan only requests a repository snapshot where one exists (0.11947ms)
-✔ a completed scan exports a downloadable bill of materials (0.941213ms)
-✔ a bill of materials states its own coverage (0.706579ms)
-✔ both bill-of-materials standards are offered (0.842604ms)
-✔ a Model Intake scan distinguishes static inspection from the end-to-end review (0.961644ms)
-✔ automatic review history stays compact and names the static stage accurately (0.194955ms)
-✔ serialized Firecracker work is labeled queued until the runner starts it (0.124478ms)
-✔ a first Firecracker run is reachable without inventing anything (0.319062ms)
-✔ the embedding contract is recovered for scans that predate its extraction (0.177999ms)
-✔ a failed seed says so instead of leaving the blocker list lying (0.081623ms)
-✔ only the server derives the runner bundle it will accept (0.609221ms)
-✔ every runner input is carried from a previous step without operator action (0.171249ms)
-✔ the evidence checklist credits generated technical artifacts accurately (0.137998ms)
-✔ no device completeness means no coverage (2.27552ms)
-✔ full completed scope has an exact unique denominator, not a false closed count (0.632446ms)
-✔ priority and top-N batch counts are not unique examined port counts (0.59534ms)
-✔ partial scan preserves open evidence without pretending that zero ports were examined (0.267154ms)
-✔ completed explicit ranges are deduplicated across priority scopes and retries (2.519579ms)
-✔ null, booleans, blanks and fractional counts remain unknown (0.392633ms)
-✔ UDP promotion does not add final inventory counts to original no-response counts (0.794802ms)
-✔ missing UDP evidence is unknown, not zero; requested ports are validated and deduplicated (0.203207ms)
-✔ fingerprint failure and successful HTTP detection are distinct outcomes (0.218781ms)
-✔ fingerprinting counts returned states independently of final identified services (0.315367ms)
-✔ invalid services and duplicate ports cannot inflate observed open counts (0.294175ms)
-✔ TLS must not be inferred from an encrypted non-TLS protocol (0.200513ms)
-✔ invalid and out-of-range port specifications never create examined coverage (0.234475ms)
-✔ UDP retries are not additional examined ports (0.185341ms)
-✔ New Scan labels target entry and exposes selected budget state (1.504004ms)
-✔ New Scan exposes disclosure and validation state to assistive technology (0.219992ms)
-✔ New Scan clears stale validation when the operator edits the form (0.151599ms)
-✔ ordinary active scans need one runnable worker, not release-fleet uniformity (0.177348ms)
-✔ active testing expresses active coverage intent and requires ownership before submit (0.108714ms)
-✔ submission waits for the family preview matching the current controls (0.127573ms)
-✔ normalizes a principal expectation without inventing optional fields (1.604386ms)
-✔ rejects an invalid expected HTTP status (0.433616ms)
-✔ omits empty optional fields when creating a principal (1.280546ms)
-✔ sends empty optional fields when updating so references can be cleared (0.205631ms)
-✔ normalizes counterevidence questions, steps, refs, and verdict paths (1.366897ms)
-✔ keeps analyst notes signal-only unless human verdict mode is explicit (0.258791ms)
-✔ does not style signal-only verdicts as proof-backed (0.150858ms)
-✔ collection upload keeps JSON errors visible in the modal (0.657715ms)
-✔ collection JSON is parsed before the upload request starts (0.126141ms)
-✔ shared collection UI supports upload, environment, binding, inventory, and selection (0.898619ms)
-✔ collection presentation stays metadata-only after upload (0.344471ms)
-✔ Scan and Hunt attach exact saved selection IDs without manual UUID entry (0.183858ms)
-✔ saved selections expose an explicit immutable revision lifecycle (0.147193ms)
-✖ route manifest covers every App Router page with an owned state assertion (5.547166ms)
-✔ every internal sidebar destination is represented in the route manifest (0.599136ms)
-✔ all 36 audited work-start paths retain a source marker and outcome assertion (7.503554ms)
-✔ installed UI loads its launcher-published API origin before client code (0.714721ms)
-✔ AI Gate export links use the launcher runtime API origin (0.248686ms)
-✔ Scan exposes independent host and state-changing request ceilings (0.892199ms)
-✔ scan coverage is a bounded report component with canonical language (1.139122ms)
-✔ coverage bars clamp malformed persisted percentages (0.187263ms)
-✔ canonical Scan UI submits only opaque exact-target credential profile IDs (1.0586ms)
-✔ Scan credential selection is disabled for batches and requires explicit authority (0.381497ms)
-✔ new generic profiles use canonical least-privilege capability selections (0.299683ms)
-✔ scan detail explains stages, placement, budgets, evidence, and grade reliability (1.029627ms)
-✔ execution explanation remains visible while running and after terminal outcomes (1.218773ms)
-✔ parallel action occurrences use collision-free DOM identities (0.239772ms)
-✔ direct shard pages identify the parent as the authoritative Scan (0.280274ms)
-✔ terminal shard rollups never render stale queued or running phases (0.182967ms)
-✔ bounded experiment timeout has an accessible name (0.111068ms)
-✔ scan result fetches durable finding history for its exact target (0.968203ms)
-✔ scan result reconciles report evidence with durable IDs from the scan payload (0.186322ms)
-✔ scan result separates observations from findings not observed by this run (0.267304ms)
-✔ scan result does not bury the current run under historical target rows (1.268277ms)
-✔ scan details load log history after a scan reaches a terminal state (0.832508ms)
-✔ completed and failed DAST views retain a readable execution log (0.338923ms)
-✔ running scans lead with readable progress and searchable live activity (0.345041ms)
-✔ detailed report does not repeat the target as a second page title (1.16381ms)
-✔ unlinked scan evidence is described in user-facing language (0.379754ms)
-✔ canonical DAST summary uses the persisted budget and permission names (0.716292ms)
-✔ HTTP usage falls back to canonical finalizer budget usage (0.210678ms)
-✔ parallel reports render canonical action gaps and partial status (0.124258ms)
-✔ completed scans lead with an evidence-based conclusion instead of a grade (0.944859ms)
-✔ risk, examination strength, and release status are kept distinct (0.249777ms)
-✔ result scope and deterministic posture weaknesses are visible (0.157398ms)
-✔ credential lanes never endorse an unqualified authenticated result (1.609414ms)
-✔ recorded credential interruption explains blocked work without hiding supported findings (0.304681ms)
-✔ a strong examination that finished everything endorses the conclusion (0.202546ms)
-✔ a strong score over an unfinished run is qualified, never endorsed, and names the families (0.80719ms)
-✔ coverage gap reasons read as what happened to the planned work, not as codes (0.213343ms)
-✔ an unreliable grade alone is enough to qualify the conclusion (0.148334ms)
-✔ a weak examination keeps the not-a-clean-bill wording (0.147553ms)
-✔ the page renders one coverage-gaps panel and colours a qualified conclusion amber (0.13881ms)
-✔ finding rows show a route, a proof label, and survive narrow screens (0.281315ms)
-✔ the release decision labels its chips and folds the blocking list (0.280805ms)
-✔ the canonical workflow is presented as a DAST scan, never Scan scan (0.737184ms)
-✔ new schedules require an explicit target and disabled schedules have no next run (0.820841ms)
-✔ schedule form previews authority and explains jittered dispatch (0.246973ms)
-✔ report sections are WAI-ARIA tabs that keyboard users can move through (0.891909ms)
-✔ the selected section is in the URL without a navigation, and every section prints (0.189206ms)
-✔ the scan report shows each report block in exactly one tab (0.447327ms)
-✔ production responses use one fail-closed browser security policy (0.76718ms)
-(node:3871) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetChoices.ts is not specified and it doesn't parse as CommonJS.
+✔ legacy device investigation links preserve and load the exact run (1.35974ms)
+✔ legacy history is clearly read-only and links its deterministic scans (0.225681ms)
+✔ canonical Hunt history has durable exact-run links and audit details (0.375261ms)
+✔ a newly started Hunt immediately becomes a reload-safe exact-run URL (0.254896ms)
+✔ open Hunt sessions do not imply background network execution (61.746159ms)
+✔ the legacy device investigation view is history only (1.415333ms)
+✔ finding investigation starts a canonical Hunt, not a Research episode (1.979948ms)
+✔ a managed deployment that authorizes targets itself is named, not guessed (0.903949ms)
+✔ Hunt reuses stored target authorization for selected credentials too (0.323495ms)
+✔ Hunt exposes a real label and description for capability filtering (1.434489ms)
+✔ Hunt explains why it cannot start before privileged prerequisites are ready (0.404546ms)
+✔ Hunt presents compact adaptive methodologies without preloading the catalog (0.407882ms)
+✔ Hunt UI consumes the generated server policy and zero-budget contract (1.356604ms)
+✔ hunt history is reachable from the sidebar (1.939452ms)
+✔ history filter state lives in the URL so a view survives reload and back (0.207327ms)
+✔ search is debounced rather than firing per keystroke (0.207308ms)
+✔ paging is server-side and reports the true total (0.215433ms)
+✔ sorting and filtering cover target, status and kind (0.34235ms)
+✔ a background refresh failure does not blank the rows being read (0.217156ms)
+✔ the page distinguishes loading, empty and error (0.339414ms)
+✔ the launcher no longer renders a failed history fetch as "no hunts" (0.266558ms)
+✔ the launcher links to the full history instead of capping silently (0.98513ms)
+✔ the client sends every supported filter and reads the total (0.726807ms)
+✔ the assurance chip is actually rendered, not just defined (0.474777ms)
+✔ scan report renders target infrastructure as explicitly unscored context (1.352797ms)
+✔ associated names are not presented as authorized or scanned targets (0.300582ms)
+✔ infrastructure section exposes registration, DNS, network, and certificate context (1.438496ms)
+✔ Model Intake exposes its workflow modes as a single-choice control (1.529567ms)
+✔ strict trusted-anchor mode has no blocking failures when operator trust material is present (2.744677ms)
+✔ metadata-supplied signing evidence cannot satisfy strict trusted provenance (0.376103ms)
+✔ checksum-only mode is advisory when policy does not require signature verification (0.261669ms)
+✔ trust mode inference prefers operator trust anchors over metadata claims (0.269624ms)
+✔ scanner readiness surfaces enforceable material freshness and reassessment (3.256853ms)
+✔ adapter readiness never mislabels an installed scanner when its version is unavailable (1.013963ms)
+✔ controlled Model Intake UI exposes every authoritative workflow stage (1.158333ms)
+✔ runner evidence is rendered as phases, network telemetry, and resource telemetry (0.308787ms)
+✔ Codex workflow is prominently advisory and promotion remains a separate operator action (0.226523ms)
+✔ normalized review report has engineer-first UI and export parity (0.512487ms)
+✔ the model reference and deployment target are chosen once and reused downstream (0.468134ms)
+✔ page stages are numbered in the order they are rendered (0.650214ms)
+✔ local installs receive a scoped browser session without the operator secret (0.626693ms)
+✔ artifact acquisition is presented in model-sized units, not a 100MB prefix (0.603016ms)
+✔ model intake renders as one phased pipeline instead of eight stacked panels (0.53559ms)
+✔ queueing a preflight scan hands off to admission instead of navigating away (0.354172ms)
+✔ using generated evidence carries the selected scan subject into admission (0.222126ms)
+✔ binding generated evidence is a picker over completed scans (0.182251ms)
+✔ cross-phase navigation targets the phase that renders the control (0.179756ms)
+✔ operator credential delivery cannot be enabled by spoofed deployment headers (0.132707ms)
+✔ credential messaging leads with impact and keeps ops detail behind a disclosure (2.695234ms)
+✔ an unavailable microVM tier reads as unavailable, not broken (0.203901ms)
+✔ pasting a model reference produces the complete evidence set by default (0.417039ms)
+✔ one pasted Hugging Face link queues the complete technical review (0.810142ms)
+✔ model intake exposes the authoritative check catalog in an information dialog (0.142766ms)
+✔ automatic review JSONB values cannot crash the Model Intake route (0.173294ms)
+✔ model intake reports lead with outcomes and collapse technical bulk (0.893849ms)
+✔ a Linux host with no CPU virtualization is named precisely, not "n/a on linux" (0.180757ms)
+✔ the microVM tier is offered as an opt-in install, not executed by the API (0.415024ms)
+✔ runner storage is visible, bounded before queueing, and safely cleanable (0.306633ms)
+✔ local PEM is the default runner signer and KMS remains opt-in (0.086502ms)
+✔ the runner chip is the way to reach the runner setup (0.145582ms)
+✔ the runner stage never ships a deployment bundle that cannot validate (0.206496ms)
+✔ the deployment bundle arrives prefilled from the scanned revision (0.232885ms)
+✔ fields the operator should not have to invent are offered, not demanded (0.167383ms)
+✔ a disabled queue button always states what is blocking it (0.260656ms)
+✔ undeclared embedding fields render empty, highlighted, and listed once (0.164928ms)
+✔ re-seeding refreshes digests without discarding declared embedding values (0.169106ms)
+✔ the default preflight actually scans the model (0.257621ms)
+✔ a full scan only requests a repository snapshot where one exists (0.156673ms)
+✔ a completed scan exports a downloadable bill of materials (0.847724ms)
+✔ a bill of materials states its own coverage (0.687444ms)
+✔ both bill-of-materials standards are offered (1.185364ms)
+✔ a Model Intake scan distinguishes static inspection from the end-to-end review (1.327179ms)
+✔ automatic review history stays compact and names the static stage accurately (0.305981ms)
+✔ serialized Firecracker work is labeled queued until the runner starts it (0.197108ms)
+✔ a first Firecracker run is reachable without inventing anything (0.311772ms)
+✔ the embedding contract is recovered for scans that predate its extraction (0.249907ms)
+✔ a failed seed says so instead of leaving the blocker list lying (0.145441ms)
+✔ only the server derives the runner bundle it will accept (0.643481ms)
+✔ every runner input is carried from a previous step without operator action (0.266017ms)
+✔ the evidence checklist credits generated technical artifacts accurately (0.247181ms)
+✔ no device completeness means no coverage (2.653957ms)
+✔ full completed scope has an exact unique denominator, not a false closed count (0.766952ms)
+✔ priority and top-N batch counts are not unique examined port counts (0.651727ms)
+✔ partial scan preserves open evidence without pretending that zero ports were examined (0.345576ms)
+✔ completed explicit ranges are deduplicated across priority scopes and retries (3.467576ms)
+✔ null, booleans, blanks and fractional counts remain unknown (0.50307ms)
+✔ UDP promotion does not add final inventory counts to original no-response counts (1.344121ms)
+✔ missing UDP evidence is unknown, not zero; requested ports are validated and deduplicated (0.337851ms)
+✔ fingerprint failure and successful HTTP detection are distinct outcomes (0.296194ms)
+✔ fingerprinting counts returned states independently of final identified services (0.415876ms)
+✔ invalid services and duplicate ports cannot inflate observed open counts (0.258503ms)
+✔ TLS must not be inferred from an encrypted non-TLS protocol (0.264184ms)
+✔ invalid and out-of-range port specifications never create examined coverage (0.351697ms)
+✔ UDP retries are not additional examined ports (0.220432ms)
+✔ New Scan labels target entry and exposes selected budget state (2.649318ms)
+✔ New Scan exposes disclosure and validation state to assistive technology (0.493221ms)
+✔ New Scan clears stale validation when the operator edits the form (0.254575ms)
+✔ ordinary active scans need one runnable worker, not release-fleet uniformity (0.367246ms)
+✔ active testing expresses active coverage intent and requires ownership before submit (0.268712ms)
+✔ submission waits for the family preview matching the current controls (0.258954ms)
+✔ normalizes a principal expectation without inventing optional fields (1.585732ms)
+✔ rejects an invalid expected HTTP status (0.457124ms)
+✔ omits empty optional fields when creating a principal (2.245373ms)
+✔ sends empty optional fields when updating so references can be cleared (0.297957ms)
+✔ normalizes counterevidence questions, steps, refs, and verdict paths (1.819287ms)
+✔ keeps analyst notes signal-only unless human verdict mode is explicit (0.431095ms)
+✔ does not style signal-only verdicts as proof-backed (0.181449ms)
+✔ collection upload keeps JSON errors visible in the modal (1.367745ms)
+✔ collection JSON is parsed before the upload request starts (0.273201ms)
+✖ shared collection UI supports upload, environment, binding, inventory, and selection (4.682576ms)
+✔ collection presentation stays metadata-only after upload (0.471611ms)
+✔ Scan and Hunt attach exact saved selection IDs without manual UUID entry (0.287286ms)
+✖ saved selections expose an explicit immutable revision lifecycle (1.545026ms)
+✔ route manifest covers every App Router page with an owned state assertion (7.528861ms)
+✔ every internal sidebar destination is represented in the route manifest (0.548814ms)
+✔ all 36 audited work-start paths retain a source marker and outcome assertion (13.122648ms)
+✔ installed UI loads its launcher-published API origin before client code (1.34965ms)
+✔ AI Gate export links use the launcher runtime API origin (0.378296ms)
+✔ Scan exposes independent host and state-changing request ceilings (1.176828ms)
+✔ scan coverage is a bounded report component with canonical language (1.695297ms)
+✔ coverage bars clamp malformed persisted percentages (0.28415ms)
+✔ canonical Scan UI submits only opaque exact-target credential profile IDs (1.708682ms)
+✔ Scan credential selection is disabled for batches and requires explicit authority (0.484145ms)
+✔ new generic profiles use canonical least-privilege capability selections (0.480667ms)
+✔ scan detail explains stages, placement, budgets, evidence, and grade reliability (1.682352ms)
+✔ execution explanation remains visible while running and after terminal outcomes (1.761049ms)
+✔ parallel action occurrences use collision-free DOM identities (0.572628ms)
+✔ direct shard pages identify the parent as the authoritative Scan (0.713002ms)
+✔ terminal shard rollups never render stale queued or running phases (0.275324ms)
+✔ bounded experiment timeout has an accessible name (0.173864ms)
+✔ scan result fetches durable finding history for its exact target (1.336115ms)
+✔ scan result reconciles report evidence with durable IDs from the scan payload (0.202758ms)
+✔ scan result separates observations from findings not observed by this run (0.379909ms)
+✔ scan result does not bury the current run under historical target rows (1.212375ms)
+✔ scan details load log history after a scan reaches a terminal state (1.617621ms)
+✔ completed and failed DAST views retain a readable execution log (0.606523ms)
+✔ running scans lead with readable progress and searchable live activity (0.450001ms)
+✔ detailed report does not repeat the target as a second page title (1.655882ms)
+✔ unlinked scan evidence is described in user-facing language (0.446494ms)
+✔ canonical DAST summary uses the persisted budget and permission names (1.598325ms)
+✔ HTTP usage falls back to canonical finalizer budget usage (0.377265ms)
+✔ parallel reports render canonical action gaps and partial status (0.240139ms)
+✔ completed scans lead with an evidence-based conclusion instead of a grade (1.154697ms)
+✔ risk, examination strength, and release status are kept distinct (0.286325ms)
+✔ result scope and deterministic posture weaknesses are visible (0.28344ms)
+✔ credential lanes never endorse an unqualified authenticated result (2.441941ms)
+✔ recorded credential interruption explains blocked work without hiding supported findings (0.372015ms)
+✔ a strong examination that finished everything endorses the conclusion (0.311462ms)
+✔ a strong score over an unfinished run is qualified, never endorsed, and names the families (1.270372ms)
+✔ coverage gap reasons read as what happened to the planned work, not as codes (0.35861ms)
+✔ an unreliable grade alone is enough to qualify the conclusion (0.340565ms)
+✔ a weak examination keeps the not-a-clean-bill wording (0.271897ms)
+✔ the page renders one coverage-gaps panel and colours a qualified conclusion amber (0.278059ms)
+✔ finding rows show a route, a proof label, and survive narrow screens (0.394356ms)
+✔ the release decision labels its chips and folds the blocking list (0.470439ms)
+✔ the canonical workflow is presented as a DAST scan, never Scan scan (1.538092ms)
+✔ new schedules require an explicit target and disabled schedules have no next run (1.271655ms)
+✔ schedule form previews authority and explains jittered dispatch (0.367938ms)
+✔ report sections are WAI-ARIA tabs that keyboard users can move through (1.046204ms)
+✔ the selected section is in the URL without a navigation, and every section prints (0.184104ms)
+✔ the scan report shows each report block in exactly one tab (0.562311ms)
+✔ production responses use one fail-closed browser security policy (1.358497ms)
+(node:4401) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/targetChoices.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ target-bound forms hide inactive and unnamed web targets (1.561761ms)
-✔ secret-bearing forms require an explicit target choice (0.307024ms)
-✔ historical malformed target labels stay bounded in read-only selectors (0.396951ms)
-✔ target scan counters describe completed scans instead of all linked history (0.936646ms)
-✔ per-target scan counters preserve exact target history context (0.323419ms)
-✔ subdomain finding counters have an accessible text label (0.140663ms)
-✔ pathological domain labels stay inside their card (0.104768ms)
-✔ archived targets can be listed, restored and deleted from the Targets page (0.319023ms)
-✔ the credential and collection target lives in the URL (1.041915ms)
-✔ a slow answer for a target no longer selected never fills the list (0.22507ms)
-✔ a linked credential target outside the loaded list is fetched, or reported (0.202937ms)
-✔ Hunts and Scans filter by an exact target (0.141043ms)
-✔ a device lists its findings from every source, Hunt included (0.123156ms)
-✔ the scan page shows target posture with per-section provenance (0.911317ms)
-✔ absence is stated per section instead of implied (0.311601ms)
-✔ the API client reads the posture route and surfaces server errors (0.227214ms)
-✔ single-target menus offer both the safe shortcut and full configuration (0.689492ms)
-✔ domain-wide customization opens New Scan in prefilled batch mode (0.175164ms)
-✔ target search has a stable accessible name (0.632537ms)
-(node:3915) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/workspaceCapabilities.ts is not specified and it doesn't parse as CommonJS.
+✔ target-bound forms hide inactive and unnamed web targets (2.399592ms)
+✖ secret-bearing forms require an explicit target choice (3.831566ms)
+✔ historical malformed target labels stay bounded in read-only selectors (0.803831ms)
+✔ target scan counters describe completed scans instead of all linked history (1.390778ms)
+✔ per-target scan counters preserve exact target history context (0.389057ms)
+✔ subdomain finding counters have an accessible text label (0.20356ms)
+✔ pathological domain labels stay inside their card (0.200625ms)
+✔ archived targets can be listed, restored and deleted from the Targets page (0.499924ms)
+✔ the credential and collection target lives in the URL (1.517625ms)
+✔ a slow answer for a target no longer selected never fills the list (0.361154ms)
+✖ a linked credential target outside the loaded list is fetched, or reported (2.55409ms)
+✔ Hunts and Scans filter by an exact target (1.292204ms)
+✔ a device lists its findings from every source, Hunt included (0.293238ms)
+✔ the scan page shows target posture with per-section provenance (1.344251ms)
+✔ absence is stated per section instead of implied (0.212577ms)
+✔ the API client reads the posture route and surfaces server errors (0.311432ms)
+✔ single-target menus offer both the safe shortcut and full configuration (0.973778ms)
+✔ domain-wide customization opens New Scan in prefilled batch mode (0.260747ms)
+✔ target search has a stable accessible name (1.11925ms)
+(node:4450) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/runner/work/shakerscan/shakerscan/ui/src/lib/workspaceCapabilities.ts is not specified and it doesn't parse as CommonJS.
 Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
 To eliminate this warning, add "type": "module" to /home/runner/work/shakerscan/shakerscan/ui/package.json.
 (Use `node --trace-warnings ...` to show where the warning was created)
-✔ standalone retains features; managed deployments hide unavailable and excluded routes (0.846069ms)
-✔ server render without window matches the standalone client so nav does not hydrate-mismatch (0.152921ms)
-✔ unknown capability contracts fail closed (0.0927ms)
-✔ workspace limits narrow engine limits without changing standalone ceilings (0.107602ms)
-✔ the edition label comes from a managed manifest and defaults to Open Source Edition (0.164669ms)
+✔ standalone retains features; managed deployments hide unavailable and excluded routes (1.25301ms)
+✔ server render without window matches the standalone client so nav does not hydrate-mismatch (0.20853ms)
+✔ unknown capability contracts fail closed (0.165309ms)
+✔ workspace limits narrow engine limits without changing standalone ceilings (0.215573ms)
+✔ the edition label comes from a managed manifest and defaults to Open Source Edition (0.248875ms)
 ℹ tests 415
 ℹ suites 0
-ℹ pass 414
-ℹ fail 1
+ℹ pass 410
+ℹ fail 5
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 3298.669468
+ℹ duration_ms 4610.293191
 
 ✖ failing tests:
 
-test at tests/route-action-manifest.test.mjs:21:1
-✖ route manifest covers every App Router page with an owned state assertion (5.547166ms)
-  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
-  + actual - expected
-  ... Skipped lines
+test at tests/credentials-page.test.mjs:23:1
+✖ changing credential target kind cannot query with the previous kind target ID (1.419822ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind, target_id: undefined/. Input:
   
-    [
-      'src/app/ai-gate/boundary/page.tsx',
-      'src/app/ai-gate/page.tsx',
-      'src/app/asm/page.tsx',
-      'src/app/campaigns/[id]/page.tsx',
-  ...
-      'src/app/settings/policy-profiles/page.tsx',
-  -   'src/app/targets/[id]/asset/page.tsx',
-      'src/app/targets/[id]/graph/page.tsx',
-      'src/app/targets/page.tsx',
-      'src/app/timeline/page.tsx',
-      'src/app/workers/page.tsx'
-    ]
+  'function changeTargetKind(kind: CredentialTargetKind) {\n' +
+    '    if (kind === targetKind) return\n' +
+    '    // Switching capability views preserves the asset identity and shared records.\n' +
+    '    setProfiles([])\n' +
+    '    setError(null)\n' +
+    '    setMissingTarget(null)\n' +
+    "    setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })\n" +
+    '  }'
   
-      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/route-action-manifest.test.mjs:25:10)
+      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/credentials-page.test.mjs:26:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: "function changeTargetKind(kind: CredentialTargetKind) {\n    if (kind === targetKind) return\n    // Switching capability views preserves the asset identity and shared records.\n    setProfiles([])\n    setError(null)\n    setMissingTarget(null)\n    setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })\n  }",
+    expected: /setFilters\(\{ target_kind: kind === 'web' \? undefined : kind, target_id: undefined/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/request-collections-page.test.mjs:15:1
+✖ shared collection UI supports upload, environment, binding, inventory, and selection (4.682576ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /\.slice\(0, 240\)/. Input:
+  
+  "'use client'\n" +
+    "import { featureEnabled } from '@/lib/workspaceCapabilities'\n" +
+    '\n' +
+    "import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\n" +
+    "import { useUrlFilters } from '@/lib/useUrlFilters'\n" +
+    "import { UploadAttempt } from '@/lib/uploadAttempt'\n" +
+    "import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\n" +
+    "import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\n" +
+    'import {\n' +
+    '  createRequestCollection,\n' +
+    '  deactivateRequestCollection,\n' +
+    '  deactivateRequestCollectionSelection,\n' +
+    '  getRequestCollection,\n' +
+    '  listRequestCollectionInventory,\n' +
+    '  listRequestCollections,\n' +
+    '  upsertRequestCollectionBinding,\n' +
+    '  upsertRequestCollectionEnvironment,\n' +
+    '  upsertRequestCollectionSelection,\n' +
+    '  type RequestCollectionDetail,\n' +
+    '  type RequestCollectionInventoryItem,\n' +
+    '  type RequestCollectionImportFormat,\n' +
+    '  type RequestCollectionReplayPolicy,\n' +
+    '  type RequestCollectionTargetKind,\n' +
+    '  type SharedRequestCollection,\n' +
+    "} from '@/lib/requestCollectionApi'\n" +
+    'import {\n' +
+    '  Button,\n' +
+    '  Card,\n' +
+    '  ConfirmDialog,\n' +
+    '  EmptyState,\n' +
+    '  ErrorState,\n' +
+    '  Field,\n' +
+    '  Input,\n' +
+    '  Modal,\n' +
+    '  PageHeader,\n' +
+    '  Select,\n' +
+    '  Textarea,\n' +
+    '  useToast,\n' +
+    "} from '@/components/ui'\n" +
+    '\n' +
+    'type Choice = {\n' +
+    '  id: string\n' +
+    '  label: string\n' +
+    '  detail: string\n' +
+    '  locator: string\n' +
+    "  ownerKind: 'network'\n" +
+    '}\n' +
+    '\n' +
+    'function splitValues(value: string): string[] {\n' +
+    '  return Array.from(new Set(\n' +
+    '    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n' +
+    '  ))\n' +
+    '}\n' +
+    '\n' +
+    'function parseJson(value: string, label: string): unknown {\n' +
+    '  try {\n' +
+    '    return JSON.parse(value)\n' +
+    '  } catch {\n' +
+    '    throw new Error(`${label} must be valid JSON.`)\n' +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    'async function readFile(file: File | undefined): Promise<string | null> {\n' +
+    '  if (!file) return null\n' +
+    "  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n" +
+    '  return file.text()\n' +
+    '}\n' +
+    '\n' +
+    'function defaultOrigin(choice: Choice | undefined): string {\n' +
+    "  if (!choice) return ''\n" +
+    '  try {\n' +
+    '    const parsed = new URL(choice.locator)\n' +
+    "    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n" +
+    '  } catch {\n' +
+    "    return ''\n" +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    "const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n" +
+    '\n' +
+    'export default function RequestCollectionsPage() {\n' +
+    '  return (\n' +
+    '    <Suspense fallback={null}>\n' +
+    '      <RequestCollectionsContent />\n' +
+    '    </Suspense>\n' +
+    '  )\n' +
+    '}\n' +
+    '\n' +
+    'function RequestCollectionsContent() {\n' +
+    '  const toast = useToast()\n' +
+    '  const [assets, setAssets] = useState<TargetAsset[]>([])\n' +
+    '  // The collection owner lives in the URL, so reload, Back and links keep it.\n' +
+    '  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n' +
+    '  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n' +
+    '    ? filters.target_kind as RequestCollectionTargetKind\n' +
+    "    : 'network'\n" +
+    "  const targetId = filters.target_id || ''\n" +
+    '  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n' +
+    '  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n' +
+    '    target_kind: kind,\n' +
+    '  }), [setFilters])\n' +
+    '  const latestCollectionsRequest = useRef(0)\n' +
+    '  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n' +
+    "  const [selectedId, setSelectedId] = useState('')\n" +
+    '  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n' +
+    '  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n' +
+    '  const [inventoryTotal, setInventoryTotal] = useState(0)\n' +
+    '  const [inventoryOffset, setInventoryOffset] = useState(0)\n' +
+    '  const [loading, setLoading] = useState(true)\n' +
+    '  const [busy, setBusy] = useState(false)\n' +
+    '  const [error, setError] = useState<string | null>(null)\n' +
+    '  const [uploaderOpen, setUploaderOpen] = useState(false)\n' +
+    '  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n' +
+    '\n' +
+    "  const [uploadName, setUploadName] = useState('')\n" +
+    '  const uploadAttempt = useRef(new UploadAttempt())\n' +
+    "  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n" +
+    "  const [documentText, setDocumentText] = useState('')\n" +
+    "  const [environmentText, setEnvironmentText] = useState('')\n" +
+    "  const [environmentName, setEnvironmentName] = useState('')\n" +
+    "  const [baseUrl, setBaseUrl] = useState('')\n" +
+    '  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n' +
+    '\n' +
+    "  const [bindingOrigins, setBindingOrigins] = useState('')\n" +
+    "  const [executionTargetId, setExecutionTargetId] = useState('')\n" +
+    '  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n' +
+    "  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n" +
+    "  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n" +
+    "  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n" +
+    '\n' +
+    "  const [selectionName, setSelectionName] = useState('')\n" +
+    "  const [selectionBindingId, setSelectionBindingId] = useState('')\n" +
+    "  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n" +
+    "  const [requestIds, setRequestIds] = useState('')\n" +
+    "  const [folders, setFolders] = useState('')\n" +
+    "  const [methods, setMethods] = useState('')\n" +
+    "  const [tags, setTags] = useState('')\n" +
+    "  const [pathRegex, setPathRegex] = useState('')\n" +
+    '  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n' +
+    "  const [maxRequests, setMaxRequests] = useState('500')\n" +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    let cancelled = false\n' +
+    '    getAllTargetAssets().then((items) => {\n' +
+    '      if (!cancelled) setAssets(items)\n' +
+    '    })\n' +
+    '      .catch((cause) => {\n' +
+    "        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n" +
+    '      })\n' +
+    '      .finally(() => { if (!cancelled) setLoading(false) })\n' +
+    '    return () => { cancelled = true }\n' +
+    '  }, [])\n' +
+    '\n' +
+    '  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n' +
+    "    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n" +
+    '  })),[assets])\n' +
+    '  const selectedChoice = choices.find((choice) => choice.id === targetId)\n' +
+    '  useEffect(() => {\n' +
+    "    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n" +
+    '    if (!targetId) return\n' +
+    '    const controller = new AbortController()\n' +
+    '    getTargetAsset(targetId,controller.signal).then((result) => {\n' +
+    '      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n' +
+    "    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n" +
+    '    return () => controller.abort()\n' +
+    '  },[targetId])\n' +
+    '  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n' +
+    "  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n" +
+    '  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n' +
+    '  useEffect(() => {\n' +
+    '    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n' +
+    '    let cancelled = false\n' +
+    '    getTargetAsset(targetId).then((result) => {\n' +
+    '      if (cancelled) return\n' +
+    "      if (!result.target.is_active) {setError('The linked target is retired');return}\n" +
+    '      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n' +
+    '      setTargetId(result.target.id)\n' +
+    "    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n" +
+    '    return () => {cancelled = true}\n' +
+    '  },[assets,loading,setTargetId,targetId])\n' +
+    '\n' +
+    '  const loadCollections = useCallback(async () => {\n' +
+    "    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n" +
+    '    const request = ++latestCollectionsRequest.current\n' +
+    '    if (!targetId) {\n' +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const result = await listRequestCollections(targetId)\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    '      setCollections(result.collections || [])\n' +
+    '      setSelectedId((current) => (\n' +
+    '        result.collections.some((item) => item.id === current)\n' +
+    '          ? current\n' +
+    "          : result.collections[0]?.id || ''\n" +
+    '      ))\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    "      // The previous target's collections must not stay on screen under this target.\n" +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n" +
+    '    }\n' +
+    '  }, [targetId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadCollections() }, [loadCollections])\n' +
+    '\n' +
+    '  const loadDetail = useCallback(async (offset = 0) => {\n' +
+    '    if (!selectedId) {\n' +
+    '      setDetail(null)\n' +
+    '      setInventory([])\n' +
+    '      setInventoryTotal(0)\n' +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const [nextDetail, nextInventory] = await Promise.all([\n' +
+    '        getRequestCollection(selectedId),\n' +
+    '        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n' +
+    '      ])\n' +
+    '      setDetail(nextDetail)\n' +
+    '      setInventory(nextInventory.requests || [])\n' +
+    '      setInventoryTotal(nextInventory.total || 0)\n' +
+    '      setInventoryOffset(nextInventory.offset || 0)\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n" +
+    '    }\n' +
+    '  }, [selectedId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadDetail(0) }, [loadDetail])\n' +
+    '\n' +
+    '  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n' +
+    '    availableBindingTargets.has(binding.target_id)\n' +
+    '  )), [detail?.bindings, availableBindingTargets])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    setSelectionBindingId((current) => (\n' +
+    '      matchingBindings.some((binding) => binding.id === current)\n' +
+    '        ? current\n' +
+    "        : matchingBindings[0]?.id || ''\n" +
+    '    ))\n' +
+    '  }, [matchingBindings])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    "    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n" +
+    '  }, [replayPolicy])\n' +
+    '\n' +
+    '  function openUploader() {\n' +
+    '    uploadAttempt.current.reset()\n' +
+    "    setUploadName('')\n" +
+    ' '... 25695 more characters
+  
+      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/request-collections-page.test.mjs:22:10)
       at Test.runInAsyncScope (node:async_hooks:227:14)
       at Test.run (node:internal/test_runner/test:1402:25)
       at Test.start (node:internal/test_runner/test:1262:17)
       at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17) {
     generatedMessage: true,
     code: 'ERR_ASSERTION',
-    actual: [
-      'src/app/ai-gate/boundary/page.tsx',         'src/app/ai-gate/page.tsx',
-      'src/app/asm/page.tsx',                      'src/app/campaigns/[id]/page.tsx',
-      'src/app/campaigns/page.tsx',                'src/app/credentials/page.tsx',
-      'src/app/deep-hunt/experiment/page.tsx',     'src/app/deep-hunt/explorer/page.tsx',
-      'src/app/deep-hunt/leads/page.tsx',          'src/app/deep-hunt/operator/page.tsx',
-      'src/app/deep-hunt/page.tsx',                'src/app/deep-hunt/runs/[id]/page.tsx',
-      'src/app/devices/[id]/agent/page.tsx',       'src/app/devices/[id]/page.tsx',
-      'src/app/devices/page.tsx',                  'src/app/devices/policies/page.tsx',
-      'src/app/docs/page.tsx',                     'src/app/evidence/page.tsx',
-      'src/app/exposure/page.tsx',                 'src/app/findings/[id]/page.tsx',
-      'src/app/findings/candidates/page.tsx',      'src/app/findings/page.tsx',
-      'src/app/fleet/page.tsx',                    'src/app/hunt/page.tsx',
-      'src/app/hunts/page.tsx',                    'src/app/model-intake/page.tsx',
-      'src/app/page.tsx',                          'src/app/request-collections/page.tsx',
-      'src/app/scan/new/page.tsx',                 'src/app/scans/[id]/page.tsx',
-      'src/app/scans/page.tsx',                    'src/app/schedules/page.tsx',
-      'src/app/settings/arsenal/page.tsx',         'src/app/settings/page.tsx',
-      'src/app/settings/policy-profiles/page.tsx', 'src/app/targets/[id]/graph/page.tsx',
-      'src/app/targets/page.tsx',                  'src/app/timeline/page.tsx',
-      'src/app/workers/page.tsx'
-    ],
-    expected: [
-      'src/app/ai-gate/boundary/page.tsx',         'src/app/ai-gate/page.tsx',
-      'src/app/asm/page.tsx',                      'src/app/campaigns/[id]/page.tsx',
-      'src/app/campaigns/page.tsx',                'src/app/credentials/page.tsx',
-      'src/app/deep-hunt/experiment/page.tsx',     'src/app/deep-hunt/explorer/page.tsx',
-      'src/app/deep-hunt/leads/page.tsx',          'src/app/deep-hunt/operator/page.tsx',
-      'src/app/deep-hunt/page.tsx',                'src/app/deep-hunt/runs/[id]/page.tsx',
-      'src/app/devices/[id]/agent/page.tsx',       'src/app/devices/[id]/page.tsx',
-      'src/app/devices/page.tsx',                  'src/app/devices/policies/page.tsx',
-      'src/app/docs/page.tsx',                     'src/app/evidence/page.tsx',
-      'src/app/exposure/page.tsx',                 'src/app/findings/[id]/page.tsx',
-      'src/app/findings/candidates/page.tsx',      'src/app/findings/page.tsx',
-      'src/app/fleet/page.tsx',                    'src/app/hunt/page.tsx',
-      'src/app/hunts/page.tsx',                    'src/app/model-intake/page.tsx',
-      'src/app/page.tsx',                          'src/app/request-collections/page.tsx',
-      'src/app/scan/new/page.tsx',                 'src/app/scans/[id]/page.tsx',
-      'src/app/scans/page.tsx',                    'src/app/schedules/page.tsx',
-      'src/app/settings/arsenal/page.tsx',         'src/app/settings/page.tsx',
-      'src/app/settings/policy-profiles/page.tsx', 'src/app/targets/[id]/asset/page.tsx',
-      'src/app/targets/[id]/graph/page.tsx',       'src/app/targets/page.tsx',
-      'src/app/timeline/page.tsx',                 'src/app/workers/page.tsx'
-    ],
-    operator: 'deepStrictEqual',
+    actual: "'use client'\nimport { featureEnabled } from '@/lib/workspaceCapabilities'\n\nimport { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\nimport { useUrlFilters } from '@/lib/useUrlFilters'\nimport { UploadAttempt } from '@/lib/uploadAttempt'\nimport { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\nimport { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\nimport {\n  createRequestCollection,\n  deactivateRequestCollection,\n  deactivateRequestCollectionSelection,\n  getRequestCollection,\n  listRequestCollectionInventory,\n  listRequestCollections,\n  upsertRequestCollectionBinding,\n  upsertRequestCollectionEnvironment,\n  upsertRequestCollectionSelection,\n  type RequestCollectionDetail,\n  type RequestCollectionInventoryItem,\n  type RequestCollectionImportFormat,\n  type RequestCollectionReplayPolicy,\n  type RequestCollectionTargetKind,\n  type SharedRequestCollection,\n} from '@/lib/requestCollectionApi'\nimport {\n  Button,\n  Card,\n  ConfirmDialog,\n  EmptyState,\n  ErrorState,\n  Field,\n  Input,\n  Modal,\n  PageHeader,\n  Select,\n  Textarea,\n  useToast,\n} from '@/components/ui'\n\ntype Choice = {\n  id: string\n  label: string\n  detail: string\n  locator: string\n  ownerKind: 'network'\n}\n\nfunction splitValues(value: string): string[] {\n  return Array.from(new Set(\n    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n  ))\n}\n\nfunction parseJson(value: string, label: string): unknown {\n  try {\n    return JSON.parse(value)\n  } catch {\n    throw new Error(`${label} must be valid JSON.`)\n  }\n}\n\nasync function readFile(file: File | undefined): Promise<string | null> {\n  if (!file) return null\n  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n  return file.text()\n}\n\nfunction defaultOrigin(choice: Choice | undefined): string {\n  if (!choice) return ''\n  try {\n    const parsed = new URL(choice.locator)\n    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n  } catch {\n    return ''\n  }\n}\n\nconst COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n\nexport default function RequestCollectionsPage() {\n  return (\n    <Suspense fallback={null}>\n      <RequestCollectionsContent />\n    </Suspense>\n  )\n}\n\nfunction RequestCollectionsContent() {\n  const toast = useToast()\n  const [assets, setAssets] = useState<TargetAsset[]>([])\n  // The collection owner lives in the URL, so reload, Back and links keep it.\n  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n    ? filters.target_kind as RequestCollectionTargetKind\n    : 'network'\n  const targetId = filters.target_id || ''\n  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n    target_kind: kind,\n  }), [setFilters])\n  const latestCollectionsRequest = useRef(0)\n  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n  const [selectedId, setSelectedId] = useState('')\n  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n  const [inventoryTotal, setInventoryTotal] = useState(0)\n  const [inventoryOffset, setInventoryOffset] = useState(0)\n  const [loading, setLoading] = useState(true)\n  const [busy, setBusy] = useState(false)\n  const [error, setError] = useState<string | null>(null)\n  const [uploaderOpen, setUploaderOpen] = useState(false)\n  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n\n  const [uploadName, setUploadName] = useState('')\n  const uploadAttempt = useRef(new UploadAttempt())\n  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n  const [documentText, setDocumentText] = useState('')\n  const [environmentText, setEnvironmentText] = useState('')\n  const [environmentName, setEnvironmentName] = useState('')\n  const [baseUrl, setBaseUrl] = useState('')\n  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n\n  const [bindingOrigins, setBindingOrigins] = useState('')\n  const [executionTargetId, setExecutionTargetId] = useState('')\n  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n\n  const [selectionName, setSelectionName] = useState('')\n  const [selectionBindingId, setSelectionBindingId] = useState('')\n  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n  const [requestIds, setRequestIds] = useState('')\n  const [folders, setFolders] = useState('')\n  const [methods, setMethods] = useState('')\n  const [tags, setTags] = useState('')\n  const [pathRegex, setPathRegex] = useState('')\n  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n  const [maxRequests, setMaxRequests] = useState('500')\n\n  useEffect(() => {\n    let cancelled = false\n    getAllTargetAssets().then((items) => {\n      if (!cancelled) setAssets(items)\n    })\n      .catch((cause) => {\n        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n      })\n      .finally(() => { if (!cancelled) setLoading(false) })\n    return () => { cancelled = true }\n  }, [])\n\n  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n  })),[assets])\n  const selectedChoice = choices.find((choice) => choice.id === targetId)\n  useEffect(() => {\n    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n    if (!targetId) return\n    const controller = new AbortController()\n    getTargetAsset(targetId,controller.signal).then((result) => {\n      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n    return () => controller.abort()\n  },[targetId])\n  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n  useEffect(() => {\n    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n    let cancelled = false\n    getTargetAsset(targetId).then((result) => {\n      if (cancelled) return\n      if (!result.target.is_active) {setError('The linked target is retired');return}\n      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n      setTargetId(result.target.id)\n    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n    return () => {cancelled = true}\n  },[assets,loading,setTargetId,targetId])\n\n  const loadCollections = useCallback(async () => {\n    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n    const request = ++latestCollectionsRequest.current\n    if (!targetId) {\n      setCollections([])\n      setSelectedId('')\n      return\n    }\n    try {\n      const result = await listRequestCollections(targetId)\n      if (request !== latestCollectionsRequest.current) return\n      setCollections(result.collections || [])\n      setSelectedId((current) => (\n        result.collections.some((item) => item.id === current)\n          ? current\n          : result.collections[0]?.id || ''\n      ))\n      setError(null)\n    } catch (cause) {\n      if (request !== latestCollectionsRequest.current) return\n      // The previous target's collections must not stay on screen under this target.\n      setCollections([])\n      setSelectedId('')\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n    }\n  }, [targetId])\n\n  useEffect(() => { void loadCollections() }, [loadCollections])\n\n  const loadDetail = useCallback(async (offset = 0) => {\n    if (!selectedId) {\n      setDetail(null)\n      setInventory([])\n      setInventoryTotal(0)\n      return\n    }\n    try {\n      const [nextDetail, nextInventory] = await Promise.all([\n        getRequestCollection(selectedId),\n        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n      ])\n      setDetail(nextDetail)\n      setInventory(nextInventory.requests || [])\n      setInventoryTotal(nextInventory.total || 0)\n      setInventoryOffset(nextInventory.offset || 0)\n      setError(null)\n    } catch (cause) {\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n    }\n  }, [selectedId])\n\n  useEffect(() => { void loadDetail(0) }, [loadDetail])\n\n  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n    availableBindingTargets.has(binding.target_id)\n  )), [detail?.bindings, availableBindingTargets])\n\n  useEffect(() => {\n    setSelectionBindingId((current) => (\n      matchingBindings.some((binding) => binding.id === current)\n        ? current\n        : matchingBindings[0]?.id || ''\n    ))\n  }, [matchingBindings])\n\n  useEffect(() => {\n    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n  }, [replayPolicy])\n\n  function openUploader() {\n    uploadAttempt.current.reset()\n    setUploadName('')\n "... 25695 more characters,
+    expected: /\.slice\(0, 240\)/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/request-collections-page.test.mjs:53:1
+✖ saved selections expose an explicit immutable revision lifecycle (1.545026ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Ownership is exact target ID/. Input:
+  
+  "'use client'\n" +
+    "import { featureEnabled } from '@/lib/workspaceCapabilities'\n" +
+    '\n' +
+    "import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\n" +
+    "import { useUrlFilters } from '@/lib/useUrlFilters'\n" +
+    "import { UploadAttempt } from '@/lib/uploadAttempt'\n" +
+    "import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\n" +
+    "import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\n" +
+    'import {\n' +
+    '  createRequestCollection,\n' +
+    '  deactivateRequestCollection,\n' +
+    '  deactivateRequestCollectionSelection,\n' +
+    '  getRequestCollection,\n' +
+    '  listRequestCollectionInventory,\n' +
+    '  listRequestCollections,\n' +
+    '  upsertRequestCollectionBinding,\n' +
+    '  upsertRequestCollectionEnvironment,\n' +
+    '  upsertRequestCollectionSelection,\n' +
+    '  type RequestCollectionDetail,\n' +
+    '  type RequestCollectionInventoryItem,\n' +
+    '  type RequestCollectionImportFormat,\n' +
+    '  type RequestCollectionReplayPolicy,\n' +
+    '  type RequestCollectionTargetKind,\n' +
+    '  type SharedRequestCollection,\n' +
+    "} from '@/lib/requestCollectionApi'\n" +
+    'import {\n' +
+    '  Button,\n' +
+    '  Card,\n' +
+    '  ConfirmDialog,\n' +
+    '  EmptyState,\n' +
+    '  ErrorState,\n' +
+    '  Field,\n' +
+    '  Input,\n' +
+    '  Modal,\n' +
+    '  PageHeader,\n' +
+    '  Select,\n' +
+    '  Textarea,\n' +
+    '  useToast,\n' +
+    "} from '@/components/ui'\n" +
+    '\n' +
+    'type Choice = {\n' +
+    '  id: string\n' +
+    '  label: string\n' +
+    '  detail: string\n' +
+    '  locator: string\n' +
+    "  ownerKind: 'network'\n" +
+    '}\n' +
+    '\n' +
+    'function splitValues(value: string): string[] {\n' +
+    '  return Array.from(new Set(\n' +
+    '    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n' +
+    '  ))\n' +
+    '}\n' +
+    '\n' +
+    'function parseJson(value: string, label: string): unknown {\n' +
+    '  try {\n' +
+    '    return JSON.parse(value)\n' +
+    '  } catch {\n' +
+    '    throw new Error(`${label} must be valid JSON.`)\n' +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    'async function readFile(file: File | undefined): Promise<string | null> {\n' +
+    '  if (!file) return null\n' +
+    "  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n" +
+    '  return file.text()\n' +
+    '}\n' +
+    '\n' +
+    'function defaultOrigin(choice: Choice | undefined): string {\n' +
+    "  if (!choice) return ''\n" +
+    '  try {\n' +
+    '    const parsed = new URL(choice.locator)\n' +
+    "    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n" +
+    '  } catch {\n' +
+    "    return ''\n" +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    "const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n" +
+    '\n' +
+    'export default function RequestCollectionsPage() {\n' +
+    '  return (\n' +
+    '    <Suspense fallback={null}>\n' +
+    '      <RequestCollectionsContent />\n' +
+    '    </Suspense>\n' +
+    '  )\n' +
+    '}\n' +
+    '\n' +
+    'function RequestCollectionsContent() {\n' +
+    '  const toast = useToast()\n' +
+    '  const [assets, setAssets] = useState<TargetAsset[]>([])\n' +
+    '  // The collection owner lives in the URL, so reload, Back and links keep it.\n' +
+    '  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n' +
+    '  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n' +
+    '    ? filters.target_kind as RequestCollectionTargetKind\n' +
+    "    : 'network'\n" +
+    "  const targetId = filters.target_id || ''\n" +
+    '  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n' +
+    '  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n' +
+    '    target_kind: kind,\n' +
+    '  }), [setFilters])\n' +
+    '  const latestCollectionsRequest = useRef(0)\n' +
+    '  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n' +
+    "  const [selectedId, setSelectedId] = useState('')\n" +
+    '  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n' +
+    '  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n' +
+    '  const [inventoryTotal, setInventoryTotal] = useState(0)\n' +
+    '  const [inventoryOffset, setInventoryOffset] = useState(0)\n' +
+    '  const [loading, setLoading] = useState(true)\n' +
+    '  const [busy, setBusy] = useState(false)\n' +
+    '  const [error, setError] = useState<string | null>(null)\n' +
+    '  const [uploaderOpen, setUploaderOpen] = useState(false)\n' +
+    '  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n' +
+    '\n' +
+    "  const [uploadName, setUploadName] = useState('')\n" +
+    '  const uploadAttempt = useRef(new UploadAttempt())\n' +
+    "  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n" +
+    "  const [documentText, setDocumentText] = useState('')\n" +
+    "  const [environmentText, setEnvironmentText] = useState('')\n" +
+    "  const [environmentName, setEnvironmentName] = useState('')\n" +
+    "  const [baseUrl, setBaseUrl] = useState('')\n" +
+    '  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n' +
+    '\n' +
+    "  const [bindingOrigins, setBindingOrigins] = useState('')\n" +
+    "  const [executionTargetId, setExecutionTargetId] = useState('')\n" +
+    '  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n' +
+    "  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n" +
+    "  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n" +
+    "  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n" +
+    '\n' +
+    "  const [selectionName, setSelectionName] = useState('')\n" +
+    "  const [selectionBindingId, setSelectionBindingId] = useState('')\n" +
+    "  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n" +
+    "  const [requestIds, setRequestIds] = useState('')\n" +
+    "  const [folders, setFolders] = useState('')\n" +
+    "  const [methods, setMethods] = useState('')\n" +
+    "  const [tags, setTags] = useState('')\n" +
+    "  const [pathRegex, setPathRegex] = useState('')\n" +
+    '  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n' +
+    "  const [maxRequests, setMaxRequests] = useState('500')\n" +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    let cancelled = false\n' +
+    '    getAllTargetAssets().then((items) => {\n' +
+    '      if (!cancelled) setAssets(items)\n' +
+    '    })\n' +
+    '      .catch((cause) => {\n' +
+    "        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n" +
+    '      })\n' +
+    '      .finally(() => { if (!cancelled) setLoading(false) })\n' +
+    '    return () => { cancelled = true }\n' +
+    '  }, [])\n' +
+    '\n' +
+    '  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n' +
+    "    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n" +
+    '  })),[assets])\n' +
+    '  const selectedChoice = choices.find((choice) => choice.id === targetId)\n' +
+    '  useEffect(() => {\n' +
+    "    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n" +
+    '    if (!targetId) return\n' +
+    '    const controller = new AbortController()\n' +
+    '    getTargetAsset(targetId,controller.signal).then((result) => {\n' +
+    '      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n' +
+    "    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n" +
+    '    return () => controller.abort()\n' +
+    '  },[targetId])\n' +
+    '  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n' +
+    "  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n" +
+    '  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n' +
+    '  useEffect(() => {\n' +
+    '    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n' +
+    '    let cancelled = false\n' +
+    '    getTargetAsset(targetId).then((result) => {\n' +
+    '      if (cancelled) return\n' +
+    "      if (!result.target.is_active) {setError('The linked target is retired');return}\n" +
+    '      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n' +
+    '      setTargetId(result.target.id)\n' +
+    "    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n" +
+    '    return () => {cancelled = true}\n' +
+    '  },[assets,loading,setTargetId,targetId])\n' +
+    '\n' +
+    '  const loadCollections = useCallback(async () => {\n' +
+    "    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n" +
+    '    const request = ++latestCollectionsRequest.current\n' +
+    '    if (!targetId) {\n' +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const result = await listRequestCollections(targetId)\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    '      setCollections(result.collections || [])\n' +
+    '      setSelectedId((current) => (\n' +
+    '        result.collections.some((item) => item.id === current)\n' +
+    '          ? current\n' +
+    "          : result.collections[0]?.id || ''\n" +
+    '      ))\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    "      // The previous target's collections must not stay on screen under this target.\n" +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n" +
+    '    }\n' +
+    '  }, [targetId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadCollections() }, [loadCollections])\n' +
+    '\n' +
+    '  const loadDetail = useCallback(async (offset = 0) => {\n' +
+    '    if (!selectedId) {\n' +
+    '      setDetail(null)\n' +
+    '      setInventory([])\n' +
+    '      setInventoryTotal(0)\n' +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const [nextDetail, nextInventory] = await Promise.all([\n' +
+    '        getRequestCollection(selectedId),\n' +
+    '        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n' +
+    '      ])\n' +
+    '      setDetail(nextDetail)\n' +
+    '      setInventory(nextInventory.requests || [])\n' +
+    '      setInventoryTotal(nextInventory.total || 0)\n' +
+    '      setInventoryOffset(nextInventory.offset || 0)\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n" +
+    '    }\n' +
+    '  }, [selectedId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadDetail(0) }, [loadDetail])\n' +
+    '\n' +
+    '  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n' +
+    '    availableBindingTargets.has(binding.target_id)\n' +
+    '  )), [detail?.bindings, availableBindingTargets])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    setSelectionBindingId((current) => (\n' +
+    '      matchingBindings.some((binding) => binding.id === current)\n' +
+    '        ? current\n' +
+    "        : matchingBindings[0]?.id || ''\n" +
+    '    ))\n' +
+    '  }, [matchingBindings])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    "    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n" +
+    '  }, [replayPolicy])\n' +
+    '\n' +
+    '  function openUploader() {\n' +
+    '    uploadAttempt.current.reset()\n' +
+    "    setUploadName('')\n" +
+    ' '... 25695 more characters
+  
+      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/request-collections-page.test.mjs:54:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: "'use client'\nimport { featureEnabled } from '@/lib/workspaceCapabilities'\n\nimport { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\nimport { useUrlFilters } from '@/lib/useUrlFilters'\nimport { UploadAttempt } from '@/lib/uploadAttempt'\nimport { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\nimport { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\nimport {\n  createRequestCollection,\n  deactivateRequestCollection,\n  deactivateRequestCollectionSelection,\n  getRequestCollection,\n  listRequestCollectionInventory,\n  listRequestCollections,\n  upsertRequestCollectionBinding,\n  upsertRequestCollectionEnvironment,\n  upsertRequestCollectionSelection,\n  type RequestCollectionDetail,\n  type RequestCollectionInventoryItem,\n  type RequestCollectionImportFormat,\n  type RequestCollectionReplayPolicy,\n  type RequestCollectionTargetKind,\n  type SharedRequestCollection,\n} from '@/lib/requestCollectionApi'\nimport {\n  Button,\n  Card,\n  ConfirmDialog,\n  EmptyState,\n  ErrorState,\n  Field,\n  Input,\n  Modal,\n  PageHeader,\n  Select,\n  Textarea,\n  useToast,\n} from '@/components/ui'\n\ntype Choice = {\n  id: string\n  label: string\n  detail: string\n  locator: string\n  ownerKind: 'network'\n}\n\nfunction splitValues(value: string): string[] {\n  return Array.from(new Set(\n    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n  ))\n}\n\nfunction parseJson(value: string, label: string): unknown {\n  try {\n    return JSON.parse(value)\n  } catch {\n    throw new Error(`${label} must be valid JSON.`)\n  }\n}\n\nasync function readFile(file: File | undefined): Promise<string | null> {\n  if (!file) return null\n  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n  return file.text()\n}\n\nfunction defaultOrigin(choice: Choice | undefined): string {\n  if (!choice) return ''\n  try {\n    const parsed = new URL(choice.locator)\n    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n  } catch {\n    return ''\n  }\n}\n\nconst COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n\nexport default function RequestCollectionsPage() {\n  return (\n    <Suspense fallback={null}>\n      <RequestCollectionsContent />\n    </Suspense>\n  )\n}\n\nfunction RequestCollectionsContent() {\n  const toast = useToast()\n  const [assets, setAssets] = useState<TargetAsset[]>([])\n  // The collection owner lives in the URL, so reload, Back and links keep it.\n  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n    ? filters.target_kind as RequestCollectionTargetKind\n    : 'network'\n  const targetId = filters.target_id || ''\n  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n    target_kind: kind,\n  }), [setFilters])\n  const latestCollectionsRequest = useRef(0)\n  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n  const [selectedId, setSelectedId] = useState('')\n  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n  const [inventoryTotal, setInventoryTotal] = useState(0)\n  const [inventoryOffset, setInventoryOffset] = useState(0)\n  const [loading, setLoading] = useState(true)\n  const [busy, setBusy] = useState(false)\n  const [error, setError] = useState<string | null>(null)\n  const [uploaderOpen, setUploaderOpen] = useState(false)\n  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n\n  const [uploadName, setUploadName] = useState('')\n  const uploadAttempt = useRef(new UploadAttempt())\n  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n  const [documentText, setDocumentText] = useState('')\n  const [environmentText, setEnvironmentText] = useState('')\n  const [environmentName, setEnvironmentName] = useState('')\n  const [baseUrl, setBaseUrl] = useState('')\n  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n\n  const [bindingOrigins, setBindingOrigins] = useState('')\n  const [executionTargetId, setExecutionTargetId] = useState('')\n  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n\n  const [selectionName, setSelectionName] = useState('')\n  const [selectionBindingId, setSelectionBindingId] = useState('')\n  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n  const [requestIds, setRequestIds] = useState('')\n  const [folders, setFolders] = useState('')\n  const [methods, setMethods] = useState('')\n  const [tags, setTags] = useState('')\n  const [pathRegex, setPathRegex] = useState('')\n  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n  const [maxRequests, setMaxRequests] = useState('500')\n\n  useEffect(() => {\n    let cancelled = false\n    getAllTargetAssets().then((items) => {\n      if (!cancelled) setAssets(items)\n    })\n      .catch((cause) => {\n        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n      })\n      .finally(() => { if (!cancelled) setLoading(false) })\n    return () => { cancelled = true }\n  }, [])\n\n  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n  })),[assets])\n  const selectedChoice = choices.find((choice) => choice.id === targetId)\n  useEffect(() => {\n    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n    if (!targetId) return\n    const controller = new AbortController()\n    getTargetAsset(targetId,controller.signal).then((result) => {\n      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n    return () => controller.abort()\n  },[targetId])\n  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n  useEffect(() => {\n    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n    let cancelled = false\n    getTargetAsset(targetId).then((result) => {\n      if (cancelled) return\n      if (!result.target.is_active) {setError('The linked target is retired');return}\n      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n      setTargetId(result.target.id)\n    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n    return () => {cancelled = true}\n  },[assets,loading,setTargetId,targetId])\n\n  const loadCollections = useCallback(async () => {\n    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n    const request = ++latestCollectionsRequest.current\n    if (!targetId) {\n      setCollections([])\n      setSelectedId('')\n      return\n    }\n    try {\n      const result = await listRequestCollections(targetId)\n      if (request !== latestCollectionsRequest.current) return\n      setCollections(result.collections || [])\n      setSelectedId((current) => (\n        result.collections.some((item) => item.id === current)\n          ? current\n          : result.collections[0]?.id || ''\n      ))\n      setError(null)\n    } catch (cause) {\n      if (request !== latestCollectionsRequest.current) return\n      // The previous target's collections must not stay on screen under this target.\n      setCollections([])\n      setSelectedId('')\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n    }\n  }, [targetId])\n\n  useEffect(() => { void loadCollections() }, [loadCollections])\n\n  const loadDetail = useCallback(async (offset = 0) => {\n    if (!selectedId) {\n      setDetail(null)\n      setInventory([])\n      setInventoryTotal(0)\n      return\n    }\n    try {\n      const [nextDetail, nextInventory] = await Promise.all([\n        getRequestCollection(selectedId),\n        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n      ])\n      setDetail(nextDetail)\n      setInventory(nextInventory.requests || [])\n      setInventoryTotal(nextInventory.total || 0)\n      setInventoryOffset(nextInventory.offset || 0)\n      setError(null)\n    } catch (cause) {\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n    }\n  }, [selectedId])\n\n  useEffect(() => { void loadDetail(0) }, [loadDetail])\n\n  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n    availableBindingTargets.has(binding.target_id)\n  )), [detail?.bindings, availableBindingTargets])\n\n  useEffect(() => {\n    setSelectionBindingId((current) => (\n      matchingBindings.some((binding) => binding.id === current)\n        ? current\n        : matchingBindings[0]?.id || ''\n    ))\n  }, [matchingBindings])\n\n  useEffect(() => {\n    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n  }, [replayPolicy])\n\n  function openUploader() {\n    uploadAttempt.current.reset()\n    setUploadName('')\n "... 25695 more characters,
+    expected: /Ownership is exact target ID/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/target-choice-robustness.test.mjs:26:1
+✖ secret-bearing forms require an explicit target choice (3.831566ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /if \(loading \|\| !targetId \|\| choices\.some\(\(choice\) => choice\.id === targetId\)\) return/. Input:
+  
+  "'use client'\n" +
+    "import { featureEnabled } from '@/lib/workspaceCapabilities'\n" +
+    '\n' +
+    "import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\n" +
+    "import { useUrlFilters } from '@/lib/useUrlFilters'\n" +
+    "import { UploadAttempt } from '@/lib/uploadAttempt'\n" +
+    "import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\n" +
+    "import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\n" +
+    'import {\n' +
+    '  createRequestCollection,\n' +
+    '  deactivateRequestCollection,\n' +
+    '  deactivateRequestCollectionSelection,\n' +
+    '  getRequestCollection,\n' +
+    '  listRequestCollectionInventory,\n' +
+    '  listRequestCollections,\n' +
+    '  upsertRequestCollectionBinding,\n' +
+    '  upsertRequestCollectionEnvironment,\n' +
+    '  upsertRequestCollectionSelection,\n' +
+    '  type RequestCollectionDetail,\n' +
+    '  type RequestCollectionInventoryItem,\n' +
+    '  type RequestCollectionImportFormat,\n' +
+    '  type RequestCollectionReplayPolicy,\n' +
+    '  type RequestCollectionTargetKind,\n' +
+    '  type SharedRequestCollection,\n' +
+    "} from '@/lib/requestCollectionApi'\n" +
+    'import {\n' +
+    '  Button,\n' +
+    '  Card,\n' +
+    '  ConfirmDialog,\n' +
+    '  EmptyState,\n' +
+    '  ErrorState,\n' +
+    '  Field,\n' +
+    '  Input,\n' +
+    '  Modal,\n' +
+    '  PageHeader,\n' +
+    '  Select,\n' +
+    '  Textarea,\n' +
+    '  useToast,\n' +
+    "} from '@/components/ui'\n" +
+    '\n' +
+    'type Choice = {\n' +
+    '  id: string\n' +
+    '  label: string\n' +
+    '  detail: string\n' +
+    '  locator: string\n' +
+    "  ownerKind: 'network'\n" +
+    '}\n' +
+    '\n' +
+    'function splitValues(value: string): string[] {\n' +
+    '  return Array.from(new Set(\n' +
+    '    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n' +
+    '  ))\n' +
+    '}\n' +
+    '\n' +
+    'function parseJson(value: string, label: string): unknown {\n' +
+    '  try {\n' +
+    '    return JSON.parse(value)\n' +
+    '  } catch {\n' +
+    '    throw new Error(`${label} must be valid JSON.`)\n' +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    'async function readFile(file: File | undefined): Promise<string | null> {\n' +
+    '  if (!file) return null\n' +
+    "  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n" +
+    '  return file.text()\n' +
+    '}\n' +
+    '\n' +
+    'function defaultOrigin(choice: Choice | undefined): string {\n' +
+    "  if (!choice) return ''\n" +
+    '  try {\n' +
+    '    const parsed = new URL(choice.locator)\n' +
+    "    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n" +
+    '  } catch {\n' +
+    "    return ''\n" +
+    '  }\n' +
+    '}\n' +
+    '\n' +
+    "const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n" +
+    '\n' +
+    'export default function RequestCollectionsPage() {\n' +
+    '  return (\n' +
+    '    <Suspense fallback={null}>\n' +
+    '      <RequestCollectionsContent />\n' +
+    '    </Suspense>\n' +
+    '  )\n' +
+    '}\n' +
+    '\n' +
+    'function RequestCollectionsContent() {\n' +
+    '  const toast = useToast()\n' +
+    '  const [assets, setAssets] = useState<TargetAsset[]>([])\n' +
+    '  // The collection owner lives in the URL, so reload, Back and links keep it.\n' +
+    '  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n' +
+    '  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n' +
+    '    ? filters.target_kind as RequestCollectionTargetKind\n' +
+    "    : 'network'\n" +
+    "  const targetId = filters.target_id || ''\n" +
+    '  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n' +
+    '  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n' +
+    '    target_kind: kind,\n' +
+    '  }), [setFilters])\n' +
+    '  const latestCollectionsRequest = useRef(0)\n' +
+    '  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n' +
+    "  const [selectedId, setSelectedId] = useState('')\n" +
+    '  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n' +
+    '  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n' +
+    '  const [inventoryTotal, setInventoryTotal] = useState(0)\n' +
+    '  const [inventoryOffset, setInventoryOffset] = useState(0)\n' +
+    '  const [loading, setLoading] = useState(true)\n' +
+    '  const [busy, setBusy] = useState(false)\n' +
+    '  const [error, setError] = useState<string | null>(null)\n' +
+    '  const [uploaderOpen, setUploaderOpen] = useState(false)\n' +
+    '  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n' +
+    '\n' +
+    "  const [uploadName, setUploadName] = useState('')\n" +
+    '  const uploadAttempt = useRef(new UploadAttempt())\n' +
+    "  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n" +
+    "  const [documentText, setDocumentText] = useState('')\n" +
+    "  const [environmentText, setEnvironmentText] = useState('')\n" +
+    "  const [environmentName, setEnvironmentName] = useState('')\n" +
+    "  const [baseUrl, setBaseUrl] = useState('')\n" +
+    '  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n' +
+    '\n' +
+    "  const [bindingOrigins, setBindingOrigins] = useState('')\n" +
+    "  const [executionTargetId, setExecutionTargetId] = useState('')\n" +
+    '  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n' +
+    "  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n" +
+    "  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n" +
+    "  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n" +
+    '\n' +
+    "  const [selectionName, setSelectionName] = useState('')\n" +
+    "  const [selectionBindingId, setSelectionBindingId] = useState('')\n" +
+    "  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n" +
+    "  const [requestIds, setRequestIds] = useState('')\n" +
+    "  const [folders, setFolders] = useState('')\n" +
+    "  const [methods, setMethods] = useState('')\n" +
+    "  const [tags, setTags] = useState('')\n" +
+    "  const [pathRegex, setPathRegex] = useState('')\n" +
+    '  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n' +
+    "  const [maxRequests, setMaxRequests] = useState('500')\n" +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    let cancelled = false\n' +
+    '    getAllTargetAssets().then((items) => {\n' +
+    '      if (!cancelled) setAssets(items)\n' +
+    '    })\n' +
+    '      .catch((cause) => {\n' +
+    "        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n" +
+    '      })\n' +
+    '      .finally(() => { if (!cancelled) setLoading(false) })\n' +
+    '    return () => { cancelled = true }\n' +
+    '  }, [])\n' +
+    '\n' +
+    '  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n' +
+    "    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n" +
+    '  })),[assets])\n' +
+    '  const selectedChoice = choices.find((choice) => choice.id === targetId)\n' +
+    '  useEffect(() => {\n' +
+    "    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n" +
+    '    if (!targetId) return\n' +
+    '    const controller = new AbortController()\n' +
+    '    getTargetAsset(targetId,controller.signal).then((result) => {\n' +
+    '      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n' +
+    "    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n" +
+    '    return () => controller.abort()\n' +
+    '  },[targetId])\n' +
+    '  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n' +
+    "  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n" +
+    '  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n' +
+    '  useEffect(() => {\n' +
+    '    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n' +
+    '    let cancelled = false\n' +
+    '    getTargetAsset(targetId).then((result) => {\n' +
+    '      if (cancelled) return\n' +
+    "      if (!result.target.is_active) {setError('The linked target is retired');return}\n" +
+    '      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n' +
+    '      setTargetId(result.target.id)\n' +
+    "    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n" +
+    '    return () => {cancelled = true}\n' +
+    '  },[assets,loading,setTargetId,targetId])\n' +
+    '\n' +
+    '  const loadCollections = useCallback(async () => {\n' +
+    "    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n" +
+    '    const request = ++latestCollectionsRequest.current\n' +
+    '    if (!targetId) {\n' +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const result = await listRequestCollections(targetId)\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    '      setCollections(result.collections || [])\n' +
+    '      setSelectedId((current) => (\n' +
+    '        result.collections.some((item) => item.id === current)\n' +
+    '          ? current\n' +
+    "          : result.collections[0]?.id || ''\n" +
+    '      ))\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    '      if (request !== latestCollectionsRequest.current) return\n' +
+    "      // The previous target's collections must not stay on screen under this target.\n" +
+    '      setCollections([])\n' +
+    "      setSelectedId('')\n" +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n" +
+    '    }\n' +
+    '  }, [targetId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadCollections() }, [loadCollections])\n' +
+    '\n' +
+    '  const loadDetail = useCallback(async (offset = 0) => {\n' +
+    '    if (!selectedId) {\n' +
+    '      setDetail(null)\n' +
+    '      setInventory([])\n' +
+    '      setInventoryTotal(0)\n' +
+    '      return\n' +
+    '    }\n' +
+    '    try {\n' +
+    '      const [nextDetail, nextInventory] = await Promise.all([\n' +
+    '        getRequestCollection(selectedId),\n' +
+    '        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n' +
+    '      ])\n' +
+    '      setDetail(nextDetail)\n' +
+    '      setInventory(nextInventory.requests || [])\n' +
+    '      setInventoryTotal(nextInventory.total || 0)\n' +
+    '      setInventoryOffset(nextInventory.offset || 0)\n' +
+    '      setError(null)\n' +
+    '    } catch (cause) {\n' +
+    "      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n" +
+    '    }\n' +
+    '  }, [selectedId])\n' +
+    '\n' +
+    '  useEffect(() => { void loadDetail(0) }, [loadDetail])\n' +
+    '\n' +
+    '  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n' +
+    '    availableBindingTargets.has(binding.target_id)\n' +
+    '  )), [detail?.bindings, availableBindingTargets])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    '    setSelectionBindingId((current) => (\n' +
+    '      matchingBindings.some((binding) => binding.id === current)\n' +
+    '        ? current\n' +
+    "        : matchingBindings[0]?.id || ''\n" +
+    '    ))\n' +
+    '  }, [matchingBindings])\n' +
+    '\n' +
+    '  useEffect(() => {\n' +
+    "    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n" +
+    '  }, [replayPolicy])\n' +
+    '\n' +
+    '  function openUploader() {\n' +
+    '    uploadAttempt.current.reset()\n' +
+    "    setUploadName('')\n" +
+    ' '... 25695 more characters
+  
+      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/target-choice-robustness.test.mjs:33:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: "'use client'\nimport { featureEnabled } from '@/lib/workspaceCapabilities'\n\nimport { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\nimport { useUrlFilters } from '@/lib/useUrlFilters'\nimport { UploadAttempt } from '@/lib/uploadAttempt'\nimport { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'\nimport { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'\nimport {\n  createRequestCollection,\n  deactivateRequestCollection,\n  deactivateRequestCollectionSelection,\n  getRequestCollection,\n  listRequestCollectionInventory,\n  listRequestCollections,\n  upsertRequestCollectionBinding,\n  upsertRequestCollectionEnvironment,\n  upsertRequestCollectionSelection,\n  type RequestCollectionDetail,\n  type RequestCollectionInventoryItem,\n  type RequestCollectionImportFormat,\n  type RequestCollectionReplayPolicy,\n  type RequestCollectionTargetKind,\n  type SharedRequestCollection,\n} from '@/lib/requestCollectionApi'\nimport {\n  Button,\n  Card,\n  ConfirmDialog,\n  EmptyState,\n  ErrorState,\n  Field,\n  Input,\n  Modal,\n  PageHeader,\n  Select,\n  Textarea,\n  useToast,\n} from '@/components/ui'\n\ntype Choice = {\n  id: string\n  label: string\n  detail: string\n  locator: string\n  ownerKind: 'network'\n}\n\nfunction splitValues(value: string): string[] {\n  return Array.from(new Set(\n    value.split(/[\\n,]+/).map((item) => item.trim()).filter(Boolean),\n  ))\n}\n\nfunction parseJson(value: string, label: string): unknown {\n  try {\n    return JSON.parse(value)\n  } catch {\n    throw new Error(`${label} must be valid JSON.`)\n  }\n}\n\nasync function readFile(file: File | undefined): Promise<string | null> {\n  if (!file) return null\n  if (file.size > 50 * 1024 * 1024) throw new Error('Collection file exceeds 50 MiB.')\n  return file.text()\n}\n\nfunction defaultOrigin(choice: Choice | undefined): string {\n  if (!choice) return ''\n  try {\n    const parsed = new URL(choice.locator)\n    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''\n  } catch {\n    return ''\n  }\n}\n\nconst COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']\n\nexport default function RequestCollectionsPage() {\n  return (\n    <Suspense fallback={null}>\n      <RequestCollectionsContent />\n    </Suspense>\n  )\n}\n\nfunction RequestCollectionsContent() {\n  const toast = useToast()\n  const [assets, setAssets] = useState<TargetAsset[]>([])\n  // The collection owner lives in the URL, so reload, Back and links keep it.\n  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()\n  const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)\n    ? filters.target_kind as RequestCollectionTargetKind\n    : 'network'\n  const targetId = filters.target_id || ''\n  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])\n  const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({\n    target_kind: kind,\n  }), [setFilters])\n  const latestCollectionsRequest = useRef(0)\n  const [collections, setCollections] = useState<SharedRequestCollection[]>([])\n  const [selectedId, setSelectedId] = useState('')\n  const [detail, setDetail] = useState<RequestCollectionDetail | null>(null)\n  const [inventory, setInventory] = useState<RequestCollectionInventoryItem[]>([])\n  const [inventoryTotal, setInventoryTotal] = useState(0)\n  const [inventoryOffset, setInventoryOffset] = useState(0)\n  const [loading, setLoading] = useState(true)\n  const [busy, setBusy] = useState(false)\n  const [error, setError] = useState<string | null>(null)\n  const [uploaderOpen, setUploaderOpen] = useState(false)\n  const [deleting, setDeleting] = useState<SharedRequestCollection | null>(null)\n\n  const [uploadName, setUploadName] = useState('')\n  const uploadAttempt = useRef(new UploadAttempt())\n  const [uploadFormat, setUploadFormat] = useState<RequestCollectionImportFormat>('auto')\n  const [documentText, setDocumentText] = useState('')\n  const [environmentText, setEnvironmentText] = useState('')\n  const [environmentName, setEnvironmentName] = useState('')\n  const [baseUrl, setBaseUrl] = useState('')\n  const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})\n\n  const [bindingOrigins, setBindingOrigins] = useState('')\n  const [executionTargetId, setExecutionTargetId] = useState('')\n  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])\n  const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')\n  const [newEnvironmentName, setNewEnvironmentName] = useState('')\n  const [newEnvironmentText, setNewEnvironmentText] = useState('')\n\n  const [selectionName, setSelectionName] = useState('')\n  const [selectionBindingId, setSelectionBindingId] = useState('')\n  const [replayPolicy, setReplayPolicy] = useState<RequestCollectionReplayPolicy>('safe_reads')\n  const [requestIds, setRequestIds] = useState('')\n  const [folders, setFolders] = useState('')\n  const [methods, setMethods] = useState('')\n  const [tags, setTags] = useState('')\n  const [pathRegex, setPathRegex] = useState('')\n  const [safeMethodsOnly, setSafeMethodsOnly] = useState(true)\n  const [maxRequests, setMaxRequests] = useState('500')\n\n  useEffect(() => {\n    let cancelled = false\n    getAllTargetAssets().then((items) => {\n      if (!cancelled) setAssets(items)\n    })\n      .catch((cause) => {\n        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')\n      })\n      .finally(() => { if (!cancelled) setLoading(false) })\n    return () => { cancelled = true }\n  }, [])\n\n  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({\n    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',\n  })),[assets])\n  const selectedChoice = choices.find((choice) => choice.id === targetId)\n  useEffect(() => {\n    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')\n    if (!targetId) return\n    const controller = new AbortController()\n    getTargetAsset(targetId,controller.signal).then((result) => {\n      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))\n    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})\n    return () => controller.abort()\n  },[targetId])\n  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)\n  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'\n  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])\n  useEffect(() => {\n    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return\n    let cancelled = false\n    getTargetAsset(targetId).then((result) => {\n      if (cancelled) return\n      if (!result.target.is_active) {setError('The linked target is retired');return}\n      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])\n      setTargetId(result.target.id)\n    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})\n    return () => {cancelled = true}\n  },[assets,loading,setTargetId,targetId])\n\n  const loadCollections = useCallback(async () => {\n    // Only the latest request may fill the list, so a slow answer never shows another target's collections.\n    const request = ++latestCollectionsRequest.current\n    if (!targetId) {\n      setCollections([])\n      setSelectedId('')\n      return\n    }\n    try {\n      const result = await listRequestCollections(targetId)\n      if (request !== latestCollectionsRequest.current) return\n      setCollections(result.collections || [])\n      setSelectedId((current) => (\n        result.collections.some((item) => item.id === current)\n          ? current\n          : result.collections[0]?.id || ''\n      ))\n      setError(null)\n    } catch (cause) {\n      if (request !== latestCollectionsRequest.current) return\n      // The previous target's collections must not stay on screen under this target.\n      setCollections([])\n      setSelectedId('')\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collections')\n    }\n  }, [targetId])\n\n  useEffect(() => { void loadCollections() }, [loadCollections])\n\n  const loadDetail = useCallback(async (offset = 0) => {\n    if (!selectedId) {\n      setDetail(null)\n      setInventory([])\n      setInventoryTotal(0)\n      return\n    }\n    try {\n      const [nextDetail, nextInventory] = await Promise.all([\n        getRequestCollection(selectedId),\n        listRequestCollectionInventory(selectedId, { limit: 100, offset }),\n      ])\n      setDetail(nextDetail)\n      setInventory(nextInventory.requests || [])\n      setInventoryTotal(nextInventory.total || 0)\n      setInventoryOffset(nextInventory.offset || 0)\n      setError(null)\n    } catch (cause) {\n      setError(cause instanceof Error ? cause.message : 'Failed to load request collection')\n    }\n  }, [selectedId])\n\n  useEffect(() => { void loadDetail(0) }, [loadDetail])\n\n  const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (\n    availableBindingTargets.has(binding.target_id)\n  )), [detail?.bindings, availableBindingTargets])\n\n  useEffect(() => {\n    setSelectionBindingId((current) => (\n      matchingBindings.some((binding) => binding.id === current)\n        ? current\n        : matchingBindings[0]?.id || ''\n    ))\n  }, [matchingBindings])\n\n  useEffect(() => {\n    if (replayPolicy !== 'confirmed_active') setSafeMethodsOnly(true)\n  }, [replayPolicy])\n\n  function openUploader() {\n    uploadAttempt.current.reset()\n    setUploadName('')\n "... 25695 more characters,
+    expected: /if \(loading \|\| !targetId \|\| choices\.some\(\(choice\) => choice\.id === targetId\)\) return/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests/target-filtering-ux.test.mjs:33:1
+✖ a linked credential target outside the loaded list is fetched, or reported (2.55409ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /getTarget\(targetId\)/. Input:
+  
+  "'use client'\n" +
+    "import { featureEnabled } from '@/lib/workspaceCapabilities'\n" +
+    "import AuthenticationProfiles from '@/components/AuthenticationProfiles'\n" +
+    '\n' +
+    "import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\n" +
+    "import { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'\n" +
+    "import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'\n" +
+    'import {\n' +
+    '  createTargetPolicyApprovalReceipt,\n' +
+    "} from '@/lib/api'\n" +
+    'import {\n' +
+    '  createCredentialProfile,\n' +
+    '  deactivateCredentialProfile,\n' +
+    '  listCredentialCapabilities,\n' +
+    '  listCredentialLibrary,\n' +
+    '  listCredentialProfiles,\n' +
+    '  revokeCredentialGrant,\n' +
+    '  type CredentialCapabilityOption,\n' +
+    '  rotateCredentialProfile,\n' +
+    '  type CredentialAuthKind,\n' +
+    '  type CredentialPrincipalSlot,\n' +
+    '  type CredentialProfile,\n' +
+    '  type CredentialSecretPayload,\n' +
+    '  type CredentialTargetKind,\n' +
+    "} from '@/lib/credentialApi'\n" +
+    'import {\n' +
+    '  Button,\n' +
+    '  Card,\n' +
+    '  ConfirmDialog,\n' +
+    '  EmptyState,\n' +
+    '  ErrorState,\n' +
+    '  Field,\n' +
+    '  Input,\n' +
+    '  Modal,\n' +
+    '  PageHeader,\n' +
+    '  Select,\n' +
+    '  Textarea,\n' +
+    '  useToast,\n' +
+    "} from '@/components/ui'\n" +
+    "import { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'\n" +
+    "import { useUrlFilters } from '@/lib/useUrlFilters'\n" +
+    '\n' +
+    'const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [\n' +
+    "  { value: 'bearer_token', label: 'Bearer token' },\n" +
+    "  { value: 'authorization_header', label: 'Authorization header' },\n" +
+    "  { value: 'api_key_header', label: 'API key header' },\n" +
+    "  { value: 'cookie', label: 'Cookie' },\n" +
+    "  { value: 'basic_auth', label: 'Basic authentication' },\n" +
+    "  { value: 'form_login', label: 'Form login' },\n" +
+    "  { value: 'json_login', label: 'JSON login' },\n" +
+    "  { value: 'oauth_client_credentials', label: 'OAuth client credentials' },\n" +
+    "  { value: 'oauth_password', label: 'OAuth password flow' },\n" +
+    "  { value: 'custom_headers', label: 'Custom headers' },\n" +
+    "  { value: 'query_parameter', label: 'Query parameter' },\n" +
+    ']\n' +
+    'const SSH_KINDS: { value: CredentialAuthKind; label: string }[] = [\n' +
+    "  { value: 'ssh_password', label: 'SSH password' },\n" +
+    "  { value: 'ssh_private_key', label: 'SSH private key' },\n" +
+    "  { value: 'ssh_private_key_with_passphrase', label: 'SSH key + passphrase' },\n" +
+    ']\n' +
+    '\n' +
+    'type Draft = {\n' +
+    '  name: string\n' +
+    '  authKind: CredentialAuthKind\n' +
+    '  principalLabel: string\n' +
+    '  principalSlot: CredentialPrincipalSlot\n' +
+    '  secret: string\n' +
+    '  username: string\n' +
+    '  secondarySecret: string\n' +
+    '  headerName: string\n' +
+    '  browserStorageKey: string\n' +
+    '  endpointUrl: string\n' +
+    '  clientId: string\n' +
+    '  scopes: string\n' +
+    '  customHeaders: string\n' +
+    '  expiresAt: string\n' +
+    '  capabilities: string\n' +
+    '  allowActiveCapabilities: boolean\n' +
+    '}\n' +
+    '\n' +
+    'type DraftErrors = Partial<Record<keyof Draft, string>>\n' +
+    '\n' +
+    'const EMPTY_DRAFT: Draft = {\n' +
+    "  name: '',\n" +
+    "  authKind: 'bearer_token',\n" +
+    "  principalLabel: '',\n" +
+    "  principalSlot: 'primary',\n" +
+    "  secret: '',\n" +
+    "  username: '',\n" +
+    "  secondarySecret: '',\n" +
+    "  headerName: 'X-API-Key',\n" +
+    "  browserStorageKey: '',\n" +
+    "  endpointUrl: '',\n" +
+    "  clientId: '',\n" +
+    "  scopes: '',\n" +
+    "  customHeaders: '',\n" +
+    "  expiresAt: '',\n" +
+    "  capabilities: '',\n" +
+    '  allowActiveCapabilities: false,\n' +
+    '}\n' +
+    '\n' +
+    'function splitValues(value: string): string[] {\n' +
+    '  return Array.from(new Set(value.split(/[\\s,]+/).map((item) => item.trim()).filter(Boolean)))\n' +
+    '}\n' +
+    '\n' +
+    'function customHeaders(value: string): Record<string, string> | undefined {\n' +
+    '  if (!value.trim()) return undefined\n' +
+    '  const result: Record<string, string> = {}\n' +
+    "  for (const line of value.split('\\n').map((item) => item.trim()).filter(Boolean)) {\n" +
+    "    const separator = line.indexOf(':')\n" +
+    '    if (separator < 1 || !line.slice(separator + 1).trim()) {\n' +
+    "      throw new Error('Each custom header must use “Name: value” on its own line.')\n" +
+    '    }\n' +
+    '    result[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()\n' +
+    '  }\n' +
+    '  return result\n' +
+    '}\n' +
+    '\n' +
+    'function isSsh(kind: CredentialAuthKind): boolean {\n' +
+    "  return kind.startsWith('ssh_')\n" +
+    '}\n' +
+    '\n' +
+    '// Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half\n' +
+    '// of the username/secret pair on its own, so neither field is individually required -- but at\n' +
+    '// least one must be present. A UI test asserts this list matches the backend constant.\n' +
+    "const IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password', 'json_login']\n" +
+    '\n' +
+    'function isIdentityPair(kind: CredentialAuthKind): boolean {\n' +
+    '  return IDENTITY_PAIR_KINDS.includes(kind)\n' +
+    '}\n' +
+    '\n' +
+    '// Which kinds show a username field at all. SSH additionally requires it.\n' +
+    'function showsUsername(kind: CredentialAuthKind): boolean {\n' +
+    '  return isIdentityPair(kind) || isSsh(kind)\n' +
+    '}\n' +
+    '\n' +
+    'function needsEndpoint(kind: CredentialAuthKind): boolean {\n' +
+    "  return ['form_login', 'oauth_client_credentials', 'oauth_password', 'json_login'].includes(kind)\n" +
+    '}\n' +
+    '\n' +
+    'function validateDraft(draft: Draft, rotating: boolean): DraftErrors {\n' +
+    '  const errors: DraftErrors = {}\n' +
+    "  if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'\n" +
+    '  if (!rotating && isSsh(draft.authKind) && !splitValues(draft.capabilities).length) {\n' +
+    "    errors.capabilities = 'Select at least one explicitly approved SSH capability.'\n" +
+    '  }\n' +
+    "  if (isSsh(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'\n" +
+    "  if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {\n" +
+    "    errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'\n" +
+    '  }\n' +
+    "  if (draft.authKind === 'bearer_token' && draft.browserStorageKey.trim() && !/^[A-Za-z0-9_.:-]{1,200}$/.test(draft.browserStorageKey.trim())) {\n" +
+    "    errors.browserStorageKey = 'Use 1–200 letters, numbers, dots, colons, underscores, or hyphens.'\n" +
+    '  }\n' +
+    "  if (needsEndpoint(draft.authKind) && !draft.endpointUrl.trim()) errors.endpointUrl = 'Enter the login or token endpoint.'\n" +
+    "  if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'\n" +
+    "  if (draft.authKind === 'custom_headers') {\n" +
+    "    if (!draft.customHeaders.trim()) errors.customHeaders = 'Enter at least one Name: value header.'\n" +
+    '  } else if (isIdentityPair(draft.authKind)) {\n' +
+    '    if (!draft.username.trim() && !draft.secret.trim()) {\n' +
+    "      const message = 'Enter a username, a secret, or both.'\n" +
+    '      errors.username = message\n' +
+    '      errors.secret = message\n' +
+    '    }\n' +
+    '  } else if (!draft.secret.trim()) {\n' +
+    "    errors.secret = draft.authKind.startsWith('ssh_private_key') ? 'Paste the private key.' : 'Enter the secret value.'\n" +
+    '  }\n' +
+    "  if (draft.authKind === 'ssh_private_key_with_passphrase' && !draft.secondarySecret.trim()) {\n" +
+    "    errors.secondarySecret = 'Enter the private-key passphrase.'\n" +
+    '  }\n' +
+    '  return errors\n' +
+    '}\n' +
+    '\n' +
+    'function secretPayload(draft: Draft): CredentialSecretPayload {\n' +
+    '  const kind = draft.authKind\n' +
+    '  const payload: CredentialSecretPayload = {}\n' +
+    '  // A pair kind omits the half it does not hold rather than sending an empty string, so the\n' +
+    '  // stored envelope records absence instead of a blank value.\n' +
+    '  if (isIdentityPair(kind)) {\n' +
+    '    if (draft.secret.trim()) payload.secret = draft.secret\n' +
+    '    if (draft.username.trim()) payload.username = draft.username\n' +
+    '  } else {\n' +
+    "    if (kind !== 'custom_headers') payload.secret = draft.secret\n" +
+    '    if (showsUsername(kind)) payload.username = draft.username\n' +
+    '  }\n' +
+    "  if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret\n" +
+    "  if (kind === 'api_key_header') payload.header_name = draft.headerName\n" +
+    "  if (kind === 'query_parameter') payload.parameter_name = draft.headerName\n" +
+    "  if (kind === 'bearer_token' && draft.browserStorageKey.trim()) {\n" +
+    '    payload.browser_storage_key = draft.browserStorageKey.trim()\n' +
+    '  }\n' +
+    '  if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl\n' +
+    "  if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {\n" +
+    '    payload.client_id = draft.clientId\n' +
+    '  }\n' +
+    "  if (kind === 'oauth_client_credentials' || kind === 'oauth_password') {\n" +
+    '    payload.scopes = splitValues(draft.scopes)\n' +
+    '  }\n' +
+    "  if (kind === 'custom_headers') payload.custom_headers = customHeaders(draft.customHeaders)\n" +
+    '  if (draft.expiresAt) payload.expires_at = new Date(draft.expiresAt).toISOString()\n' +
+    '  return payload\n' +
+    '}\n' +
+    '\n' +
+    '// Content-free description of which half of a username/secret pair a profile holds. Only\n' +
+    '// meaningful for pair kinds, where either half alone is a valid identity.\n' +
+    'function identityComposition(profile: CredentialProfile): string | null {\n' +
+    '  if (!isIdentityPair(profile.auth_kind)) return null\n' +
+    '  const hasUsername = profile.configuration.username_configured\n' +
+    '  const hasSecret = profile.configuration.secret_configured\n' +
+    "  if (hasUsername && hasSecret) return 'username + secret'\n" +
+    "  if (hasUsername) return 'username only'\n" +
+    "  if (hasSecret) return 'secret only'\n" +
+    '  return null\n' +
+    '}\n' +
+    '\n' +
+    'function statusClass(profile: CredentialProfile): string {\n' +
+    "  if (profile.status === 'active' && !profile.refresh_required) {\n" +
+    "    return 'bg-emerald-500/10 text-emerald-300'\n" +
+    '  }\n' +
+    "  if (profile.status === 'expired' || profile.refresh_required) {\n" +
+    "    return 'bg-amber-500/10 text-amber-300'\n" +
+    '  }\n' +
+    "  return 'bg-gray-800 text-gray-400'\n" +
+    '}\n' +
+    '\n' +
+    "const TARGET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']\n" +
+    '\n' +
+    'export default function CredentialsPage() {\n' +
+    '  return (\n' +
+    '    <Suspense fallback={<div className="p-6 text-sm text-gray-400">Loading credential targets…</div>}>\n' +
+    '      <CredentialsContent />\n' +
+    '    </Suspense>\n' +
+    '  )\n' +
+    '}\n' +
+    '\n' +
+    'function CredentialsContent() {\n' +
+    '  const toast = useToast()\n' +
+    '  const appliedDeepLink = useRef(false)\n' +
+    '  // The selected target lives in the URL, so reload, Back and links keep it.\n' +
+    '  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; target?: string }>()\n' +
+    '  const targetKind: CredentialTargetKind = TARGET_KINDS.includes(filters.target_kind as CredentialTargetKind)\n' +
+    '    ? filters.target_kind as CredentialTargetKind\n' +
+    "    : 'web'\n" +
+    "  const targetId = filters.target_id || ''\n" +
+    '  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])\n' +
+    '  const [missingTarget, setMissingTarget] = useState<string | null>(null)\n' +
+    '  const latestProfileRequest = useR'... 27990 more characters
+  
+      at TestContext.<anonymous> (file:///home/runner/work/shakerscan/shakerscan/ui/tests/target-filtering-ux.test.mjs:34:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: `'use client'\nimport { featureEnabled } from '@/lib/workspaceCapabilities'\nimport AuthenticationProfiles from '@/components/AuthenticationProfiles'\n\nimport { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'\nimport { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'\nimport { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'\nimport {\n  createTargetPolicyApprovalReceipt,\n} from '@/lib/api'\nimport {\n  createCredentialProfile,\n  deactivateCredentialProfile,\n  listCredentialCapabilities,\n  listCredentialLibrary,\n  listCredentialProfiles,\n  revokeCredentialGrant,\n  type CredentialCapabilityOption,\n  rotateCredentialProfile,\n  type CredentialAuthKind,\n  type CredentialPrincipalSlot,\n  type CredentialProfile,\n  type CredentialSecretPayload,\n  type CredentialTargetKind,\n} from '@/lib/credentialApi'\nimport {\n  Button,\n  Card,\n  ConfirmDialog,\n  EmptyState,\n  ErrorState,\n  Field,\n  Input,\n  Modal,\n  PageHeader,\n  Select,\n  Textarea,\n  useToast,\n} from '@/components/ui'\nimport { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'\nimport { useUrlFilters } from '@/lib/useUrlFilters'\n\nconst HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [\n  { value: 'bearer_token', label: 'Bearer token' },\n  { value: 'authorization_header', label: 'Authorization header' },\n  { value: 'api_key_header', label: 'API key header' },\n  { value: 'cookie', label: 'Cookie' },\n  { value: 'basic_auth', label: 'Basic authentication' },\n  { value: 'form_login', label: 'Form login' },\n  { value: 'json_login', label: 'JSON login' },\n  { value: 'oauth_client_credentials', label: 'OAuth client credentials' },\n  { value: 'oauth_password', label: 'OAuth password flow' },\n  { value: 'custom_headers', label: 'Custom headers' },\n  { value: 'query_parameter', label: 'Query parameter' },\n]\nconst SSH_KINDS: { value: CredentialAuthKind; label: string }[] = [\n  { value: 'ssh_password', label: 'SSH password' },\n  { value: 'ssh_private_key', label: 'SSH private key' },\n  { value: 'ssh_private_key_with_passphrase', label: 'SSH key + passphrase' },\n]\n\ntype Draft = {\n  name: string\n  authKind: CredentialAuthKind\n  principalLabel: string\n  principalSlot: CredentialPrincipalSlot\n  secret: string\n  username: string\n  secondarySecret: string\n  headerName: string\n  browserStorageKey: string\n  endpointUrl: string\n  clientId: string\n  scopes: string\n  customHeaders: string\n  expiresAt: string\n  capabilities: string\n  allowActiveCapabilities: boolean\n}\n\ntype DraftErrors = Partial<Record<keyof Draft, string>>\n\nconst EMPTY_DRAFT: Draft = {\n  name: '',\n  authKind: 'bearer_token',\n  principalLabel: '',\n  principalSlot: 'primary',\n  secret: '',\n  username: '',\n  secondarySecret: '',\n  headerName: 'X-API-Key',\n  browserStorageKey: '',\n  endpointUrl: '',\n  clientId: '',\n  scopes: '',\n  customHeaders: '',\n  expiresAt: '',\n  capabilities: '',\n  allowActiveCapabilities: false,\n}\n\nfunction splitValues(value: string): string[] {\n  return Array.from(new Set(value.split(/[\\s,]+/).map((item) => item.trim()).filter(Boolean)))\n}\n\nfunction customHeaders(value: string): Record<string, string> | undefined {\n  if (!value.trim()) return undefined\n  const result: Record<string, string> = {}\n  for (const line of value.split('\\n').map((item) => item.trim()).filter(Boolean)) {\n    const separator = line.indexOf(':')\n    if (separator < 1 || !line.slice(separator + 1).trim()) {\n      throw new Error('Each custom header must use “Name: value” on its own line.')\n    }\n    result[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()\n  }\n  return result\n}\n\nfunction isSsh(kind: CredentialAuthKind): boolean {\n  return kind.startsWith('ssh_')\n}\n\n// Mirrors IDENTITY_PAIR_KINDS in api/runtime/credentials.py. These flows accept either half\n// of the username/secret pair on its own, so neither field is individually required -- but at\n// least one must be present. A UI test asserts this list matches the backend constant.\nconst IDENTITY_PAIR_KINDS: CredentialAuthKind[] = ['basic_auth', 'form_login', 'oauth_password', 'json_login']\n\nfunction isIdentityPair(kind: CredentialAuthKind): boolean {\n  return IDENTITY_PAIR_KINDS.includes(kind)\n}\n\n// Which kinds show a username field at all. SSH additionally requires it.\nfunction showsUsername(kind: CredentialAuthKind): boolean {\n  return isIdentityPair(kind) || isSsh(kind)\n}\n\nfunction needsEndpoint(kind: CredentialAuthKind): boolean {\n  return ['form_login', 'oauth_client_credentials', 'oauth_password', 'json_login'].includes(kind)\n}\n\nfunction validateDraft(draft: Draft, rotating: boolean): DraftErrors {\n  const errors: DraftErrors = {}\n  if (!rotating && !draft.name.trim()) errors.name = 'Enter a profile name.'\n  if (!rotating && isSsh(draft.authKind) && !splitValues(draft.capabilities).length) {\n    errors.capabilities = 'Select at least one explicitly approved SSH capability.'\n  }\n  if (isSsh(draft.authKind) && !draft.username.trim()) errors.username = 'Enter the username for this identity.'\n  if ((draft.authKind === 'api_key_header' || draft.authKind === 'query_parameter') && !draft.headerName.trim()) {\n    errors.headerName = draft.authKind === 'query_parameter' ? 'Enter the parameter name.' : 'Enter the header name.'\n  }\n  if (draft.authKind === 'bearer_token' && draft.browserStorageKey.trim() && !/^[A-Za-z0-9_.:-]{1,200}$/.test(draft.browserStorageKey.trim())) {\n    errors.browserStorageKey = 'Use 1–200 letters, numbers, dots, colons, underscores, or hyphens.'\n  }\n  if (needsEndpoint(draft.authKind) && !draft.endpointUrl.trim()) errors.endpointUrl = 'Enter the login or token endpoint.'\n  if (draft.authKind === 'oauth_client_credentials' && !draft.clientId.trim()) errors.clientId = 'Enter the OAuth client ID.'\n  if (draft.authKind === 'custom_headers') {\n    if (!draft.customHeaders.trim()) errors.customHeaders = 'Enter at least one Name: value header.'\n  } else if (isIdentityPair(draft.authKind)) {\n    if (!draft.username.trim() && !draft.secret.trim()) {\n      const message = 'Enter a username, a secret, or both.'\n      errors.username = message\n      errors.secret = message\n    }\n  } else if (!draft.secret.trim()) {\n    errors.secret = draft.authKind.startsWith('ssh_private_key') ? 'Paste the private key.' : 'Enter the secret value.'\n  }\n  if (draft.authKind === 'ssh_private_key_with_passphrase' && !draft.secondarySecret.trim()) {\n    errors.secondarySecret = 'Enter the private-key passphrase.'\n  }\n  return errors\n}\n\nfunction secretPayload(draft: Draft): CredentialSecretPayload {\n  const kind = draft.authKind\n  const payload: CredentialSecretPayload = {}\n  // A pair kind omits the half it does not hold rather than sending an empty string, so the\n  // stored envelope records absence instead of a blank value.\n  if (isIdentityPair(kind)) {\n    if (draft.secret.trim()) payload.secret = draft.secret\n    if (draft.username.trim()) payload.username = draft.username\n  } else {\n    if (kind !== 'custom_headers') payload.secret = draft.secret\n    if (showsUsername(kind)) payload.username = draft.username\n  }\n  if (kind === 'ssh_private_key_with_passphrase') payload.secondary_secret = draft.secondarySecret\n  if (kind === 'api_key_header') payload.header_name = draft.headerName\n  if (kind === 'query_parameter') payload.parameter_name = draft.headerName\n  if (kind === 'bearer_token' && draft.browserStorageKey.trim()) {\n    payload.browser_storage_key = draft.browserStorageKey.trim()\n  }\n  if (needsEndpoint(kind)) payload.endpoint_url = draft.endpointUrl\n  if ((kind === 'oauth_client_credentials' || kind === 'oauth_password') && draft.clientId.trim()) {\n    payload.client_id = draft.clientId\n  }\n  if (kind === 'oauth_client_credentials' || kind === 'oauth_password') {\n    payload.scopes = splitValues(draft.scopes)\n  }\n  if (kind === 'custom_headers') payload.custom_headers = customHeaders(draft.customHeaders)\n  if (draft.expiresAt) payload.expires_at = new Date(draft.expiresAt).toISOString()\n  return payload\n}\n\n// Content-free description of which half of a username/secret pair a profile holds. Only\n// meaningful for pair kinds, where either half alone is a valid identity.\nfunction identityComposition(profile: CredentialProfile): string | null {\n  if (!isIdentityPair(profile.auth_kind)) return null\n  const hasUsername = profile.configuration.username_configured\n  const hasSecret = profile.configuration.secret_configured\n  if (hasUsername && hasSecret) return 'username + secret'\n  if (hasUsername) return 'username only'\n  if (hasSecret) return 'secret only'\n  return null\n}\n\nfunction statusClass(profile: CredentialProfile): string {\n  if (profile.status === 'active' && !profile.refresh_required) {\n    return 'bg-emerald-500/10 text-emerald-300'\n  }\n  if (profile.status === 'expired' || profile.refresh_required) {\n    return 'bg-amber-500/10 text-amber-300'\n  }\n  return 'bg-gray-800 text-gray-400'\n}\n\nconst TARGET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']\n\nexport default function CredentialsPage() {\n  return (\n    <Suspense fallback={<div className="p-6 text-sm text-gray-400">Loading credential targets…</div>}>\n      <CredentialsContent />\n    </Suspense>\n  )\n}\n\nfunction CredentialsContent() {\n  const toast = useToast()\n  const appliedDeepLink = useRef(false)\n  // The selected target lives in the URL, so reload, Back and links keep it.\n  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; target?: string }>()\n  const targetKind: CredentialTargetKind = TARGET_KINDS.includes(filters.target_kind as CredentialTargetKind)\n    ? filters.target_kind as CredentialTargetKind\n    : 'web'\n  const targetId = filters.target_id || ''\n  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])\n  const [missingTarget, setMissingTarget] = useState<string | null>(null)\n  const latestProfileRequest = useR`... 27990 more characters,
+    expected: /getTarget\(targetId\)/,
+    operator: 'match',
     diff: 'simple'
   }
