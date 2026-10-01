@@ -1,232 +1,96 @@
-........FFFF..FFFFF                                                      [100%]
-=================================== FAILURES ===================================
-_______ test_device_input_migration_keeps_ids_and_one_ciphertext_source ________
-tests/test_target_asset_inputs_postgres.py:95: in test_device_input_migration_keeps_ids_and_one_ciphertext_source
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_inputs_postgres.py:65: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-__ test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries __
-tests/test_target_asset_inputs_postgres.py:126: in test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_inputs_postgres.py:108: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-_______ test_device_credential_crud_uses_one_profile_and_worker_version ________
-tests/test_device_shared_inputs_postgres.py:55: in test_device_credential_crud_uses_one_profile_and_worker_version
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_device_shared_inputs_postgres.py:31: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-____________ test_device_collection_crud_reuses_shared_document_id _____________
-tests/test_device_shared_inputs_postgres.py:83: in test_device_collection_crud_reuses_shared_document_id
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_device_shared_inputs_postgres.py:67: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-_____ test_inventory_groups_origins_and_profile_addition_reuses_the_asset ______
-tests/test_target_asset_store_postgres.py:46: in test_inventory_groups_origins_and_profile_addition_reuses_the_asset
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_store_postgres.py:21: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-_____ test_host_authority_is_reused_and_service_revocation_is_not_bypassed _____
-tests/test_target_asset_authority_postgres.py:49: in test_host_authority_is_reused_and_service_revocation_is_not_bypassed
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_authority_postgres.py:34: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-_ test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host __
-tests/test_target_asset_authority_postgres.py:68: in test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_authority_postgres.py:60: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-__________ test_worker_revalidates_parent_authority_not_a_client_flag __________
-tests/test_target_asset_authority_postgres.py:96: in test_worker_revalidates_parent_authority_not_a_client_flag
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_authority_postgres.py:80: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-_______________ test_collection_owner_and_exact_service_bindings _______________
-tests/test_target_asset_collections_postgres.py:50: in test_collection_owner_and_exact_service_bindings
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_collections_postgres.py:27: in run
-    await migrate_asset_inputs(conn)
-api/targets/asset_inputs_migration.py:100: in migrate_asset_inputs
-    await migrate_asset_authority(conn)
-api/targets/asset_authority.py:44: in migrate_asset_authority
-    await conn.execute(SCHEMA)
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:354: in execute
-    result = await self._protocol.query(query, timeout)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-asyncpg/protocol/protocol.pyx:369: in query
-    ???
-E   asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
+
+==================================== ERRORS ====================================
+________ ERROR collecting tests/test_target_asset_authority_postgres.py ________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_authority_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_authority_postgres.py:10: in <module>
+    from api.targets.asset_authority import standing_authorization_matches_target
+E   ModuleNotFoundError: No module named 'api.targets'; 'api' is not a package
+_______ ERROR collecting tests/test_target_asset_collections_postgres.py _______
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_collections_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_collections_postgres.py:8: in <module>
+    from api.devices.shared_collections import save_device_collection
+E   ModuleNotFoundError: No module named 'api.devices'; 'api' is not a package
+____________ ERROR collecting tests/test_target_asset_execution.py _____________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_execution.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_execution.py:6: in <module>
+    from api.targets.asset_execution import execution_target_refs
+E   ModuleNotFoundError: No module named 'api.targets'; 'api' is not a package
+_________ ERROR collecting tests/test_target_asset_inputs_postgres.py __________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_inputs_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_inputs_postgres.py:13: in <module>
+    from api.runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
+E   ModuleNotFoundError: No module named 'api.runtime'; 'api' is not a package
+________ ERROR collecting tests/test_target_asset_migration_postgres.py ________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_migration_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_migration_postgres.py:12: in <module>
+    from api.targets.asset_migration import host_url, locator_from_url, migrate_target_assets
+E   ModuleNotFoundError: No module named 'api.targets'; 'api' is not a package
+_________ ERROR collecting tests/test_target_asset_startup_postgres.py _________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_startup_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_startup_postgres.py:7: in <module>
+    from api.targets.asset_migration import BoundConnectionPool
+E   ModuleNotFoundError: No module named 'api.targets'; 'api' is not a package
+__________ ERROR collecting tests/test_target_asset_store_postgres.py __________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_target_asset_store_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_target_asset_store_postgres.py:4: in <module>
+    from api.targets.asset_migration import migrate_target_assets
+E   ModuleNotFoundError: No module named 'api.targets'; 'api' is not a package
+_________ ERROR collecting tests/test_device_shared_inputs_postgres.py _________
+ImportError while importing test module '/home/runner/work/shakerscan/shakerscan/tests/test_device_shared_inputs_postgres.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_device_shared_inputs_postgres.py:11: in <module>
+    from api.devices.shared_credentials import (
+E   ModuleNotFoundError: No module named 'api.devices'; 'api' is not a package
 =========================== short test summary info ============================
-FAILED tests/test_target_asset_inputs_postgres.py::test_device_input_migration_keeps_ids_and_one_ciphertext_source - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_inputs_postgres.py::test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_device_shared_inputs_postgres.py::test_device_credential_crud_uses_one_profile_and_worker_version - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_device_shared_inputs_postgres.py::test_device_collection_crud_reuses_shared_document_id - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_store_postgres.py::test_inventory_groups_origins_and_profile_addition_reuses_the_asset - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_authority_postgres.py::test_host_authority_is_reused_and_service_revocation_is_not_bypassed - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_authority_postgres.py::test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_authority_postgres.py::test_worker_revalidates_parent_authority_not_a_client_flag - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-FAILED tests/test_target_asset_collections_postgres.py::test_collection_owner_and_exact_service_bindings - asyncpg.exceptions.UndefinedTableError: relation "approval_receipts" does not exist
-9 failed, 10 passed in 22.27s
+ERROR tests/test_target_asset_authority_postgres.py
+ERROR tests/test_target_asset_collections_postgres.py
+ERROR tests/test_target_asset_execution.py
+ERROR tests/test_target_asset_inputs_postgres.py
+ERROR tests/test_target_asset_migration_postgres.py
+ERROR tests/test_target_asset_startup_postgres.py
+ERROR tests/test_target_asset_store_postgres.py
+ERROR tests/test_device_shared_inputs_postgres.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 8 errors during collection !!!!!!!!!!!!!!!!!!!!
+8 errors in 2.80s
 module size ratchet: OK
 
-pytest_exit=1 module_size_exit=0 ui_tests_exit=1 types_exit=0 build_exit=0
+pytest_exit=2 affected_exit=4 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0

@@ -1,0 +1,10 @@
+
+> shakerscan-ui@1.0.0 start
+> next start -p 3000 --hostname 127.0.0.1 --port 3000
+
+▲ Next.js 16.3.6
+- Local:         http://127.0.0.1:3000
+- Network:       http://127.0.0.1:3000
+✓ Ready in 123ms
+✓ Running next.config.js took 15ms
+⚠ "next start" does not work with "output: standalone" configuration. Use "node .next/standalone/server.js" instead.
