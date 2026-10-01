@@ -1,64 +1,40 @@
-"""Temporary anchored source changes; only the resulting source files are shipped."""
+"""Temporary source amendments and read-only runtime contract extraction."""
 from pathlib import Path
 import ast
 
 
-def substitute(path, old, new, count=1):
+def substitute(path, old, new):
     source = Path(path).read_text()
-    if old not in source:
-        if new in source:
-            return
-        raise RuntimeError(f'Patch context changed: {path}: {old[:100]}')
-    if source.count(old) != count:
-        raise RuntimeError(f'Ambiguous patch: {path}: {source.count(old)} != {count}')
-    Path(path).write_text(source.replace(old, new, count))
+    if new in source:
+        return
+    if source.count(old) != 1:
+        raise RuntimeError(f'Patch context changed: {path}: {old[:80]}')
+    Path(path).write_text(source.replace(old,new,1))
 
+substitute('api/targets/asset_inputs_migration.py',
+    'await sync_legacy_device_credential(conn, legacy_profile_id=row["id"])',
+    'await sync_legacy_device_credential(conn, row["id"])')
+substitute('tests/test_target_asset_inputs_postgres.py',
+    'from test_target_asset_migration_postgres import database',
+    'from tests.test_target_asset_migration_postgres import database')
+substitute('api/targets/asset_inputs_schema.py',
+    'b.allowed_capabilities,p.created_at,p.updated_at',
+    'b.allowed_capabilities,p.rotated_at,p.created_at,p.updated_at')
 
-def assignment(path, name, replacement):
-    source = Path(path).read_text(); lines = source.splitlines(keepends=True)
+out=[]
+def emit(path,names):
+    source=Path(path).read_text(); lines=source.splitlines()
     for node in ast.parse(source).body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            lines[node.lineno-1:node.end_lineno] = [replacement + '\n']
-            Path(path).write_text(''.join(lines))
-            return
-    raise RuntimeError(f'Missing assignment {path}:{name}')
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in names:
+            out.append(f'\n=== {path}:{node.lineno} {node.name} ===\n'+'\n'.join(lines[node.lineno-1:node.end_lineno]))
 
-
-store = 'api/runtime/credential_store.py'
-assignment(store, '_KIND_COMPATIBLE_SQL', '''_KIND_COMPATIBLE_SQL = "(p.target_kind IN ('web','api','network','device') AND {kind} IN ('web','api','network','device'))"''')
-substitute(store,
-    "               LEFT JOIN credential_profile_bindings b\n                 ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$2::text",
-    "               LEFT JOIN LATERAL target_credential_grant(p.id,$3) b ON true")
-substitute(store,
-    "                 AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.revoked_at IS NULL))",
-    "                 AND b.id IS NOT NULL AND b.revoked_at IS NULL")
-substitute(store,
-    "               JOIN credential_profile_bindings b\n                 ON b.profile_id=p.id AND b.binding_kind='target'\n                AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL",
-    "               JOIN LATERAL target_credential_grant(p.id,$3::uuid) b\n                 ON b.is_active=true AND b.revoked_at IS NULL", count=2)
-substitute(store, "b.allowed_capabilities, b.binding_id AS granted_target_id",
-           "b.allowed_capabilities, $3::text AS granted_target_id")
-substitute(store, "    granted_target_id: str | None = None", "    granted_target_id: str | None = None\n    service_port: int | None = None")
-substitute(store, "            granted_target_id=(", "            service_port=int(item['service_port']) if item.get('service_port') is not None else None,\n            granted_target_id=(")
-substitute(store, '            "home_target_id": self.target_id,', '            "service_port": self.service_port,\n            "home_target_id": self.target_id,')
-models = Path('api/runtime/models.py')
-source = models.read_text()
-for node in ast.parse(source).body:
-    if isinstance(node, ast.FunctionDef) and node.name == 'target_kinds_share_asset':
-        lines = source.splitlines(keepends=True)
-        lines[node.lineno-1:node.end_lineno] = ['''def target_kinds_share_asset(left: str, right: str) -> bool:
-    """Physical-target view kinds share a model; callers must still validate the target/grant."""
-    physical = {"web", "api", "network", "device"}
-    return left == right or (left in physical and right in physical)
-''']
-        models.write_text(''.join(lines)); break
-else:
-    raise RuntimeError('target_kinds_share_asset is missing')
-substitute('tests/test_target_asset_migration_postgres.py',
-    "INSERT INTO scans(target_url,device_target_id,run_kind) VALUES('device.example.test',$1,'device_posture') RETURNING id",
-    "INSERT INTO scans(target_url,device_target_id,run_kind,status) VALUES('device.example.test',$1,'device_posture','completed') RETURNING id")
-substitute('api/targets/asset_migration.py',
-    '{"device_targets", "device_credential_profiles"}',
-    '{"device_targets", "device_credential_profiles", "device_request_collections"}')
-substitute('api/targets/asset_migration.py',
-    '{"targets", "credential_profiles"}',
-    '{"targets", "credential_profiles", "request_collections"}')
+emit('api/worker.py',['_hydrate_device_scan_credentials','_hydrate_device_request_collections'])
+emit('api/devices/router.py',['_public_device_credential_profile','_public_device_request_collection','_validate_device_credential_refs','get_device_request_collection','create_device_request_collection','update_device_request_collection','deactivate_device_request_collection'])
+emit('api/credential_api.py',['_sync_legacy_device_from_generic'])
+emit('scanner/scanner_tools/device_web.py',['_credential_headers','_credential_request','_attempt_login'])
+for path in ['scanner/scanner_tools/device_web.py','api/target_authorization.py','api/api.py']:
+    source=Path(path).read_text(); lines=source.splitlines()
+    for node in ast.parse(source).body:
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and (path!='api/api.py' or 'target' in node.name):
+            out.append(f'FUNCTION {path} {node.name} {node.lineno}-{node.end_lineno}')
+Path('.implementation/runtime-contracts.txt').write_text('\n'.join(out)+'\n')
