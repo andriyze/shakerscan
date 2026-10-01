@@ -2,6 +2,9 @@ import type { Head } from '../http.ts';
 import type { Check } from '../types.ts';
 
 export const CORS_PROBE_ORIGIN = 'https://shakerscan-cors-probe.invalid';
+// Header values may contain tabs, which cached evidence refuses as control characters:
+// 'X-Frame-Options: DENY<TAB>x' made the whole observation fail isObservation.
+const shown = (value: string, max: number) => value.replace(/\t/g, ' ').trim().toLowerCase().slice(0, max);
 
 export function headerCheck(head: Head): Check {
   const headers = head.headers;
@@ -42,18 +45,18 @@ export function headerCheck(head: Head): Check {
     }
   }
   const xcto = headers.get('x-content-type-options');
-  if (xcto != null) evidence.x_content_type_options = xcto.trim().toLowerCase().slice(0, 64);
+  if (xcto != null) evidence.x_content_type_options = shown(xcto, 64);
   if (xcto != null && xcto.trim().toLowerCase() !== 'nosniff') issues.push('invalid:x-content-type-options');
   const referrer = headers.get('referrer-policy');
-  if (referrer != null) evidence.referrer_policy = referrer.trim().toLowerCase().slice(0, 128);
+  if (referrer != null) evidence.referrer_policy = shown(referrer, 128);
   if (referrer != null && /^(?:unsafe-url|no-referrer-when-downgrade)$/i.test(referrer.trim())) issues.push('weak:referrer-policy');
   evidence.issues = issues;
   const frame = headers.get('x-frame-options');
-  if (frame != null) evidence.x_frame_options = frame.trim().toLowerCase().slice(0, 64);
+  if (frame != null) evidence.x_frame_options = shown(frame, 64);
   const coop = headers.get('cross-origin-opener-policy');
-  if (coop != null) evidence.cross_origin_opener_policy = coop.trim().toLowerCase().slice(0, 64);
+  if (coop != null) evidence.cross_origin_opener_policy = shown(coop, 64);
   const corp = headers.get('cross-origin-resource-policy');
-  if (corp != null) evidence.cross_origin_resource_policy = corp.trim().toLowerCase().slice(0, 64);
+  if (corp != null) evidence.cross_origin_resource_policy = shown(corp, 64);
   return { id: 'http.headers', name: 'HTTPS security headers', group: 'http', status: issues.length ? 'warn' : 'pass',
     detail: issues.length ? 'Selected HTTPS root headers are missing or have potentially weak values; policy effectiveness was not fully evaluated.' : 'Selected HTTPS root headers have basic valid values; policy effectiveness was not fully evaluated.', evidence };
 }
@@ -74,7 +77,7 @@ export function corsCheck(head: Head, path = '/', preflight?: Head): Check {
     if (preOrigin && preOrigin.length <= 256 && /^[\x20-\x7e]+$/.test(preOrigin)) evidence.preflight_allow_origin_value = preOrigin;
     if (preOrigin && !evidence.preflight_allow_origin_value) evidence.preflight_allow_origin_value_omitted = true;
     evidence.preflight_allow_credentials = preflight.headers.get('access-control-allow-credentials')?.trim().toLowerCase() === 'true';
-    evidence.preflight_methods = (preflight.headers.get('access-control-allow-methods') ?? '').slice(0, 128);
+    evidence.preflight_methods = (preflight.headers.get('access-control-allow-methods') ?? '').replace(/\t/g, ' ').slice(0, 128);
   }
   if (kind === 'probe_origin' && credentials) return { id: 'http.cors', name: 'CORS on HTTPS path', group: 'http', status: 'warn',
     detail: 'The requested HTTPS path allows a fixed foreign Origin with credentials on GET; exposure of sensitive data was not established.', evidence };
