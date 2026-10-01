@@ -158,9 +158,20 @@ PostgreSQL 18 or newer image.
 
 If `start` reports that `postgres-cluster` already holds a PostgreSQL 18 cluster that was not
 migrated, PostgreSQL 18 was started before the upgrade ran (for example with a raw
-`docker compose up`) and initialized an empty database. The real data is still in `postgres-data`.
-When nothing in the new cluster is needed, remove it with `docker volume rm shakerscan_postgres-cluster`
-and run `shakerscan start` again.
+`docker compose up`) and initialized an empty database. The real data is still in `postgres-data`;
+`shakerscan db-upgrade --remigrate` sets the new cluster aside and migrates.
+
+The upgrade records a fingerprint of the PostgreSQL 16 data it copied. If an earlier release later
+runs on that data again (a rollback, below) and you then return to this release, `start` stops and
+says the PostgreSQL 16 data has been used since it was copied, because the PostgreSQL 18 copy may be
+missing what was written during the rollback. Choose explicitly:
+
+```bash
+shakerscan db-upgrade --remigrate      # copy the 16 data again; the current 18 data is set aside
+shakerscan db-upgrade --keep-current   # keep the 18 data; rollback-time changes are not carried over
+```
+
+Both ask for confirmation. A set-aside copy stays in `postgres-cluster` until `--remove-legacy`.
 
 After you have checked the upgraded release, reclaim the space the PostgreSQL 16 data uses. This
 asks for confirmation and removes the only copy a previous release can start with:
@@ -180,7 +191,8 @@ To go back from PostgreSQL 18 to a release that runs PostgreSQL 16, skip the dat
 and only reinstall the previous release (the last part of this section). That release reads the
 `postgres-data` volume, which still holds the data exactly as it was when the upgrade copied it;
 changes made after the upgrade are not in it. Do not start the new release's PostgreSQL with
-`docker compose up` for this.
+`docker compose up` for this. When you upgrade again afterwards, `start` asks whether to copy the
+rolled-back data again or keep the earlier PostgreSQL 18 data (see PostgreSQL 18 above).
 
 Stop ShakerScan and start only PostgreSQL:
 

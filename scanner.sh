@@ -2263,7 +2263,7 @@ print_help() {
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
     echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
-    echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remove-legacy)"
+    echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remigrate, --keep-current, --remove-legacy)"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
     echo ""
@@ -3337,8 +3337,14 @@ db_upgrade_cmd() {
         --remove-legacy)
             remove_legacy_postgres_data
             ;;
+        --remigrate)
+            remigrate_postgres_cluster
+            ;;
+        --keep-current)
+            keep_current_postgres_cluster
+            ;;
         *)
-            echo "Usage: $(cli_hint) db-upgrade [--status|--remove-legacy]" >&2
+            echo "Usage: $(cli_hint) db-upgrade [--status|--remigrate|--keep-current|--remove-legacy]" >&2
             return 1
             ;;
     esac
