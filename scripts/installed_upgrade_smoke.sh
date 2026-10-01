@@ -23,6 +23,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE_VERSION="${BASELINE_VERSION:-$(tr -d '[:space:]' < "$ROOT/install/STABLE_VERSION")}"
 CANDIDATE_IMAGE_LOCK="${CANDIDATE_IMAGE_LOCK:?CANDIDATE_IMAGE_LOCK must name the candidate release-image-lock.env}"
+# The launcher treats these as operator overrides that win over a release image lock. Inherited from
+# the caller they would silently run other images than the baseline's and the candidate's locks name.
+unset SCANNER_IMAGE API_IMAGE UI_IMAGE SIGNER_IMAGE MODEL_INTAKE_IMAGE
 INSTALL_DIR="${INSTALLED_UPGRADE_HOME:-$HOME/.shakerscan-installed-upgrade}"
 BULK_MB="${INSTALLED_UPGRADE_BULK_MB:-256}"
 RECEIPT="${UPGRADE_RECEIPT_PATH:-$ROOT/artifacts/installed-upgrade-receipt.json}"

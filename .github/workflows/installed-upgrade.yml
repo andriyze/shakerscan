@@ -28,13 +28,6 @@ concurrency:
   group: installed-upgrade-${{ github.ref }}-${{ inputs.candidate_sha || github.sha }}
   cancel-in-progress: true
 
-env:
-  SCANNER_IMAGE: shakerscan/shakerscan-scanner
-  API_IMAGE: shakerscan/shakerscan-api
-  UI_IMAGE: shakerscan/shakerscan-ui
-  SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
-  MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
-
 jobs:
   installed-upgrade:
     name: Upgrade a real installed stable release
@@ -69,6 +62,15 @@ jobs:
 
       - name: Write the candidate image lock
         shell: bash
+        # Repository names for this step only. The launcher reads SCANNER_IMAGE, API_IMAGE and the
+        # rest as operator overrides that win over the lock, so exported to the whole job they made
+        # the upgrade run the untagged (latest, i.e. stable) images instead of the candidate.
+        env:
+          SCANNER_IMAGE: shakerscan/shakerscan-scanner
+          API_IMAGE: shakerscan/shakerscan-api
+          UI_IMAGE: shakerscan/shakerscan-ui
+          SIGNER_IMAGE: shakerscan/shakerscan-model-intake-signer
+          MODEL_INTAKE_IMAGE: shakerscan/shakerscan-model-intake
         run: |
           receipt=artifacts/candidate/release-candidate-receipt.json
           {
