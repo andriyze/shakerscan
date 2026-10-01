@@ -62,6 +62,7 @@ const STATUS_VIEW_NOUNS: Record<StatusView, string> = {
 interface FindingsFilters {
   [key: string]: string | number | undefined
   severity?: string
+  proof_state?: string
   status?: string
   source_type?: string
   domain?: string
@@ -200,13 +201,14 @@ function FindingsContent() {
   const verificationVerdictFilter = filters.verification_verdict || ''
   const verificationModeFilter = filters.verification_mode || ''
   const verifiedOnlyFilter = filters.verified_only === 'true'
+  const proofFilter = filters.proof_state || ''
   const sortBy = (filters.sort_by || 'severity') as SortOption
   const sortOrder = (filters.sort_order || 'desc') as SortOrder
   // Page is 1-based in URL (page=1 is first page)
   const rawPage = Math.max(1, filters.page || 1)
 
   const hasActiveFilters = Boolean(
-    severityFilter || (statusView !== 'all' && statusView !== 'active') || sourceTypeFilter || domainFilter ||
+    severityFilter || proofFilter || (statusView !== 'all' && statusView !== 'active') || sourceTypeFilter || domainFilter ||
     scanIdFilter || targetIdFilter || aiTargetIdFilter || deviceTargetIdFilter || drivenByFilter || researchCampaignFilter ||
     searchQuery || lastSeenFilter ||
     firstSeenWithinFilter || resolvedWithinFilter ||
@@ -241,12 +243,13 @@ function FindingsContent() {
 
   useEffect(() => {
     fetchFindings()
-  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, freshnessFilter, rawPage, sortBy, sortOrder, pageSize])
+  }, [severityFilter, statusFilter, sourceTypeFilter, domainFilter, scanIdFilter, targetIdFilter, aiTargetIdFilter, deviceTargetIdFilter, drivenByFilter, researchCampaignFilter, searchQuery, lastSeenFilter, firstSeenWithinFilter, resolvedWithinFilter, verificationVerdictFilter, verificationModeFilter, verifiedOnlyFilter, proofFilter, freshnessFilter, rawPage, sortBy, sortOrder, pageSize])
 
   async function fetchFindings() {
     try {
       const data = await getFindings({
         severity: severityFilter || undefined,
+        proof_state: proofFilter || undefined,
         status: statusFilter || undefined,
         source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
         root_domain: domainFilter || undefined,
@@ -288,6 +291,7 @@ function FindingsContent() {
         try {
           const older = await getFindings({
             severity: severityFilter || undefined,
+            proof_state: proofFilter || undefined,
             status: statusFilter || undefined,
             source_type: sourceTypeFilter ? (sourceTypeFilter as FindingSourceTypeFilter) : undefined,
             root_domain: domainFilter || undefined,
@@ -427,6 +431,7 @@ function FindingsContent() {
     if (finding.is_candidate) return '/findings/candidates'
     const params = new URLSearchParams()
     if (severityFilter) params.set('return_severity', severityFilter)
+    if (proofFilter) params.set('return_proof_state', proofFilter)
     if (filters.status) params.set('return_status', filters.status)
     if (sourceTypeFilter) params.set('return_source_type', sourceTypeFilter)
     if (domainFilter) params.set('return_domain', domainFilter)
@@ -591,6 +596,7 @@ function FindingsContent() {
           freshness: freshnessFilter,
           freshnessExplicit: Boolean(filters.freshness),
           severity: severityFilter,
+          proofState: proofFilter,
           sourceType: sourceTypeFilter,
           domain: domainFilter,
           lastSeen: lastSeenFilter,

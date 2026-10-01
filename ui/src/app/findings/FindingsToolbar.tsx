@@ -13,6 +13,7 @@ import {
 } from '@/lib/constants'
 import { STALE_AFTER_DAYS } from '@/lib/findingFreshness'
 import type { StatusView } from '@/lib/findingGroups'
+import { listFilterValues, toggleListFilterValue } from '@/lib/listFilterValues'
 import { Button, Card, Field, Input, Select, Tabs, Toggle } from '@/components/ui'
 import { countActiveSecondaryFilters } from './triage'
 
@@ -62,6 +63,13 @@ const SOURCE_TAB_ITEMS = SOURCE_TYPE_OPTIONS.map((option) => ({ key: option.valu
 // Severity is a property you narrow by, so it gets free uppercase pills (echoing the row badge);
 // status is a partition of your work, so it gets the segmented Tabs control. Different shapes
 // for different questions.
+// The list's proof badges, as filters: the server's projection, the same field the badge shows.
+const PROOF_FILTERS = [
+  { key: 'verified', label: 'Proven', hint: 'Deterministic proof confirmed these', activeClass: 'bg-emerald-500/20 text-emerald-300 ring-1 ring-inset ring-emerald-400/30' },
+  { key: 'suspected', label: 'Suspected', hint: 'Leads that are not proven yet', activeClass: 'bg-amber-500/20 text-amber-300 ring-1 ring-inset ring-amber-400/30' },
+] as const
+const PROOF_ORDER = ['verified', 'suspected', 'unverified'] as const
+
 const SEVERITY_PILL_BASE =
   'rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ' +
   'focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500'
@@ -82,7 +90,10 @@ export interface FindingsToolbarValues {
   /** The freshness view in effect, and whether the URL chose it explicitly. */
   freshness: FreshnessView
   freshnessExplicit: boolean
+  /** Comma list; several severities may be selected. */
   severity: string
+  /** Comma list of server proof states (verified, suspected). */
+  proofState: string
   sourceType: string
   domain: string
   lastSeen: number
@@ -273,15 +284,37 @@ export function FindingsToolbar({
           active={values.status}
           onChange={(key) => onStatusChange(key as StatusView)}
         />
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div role="group" aria-label="Filter by proof" className="flex flex-wrap gap-1.5">
+          {PROOF_FILTERS.map((proof) => {
+            const active = listFilterValues(values.proofState).includes(proof.key)
+            return (
+              <button
+                key={proof.key}
+                type="button"
+                aria-pressed={active}
+                title={proof.hint}
+                onClick={() => setFilter('proof_state', toggleListFilterValue(values.proofState, proof.key, PROOF_ORDER))}
+                className={cn(
+                  SEVERITY_PILL_BASE,
+                  active ? proof.activeClass : 'bg-gray-800/60 text-gray-500 hover:bg-gray-800 hover:text-gray-300'
+                )}
+              >
+                {proof.label}
+              </button>
+            )
+          })}
+        </div>
+        {/* Several severities may be selected (critical and high together). */}
         <div role="group" aria-label="Filter by severity" className="flex flex-wrap gap-1.5">
           {SEVERITY_LEVELS.map((sev) => {
-            const active = values.severity === sev
+            const active = listFilterValues(values.severity).includes(sev)
             return (
               <button
                 key={sev}
                 type="button"
                 aria-pressed={active}
-                onClick={() => setFilter('severity', active ? undefined : sev)}
+                onClick={() => setFilter('severity', toggleListFilterValue(values.severity, sev, SEVERITY_LEVELS))}
                 className={cn(
                   SEVERITY_PILL_BASE,
                   active
@@ -293,6 +326,7 @@ export function FindingsToolbar({
               </button>
             )
           })}
+        </div>
         </div>
       </div>
     </div>

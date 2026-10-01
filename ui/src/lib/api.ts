@@ -2303,6 +2303,21 @@ export function extractFindingTriage(finding: Finding | undefined | null): Findi
   return triage as FindingTriage
 }
 
+// Fix guidance from the scanner's remediation knowledge base (GET /findings/{id} only).
+// matched_by 'exposure_class' is the prover's classification; 'title' is a keyword match on the
+// title, so it is general guidance for that kind of issue.
+export interface FindingRemediation {
+  title: string | null
+  description: string | null
+  impact: string | null
+  steps: string[]
+  code_examples: Array<{ label: string; code: string }>
+  verification: string | null
+  references: string[]
+  effort: string | null
+  matched_by: 'exposure_class' | 'title'
+}
+
 export interface Finding {
   id: string
   title: string
@@ -2310,6 +2325,7 @@ export interface Finding {
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   cvss_score?: number
   status: 'active' | 'resolved' | 'false_positive' | 'accepted_risk'
+  remediation?: FindingRemediation | null
   tool?: string
   fingerprint?: string
   cwe?: string
@@ -5825,7 +5841,10 @@ export async function scanTarget(
 
 // Findings
 export async function getFindings(params?: {
+  /** One severity or several, comma-separated (critical,high). */
   severity?: string
+  /** Server proof projection, comma-separated: verified, suspected, unverified. */
+  proof_state?: string
   status?: string
   source_type?: 'dast' | 'device' | 'ai' | 'ai_gate' | 'ai_session' | 'deep_hunt' | 'autonomous' | 'model_intake' | 'asm' | 'manual'
   limit?: number
@@ -5878,6 +5897,7 @@ export async function getFindings(params?: {
   if (params?.verification_verdict) searchParams.set('verification_verdict', params.verification_verdict)
   if (params?.verification_mode) searchParams.set('verification_mode', params.verification_mode)
   if (params?.verified_only) searchParams.set('verified_only', 'true')
+  if (params?.proof_state) searchParams.set('proof_state', params.proof_state)
   if (params?.driven_by) searchParams.set('driven_by', params.driven_by)
   if (params?.research_campaign_id) searchParams.set('research_campaign_id', params.research_campaign_id)
   if (params?.sort_by) searchParams.set('sort_by', params.sort_by)
