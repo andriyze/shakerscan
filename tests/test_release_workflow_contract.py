@@ -181,3 +181,29 @@ def test_certification_requires_upgrading_a_real_installed_stable_release():
     # The rollback goes through the installer an operator uses, pinned to the stable version.
     assert 'SHAKERSCAN_INSTALL_VERSION="$BASELINE_VERSION"' in script and 'sh "$ROOT/install/index.sh"' in script
     assert "has been used since it was copied" in script
+
+
+LAUNCHER_IMAGE_OVERRIDES = ("SCANNER_IMAGE", "API_IMAGE", "UI_IMAGE", "SIGNER_IMAGE", "MODEL_INTAKE_IMAGE")
+
+
+def test_the_installed_upgrade_runs_the_locked_images_not_inherited_overrides():
+    """The launcher reads these five names as operator overrides that win over a release image lock.
+
+    installed-upgrade.yml exported them (bare repository names) to the whole job, so the 2.6.0
+    candidate's upgrade ran the untagged images, i.e. latest = the 2.5.6 stable, on 2.6.0 runtime
+    files: the API refused the identity mismatch and certification failed. They belong to the step
+    that writes the lock, and the smoke clears them before it drives the launcher.
+    """
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "installed-upgrade.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["installed-upgrade"]
+    for scope in (workflow.get("env") or {}, job.get("env") or {}):
+        assert not set(LAUNCHER_IMAGE_OVERRIDES) & set(scope)
+    for step in job["steps"]:
+        names = set(step.get("env") or {}) & set(LAUNCHER_IMAGE_OVERRIDES)
+        if "scripts/installed_upgrade_smoke.sh" in step.get("run", ""):
+            assert not names
+        if step.get("name") == "Write the candidate image lock":
+            assert names == set(LAUNCHER_IMAGE_OVERRIDES)
+    script = (ROOT / "scripts" / "installed_upgrade_smoke.sh").read_text(encoding="utf-8")
+    cleared = script.index("unset " + " ".join(LAUNCHER_IMAGE_OVERRIDES))
+    assert cleared < script.index('note "1. install')

@@ -23,6 +23,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE_VERSION="${BASELINE_VERSION:-$(tr -d '[:space:]' < "$ROOT/install/STABLE_VERSION")}"
 CANDIDATE_IMAGE_LOCK="${CANDIDATE_IMAGE_LOCK:?CANDIDATE_IMAGE_LOCK must name the candidate release-image-lock.env}"
+# The launcher treats these as operator overrides that win over a release image lock. Inherited from
+# the caller they would silently run other images than the baseline's and the candidate's locks name.
+unset SCANNER_IMAGE API_IMAGE UI_IMAGE SIGNER_IMAGE MODEL_INTAKE_IMAGE
 INSTALL_DIR="${INSTALLED_UPGRADE_HOME:-$HOME/.shakerscan-installed-upgrade}"
 BULK_MB="${INSTALLED_UPGRADE_BULK_MB:-256}"
 RECEIPT="${UPGRADE_RECEIPT_PATH:-$ROOT/artifacts/installed-upgrade-receipt.json}"
@@ -36,7 +39,23 @@ mkdir -p "$LOG_DIR"
 
 fail() {
     echo "FAIL: $*" >&2
+    diagnose > "$LOG_DIR/failure-diagnostics.txt" 2>&1 || true
     exit 1
+}
+
+# What a failed run leaves for the uploaded artifact: the cleanup trap removes the stack, so the
+# container states and logs must be captured before it runs.
+diagnose() {
+    echo "== docker"; docker version --format '{{.Server.Version}}' 2>&1; docker compose version 2>&1
+    echo "== containers"; docker ps -a --format '{{.Names}}	{{.Status}}	{{.Image}}' 2>&1
+    echo "== api health"; curl -sS -m 10 -o - -w '
+HTTP %{http_code}
+' "$API/health" 2>&1 | tail -c 2000
+    for container in shakerscan-api-1 shakerscan-postgres-1 shakerscan-api-storage-init-1; do
+        echo "== logs $container"; docker logs --tail 300 "$container" 2>&1
+        echo "== inspect $container"; docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$container" 2>&1
+    done
+    echo "== launcher status"; launcher status 2>&1 | tail -60
 }
 
 note() {
