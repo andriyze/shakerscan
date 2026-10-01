@@ -91,6 +91,7 @@ from capabilities.auth import (
     TargetBoundSessionCredential,
     establish_target_bound_http_session,
 )
+from capabilities.session_reuse import reuse_or_establish_session
 from capabilities.authz import (
     authz_route_inventory_digest,
     verify_target_bound_object_authorization,
@@ -145,7 +146,7 @@ from runtime.credential_refs import (
     CredentialReferenceError,
     select_hunt_principal_reference,
 )
-from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
+from runtime.models import PreparedExecution, ScanPolicy, TargetBinding, target_kinds_share_asset
 from runtime.request_collection_store import (
     RequestCollectionContractError,
     RequestCollectionSelection,
@@ -1986,7 +1987,7 @@ async def _hydrate_generic_scan_credentials(
                     profile.current_version != expected_version
                     or profile.auth_kind != str(ref.get("auth_kind") or "")
                     or profile.principal_slot != str(ref.get("principal_slot") or "")
-                    or profile.target_kind != target_kind
+                    or not target_kinds_share_asset(profile.target_kind, target_kind)
                     or tuple(profile.allowed_capabilities) != expected_allowed
                 ):
                     raise ScanCredentialError(
@@ -9648,8 +9649,8 @@ async def _execute_scan_auth_session_capability(
     request_limit = 2 if credential.auth_kind == "form_login" else 1
 
     async def establish_session() -> Mapping[str, Any]:
-        session = await establish_target_bound_http_session(
-            credential.session_credential(), target=target,
+        session = await reuse_or_establish_session(
+            db_pool, credential.session_credential(), target=target, establish=establish_target_bound_http_session,
         )
         private_session_holder["session"] = session
         result = dict(session.execution_result())
@@ -12446,7 +12447,7 @@ async def _bind_scan_replay_primary_credential(
             or resolved.profile.auth_kind != str(primary.get("auth_kind") or "")
             or resolved.profile.principal_slot
             != str(primary.get("principal_slot") or "")
-            or resolved.profile.target_kind != target.target_kind
+            or not target_kinds_share_asset(resolved.profile.target_kind, target.target_kind)
         ):
             raise ReplayExecutionError(
                 "Scan replay credential changed after admission"
@@ -22146,8 +22147,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
 
             async def establish_session_operation() -> dict[str, Any]:
                 nonlocal private_session
-                private_session = await establish_target_bound_http_session(
-                    credential, target=target,
+                private_session = await reuse_or_establish_session(
+                    db_pool, credential, target=target, establish=establish_target_bound_http_session,
                 )
                 return private_session.execution_result()
 

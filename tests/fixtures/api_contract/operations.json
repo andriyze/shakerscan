@@ -540,6 +540,21 @@
     "operation_id": "patch_credential_profile_credential_profiles__profile_id__patch"
   },
   {
+    "path": "/credential-profiles/{profile_id}/grants",
+    "method": "get",
+    "operation_id": "list_credential_grants_credential_profiles__profile_id__grants_get"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/grants",
+    "method": "post",
+    "operation_id": "grant_credential_profile_credential_profiles__profile_id__grants_post"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/grants/{target_id}",
+    "method": "delete",
+    "operation_id": "revoke_credential_grant_credential_profiles__profile_id__grants__target_id__delete"
+  },
+  {
     "path": "/credential-profiles/{profile_id}/rotate",
     "method": "post",
     "operation_id": "rotate_credential_profile_credential_profiles__profile_id__rotate_post"

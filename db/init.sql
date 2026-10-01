@@ -473,6 +473,9 @@ CREATE TABLE credential_profile_bindings (
     allowed_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb
         CHECK (jsonb_typeof(allowed_capabilities) = 'array'),
     is_active BOOLEAN NOT NULL DEFAULT true,
+    -- A 'target' binding other than the profile's own target is a share an operator granted.
+    granted_by TEXT,
+    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT credential_profile_bindings_unique
@@ -540,6 +543,9 @@ ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_credential_query_parameter_v1')
+ON CONFLICT (name) DO NOTHING;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_credential_profile_grants_v1')
 ON CONFLICT (name) DO NOTHING;
 
 INSERT INTO app_schema_migrations(name)

@@ -1,9 +1,11 @@
 """Authoritative PostgreSQL storage for generic V2 credential profiles.
 
 The control plane writes encrypted envelopes and content-free configuration.  Only a
-worker lookup returns ciphertext, and that lookup requires an exact target binding and
-an active consumer binding.  Secret rotation appends an immutable version instead of
-overwriting audit history.
+worker lookup returns ciphertext, and that lookup requires an active target grant for the
+consuming target: the profile's own (home) target, or another target an operator shared it
+with explicitly.  A grant makes the profile selectable there; it never authorizes testing,
+which still needs that target's own authorization.  Secret rotation appends an immutable
+version instead of overwriting audit history.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import Any, Mapping, NoReturn, Protocol
 import uuid
 
 from .credentials import CREDENTIAL_KINDS, SSH_CREDENTIAL_KINDS
+from .models import target_kinds_share_asset
 
 
 MIGRATION_NAME = "v2_credential_profiles_v1"
@@ -139,7 +142,23 @@ $$;
 INSERT INTO app_schema_migrations(name)
 VALUES ('v2_credential_query_parameter_v1')
 ON CONFLICT (name) DO NOTHING;
+
+-- Target grants: a profile shared with another target is a 'target' binding for that target.
+-- A revoked grant keeps its row (audit) and stays revoked when the profile is reactivated.
+ALTER TABLE credential_profile_bindings ADD COLUMN IF NOT EXISTS granted_by TEXT;
+ALTER TABLE credential_profile_bindings ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_credential_profile_grants_v1')
+ON CONFLICT (name) DO NOTHING;
 """
+
+# Web, API and network targets are views of the same asset rows (the targets table); a device
+# target is a different asset. A profile serves targets of its own asset kind only.
+_KIND_COMPATIBLE_SQL = (
+    "(p.target_kind={kind} OR (p.target_kind IN ('web','api','network') "
+    "AND {kind} IN ('web','api','network')))"
+)
+
 
 
 class CredentialStoreError(RuntimeError):
@@ -332,6 +351,14 @@ class CredentialProfileMetadata:
     created_at: datetime
     updated_at: datetime
     allowed_capabilities: tuple[str, ...] = ()
+    # The target this copy was loaded for through an active grant (list_profiles,
+    # load_for_worker). None when loaded by ID alone (get_profile).
+    granted_target_id: str | None = None
+
+    @property
+    def shared(self) -> bool:
+        """Loaded for a target other than the profile's own (home) target."""
+        return self.granted_target_id is not None and self.granted_target_id != self.target_id
 
     @classmethod
     def from_row(cls, value: Any) -> "CredentialProfileMetadata":
@@ -371,6 +398,9 @@ class CredentialProfileMetadata:
             created_at=item["created_at"],
             updated_at=item["updated_at"],
             allowed_capabilities=tuple(_capabilities(raw_capabilities)),
+            granted_target_id=(
+                str(_target_id(item["granted_target_id"])) if item.get("granted_target_id") else None
+            ),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -391,6 +421,9 @@ class CredentialProfileMetadata:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "allowed_capabilities": list(self.allowed_capabilities),
+            "home_target_id": self.target_id,
+            "granted_target_id": self.granted_target_id,
+            "shared": self.shared,
             "secret_configured": True,
             "secret_values_visible": False,
         }
@@ -501,17 +534,21 @@ class PostgresCredentialProfileStore:
         target_id: Any,
         include_inactive: bool = False,
     ) -> list[CredentialProfileMetadata]:
+        target_uuid = _target_id(target_id)
+        # The target's own profiles (a home binding may predate this table) and every profile
+        # shared with it through a grant that is not revoked. Own profiles sort first.
         rows = await conn.fetch(
-            """SELECT p.*, b.allowed_capabilities
+            f"""SELECT p.*, b.allowed_capabilities, $2::text AS granted_target_id
                FROM credential_profiles p
                LEFT JOIN credential_profile_bindings b
-                 ON b.profile_id=p.id AND b.binding_kind='target'
-                AND b.binding_id=p.target_id::text
-               WHERE (p.target_kind=$1 OR (p.target_kind IN ('web','api','network') AND $1 IN ('web','api','network'))) AND p.target_id=$2
-                 AND ($3::boolean OR p.is_active=true)
-               ORDER BY p.is_active DESC, lower(p.name), p.id""",
+                 ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$2::text
+               WHERE {_KIND_COMPATIBLE_SQL.format(kind="$1")}
+                 AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.revoked_at IS NULL))
+                 AND ($4::boolean OR (p.is_active=true AND (b.id IS NULL OR b.is_active=true)))
+               ORDER BY (p.target_id=$3) DESC, p.is_active DESC, lower(p.name), p.id""",
             _target_kind(target_kind),
-            _target_id(target_id),
+            str(target_uuid),
+            target_uuid,
             bool(include_inactive),
         )
         return [CredentialProfileMetadata.from_row(item) for item in rows]
@@ -601,17 +638,17 @@ class PostgresCredentialProfileStore:
             )
         if not updated:
             raise CredentialStoreConflict("credential profile was modified concurrently")
+        # Capabilities belong to the profile and follow it to every grant. Reactivating the
+        # profile restores the grants it had, never one that was revoked.
         await conn.execute(
             """UPDATE credential_profile_bindings
                SET allowed_capabilities=COALESCE($1::jsonb, allowed_capabilities),
                    is_active=$2, updated_at=$3
-               WHERE profile_id=$4 AND binding_kind='target'
-                 AND binding_id=$5""",
+               WHERE profile_id=$4 AND binding_kind='target' AND revoked_at IS NULL""",
             capabilities_json,
             bool(is_active),
             timestamp,
             profile_uuid,
-            existing.target_id,
         )
         return await self.get_profile(conn, profile_id=profile_uuid)
 
@@ -692,21 +729,23 @@ class PostgresCredentialProfileStore:
         capability_name = str(capability or "").strip()
         if not _CAPABILITY_RE.fullmatch(capability_name):
             raise CredentialStoreError("capability is invalid")
+        # The consuming target must hold an active grant: its own home binding, or a share
+        # an operator made and has not revoked.
         row = await conn.fetchrow(
-            """SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
-                      b.allowed_capabilities
+            f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
+                      b.allowed_capabilities, b.binding_id AS granted_target_id
                FROM credential_profiles p
                JOIN credential_profile_versions v
                  ON v.profile_id=p.id AND v.version=p.current_version
                JOIN credential_profile_bindings b
                  ON b.profile_id=p.id AND b.binding_kind='target'
-                AND b.binding_id=p.target_id::text AND b.is_active=true
-               WHERE p.id=$1 AND (p.target_kind=$2 OR (p.target_kind IN ('web','api','network') AND $2 IN ('web','api','network'))) AND p.target_id=$3
+                AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
+               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
                  AND p.is_active=true
                  AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
             _profile_id(profile_id),
             _target_kind(target_kind),
-            _target_id(target_id),
+            str(_target_id(target_id)),
         )
         if not row:
             raise CredentialStoreError("credential profile is unavailable for target")
@@ -760,3 +799,187 @@ class PostgresCredentialProfileStore:
             profile_uuid,
         )
         return await self.get_profile(conn, profile_id=profile_uuid)
+
+    async def has_active_grant(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+        target_kind: str,
+        target_id: Any,
+    ) -> bool:
+        """The profile is active and the target holds an active grant for it."""
+        row = await conn.fetchrow(
+            f"""SELECT 1
+               FROM credential_profiles p
+               JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
+               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")} AND p.is_active=true""",
+            _profile_id(profile_id),
+            _target_kind(target_kind),
+            str(_target_id(target_id)),
+        )
+        return bool(row)
+
+    async def grant_profile(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+        target_kind: str,
+        target_id: Any,
+        granted_by: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Share an active profile with another target of the same asset kind."""
+        timestamp = _now(now)
+        profile_uuid = _profile_id(profile_id)
+        normalized_kind = _target_kind(target_kind)
+        target_uuid = _target_id(target_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM credential_profiles WHERE id=$1 FOR UPDATE", profile_uuid,
+        )
+        if not row:
+            raise CredentialStoreError("credential profile not found")
+        profile = CredentialProfileMetadata.from_row(row)
+        if not profile.is_active:
+            raise CredentialStoreError("an inactive credential profile cannot be shared")
+        if profile.target_id == str(target_uuid):
+            raise CredentialStoreError("the credential profile already belongs to this target")
+        if not target_kinds_share_asset(profile.target_kind, normalized_kind):
+            raise CredentialStoreError(
+                f"a {profile.target_kind} credential cannot be shared with a {normalized_kind} target"
+            )
+        _validate_kind_placement(
+            auth_kind=profile.auth_kind, target_kind=normalized_kind,
+            principal_slot=profile.principal_slot,
+        )
+        home = await conn.fetchrow(
+            """SELECT allowed_capabilities FROM credential_profile_bindings
+               WHERE profile_id=$1 AND binding_kind='target' AND binding_id=$2""",
+            profile_uuid, profile.target_id,
+        )
+        capabilities = home["allowed_capabilities"] if home else "[]"
+        if not isinstance(capabilities, str):
+            capabilities = json.dumps(list(capabilities or []), separators=(",", ":"))
+        actor = str(granted_by or "api").strip()[:120] or "api"
+        grant = await conn.fetchrow(
+            """INSERT INTO credential_profile_bindings (
+                   id, profile_id, binding_kind, binding_id, allowed_capabilities,
+                   is_active, granted_by, revoked_at, created_at, updated_at
+               ) VALUES ($1,$2,'target',$3,$4::jsonb,true,$5,NULL,$6,$6)
+               ON CONFLICT (profile_id, binding_kind, binding_id) DO UPDATE
+                   SET is_active=true, revoked_at=NULL, granted_by=EXCLUDED.granted_by,
+                       allowed_capabilities=EXCLUDED.allowed_capabilities,
+                       updated_at=EXCLUDED.updated_at
+               RETURNING binding_id, granted_by, created_at, updated_at, revoked_at, is_active""",
+            uuid.uuid4(), profile_uuid, str(target_uuid), capabilities, actor, timestamp,
+        )
+        return _grant(grant, home_target_id=profile.target_id)
+
+    async def revoke_grant(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+        target_id: Any,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Stop sharing a profile with a target. The home target is never revoked here:
+        deactivating the profile removes it everywhere."""
+        timestamp = _now(now)
+        profile_uuid = _profile_id(profile_id)
+        target_text = str(_target_id(target_id))
+        row = await conn.fetchrow(
+            "SELECT target_id FROM credential_profiles WHERE id=$1 FOR UPDATE", profile_uuid,
+        )
+        if not row:
+            raise CredentialStoreError("credential profile not found")
+        if str(row["target_id"]) == target_text:
+            raise CredentialStoreError(
+                "the home target cannot be revoked; deactivate the profile instead"
+            )
+        grant = await conn.fetchrow(
+            """UPDATE credential_profile_bindings
+               SET is_active=false, revoked_at=$1, updated_at=$1
+               WHERE profile_id=$2 AND binding_kind='target' AND binding_id=$3
+                 AND revoked_at IS NULL
+               RETURNING binding_id, granted_by, created_at, updated_at, revoked_at, is_active""",
+            timestamp, profile_uuid, target_text,
+        )
+        if not grant:
+            raise CredentialStoreError("credential profile is not shared with this target")
+        return _grant(grant, home_target_id=str(row["target_id"]))
+
+    async def list_grants(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+        include_revoked: bool = False,
+    ) -> list[dict[str, Any]]:
+        """The targets a profile serves: its home target first, then its shares."""
+        profile_uuid = _profile_id(profile_id)
+        home = await conn.fetchrow(
+            "SELECT target_id FROM credential_profiles WHERE id=$1", profile_uuid,
+        )
+        if not home:
+            raise CredentialStoreError("credential profile not found")
+        rows = await conn.fetch(
+            """SELECT binding_id, granted_by, created_at, updated_at, revoked_at, is_active
+               FROM credential_profile_bindings
+               WHERE profile_id=$1 AND binding_kind='target'
+                 AND ($2::boolean OR revoked_at IS NULL)
+               ORDER BY (binding_id=$3) DESC, created_at, binding_id""",
+            profile_uuid, bool(include_revoked), str(home["target_id"]),
+        )
+        return [_grant(item, home_target_id=str(home["target_id"])) for item in rows]
+
+    async def list_library(
+        self,
+        conn: CredentialDatabase,
+        *,
+        include_inactive: bool = False,
+        search: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[tuple[CredentialProfileMetadata, int]], int]:
+        """Every profile with the number of other targets it is shared with, and the total."""
+        pattern = f"%{str(search).strip()}%" if search and str(search).strip() else None
+        rows = await conn.fetch(
+            """SELECT p.*, hb.allowed_capabilities,
+                      (SELECT count(*) FROM credential_profile_bindings g
+                        WHERE g.profile_id=p.id AND g.binding_kind='target'
+                          AND g.binding_id<>p.target_id::text AND g.revoked_at IS NULL)
+                        AS shared_target_count,
+                      COUNT(*) OVER() AS total_count
+               FROM credential_profiles p
+               LEFT JOIN credential_profile_bindings hb
+                 ON hb.profile_id=p.id AND hb.binding_kind='target'
+                AND hb.binding_id=p.target_id::text
+               WHERE ($1::boolean OR p.is_active=true)
+                 AND ($2::text IS NULL OR p.name ILIKE $2 OR COALESCE(p.principal_label,'') ILIKE $2)
+               ORDER BY p.is_active DESC, lower(p.name), p.id
+               LIMIT $3 OFFSET $4""",
+            bool(include_inactive), pattern, max(1, min(int(limit), 500)), max(0, int(offset)),
+        )
+        total = int(rows[0]["total_count"]) if rows else 0
+        return [
+            (CredentialProfileMetadata.from_row(item), int(item["shared_target_count"] or 0))
+            for item in rows
+        ], total
+
+
+def _grant(value: Any, *, home_target_id: str) -> dict[str, Any]:
+    item = _row(value)
+    target = str(item.get("binding_id"))
+    return {
+        "target_id": target,
+        "home": target == home_target_id,
+        "granted_by": item.get("granted_by"),
+        "granted_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "revoked_at": item.get("revoked_at"),
+        "active": bool(item.get("is_active")) and item.get("revoked_at") is None,
+    }

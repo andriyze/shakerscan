@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 437 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 366 | `api/**/*.py` |
+| Public REST operations | 440 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 368 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1798,6 +1798,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/credential-profiles/{profile_id}` | `delete_credential_profile` |
 | `GET` | `/credential-profiles/{profile_id}` | `get_credential_profile` |
 | `PATCH` | `/credential-profiles/{profile_id}` | `patch_credential_profile` |
+| `GET` | `/credential-profiles/{profile_id}/grants` | `list_credential_grants` |
+| `POST` | `/credential-profiles/{profile_id}/grants` | `grant_credential_profile` |
+| `DELETE` | `/credential-profiles/{profile_id}/grants/{target_id}` | `revoke_credential_grant` |
 | `POST` | `/credential-profiles/{profile_id}/rotate` | `rotate_credential_profile` |
 | `GET` | `/dashboard` | `dashboard` |
 | `POST` | `/data-deletion/execute` | `execute_record_deletion` |

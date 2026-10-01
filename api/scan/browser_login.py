@@ -14,10 +14,12 @@ try:
     from runtime.browser_login_contract import (
         BROWSER_LOGIN_CAPABILITY, normalize_browser_login_reference,
     )
+    from runtime.models import target_kinds_share_asset
 except ModuleNotFoundError:
     from ..runtime.browser_login_contract import (
         BROWSER_LOGIN_CAPABILITY, normalize_browser_login_reference,
     )
+    from ..runtime.models import target_kinds_share_asset
 
 
 def browser_login_scan_limits(request: Any) -> dict[str, Any] | None:
@@ -58,7 +60,8 @@ async def admit_scan_browser_login_profiles(conn, *, store, request, target_id, 
         profile = by_id.get(profile_id)
         if (profile is None or not profile.is_active
                 or (profile.expires_at is not None and profile.expires_at <= now)
-                or profile.target_id != str(target_id) or profile.target_kind != request.target_kind
+                or profile.granted_target_id != str(target_id)
+                or not target_kinds_share_asset(profile.target_kind, request.target_kind)
                 or profile.auth_kind not in {"form_login", "json_login"}
                 or BROWSER_LOGIN_CAPABILITY not in profile.allowed_capabilities
                 or not profile.configuration.get("browser_login_configured")

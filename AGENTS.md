@@ -131,11 +131,22 @@ count was queued; `status: partial` means only some submissions succeeded.
 - High-risk BOLA/IDOR requires explicit active/deep intent and two distinct principals.
 - A passive methodology does not fence a Hunt. Persisted policy and the capability manifest do.
 
-Reusable secrets belong only in encrypted exact-target profiles or request collections:
+Reusable secrets belong only in encrypted credential profiles or request collections:
 
+- A profile belongs to one home target and serves other targets only through an explicit
+  operator grant (`POST /credential-profiles/{id}/grants`), recorded and revocable per target.
+  A grant makes the profile selectable on that target; it never authorizes testing it, which
+  still needs that target's own standing authorization. Grants stay within one asset kind (web,
+  api and network share; device does not), and active capabilities need the receiving target's
+  own approval. Never share a profile an operator did not ask to share.
 - Scan and Hunt requests carry opaque profile/selection IDs, never tokens, cookies, passwords,
   private keys, client secrets, secret headers, or raw environment values.
-- Workers decrypt only after target, capability, approval, version, expiry, and policy validation.
+- Workers decrypt only after an active grant for the consuming target, capability, approval,
+  version, expiry, and policy validation.
+- A run about to log in starts from another run's live login when one exists for the same
+  target, credential version, principal slot, login kind and service origin (Hunts adopt it into
+  their own session row). Reuse never crosses targets, never survives a rotated, deactivated or
+  ungranted credential, and adds no authority: it happens after the run's own checks.
 - APIs, planner context, logs, and receipts remain metadata-only or redacted unless the user
   deliberately requests a raw sensitive export.
 - Primary, secondary, service, and SSH slots are distinct. BOLA needs distinct principals.
@@ -344,7 +355,8 @@ ID and frozen addresses never change. The operator-selected collection or creden
 may name that same-host service directly. Selected credentials work over HTTP and untrusted
 HTTPS; certificate defects are evidence, not an extra authorization prompt. Session refresh
 uses the saved login service, not the inventory record's default port. Do not bypass managed
-credentials or redirect credentials to another asset.
+credentials or redirect credentials to another asset; a credential reaches another target only
+through an operator's grant.
 
 SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
 uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through

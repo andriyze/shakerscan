@@ -19,6 +19,7 @@ import {
   type CredentialPrincipalSlot,
   type CredentialProfile,
 } from '@/lib/credentialApi'
+import { defaultHuntCredentialIds } from '@/lib/credentialDefaults'
 import {
   cancelHuntV2,
   confirmHuntShellPlan,
@@ -345,9 +346,11 @@ function HuntContent() {
     })
       .then(({ profiles }) => {
         if (!cancelled) {
-          setCredentialProfiles(
-            profiles.filter((profile) => profile.execution_compatible),
-          )
+          const usable = profiles.filter((profile) => profile.execution_compatible)
+          setCredentialProfiles(usable)
+          // A new Hunt starts with the target's credentials (its own before shared ones) in each
+          // slot; the operator can clear any of them before starting.
+          setCredentialIds(defaultHuntCredentialIds(usable))
         }
       })
       .catch((cause) => {
@@ -717,7 +720,7 @@ function HuntContent() {
                   <div>
                     <h2 className="text-sm font-medium text-white">Bound credential profiles</h2>
                     <p className="mt-1 text-xs text-gray-500">
-                      Select encrypted identities for this exact target. The planner receives only profile metadata.
+                      Select encrypted identities this target owns or that are shared with it. The planner receives only profile metadata.
                     </p>
                   </div>
                   <Link href="/credentials" className="text-xs text-blue-300 hover:text-blue-200">
@@ -742,7 +745,7 @@ function HuntContent() {
                             <option value="">{slot === 'ssh' ? 'No SSH command proposals' : `No ${slot} identity`}</option>
                             {candidates.map((profile) => (
                               <option key={profile.id} value={profile.id}>
-                                {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}
+                                {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}
                               </option>
                             ))}
                           </Select>
@@ -753,7 +756,7 @@ function HuntContent() {
                 )}
                 {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
                 <p className="text-xs text-gray-500">
-                  Existing target authorization also covers selected credentials. HTTP and untrusted HTTPS are supported. No SSH command runs until you separately confirm the exact immutable plan.
+                  This target&apos;s credentials start selected; clear any you do not want. Existing target authorization also covers selected credentials. HTTP and untrusted HTTPS are supported. No SSH command runs until you separately confirm the exact immutable plan.
                 </p>
               </div>
 

@@ -24,13 +24,15 @@ test('target-bound forms hide inactive and unnamed web targets', () => {
 })
 
 test('secret-bearing forms require an explicit target choice', () => {
-  for (const page of [credentialsPage, collectionsPage]) {
-    assert.match(page, /Choose a target…/)
-  }
+  assert.match(collectionsPage, /Choose a target…/)
+  // Credentials without a target is the library; creating one still needs an explicit target.
+  assert.match(credentialsPage, /<option value="">All targets<\/option>/)
+  assert.match(credentialsPage, /onClick=\{openCreate\} disabled=\{!targetId\}/)
   // A target ID from the URL is used only once it is one of the choices.
   assert.match(credentialsPage, /choices\.some\(\(item\) => item\.id === targetId\) \? targetId : ''/)
   assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| choices\.some\(\(choice\) => choice\.id === targetId\)\) return/)
-  assert.match(credentialsPage, /Choose a bound target/)
+  // With no target chosen the credentials page is the library, and says how to create one.
+  assert.match(credentialsPage, /Choose a target to create a credential/)
   assert.match(collectionsPage, /Choose a collection owner/)
 })
 

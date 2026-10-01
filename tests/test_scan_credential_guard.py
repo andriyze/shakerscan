@@ -17,13 +17,17 @@ class Pool:
 
 
 def setup(monkeypatch):
-    state = {"profile": _metadata("bearer_token"), "denied": False, "reads": 0}
+    state = {"profile": _metadata("bearer_token"), "denied": False, "reads": 0, "granted": True}
 
     class Store:
         async def get_profile(self, conn, *, profile_id):
             state["reads"] += 1
             assert profile_id == state["profile"].profile_id
             return state["profile"]
+
+        async def has_active_grant(self, conn, *, profile_id, target_kind, target_id):
+            assert profile_id == state["profile"].profile_id
+            return state["granted"]
 
         async def load_for_worker(self, *args, **kwargs):
             raise AssertionError("An action authority recheck must not load ciphertext")
@@ -46,15 +50,19 @@ def setup(monkeypatch):
 
 @pytest.mark.parametrize("change", [
     {"is_active": False}, {"current_version": 4}, {"record_version": 6},
-    {"allowed_capabilities": ()}, {"target_id": "other-target"},
-    {"target_kind": "web"}, {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
+    # A revoked share; a device profile on a web asset.
+    {"allowed_capabilities": ()}, {"granted": False},
+    {"target_kind": "device"}, {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
     {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)},
 ])
 def test_rechecks_metadata_before_each_action(monkeypatch, change):
     state, options = setup(monkeypatch)
     check = guard.build_scan_credential_check(Pool(), options=options, target=_target(), scan_id="fixture")
     assert asyncio.run(check(None)) is None
-    state["profile"] = replace(state["profile"], **change)
+    if "granted" in change:
+        state["granted"] = change["granted"]
+    else:
+        state["profile"] = replace(state["profile"], **change)
     assert asyncio.run(check(None)) == "authentication_uncertain"
     assert state["reads"] == 2
 
@@ -80,5 +88,18 @@ def test_anonymous_and_legacy_metadata_revision_compatibility(monkeypatch):
     state, options = setup(monkeypatch)
     assert guard.build_scan_credential_check(Pool(), options={}, target=_target(), scan_id="fixture") is None
     options["credential_profile_refs"][0].pop("credential_record_version")
+    check = guard.build_scan_credential_check(Pool(), options=options, target=_target(), scan_id="fixture")
+    assert asyncio.run(check(None)) is None
+
+
+@pytest.mark.parametrize("change", [
+    # Shared from another home target through an active grant.
+    {"target_id": "11111111-1111-4111-8111-111111111111"},
+    # A web profile serves an api view of the same asset (admission already allowed it).
+    {"target_kind": "web"},
+])
+def test_a_granted_profile_of_the_same_asset_keeps_working(monkeypatch, change):
+    state, options = setup(monkeypatch)
+    state["profile"] = replace(state["profile"], **change)
     check = guard.build_scan_credential_check(Pool(), options=options, target=_target(), scan_id="fixture")
     assert asyncio.run(check(None)) is None
