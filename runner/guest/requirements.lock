@@ -657,9 +657,9 @@ tqdm==4.70.0 \
     # via
     #   huggingface-hub
     #   transformers
-transformers==5.5.0 \
-    --hash=sha256:821a9ff0961abbb29eb1eb686d78df1c85929fdf213a3fe49dc6bd94f9efa944 \
-    --hash=sha256:c8db656cf51c600cd8c75f06b20ef85c72e8b8ff9abc880c5d3e8bc70e0ddcbd
+transformers==5.10.0 \
+    --hash=sha256:206c54d6d992bc35fef90f1252ac3f2746cdf549928b76e7c8c4f182684cee60 \
+    --hash=sha256:eae143e46d8e521da604bc4fdc45af7dd90e96eacbbc27f68d2754150aa5175a
     # via -r runner/guest/requirements.in
 typer==0.27.1 \
     --hash=sha256:53150287edd11baeb4e4722c8e394fcdf8181c0ae89485cba8d25c778d5edd56 \

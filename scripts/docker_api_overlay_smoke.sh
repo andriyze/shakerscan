@@ -65,7 +65,7 @@ docker run --rm --entrypoint sh "$WORKER_IMAGE" -ceu '
         exit 1
     fi
 '
-docker run --rm --entrypoint docker "$API_IMAGE" --version | grep -F 'Docker version 27.5.1, build 9f9e405'
+docker run --rm --entrypoint docker "$API_IMAGE" --version | grep -F 'Docker version 29.8.2, build 7fc2dff'
 docker run --rm --entrypoint sh "$API_IMAGE" -ceu '
     test "$(id -u)" != 0
     test ! -e /opt/tools

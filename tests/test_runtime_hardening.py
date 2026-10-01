@@ -658,7 +658,7 @@ def test_api_boundary_smoke_proves_shared_identity_and_role_isolation():
     assert 'SHAKERSCAN_API_OVERLAY_PREBUILT' in smoke
     assert 'docker image inspect "$API_IMAGE"' in smoke
     assert 'worker image must not contain Docker' in smoke
-    assert 'Docker version 27.5.1, build 9f9e405' in smoke
+    assert 'Docker version 29.8.2, build 7fc2dff' in smoke
     assert 'runtime API must not carry Buildx' in smoke
     assert 'test "$(id -u)" != 0' in smoke
     assert 'test ! -e /opt/tools' in smoke

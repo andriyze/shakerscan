@@ -1,0 +1,7 @@
+# These pins are deliberately vulnerable: Model Intake's dependency-scanner tests need packages with
+# known advisories. Nothing installs this file, so repository scanners (OSV, OpenSSF Scorecard) must
+# not report it as a project dependency.
+[[PackageOverrides]]
+ecosystem = "PyPI"
+ignore = true
+reason = "Deliberately vulnerable test fixture for Model Intake dependency scanning; never installed."
