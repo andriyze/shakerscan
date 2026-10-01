@@ -11001,8 +11001,7 @@ async def _submit_scan(
 
     if not approval_receipt_id and _policy_requests_active_testing(request.policy):
         # Authorize once per target: a standing authorization recorded for this target's scope
-        # is reused instead of asking for a new receipt on every active scan. Credential use
-        # keeps its explicit credential-tier receipt.
+        # is reused instead of asking for a new receipt on every active scan.
         approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
     try:
         scan_contract = resolve_scan_contract(
@@ -11233,6 +11232,10 @@ async def _submit_scan(
                 confirmed_active_collection_replay
             ),
         )
+        if not approval_receipt_id and durable_approval_required:
+            # The standing authorization covers the credentials selected for this target, so a
+            # passive authenticated scan reuses it exactly as an active one does.
+            approval_receipt_id = await target_dns_alias.standing_authorization_for_target_url(db_pool, normalized_target)
 
         approval_context = await _validate_approval_receipt_for_action(
             conn,

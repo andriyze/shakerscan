@@ -21021,6 +21021,104 @@ def test_scan_submission_announces_the_swap_in_its_response():
     assert "response.update(target_resolution.fallback_response_fields(dns_fallback, request.target))" in source
 
 
+def _scan_submission_approval(monkeypatch, *, credential_profile_ids=None, approval_receipt_id=None):
+    """Submit a passive Scan and return (standing lookups, receipt and options the approval check got).
+
+    Admission stops at the approval check; everything before it is stubbed to what a registered
+    target with one selected credential profile looks like.
+    """
+    import target_resolution
+
+    target_id = uuid.uuid4()
+
+    async def lookup(_hostname):
+        return ["93.184.215.14"]
+
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if query == "SELECT id FROM targets WHERE url = $1":
+                return {"id": target_id}
+            return None
+
+    async def no_receipt_policy(*_args, **_kwargs):
+        return None
+
+    async def no_placement(*_args, **_kwargs):
+        return None
+
+    async def collections(*_args, **_kwargs):
+        return [], [], []
+
+    async def credentials(_conn, *, profile_ids, **_kwargs):
+        return [
+            {"profile_id": str(profile_id), "scan_lane": "primary", "profile_version": 1}
+            for profile_id in profile_ids or []
+        ]
+
+    async def browser_logins(*_args, **_kwargs):
+        return []
+
+    looked_up: list[str] = []
+
+    async def standing(_pool, url):
+        looked_up.append(url)
+        return "standing-receipt"
+
+    approval: dict = {}
+
+    async def validate(_conn, receipt_id, **kwargs):
+        approval.update(kwargs, receipt_id=receipt_id)
+        raise _StopAtAuthorization
+
+    monkeypatch.setattr(target_resolution, "system_lookup", lookup)
+    monkeypatch.setattr(api_module, "db_pool", _pool_for(Conn()))
+    monkeypatch.setattr(api_module, "get_redis", lambda: object())
+    monkeypatch.setattr(api_module, "_require_approval_receipt_if_policy_enabled", no_receipt_policy)
+    monkeypatch.setattr(api_module, "_require_reachable_fleet_placement", no_placement)
+    monkeypatch.setattr(api_module, "_generic_collection_refs", collections)
+    monkeypatch.setattr(api_module, "_admit_generic_scan_credential_profiles", credentials)
+    monkeypatch.setattr(api_module, "admit_scan_browser_login_profiles", browser_logins)
+    monkeypatch.setattr(api_module.target_dns_alias, "standing_authorization_for_target_url", standing)
+    monkeypatch.setattr(api_module, "_validate_approval_receipt_for_action", validate)
+    with pytest.raises(_StopAtAuthorization):
+        asyncio.run(api_module._submit_scan(api_module.ScanRequest(
+            target="https://app.example.com",
+            policy={"active_testing": False},
+            credential_profile_ids=credential_profile_ids or [],
+            approval_receipt_id=approval_receipt_id,
+        )))
+    return looked_up, approval
+
+
+def test_a_passive_authenticated_scan_reuses_the_targets_standing_authorization(monkeypatch):
+    # The standing authorization covers the credentials selected for the target (AGENTS.md); an
+    # active scan already reused it, a passive one with the same credential was refused.
+    looked_up, approval = _scan_submission_approval(
+        monkeypatch, credential_profile_ids=[str(uuid.uuid4())],
+    )
+    assert looked_up == ["https://app.example.com"]
+    assert approval["receipt_id"] == "standing-receipt"
+    # The receipt is still checked with the full credential-tier requirements.
+    assert approval["risk_tier"] == "credential"
+    assert approval["always_require_receipt"] is True
+    assert approval["require_target_binding"] is True
+
+
+def test_a_passive_scan_without_credentials_needs_no_authorization(monkeypatch):
+    looked_up, approval = _scan_submission_approval(monkeypatch)
+    assert looked_up == []
+    assert approval["receipt_id"] is None
+    assert approval["always_require_receipt"] is False
+
+
+def test_an_explicit_receipt_is_never_replaced_by_the_standing_authorization(monkeypatch):
+    looked_up, approval = _scan_submission_approval(
+        monkeypatch, credential_profile_ids=[str(uuid.uuid4())], approval_receipt_id="operator-receipt",
+    )
+    assert looked_up == []
+    assert approval["receipt_id"] == "operator-receipt"
+
+
 def test_direct_query_value_unwraps_fastapi_parameter_without_private_import():
     query_type = type("Query", (), {"__module__": "fastapi.params"})
     query = query_type()
