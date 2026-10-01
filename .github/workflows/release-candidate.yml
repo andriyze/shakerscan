@@ -1135,12 +1135,25 @@ jobs:
   # the vulnerability scans: promotion requires the whole run to succeed, so a
   # failed scan still blocks, and the slowest gate no longer waits for eight
   # image scans that do not feed it.
+  installed-upgrade:
+    name: Upgrade a real installed stable release
+    needs: [meta, merge]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/installed-upgrade.yml
+    with:
+      candidate_sha: ${{ needs.meta.outputs.candidate_sha }}
+      receipt_artifact: release-candidate-uncertified-${{ needs.meta.outputs.version }}-${{ needs.meta.outputs.candidate_sha }}
+
   certify:
     name: Certify final manifest digests
-    needs: [meta, merge]
+    needs: [meta, merge, installed-upgrade]
     # Same reason as vulnerability-scan: certification must run whenever the manifests were
-    # created, whether the images were built here or reused from build-on-main.
-    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' }}
+    # created, whether the images were built here or reused from build-on-main. A candidate that
+    # cannot upgrade a real installed stable release (and roll back) is not certified.
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.merge.result == 'success' && needs.installed-upgrade.result == 'success' }}
     runs-on: ubuntu-latest
     # Certification runs the thorough Juice Shop benchmark, whose wall ceiling is the thorough
     # profile's max_tool_wall_seconds (180 min in 2.2.0), plus the installed-stack E2E, both

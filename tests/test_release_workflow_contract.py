@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from scripts import verify_installed_runtime
 
@@ -158,3 +160,24 @@ def test_certify_timeout_covers_the_thorough_scan_ceiling_plus_certification_ove
     )
     # GitHub-hosted runners cap a job at 360 minutes; stay inside it.
     assert certify_limit <= 360
+
+
+def test_certification_requires_upgrading_a_real_installed_stable_release():
+    """A candidate is certified only after it upgraded an installed stable release and rolled back.
+
+    The 2.5.6 -> PostgreSQL 18 work showed what nothing else exercised: the hosted installer's pinned
+    rollback was broken and a rollback's writes could be silently dropped. Both were only visible on a
+    real install, so that run is a certification prerequisite, not an optional report.
+    """
+    document = yaml.safe_load(CANDIDATE.read_text(encoding="utf-8"))
+    jobs = document["jobs"]
+    assert jobs["installed-upgrade"]["uses"] == "./.github/workflows/installed-upgrade.yml"
+    assert "installed-upgrade" in jobs["certify"]["needs"]
+    assert "needs.installed-upgrade.result == 'success'" in jobs["certify"]["if"]
+    called = yaml.safe_load((ROOT / ".github" / "workflows" / "installed-upgrade.yml").read_text(encoding="utf-8"))
+    steps = called["jobs"]["installed-upgrade"]["steps"]
+    assert any("scripts/installed_upgrade_smoke.sh" in step.get("run", "") for step in steps)
+    script = (ROOT / "scripts" / "installed_upgrade_smoke.sh").read_text(encoding="utf-8")
+    # The rollback goes through the installer an operator uses, pinned to the stable version.
+    assert 'SHAKERSCAN_INSTALL_VERSION="$BASELINE_VERSION"' in script and 'sh "$ROOT/install/index.sh"' in script
+    assert "has been used since it was copied" in script
