@@ -1976,6 +1976,11 @@ prepare_runtime_files() {
         # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
         api_uid=10002
         api_gid=10002
+        # The API reads this directory through its read-only /workspace mount. A root install
+        # directory is private (the installer builds it in a 0700 staging directory), so the
+        # API could not enter it and /health failed. Give the API's group read access only;
+        # other host accounts stay out.
+        chgrp "$api_gid" "$SCRIPT_DIR" 2>/dev/null && chmod g+rx "$SCRIPT_DIR" 2>/dev/null || true
     fi
     export SHAKERSCAN_API_UID="$api_uid"
     export SHAKERSCAN_API_GID="$api_gid"
@@ -2219,9 +2224,6 @@ print_banner() {
 }
 
 print_help() {
-    echo "Trusted LAN: shakerscan start --lan [--bind-host <assigned-LAN-IPv4>]"
-    echo "Also supports restart --lan. Cannot combine --lan with --remote/--tailscale."
-    echo ""
     print_banner
     echo "Usage: ./scanner.sh [command] [options]"
     echo ""
@@ -2243,6 +2245,7 @@ print_help() {
     echo "  install-deps       Install missing prerequisites"
     echo "  doctor             Check local prerequisites and common startup issues"
     echo "  env                Show PATH, launcher, and runtime guidance"
+    echo "  version            Print the engine release (and source revision in a checkout)"
     echo "  agent [name]       Start Codex, Claude, OpenCode, or Pi in this runtime dir"
     echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
@@ -2275,6 +2278,8 @@ print_help() {
     echo "  --prebuilt         Force prebuilt Docker Hub images (default for curl installs)"
     echo "  --image-tag TAG    Override Docker image tag (default: latest)"
     echo "  --remote           Bind UI/API to this host's Tailscale IPv4 address"
+    echo "  --lan              Bind UI/API to this host's private LAN IPv4 (start/restart; not with --remote)"
+    echo "                       --bind-host IP picks the address when there are several"
     echo "  --confirm-active   Confirm authorization when --active-testing is enabled"
     echo "  Scan-specific options are listed by './scanner.sh scan --help'"
     echo "  SHAKERSCAN_BIND_HOST=IP overrides the Docker bind address"
@@ -4032,6 +4037,10 @@ case $COMMAND in
         ;;
     help|--help|-h)
         print_help
+        ;;
+    version|--version|-V)
+        engine_revision="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+        echo "shakerscan engine $(get_release_version)${engine_revision:+ (source $engine_revision)}"
         ;;
     *)
         echo -e "${RED}Unknown command: $COMMAND${NC}"
