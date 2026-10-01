@@ -5504,6 +5504,10 @@ configure_devices_router(
 )
 app.include_router(devices_router)
 try:
+    from scan_finding_proof import SCAN_DETAIL_FINDINGS_SQL, project_scan_finding_proof
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.scan_finding_proof import SCAN_DETAIL_FINDINGS_SQL, project_scan_finding_proof
+try:
     from finding_routes.router import (
         BulkFindingUpdateRequest,
         FindingRetestRequest,
@@ -11823,19 +11827,7 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         # Get findings for this scan. Verified-only filtering is applied after
         # merging raw scan-time proof below, so stale persisted retest verdicts
         # cannot hide findings that this scan just proved.
-        findings = await conn.fetch("""
-            SELECT id, fingerprint, title, severity, cvss_score, status, tool, url,
-                   last_verification_status, last_verification_verdict, last_verification_confidence
-            FROM findings WHERE scan_id = $1
-            ORDER BY
-                CASE severity
-                    WHEN 'critical' THEN 1
-                    WHEN 'high' THEN 2
-                    WHEN 'medium' THEN 3
-                    WHEN 'low' THEN 4
-                    ELSE 5
-                END
-        """, uuid.UUID(scan_id))
+        findings = await conn.fetch(SCAN_DETAIL_FINDINGS_SQL, uuid.UUID(scan_id))
 
         action_rows = await conn.fetch(
             _PUBLIC_SCAN_ACTIONS_SQL, uuid.UUID(scan_id),
@@ -11872,7 +11864,9 @@ async def get_scan(scan_id: str, verified_only: bool = False):
         if verified_only and finding.get("last_verification_verdict") != "exploited":
             continue
         merged_findings.append(finding)
-    result['findings'] = merged_findings
+    result['findings'] = project_scan_finding_proof(
+        result.get('result'), merged_findings, project=finding_proof_fields, fingerprint=generate_finding_fingerprint,
+    )
     if canonical_stage_checkpoint:
         result["canonical_stage_checkpoint"] = dict(
             canonical_stage_checkpoint

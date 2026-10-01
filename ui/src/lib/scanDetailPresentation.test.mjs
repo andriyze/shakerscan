@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, formatResumeTime, notExaminedExplanation, reconciledScanFindings, releaseLine, scanFindingIdentity, scanLogEntry, scanPhasePresentation, scanResultPresentation } from './scanDetailPresentation.mjs'
+import {
+  carriedOverFromDecision,
+  carriedOverSummary,
+  domainRatePresentation,
+  formatResumeTime,
+  isProvenFinding,
+  notExaminedExplanation,
+  reconciledScanFindings,
+  releaseLine,
+  scanFindingIdentity,
+  scanLogEntry,
+  scanPhasePresentation,
+  scanResultPresentation,
+} from './scanDetailPresentation.mjs'
 
 test('running phases are explained in operator language', () => {
   assert.deepEqual(scanPhasePresentation({ status: 'running', current_phase: 'active_sqli', progress: 60 }), {
@@ -137,6 +150,21 @@ test('confirmed and candidate material findings get distinct conclusions', () =>
     result: { findings: [{ severity: 'high', suspected: true }] },
   }, { band: 'limited', label: 'Limited coverage' })
   assert.match(candidate.headline, /potential material issue needs verification/)
+})
+
+test('proof is the server projection, never the scanner word or a second boolean', () => {
+  // GET /scans/{id} projects the findings API vocabulary onto every report finding; the honey
+  // scan proved ten critical/high exposures and the page said "0 proven, need verification".
+  const proven = { severity: 'critical', verified: true, proof_state: 'verified', scan_time_proof_state: 'exploited' }
+  const lead = { severity: 'medium', proof_state: 'suspected', scan_time_proof_state: 'candidate' }
+  const result = scanResultPresentation({ result: { findings: [proven, proven, lead] } }, { band: 'limited', label: 'Limited coverage' })
+  assert.equal(result.confirmedCount, 2)
+  assert.equal(result.candidateCount, 1)
+  assert.match(result.headline, /^2 confirmed material issues require action/)
+  // The scanner's own word alone is not the projection; neither is a generic verified flag.
+  assert.equal(isProvenFinding({ proof_state: 'exploited', verified: true }), false)
+  assert.equal(isProvenFinding({ verified: true }), false)
+  assert.equal(isProvenFinding({ proof_state: 'verified' }), true)
 })
 
 test('ambiguous v3 reports claim posture deductions only when they carry one', () => {

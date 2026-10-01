@@ -15,7 +15,7 @@ import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
 import { normalizeParentCoverage } from '@/lib/deferredWorkContracts'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
-import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
+import { carriedOverFromDecision, carriedOverSummary, domainRatePresentation, isProvenFinding, reconciledScanFindings, releaseLine, scanLogEntry, scanPhasePresentation, scanResultPresentation } from '@/lib/scanDetailPresentation.mjs'
 import { scanFailureRecommendation } from '@/lib/scanFailureRecommendation'
 
 function formatScanTypeLabel(scan: any): string {
@@ -623,27 +623,18 @@ function findingLocation(finding: any): string | null {
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 
+// Proven first, then by severity: an unproven critical still outranks a medium lead.
 function findingPriority(finding: any): number {
-  const proofState = String(finding.proof_state || '')
-  const proofRank = finding.verified === true && proofState === 'verified'
-    ? 0
-    : proofState === 'likely_vulnerable' || finding.suspected === true
-      ? 1
-      : 2
   const severityRank = SEVERITY_ORDER[String(finding.severity || 'info').toLowerCase()] ?? 4
-  return proofRank * 10 + severityRank
+  return (isProvenFinding(finding) ? 0 : 10) + severityRank
 }
 
 function findingProofLabel(finding: any): { label: string; className: string } {
   const state = String(finding?.proof_state || '')
-  if (state === 'verified' || (finding?.verified === true && !state)) {
-    return { label: 'proven', className: 'text-emerald-300' }
-  }
-  if (state === 'likely_vulnerable') return { label: 'likely vulnerable', className: 'text-amber-200' }
-  if (state === 'refuted' || state === 'false_positive') return { label: state.replaceAll('_', ' '), className: 'text-gray-500' }
-  if (state) return { label: state.replaceAll('_', ' '), className: 'text-gray-400' }
-  if (finding?.suspected || finding?.needs_verification) return { label: 'needs verification', className: 'text-gray-400' }
-  return { label: String(finding?.status || 'unverified').replaceAll('_', ' '), className: 'text-gray-500' }
+  if (isProvenFinding(finding)) return { label: 'proven', className: 'text-emerald-300' }
+  if (state === 'suspected') return { label: 'needs verification', className: 'text-amber-200' }
+  if (state === 'refuted' || state === 'inconclusive') return { label: state, className: 'text-gray-500' }
+  return { label: 'unverified', className: 'text-gray-500' }
 }
 
 function ScanFindingRow({ finding }: { finding: any }) {
@@ -690,13 +681,11 @@ function ScanFindingContextCard({
   if (!scan?.target_id) return null
   const { current, persistedCurrentCount } = reconciledScanFindings(scan, targetFindings)
   // The list is what an operator reads first, so the proven critical must not sit under a
-  // thousand informational candidates: order by proof, then severity, keeping the server's
+  // thousand informational candidates: proven first, then severity, keeping the server's
   // order within a tier.
   current.sort((a: any, b: any) => findingPriority(a) - findingPriority(b))
   const existingTotal = Math.max(0, targetFindingsTotal - persistedCurrentCount)
-  const provenCount = current.filter((finding: any) => (
-    finding.verified === true && String(finding.proof_state || '') === 'verified'
-  )).length
+  const provenCount = current.filter(isProvenFinding).length
 
   return (
     <Card className="mb-6 p-4">

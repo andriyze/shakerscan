@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   buildFindingLinkageIndex,
   linkedPersistedFinding,
+  observedReportFinding,
 } from '../src/lib/findingLinkage.ts'
 
 test('raw scanner results link to persisted findings by stable fingerprint', () => {
@@ -64,4 +65,20 @@ test('probe-local AI finding IDs resolve only inside the current scan index', ()
     linkedPersistedFinding(rawFinding, buildFindingLinkageIndex([fixtureFinding])),
     fixtureFinding,
   )
+})
+
+test('a report result is shown as observed by the scan that reported it', () => {
+  // The honey report marked every proven critical "never observed": a raw result has no
+  // last_seen_at of its own.
+  const raw = { title: 'Sensitive exposure: private key material', url: 'https://example.test/id_rsa', severity: 'critical' }
+  const linked = observedReportFinding(raw, {
+    id: 'f1', status: 'active', first_seen_at: '2026-09-04T06:16:14Z', last_seen_at: '2026-09-30T04:28:45Z',
+  }, '2026-09-30T04:28:50Z')
+  assert.equal(linked.first_seen_at, '2026-09-04T06:16:14Z')
+  assert.equal(linked.last_seen_at, '2026-09-30T04:28:45Z')
+  assert.equal(linked.status, 'active')
+  const candidate = observedReportFinding(raw, null, '2026-09-30T04:28:50Z')
+  assert.equal(candidate.last_seen_at, '2026-09-30T04:28:50Z')
+  assert.equal(candidate.first_seen_at, '2026-09-30T04:28:50Z')
+  assert.equal(candidate.title, raw.title)
 })

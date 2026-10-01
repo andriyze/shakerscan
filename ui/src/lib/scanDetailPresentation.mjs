@@ -413,15 +413,21 @@ export function releaseLine(decision, scanId, confirmedCount) {
     : `Release decision: ${verdict.replace(/_/g, ' ')}.` }
 }
 
+// The scan detail carries the server's proof projection on every finding (the same field the
+// findings API serves), so proof is read from it alone. The scanner's own word is kept as
+// scan_time_proof_state ('exploited' means verified); reading it against this vocabulary showed
+// proven critical exposures as "0 proven, need verification".
+export function isProvenFinding(finding) {
+  return String(finding?.proof_state || '') === 'verified'
+}
+
 export function scanResultPresentation(scan, assurance) {
   const scanRecord = record(scan)
   const report = record(scanRecord.result)
   const result = record(report.result)
   const findings = Array.isArray(report.findings) ? report.findings : []
   const material = findings.filter((finding) => MATERIAL_SEVERITIES.has(String(finding?.severity || '').toLowerCase()))
-  const confirmed = material.filter((finding) => (
-    finding?.verified === true && String(finding?.proof_state || '') === 'verified'
-  ))
+  const confirmed = material.filter(isProvenFinding)
   const candidates = material.filter((finding) => !confirmed.includes(finding))
   const assuranceBand = String(assurance?.band || result.assurance_band || 'none')
   const assuranceLabel = String(assurance?.label || 'Coverage unavailable')
