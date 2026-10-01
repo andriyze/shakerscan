@@ -205,5 +205,7 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     # The baseline takes the same reentrant session lock on this connection.
                     await baseline(BoundConnectionPool(conn))
                     await migrate_target_assets(conn)
+                from .asset_inputs_migration import migrate_asset_inputs
+                await migrate_asset_inputs(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")

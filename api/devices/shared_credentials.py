@@ -126,7 +126,7 @@ def worker_material(kind: str, material: dict[str, Any]) -> dict[str, Any]:
             'secondary_secret': material.get('secondary_secret'),
         }
     if kind in IMMEDIATE_HTTP_HEADER_KINDS:
-        return {'auth_kind': 'web_headers', 'headers': immediate_http_headers(material)}
+        return {'auth_kind': 'web_headers', 'headers': immediate_http_headers({**material, "auth_kind": kind})}
     if kind == 'form_login':
         return {'auth_kind': 'web_form', 'username': material.get('username'),
                 'secret': material.get('secret'), 'login_path': material.get('endpoint_url')}

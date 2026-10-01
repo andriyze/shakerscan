@@ -1,0 +1,805 @@
+
+=== api/api.py:15092 _validate_approval_receipt_for_action ===
+async def _validate_approval_receipt_for_action(
+    conn,
+    approval_receipt_id: str | None,
+    *,
+    target_url: str | None = None,
+    target_id: str | uuid.UUID | None = None,
+    action_name: str = "state_changing_action",
+    command: str | None = None,
+    risk_tier: str = "active",
+    record_blocked: bool = True,
+    created_by: str | None = None,
+    always_require_receipt: bool = False,
+    require_target_binding: bool = False,
+    required_action_name: str | None = None,
+    required_action_context: dict[str, Any] | None = None,
+    require_expiry: bool = False,
+    created_not_before: datetime | str | None = None,
+    expires_no_later_than: datetime | str | None = None,
+) -> dict[str, Any] | None:
+    async def _deny(
+        reason: str,
+        message: str,
+        *,
+        http_status: int = 400,
+        approval_ref: str | None = None,
+        scope_ref: str | None = None,
+    ):
+        # Persist a durable "blocked" audit row before raising so a rejected
+        # request is as auditable as a queued one. FK-safe: only pass receipt
+        # refs whose rows actually exist.
+        if record_blocked:
+            await _record_blocked_command_result(
+                conn,
+                action_name=action_name,
+                command=command,
+                risk_tier=risk_tier,
+                status="blocked",
+                blocked_by=[reason],
+                operator_message=f"Blocked {_command_from_action(action_name)}: {message}",
+                approval_receipt_id=approval_ref,
+                scope_receipt_id=scope_ref,
+                created_by=created_by,
+            )
+        raise HTTPException(status_code=http_status, detail=message)
+
+    if not approval_receipt_id:
+        if always_require_receipt:
+            await _deny("approval_receipt_required", "Approval receipt is required")
+        await _require_approval_receipt_if_policy_enabled(
+            conn, None, action_name=action_name, command=command, risk_tier=risk_tier, created_by=created_by
+        )
+        return None
+    try:
+        approval_uuid = uuid.UUID(str(approval_receipt_id))
+    except ValueError:
+        await _deny("approval_receipt_id_invalid_uuid", "approval_receipt_id must be a UUID")
+
+    approval_row = await conn.fetchrow("SELECT * FROM approval_receipts WHERE id=$1", approval_uuid)
+    if not approval_row:
+        await _deny("approval_receipt_not_found", "Approval receipt not found", http_status=404)
+    approval_ref = str(approval_uuid)
+    approval = _public_approval_receipt_row(approval_row)
+    if approval.get("status") == "revoked":
+        await _deny(
+            "approval_receipt_revoked",
+            "Approval receipt is revoked",
+            approval_ref=approval_ref,
+        )
+    if not approval.get("approved_by") or approval.get("denial_reason"):
+        await _deny("approval_receipt_is_denial", "Approval receipt is not an approval", approval_ref=approval_ref)
+    approved_risk = str(approval.get("risk_tier") or "active")
+    if not approval_covers_risk(approval, str(risk_tier or "active")):
+        await _deny(
+            "approval_receipt_risk_too_low",
+            "Approval receipt risk tier does not cover the requested action",
+            approval_ref=approval_ref,
+        )
+    confirmations = approval.get("confirmations") if isinstance(approval.get("confirmations"), list) else []
+    if "confirm_authorized" not in confirmations:
+        await _deny("approval_receipt_missing_confirm_authorized", "Approval receipt is missing confirm_authorized", approval_ref=approval_ref)
+    expires_at = approval_row["expires_at"]
+    standing = (
+        str(approval.get("action_name") or "").strip() == target_authorization.STANDING_ACTION_NAME
+        and approved_risk in target_authorization.STANDING_RISK_TIERS
+    )
+    if require_expiry and not expires_at and not standing:
+        await _deny(
+            "approval_receipt_expiry_required",
+            "Approval receipt must have a bounded expiry for this action",
+            approval_ref=approval_ref,
+        )
+    if expires_at:
+        now = datetime.now(timezone.utc)
+        if expires_at.tzinfo is None:
+            now = utc_now()
+        if expires_at <= now:
+            await _deny("approval_receipt_expired", "Approval receipt is expired", approval_ref=approval_ref)
+        latest_expiry = _parse_hypothesis_time(expires_no_later_than)
+        normalized_expiry = _parse_hypothesis_time(expires_at)
+        if latest_expiry and normalized_expiry and normalized_expiry > latest_expiry:
+            await _deny(
+                "approval_receipt_expiry_too_long",
+                "Approval receipt outlives the bound action preview",
+                approval_ref=approval_ref,
+            )
+    earliest_creation = _parse_hypothesis_time(created_not_before)
+    if earliest_creation:
+        approval_created_at = _parse_hypothesis_time(approval.get("created_at"))
+        if not approval_created_at or approval_created_at < earliest_creation:
+            await _deny(
+                "approval_receipt_predates_preview",
+                "Approval receipt predates the bound action preview",
+                approval_ref=approval_ref,
+            )
+
+    receipt_action_name = str(approval.get("action_name") or "").strip()
+    if standing and not required_action_name:
+        receipt_action_name = ""  # a standing target authorization covers every ordinary action
+    if receipt_action_name and receipt_action_name != str(action_name or "").strip():
+        await _deny(
+            "approval_receipt_action_mismatch",
+            "Approval receipt is bound to a different action",
+            approval_ref=approval_ref,
+        )
+    if required_action_name and receipt_action_name != required_action_name:
+        await _deny(
+            "approval_receipt_action_mismatch",
+            "Approval receipt is not bound to this action",
+            approval_ref=approval_ref,
+        )
+    expected_context = required_action_context or {}
+    actual_context = approval.get("action_context") if isinstance(approval.get("action_context"), dict) else {}
+    mismatched_context = _approval_context_mismatch(actual_context, expected_context)
+    if mismatched_context:
+        await _deny("approval_receipt_context_mismatch", f"Approval receipt is not bound to this {mismatched_context}", approval_ref=approval_ref)
+
+    scope_id = approval.get("scope_receipt_id")
+    if not scope_id:
+        await _deny("approval_receipt_no_scope", "Approval receipt is not linked to a scope receipt", approval_ref=approval_ref)
+    scope_row = await conn.fetchrow("SELECT * FROM scope_receipts WHERE id=$1", str(scope_id))
+    if not scope_row:
+        await _deny("scope_receipt_not_found", "Linked scope receipt not found", http_status=404, approval_ref=approval_ref)
+    scope_ref = str(scope_id)
+    scope = _public_scope_receipt_row(scope_row)
+    if scope.get("verdict") == "blocked":
+        await _deny("scope_receipt_blocked", "Linked scope receipt is blocked", approval_ref=approval_ref, scope_ref=scope_ref)
+    if scope.get("verdict") == "needs_approval" and "confirm_scope_reviewed" not in confirmations:
+        await _deny("scope_receipt_needs_review", "Approval receipt is missing confirm_scope_reviewed", approval_ref=approval_ref, scope_ref=scope_ref)
+
+    requested_target_id = str(target_id) if target_id else None
+    scope_target_id = str(scope.get("target_id") or "")
+    if requested_target_id and require_target_binding and not scope_target_id:
+        await _deny(
+            "approval_scope_target_missing",
+            "Approval receipt scope is not bound to the requested target",
+            approval_ref=approval_ref,
+            scope_ref=scope_ref,
+        )
+    if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
+        await _deny("approval_scope_target_mismatch", "Approval receipt scope target does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
+
+    if target_url:
+        parsed = urllib.parse.urlparse(target_url if "://" in target_url else f"https://{target_url}")
+        host = parsed.hostname or ""
+        if host and not _host_matches_receipt_scope(host, scope):
+            await _deny("approval_scope_host_mismatch", "Approval receipt scope host does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
+
+    return {
+        "approval_receipt_id": approval["id"],
+        "scope_receipt_id": scope["id"],
+        "approved_by": approval.get("approved_by"),
+        "risk_tier": approval.get("risk_tier"),
+        "runtime_scope_guard": _runtime_scope_guard_from_scope(scope),
+    }
+
+=== api/scan/contracts.py:267 bind_scan_scope_receipt ===
+def bind_scan_scope_receipt(
+    contract: ResolvedScanContract, scope_receipt_id: str | None,
+) -> ResolvedScanContract:
+    """Bind a validated scope receipt into every canonical Scan snapshot.
+
+    Target-bound approval is validated only after the target row exists. Rebuild
+    the immutable plan at that boundary instead of mutating the flattened policy
+    and leaving the execution-plan digest stale.
+    """
+    scope_id = str(scope_receipt_id or "").strip() or None
+    if contract.policy.scope_receipt_id == scope_id:
+        return contract
+    if contract.policy.scope_receipt_id and scope_id != contract.policy.scope_receipt_id:
+        raise ValueError("validated scope receipt conflicts with the Scan contract")
+    policy = replace(contract.policy, scope_receipt_id=scope_id)
+    plan = ScanExecutionPlan(
+        policy=policy,
+        budget_profile=contract.budget_profile,
+        budget=contract.budget,
+        family_preset=contract.execution_plan.family_preset,
+        requested_families=contract.execution_plan.requested_families,
+        resolved_families=contract.execution_plan.resolved_families,
+    )
+    return replace(contract, policy=policy, execution_plan=plan)
+
+=== api/target_authorization.py:131 current_target_authorization ===
+async def current_target_authorization(conn: Any, target_id: Any) -> dict[str, Any] | None:
+    """The target's standing (or still valid bounded) authorization, or None.
+
+    Only receipts whose scope still names the target's current host count: a target whose URL
+    changed since the authorization was given must be authorized again.
+    """
+    try:
+        target_uuid = uuid.UUID(str(target_id))
+    except (TypeError, ValueError):
+        return None
+    target = _row(await conn.fetchrow("SELECT id, url FROM targets WHERE id=$1", target_uuid))
+    if not target:
+        # The same id may name a connected device. Reading only the web table made every
+        # standing receipt recorded for a device invisible to the readers that gate scans and
+        # Hunts, so the receipt existed and nothing could resolve it.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator FROM device_targets WHERE id=$1", target_uuid,
+        ))
+        if not device:
+            return None
+        locator = str(device.get("primary_locator") or "").strip()
+        target = {"id": device.get("id"), "url": locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )}
+    rows = await conn.fetch(
+        """
+        SELECT a.*, s.id AS scope_id, s.allowed_hosts AS scope_allowed_hosts,
+               s.normalized_scope AS scope_normalized, s.verdict AS scope_verdict
+          FROM approval_receipts a
+          JOIN scope_receipts s ON s.id = a.scope_receipt_id
+         WHERE s.target_id = $1
+           AND a.approved_by IS NOT NULL
+           AND a.status = 'active'
+           AND a.risk_tier = ANY($2::text[])
+           -- A receipt recorded before the standing-authorization contract has no
+           -- action_name. Counting it as standing made the target report itself
+           -- authorized while the submission gate, which requires the exact
+           -- action_name, refused every active scan of it -- and revoke, which
+           -- matches the same name, could never clear it. One definition here,
+           -- at the gate, and at revoke, so re-authorizing is the way out.
+           AND a.action_name = $3
+           AND (a.expires_at IS NULL OR a.expires_at > NOW())
+         ORDER BY (a.expires_at IS NULL) DESC, a.created_at DESC
+         LIMIT 20
+        """,
+        target_uuid,
+        list(STANDING_RISK_TIERS),
+        STANDING_ACTION_NAME,
+    )
+    host = _host(target.get("url", ""))
+    for raw in rows:
+        row = _row(raw)
+        if str(row.get("scope_verdict") or "") == "blocked":
+            continue
+        allowed = _json(row.get("scope_allowed_hosts")) or []
+        normalized = _json(row.get("scope_normalized")) or {}
+        scope_host = str((normalized or {}).get("host") or "").lower() if isinstance(normalized, dict) else ""
+        hosts = {str(item).lower() for item in allowed if str(item).strip()} | ({scope_host} if scope_host else set())
+        if host and host not in hosts:
+            continue
+        scope = {"id": row.get("scope_id"), "verdict": row.get("scope_verdict")}
+        return public_authorization(row, scope)
+    return None
+
+=== api/target_authorization.py:196 authorize_target ===
+async def authorize_target(
+    conn: Any,
+    target_id: Any,
+    *,
+    approved_by: str,
+    environment: str | None = None,
+    risk_tier: str = "active",
+) -> dict[str, Any]:
+    """Record the standing authorization for a target; idempotent while one already stands."""
+    approved_by = str(approved_by or "").strip()
+    if not approved_by:
+        raise TargetAuthorizationError("approved_by is required")
+    if risk_tier not in STANDING_RISK_TIERS:
+        raise TargetAuthorizationError("a standing authorization is active or intrusive")
+    try:
+        target_uuid = uuid.UUID(str(target_id))
+    except (TypeError, ValueError) as exc:
+        raise TargetAuthorizationError("target id must be a UUID") from exc
+    existing = await current_target_authorization(conn, target_uuid)
+    if existing and existing.get("standing") and existing.get("risk_tier") == risk_tier:
+        return existing
+    target = _row(await conn.fetchrow("SELECT id, url, metadata_json FROM targets WHERE id=$1", target_uuid))
+    if target:
+        metadata = _json(target.get("metadata_json")) or {}
+        env = effective_target_environment(metadata, requested=environment)
+        url = str(target.get("url") or "")
+    else:
+        # A connected device is an asset the operator owns exactly as a web target is. Reading
+        # only the web table meant `POST /targets/{id}/authorization` answered 404 for a device,
+        # so every device scan re-asked for permission inline and no device Hunt could resolve a
+        # standing receipt. The device's own environment wins when the caller names none.
+        device = _row(await conn.fetchrow(
+            "SELECT id, primary_locator, environment FROM device_targets WHERE id=$1",
+            target_uuid,
+        ))
+        if not device:
+            raise TargetAuthorizationError("target not found")
+        locator = str(device.get("primary_locator") or "").strip()
+        env = str(environment or device.get("environment") or "production").strip() or "production"
+        url = locator if "://" in locator else (
+            f"http://[{locator}]" if ":" in locator else f"http://{locator}"
+        )
+    host = _host(url)
+    receipt = receipt_to_dict(evaluate_scope(
+        url, allowed_hosts=[host] if host else None, environment=env, target_id=str(target_uuid),
+    ))
+    if receipt["verdict"] == "blocked":
+        raise TargetAuthorizationError(
+            "the target's scope is blocked: " + ", ".join(receipt["blocked_by"])
+        )
+    await persist_scope_receipt(conn, receipt, target_uuid)
+    confirmations = ["confirm_authorized"]
+    if receipt["verdict"] == "needs_approval":
+        confirmations.append("confirm_scope_reviewed")
+    row = _row(await conn.fetchrow(
+        """
+        INSERT INTO approval_receipts
+            (scope_receipt_id, risk_tier, confirmations, action_name, action_context,
+             approved_by, denial_reason, expires_at)
+        VALUES ($1,$2,$3::jsonb,$4,$5::jsonb,$6,NULL,NULL)
+        RETURNING *
+        """,
+        receipt["receipt_id"],
+        risk_tier,
+        json.dumps(confirmations),
+        STANDING_ACTION_NAME,
+        json.dumps({"target_id": str(target_uuid), "host": host}, sort_keys=True),
+        approved_by,
+    ))
+    return public_authorization(row, {"id": receipt["receipt_id"], "verdict": receipt["verdict"]})
+
+=== api/target_authorization.py:268 revoke_target_authorization ===
+async def revoke_target_authorization(
+    conn: Any, target_id: Any, *, revoked_by: str, reason: str
+) -> int:
+    """Revoke every standing authorization of the target; returns how many were revoked."""
+    try:
+        target_uuid = uuid.UUID(str(target_id))
+    except (TypeError, ValueError) as exc:
+        raise TargetAuthorizationError("target id must be a UUID") from exc
+    revoked_by = str(revoked_by or "").strip()
+    reason = str(reason or "").strip()
+    if not revoked_by or not reason:
+        raise TargetAuthorizationError("revoked_by and reason are required")
+    result = await conn.execute(
+        """
+        UPDATE approval_receipts a
+           SET status='revoked', revoked_at=NOW(), revoked_by=$2, revocation_reason=$3
+          FROM scope_receipts s
+         WHERE s.id = a.scope_receipt_id AND s.target_id = $1
+           AND a.status = 'active' AND a.approved_by IS NOT NULL
+           AND a.action_name = $4
+        """,
+        target_uuid,
+        revoked_by,
+        reason[:2000],
+        STANDING_ACTION_NAME,
+    )
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+=== scanner/scanner_tools/device_web.py:686 _safe_request_headers ===
+def _safe_request_headers(headers: dict[str, str]) -> dict[str, str]:
+    blocked = {"host", "connection", "content-length", "transfer-encoding", "proxy-authorization"}
+    return {
+        str(key): str(value)
+        for key, value in headers.items()
+        if str(key).lower() not in blocked
+        and "\r" not in str(key) and "\n" not in str(key)
+        and "\r" not in str(value) and "\n" not in str(value)
+    }
+
+=== ui/src/app/targets/page.tsx total 1195 lines ===
+
+23: function classifyTargetGroupIdentity(value: string): { kind: TargetIdentityKind; label: string; canDiscoverSubdomains: boolean; internal: boolean } {
+44: function configureScanHref(targets: string[], forceBatch = false): string {
+54: function scanHistoryHref(targetId: string): string {
+68: function TargetsContent() {
+119:     function handleClickOutside(event: MouseEvent) {
+128:     return () => document.removeEventListener('mousedown', handleClickOutside)
+135:     return () => {
+156:     return () => {
+197:   function closeAddModal() {
+202:   async function handleAuthorize(targetId: string) {
+215:   async function handleRestore(targetId: string) {
+228:   async function handleRevokeAuthorization(targetId: string) {
+241:   async function handleAddTarget(e: React.FormEvent) {
+284:   async function handleScan(targetId: string) {
+302:   function confirmScanAll() {
+309:   async function handleScanDomainSet(domain: GroupedDomain) {
+366:   async function handleDiscover(rootDomain: string) {
+425:   async function handleFindDuplicates() {
+442:   async function handleExecuteDedupe() {
+456:   function toggleExpand(rootDomain: string) {
+468:   function getSourceBadge(source: string) {
+479:   function clearFilters() {
+491:   function toggleSortOrder() {
+495:   return (
+736:             return (
+1189: export default function TargetsPage() {
+1190:   return (
+        </div>
+      )}
+
+      <Modal open={showAddModal} title="Add Target" onClose={closeAddModal}>
+        <form onSubmit={handleAddTarget} className="space-y-4">
+          <Field label="URL" error={urlError || undefined}>
+            <Input
+              type="text"
+              value={newTargetUrl}
+              onChange={(e) => {
+                setNewTargetUrl(e.target.value)
+                if (urlError) setUrlError('')
+              }}
+              placeholder="https://example.com"
+              error={Boolean(urlError)}
+              required
+            />
+          </Field>
+          <Field label="Name (optional)">
+            <Input
+              type="text"
+              value={newTargetName}
+              onChange={(e) => setNewTargetName(e.target.value)}
+              placeholder="My Website"
+            />
+          </Field>
+          <label className="flex items-start gap-2 text-sm text-gray-300">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={newTargetAuthorized}
+              onChange={(event) => setNewTargetAuthorized(event.target.checked)}
+            />
+            <span>
+              I own or am authorized to test this target. Records a standing authorization for
+              active testing: scans and Hunts of this target never ask again until it is revoked.
+            </span>
+          </label>
+          <Field label="Cohort">
+            <Select value={newTargetCohort} onChange={(event) => setNewTargetCohort(event.target.value as typeof newTargetCohort)}>
+              <option value="">Unclassified</option>
+              <option value="production">Production</option>
+              <option value="staging">Staging</option>
+              <option value="lab">Lab</option>
+              <option value="demo">Demo</option>
+              <option value="calibration">Calibration</option>
+              <option value="internal">Internal</option>
+            </Select>
+          </Field>
+          <div className="flex gap-3">
+            <Button type="button" variant="secondary" onClick={closeAddModal} className="flex-1">
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} className="flex-1">
+              {adding ? 'Adding…' : 'Add Target'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    </div>
+  )
+}
+
+export default function TargetsPage() {
+  return (
+    <Suspense fallback={<CardSkeleton count={4} />}>
+      <TargetsContent />
+    </Suspense>
+  )
+}
+
+=== ui/src/app/credentials/page.tsx total 765 lines ===
+
+42:   Textarea,
+43:   useToast,
+44: } from '@/components/ui'
+45: import { usableWebTargets } from '@/lib/targetChoices'
+46: import { useUrlFilters } from '@/lib/useUrlFilters'
+47: 
+48: const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
+49:   { value: 'bearer_token', label: 'Bearer token' },
+50:   { value: 'authorization_header', label: 'Authorization header' },
+51:   { value: 'api_key_header', label: 'API key header' },
+52:   { value: 'cookie', label: 'Cookie' },
+53:   { value: 'basic_auth', label: 'Basic authentication' },
+54:   { value: 'form_login', label: 'Form login' },
+55:   { value: 'json_login', label: 'JSON login' },
+56:   { value: 'oauth_client_credentials', label: 'OAuth client credentials' },
+57:   { value: 'oauth_password', label: 'OAuth password flow' },
+58:   { value: 'custom_headers', label: 'Custom headers' },
+59:   { value: 'query_parameter', label: 'Query parameter' },
+60: ]
+61: const SSH_KINDS: { value: CredentialAuthKind; label: string }[] = [
+62:   { value: 'ssh_password', label: 'SSH password' },
+63:   { value: 'ssh_private_key', label: 'SSH private key' },
+240: function CredentialsContent() {
+241:   const toast = useToast()
+242:   const appliedDeepLink = useRef(false)
+243:   // The selected target lives in the URL, so reload, Back and links keep it.
+244:   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; target?: string }>()
+245:   const targetKind: CredentialTargetKind = TARGET_KINDS.includes(filters.target_kind as CredentialTargetKind)
+246:     ? filters.target_kind as CredentialTargetKind
+247:     : 'web'
+248:   const targetId = filters.target_id || ''
+249:   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
+250:   const [missingTarget, setMissingTarget] = useState<string | null>(null)
+251:   const latestProfileRequest = useRef(0)
+252:   const [targets, setTargets] = useState<Target[]>([])
+253:   const [devices, setDevices] = useState<DeviceTarget[]>([])
+254:   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
+255:   const [includeInactive, setIncludeInactive] = useState(false)
+256:   const [loading, setLoading] = useState(true)
+257:   const [profilesLoading, setProfilesLoading] = useState(false)
+258:   const [error, setError] = useState<string | null>(null)
+259:   const [editorOpen, setEditorOpen] = useState(false)
+260:   const [rotating, setRotating] = useState<CredentialProfile | null>(null)
+261:   const [deactivating, setDeactivating] = useState<CredentialProfile | null>(null)
+268:   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false)
+269: 
+270:   useEffect(() => {
+271:     let cancelled = false
+272:     Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
+273:       .then(([web, connected]) => {
+274:         if (cancelled) return
+275:         setTargets(usableWebTargets(web.targets || []))
+276:         setDevices((connected.devices || []).filter((item) => item.is_active))
+277:       })
+278:       .catch((cause) => {
+279:         if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
+280:       })
+281:       .finally(() => { if (!cancelled) setLoading(false) })
+282:     return () => { cancelled = true }
+283:   }, [])
+284: 
+285:   const choices = useMemo(() => targetKind === 'device'
+286:     ? devices.map((item) => ({ id: item.id, label: item.name, detail: item.primary_locator }))
+287:     : targets.map((item) => ({ id: item.id, label: item.name || item.url, detail: item.url })),
+288:   [targetKind, devices, targets])
+289:   // Every target a credential could be shared with; the dialog keeps those of the same asset kind.
+299:     appliedDeepLink.current = true
+300:     const requestedUrl = filters.target?.trim()
+301:     if (requestedUrl && !targetId) {
+302:       const web = targets.find((item) => item.url === requestedUrl)
+303:       if (web) setFilters({ target_kind: undefined, target_id: web.id, target: undefined })
+304:       else setMissingTarget(requestedUrl)
+305:       return
+306:     }
+307:     if (!targetId) return
+308:     if (targets.some((item) => item.id === targetId)) {
+309:       if (targetKind === 'device') setFilters({ target_kind: undefined, target_id: targetId })
+310:       return
+311:     }
+312:     const device = devices.find((item) => item.id === targetId)
+313:     if (device) {
+314:       if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
+315:       return
+316:     }
+317:     getTarget(targetId)
+318:       .then((target) => {
+319:         const usable = usableWebTargets([target])
+320:         if (usable.length) setTargets((current) => [...current, ...usable])
+305:       return
+306:     }
+307:     if (!targetId) return
+308:     if (targets.some((item) => item.id === targetId)) {
+309:       if (targetKind === 'device') setFilters({ target_kind: undefined, target_id: targetId })
+310:       return
+311:     }
+312:     const device = devices.find((item) => item.id === targetId)
+313:     if (device) {
+314:       if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
+315:       return
+316:     }
+317:     getTarget(targetId)
+318:       .then((target) => {
+319:         const usable = usableWebTargets([target])
+320:         if (usable.length) setTargets((current) => [...current, ...usable])
+321:         else setMissingTarget(target.url || targetId)
+322:       })
+323:       .catch(() => setMissingTarget(targetId))
+324:   }, [devices, filters.target, loading, setFilters, targetId, targetKind, targets])
+325: 
+326:   const loadProfiles = useCallback(async () => {
+310:       return
+311:     }
+312:     const device = devices.find((item) => item.id === targetId)
+313:     if (device) {
+314:       if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
+315:       return
+316:     }
+317:     getTarget(targetId)
+318:       .then((target) => {
+319:         const usable = usableWebTargets([target])
+320:         if (usable.length) setTargets((current) => [...current, ...usable])
+321:         else setMissingTarget(target.url || targetId)
+322:       })
+323:       .catch(() => setMissingTarget(targetId))
+324:   }, [devices, filters.target, loading, setFilters, targetId, targetKind, targets])
+325: 
+326:   const loadProfiles = useCallback(async () => {
+327:     // Only the latest request may fill the list: a slower answer for a target that is no longer
+328:     // selected would show its profiles under the new target, and Rotate or Deactivate would act on them.
+329:     const request = ++latestProfileRequest.current
+330:     // A linked ID is queried only once it is a known target: an unknown one gets the notice above
+331:     // rather than an API error.
+337:     try {
+338:       // No target selected: the library of every credential, with where each is shared.
+339:       const result = targetId
+340:         ? await listCredentialProfiles({
+341:             target_kind: targetKind,
+342:             target_id: targetId,
+343:             include_inactive: includeInactive,
+344:           })
+345:         : await listCredentialLibrary({ include_inactive: includeInactive, limit: 500 })
+346:       if (request !== latestProfileRequest.current) return
+347:       setProfiles(result.profiles || [])
+348:       setError(null)
+349:     } catch (cause) {
+350:       if (request !== latestProfileRequest.current) return
+351:       setProfiles([])
+352:       setError(cause instanceof Error ? cause.message : 'Failed to load credential profiles')
+353:     } finally {
+354:       if (request === latestProfileRequest.current) setProfilesLoading(false)
+355:     }
+356:   }, [choices, includeInactive, targetId, targetKind])
+357: 
+358:   useEffect(() => { void loadProfiles() }, [loadProfiles])
+379:   useEffect(() => {
+380:     if (!editorOpen || rotating) return
+381:     let cancelled = false
+382:     setCapabilitiesLoading(true)
+383:     listCredentialCapabilities({ target_kind: targetKind, auth_kind: draft.authKind })
+384:       .then((result) => {
+385:         if (cancelled) return
+386:         setCapabilityOptions(result.capabilities || [])
+387:         setDraft((current) => ({
+388:           ...current,
+389:           capabilities: (result.safe_defaults || []).join(', '),
+390:           allowActiveCapabilities: false,
+391:         }))
+392:       })
+393:       .catch((cause) => {
+394:         if (!cancelled) setEditorError(cause instanceof Error ? cause.message : 'Failed to load capability registry')
+395:       })
+396:       .finally(() => { if (!cancelled) setCapabilitiesLoading(false) })
+397:     return () => { cancelled = true }
+398:   }, [draft.authKind, editorOpen, rotating, targetKind])
+399: 
+400:   function openRotate(profile: CredentialProfile) {
+431:     // previous kind's ID and surface a misleading 404.
+432:     setProfiles([])
+433:     setError(null)
+434:     setMissingTarget(null)
+435:     setFilters({ target_kind: kind === 'web' ? undefined : kind, target_id: undefined, target: undefined })
+436:   }
+437: 
+438:   async function saveProfile() {
+439:     if (!targetId) return
+440:     const validationErrors = validateDraft(draft, Boolean(rotating))
+441:     if (Object.keys(validationErrors).length) {
+442:       setDraftErrors(validationErrors)
+443:       setEditorError('Complete the highlighted required fields before saving this credential.')
+444:       return
+445:     }
+446:     setEditorError(null)
+447:     setBusy(true)
+448:     try {
+449:       const material = secretPayload(draft)
+450:       if (rotating) {
+451:         await rotateCredentialProfile(rotating.id, {
+452:           ...material,
+465:             })
+466:           : null
+467:         await createCredentialProfile({
+468:           ...material,
+469:           target_kind: targetKind,
+470:           target_id: targetId,
+471:           name: draft.name.trim(),
+472:           auth_kind: draft.authKind,
+473:           principal_label: draft.principalLabel.trim() || undefined,
+474:           principal_slot: draft.principalSlot,
+475:           allowed_capabilities: splitValues(draft.capabilities),
+476:           allow_active_capabilities: draft.allowActiveCapabilities,
+477:           approval_receipt_id: activeApproval?.approvalReceiptId,
+478:           created_by: 'credentials_ui',
+479:         })
+480:         toast.success('Encrypted credential profile created')
+481:       }
+482:       setEditorOpen(false)
+483:       await loadProfiles()
+484:     } catch (cause) {
+485:       const message = cause instanceof Error ? cause.message : 'Credential update failed'
+486:       setEditorError(message)
+600:                       Owner{' '}
+601:                       <button
+602:                         type="button"
+603:                         className="text-blue-300 hover:text-blue-200"
+604:                         onClick={() => setFilters({ target_kind: profile.target_kind === 'device' ? 'device' : undefined, target_id: profile.target_id })}
+605:                       >
+606:                         {profile.home_target_name || profile.target_id}
+607:                       </button>
+608:                       {profile.home_target_locator ? <span className="font-mono"> · {profile.home_target_locator}</span> : null}
+609:                     </p>
+610:                   )}
+611:                   <p className="mt-1 text-sm text-gray-400">
+612:                     {profile.auth_kind.replaceAll('_', ' ')} · version {profile.current_version}
+613:                     {identityComposition(profile) ? ` · ${identityComposition(profile)}` : ''}
+614:                     {profile.principal_label ? ` · ${profile.principal_label}` : ''}
+615:                   </p>
+616:                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+617:                     {profile.allowed_capabilities.length
+618:                       ? profile.allowed_capabilities.map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)
+619:                       : <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
+620:                     {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
+621:                   </div>
+
+=== ui/src/lib/apiConfig.ts total 75 lines ===
+
+function sameAddressApiUrl(configured: string): string | null {
+  // The configured API URL names one address. Opened at any other address that reaches the
+  // same engine -- the public IP of the host, or a forwarded port -- the page kept fetching
+  // the configured one, which the browser either cannot route to or refuses as a
+  // private-network request from a public page, so every read and write failed.
+  //
+  // Only an address literal is followed, and only when the configured URL names one too. A
+  // hostname is left alone: it may legitimately be a gateway in front of a different API
+  // host, and following names would also be the shape a rebound DNS name relies on.
+  try {
+    const parsed = new URL(configured)
+    const page = window.location.hostname
+    const isLiteral = (value: string) =>
+      /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || value.includes(':') || value.startsWith('[')
+    if (!page || page === parsed.hostname) return null
+    if (!isLiteral(page) || !isLiteral(parsed.hostname)) return null
+    parsed.hostname = page
+    return parsed.pathname === '/' && !parsed.search && !parsed.hash
+      ? parsed.origin
+      : parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+export function getApiUrl(): string {
+  if (typeof window !== 'undefined') {
+    const runtimeUrl = window.__SHAKERSCAN_API_URL__
+    if (runtimeUrl) return sameAddressApiUrl(runtimeUrl) ?? runtimeUrl
+    const host = window.location.hostname
+    const pageProtocol = window.location.protocol
+    if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+      if (pageProtocol === 'https:') {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[shakerscan] NEXT_PUBLIC_API_URL is not set on an HTTPS deploy. ' +
+            'Falling back to same-origin API; set NEXT_PUBLIC_API_URL when the ' +
+            'API is behind a different host or port.',
+        )
+        return window.location.origin
+      }
+      return `http://${host}:8080`
+    }
+  }
+  return 'http://localhost:8080'
+}
+
+declare global {
+  interface Window {
+    __SHAKERSCAN_API_URL__?: string
+  }
+}
+
+export const API_URL = getApiUrl()
+
+export async function getApiErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const data = await response.json()
+    const detail = data?.detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail)) {
+      const messages = detail.map((item) => (typeof item?.msg === 'string' ? item.msg : null)).filter(Boolean)
+      if (messages.length) return messages.join('; ')
+    }
+    if (detail && typeof detail === 'object') {
+      if (typeof detail.message === 'string') return detail.message
+      if (typeof detail.reason === 'string') return detail.reason
+      if (typeof detail.error === 'string') return detail.error
+    }
+    if (typeof data?.message === 'string') return data.message
+  } catch {
+    // Intermediaries are not required to return JSON errors.
+  }
+  return fallback
+}

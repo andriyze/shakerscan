@@ -1063,7 +1063,13 @@ async def _migrate_evidence_scan_identity(conn) -> None:
     )
 
 
-async def run_schema_migrations(pool) -> None:
+async def run_schema_migrations(db_pool):
+    """Upgrade atomically; the 2.6 baseline is frozen after inventory conversion."""
+    from targets.asset_migration import run_unified_startup
+    await run_unified_startup(db_pool, _run_schema_migrations_26_baseline)
+
+
+async def _run_schema_migrations_26_baseline(pool) -> None:
     """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
 
     The advisory lock serializes new ShakerScan processes, but during a rolling
