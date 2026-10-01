@@ -720,7 +720,7 @@ function HuntContent() {
                   <div>
                     <h2 className="text-sm font-medium text-white">Bound credential profiles</h2>
                     <p className="mt-1 text-xs text-gray-500">
-                      Select encrypted identities for this exact target. The planner receives only profile metadata.
+                      Select encrypted identities this target owns or that are shared with it. The planner receives only profile metadata.
                     </p>
                   </div>
                   <Link href="/credentials" className="text-xs text-blue-300 hover:text-blue-200">

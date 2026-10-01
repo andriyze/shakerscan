@@ -153,6 +153,8 @@ export default function NewScanPage() {
   )
   const selectedCredentialIds = [primaryCredentialId, secondaryCredentialId].filter(Boolean)
   const credentialUse = selectedCredentialIds.length > 0
+  const selectedPrimaryProfile = credentialProfiles.find((profile) => profile.id === primaryCredentialId)
+  const selectedSecondaryProfile = credentialProfiles.find((profile) => profile.id === secondaryCredentialId)
   const approvalRequired = activeTesting || networkDiscovery || credentialUse || allowStateChanging
   const currentWorkerCount = workerStats?.current_count ?? 0
   const staleWorkers = workerStats?.stale_count ?? workerStats?.stale_workers?.length ?? 0
@@ -564,6 +566,26 @@ export default function NewScanPage() {
               }} list="known-targets" placeholder="https://example.com" className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white placeholder:text-gray-600" />
             </Field>
           )}
+          {!batchMode && (selectedPrimaryProfile || selectedSecondaryProfile) && (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-blue-900/60 bg-blue-950/20 px-3 py-2 text-sm text-gray-300" data-testid="credential-defaults">
+              <span>
+                Scans as {selectedPrimaryProfile ? <strong className="font-medium text-white">{selectedPrimaryProfile.name}</strong> : 'anonymous'}
+                {selectedSecondaryProfile && <> with <strong className="font-medium text-white">{selectedSecondaryProfile.name}</strong> as the second user</>}
+                <span className="block text-xs text-gray-500">This target&apos;s credentials are selected for new Scans.</span>
+              </span>
+              <span className="flex gap-2">
+                <Button type="button" size="sm" variant="ghost" onClick={() => {
+                  setShowAdvanced(true)
+                  requestAnimationFrame(() => document.getElementById('advanced-scan-options')?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+                }}>Change</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => {
+                  setPrimaryCredentialId('')
+                  setSecondaryCredentialId('')
+                  setApprovalReceipt('')
+                }}>Scan anonymously</Button>
+              </span>
+            </div>
+          )}
           <datalist id="known-targets">{existingTargets.map((item) => <option key={item.id} value={item.url} />)}</datalist>
           <label className="block text-sm text-gray-300">
             Target kind
@@ -715,10 +737,10 @@ export default function NewScanPage() {
             <div id="advanced-scan-options" className="space-y-5 border-t border-gray-800 p-5">
               <div>
                 <h3 className="text-sm font-medium text-gray-300">Authenticated principals</h3>
-                <p className="mt-1 text-xs text-gray-500">Select encrypted profiles bound to this exact registered target. Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
+                <p className="mt-1 text-xs text-gray-500">Select encrypted profiles this target owns or that are shared with it. Add a distinct second user to enable cross-user BOLA/IDOR comparisons.</p>
               </div>
               {batchMode ? (
-                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Exact-target credentials are unavailable for multi-target batches.</p>
+                <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Credentials are unavailable for multi-target batches.</p>
               ) : !selectedRegisteredTarget ? (
                 <p className="rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-500">Choose an existing target URL exactly as registered before attaching credentials.</p>
               ) : credentialsLoading ? (
@@ -756,9 +778,6 @@ export default function NewScanPage() {
                 </div>
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
-              {(primaryCredentialId || secondaryCredentialId) && (
-                <p className="text-xs text-gray-400" data-testid="credential-defaults">This target&apos;s credentials are selected. Choose Anonymous to scan without them.</p>
-              )}
               <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates target authorization and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
               <RequestCollectionPicker
                 targetId={batchMode ? undefined : selectedRegisteredTarget?.id}

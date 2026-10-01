@@ -15,7 +15,11 @@ test('a new Scan starts with the target credentials that fit each lane, never an
   // Through the same compatibility rules the pickers enforce; the comparator is a different identity.
   assert.match(scan, /preferredCredentialId\(credentialProfiles, \(profile\) => credentialCompatibility\(profile, 'primary'\)\.compatible\)/)
   assert.match(scan, /credentialCompatibility\(profile, 'secondary'\)\.compatible, \[primary\]/)
-  assert.match(scan, /This target&apos;s credentials are selected\. Choose Anonymous to scan without them\./)
+  // The selection is shown beside the target, not only inside the collapsed Advanced section.
+  const summary = scan.indexOf('data-testid="credential-defaults"')
+  assert.ok(summary > 0 && summary < scan.indexOf('id="advanced-scan-options"'))
+  assert.match(scan, /Scans as \{selectedPrimaryProfile/)
+  assert.match(scan, />Scan anonymously<\/Button>/)
 })
 
 test('a new Hunt starts with the target credentials per slot, and never an SSH identity', () => {
