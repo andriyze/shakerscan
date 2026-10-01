@@ -487,3 +487,30 @@ test('a quota budget reduction is shown in plain words', () => {
   assert.equal(domainRatePresentation({ status: 'completed', domain_rate: { state: 'admitted', work_class: 'operator' } }), null)
   assert.equal(formatResumeTime('not a date'), '')
 })
+
+test('a finding proven in this run stays proven once merged with the row the worker stored', () => {
+  // The stored row's fields win the merge, so the page shows exactly what the API projected for
+  // that row. GET /scans/{id} matched report proof by a different fingerprint than the worker
+  // stores rows under, projected the row "suspected", and a proven exposure read as a lead.
+  const reported = {
+    title: 'Sensitive exposure: private key material', url: 'https://honey.example.test/id_rsa',
+    tool: 'shakerscan_exposure_probe', severity: 'critical',
+    proof_state: 'verified', is_verified: true, scan_time_proof_state: 'exploited',
+  }
+  const stored = (proof) => ({
+    id: 'row-1', fingerprint: 't:c2f2ffb786643d9c', scan_id: 'scan-1', title: reported.title,
+    url: reported.url, tool: reported.tool, severity: 'critical', ...proof,
+  })
+  const merged = (proof) => reconciledScanFindings(
+    { id: 'scan-1', result: { findings: [reported] }, findings: [stored(proof)] },
+  ).current
+
+  const [proven] = merged({ proof_state: 'verified', is_verified: true, is_suspected: false })
+  assert.equal(proven._persisted, true)
+  assert.equal(isProvenFinding(proven), true)
+  assert.equal(groupScanFindings([proven]).proven.length, 1)
+
+  // Precedence is the stored row's: a row the server left "suspected" wins over the report.
+  const [lead] = merged({ proof_state: 'suspected', is_verified: false, is_suspected: true })
+  assert.equal(isProvenFinding(lead), false)
+})

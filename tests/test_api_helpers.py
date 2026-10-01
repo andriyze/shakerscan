@@ -2635,6 +2635,75 @@ def test_scan_result_verification_overrides_ignore_stale_false_positive_without_
     assert overrides == {}
 
 
+def test_scan_detail_proves_the_row_the_worker_persisted_from_this_runs_proof(monkeypatch):
+    """GET /scans/{id} matched report proof to stored rows by a different fingerprint than the
+    worker stores them under, so a finding proven in this run showed as suspected."""
+    from scan.finding_identity import canonical_finding_fingerprint
+
+    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "scan_report_exposure_finding.json")
+    with open(fixture, encoding="utf-8") as handle:
+        report_finding = json.load(handle)
+    scan_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    # The row exactly as the worker persists it: canonical key, no durable proof of its own.
+    stored = {
+        "id": uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        "fingerprint": canonical_finding_fingerprint(report_finding),
+        "title": report_finding["title"], "severity": "critical", "cvss_score": None, "status": "active",
+        "tool": report_finding["tool"], "url": report_finding["url"], "first_seen_at": None, "last_seen_at": None,
+        "last_verification_status": None, "last_verification_verdict": None,
+        "last_verification_confidence": None, "evidence": None, "latest_retest_mode": None,
+    }
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            return {"id": scan_id, "job_id": None, "status": "completed", "scan_role": "standalone",
+                    "options": {}, "execution_context": {}, "result": json.dumps({"findings": [report_finding]})}
+
+        async def fetch(self, query, *args):
+            return [dict(stored)] if "FROM findings f" in query else []
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(api_module, "db_pool", _Pool())
+
+    (row,) = asyncio.run(api_module.get_scan(str(scan_id)))["findings"]
+    assert (row["proof_state"], row["is_verified"], row["last_verification_verdict"]) == ("verified", True, "exploited")
+    # The verified-only view keeps it: its scan-time proof reached the row.
+    assert [found["id"] for found in asyncio.run(api_module.get_scan(str(scan_id), verified_only=True))["findings"]] == [stored["id"]]
+
+
+def test_findings_saved_from_partial_results_update_the_row_the_worker_stored():
+    """Partial results were saved under a different fingerprint than the worker uses, so an
+    endpoint finding the worker had already stored was inserted a second time."""
+    from scan.finding_identity import canonical_finding_fingerprint
+
+    finding = {"title": "SQL injection", "tool": "sqlmap", "cwe": "CWE-89", "severity": "critical",
+               "url": "https://app.example.test/search?q=1%27"}
+    worker_row = {"id": uuid.uuid4(), "status": "active", "resurfaced_count": 0}
+    looked_up, statements = [], []
+
+    class _Conn:
+        async def fetchrow(self, query, *args):
+            looked_up.append(args[1])
+            return worker_row if args[1] == canonical_finding_fingerprint(finding) else None
+
+        async def execute(self, query, *args):
+            statements.append(query.split()[0])
+
+    saved = asyncio.run(api_module.save_findings_from_partial(_Conn(), uuid.uuid4(), uuid.uuid4(), [finding]))
+    assert looked_up == [canonical_finding_fingerprint(finding)]
+    assert statements == ["UPDATE"] and saved == 1
+
+
 def test_scan_time_verification_fields_preserves_zero_confidence():
     fields = scan_time_verification_fields(
         {"proof_of_exploitation": True, "verification_confidence": 0.0, "confidence": 0.95}

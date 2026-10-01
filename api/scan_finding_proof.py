@@ -10,10 +10,11 @@ rows; the scanner's own word stays available as ``scan_time_proof_state``.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 ProofProjector = Callable[[dict[str, Any]], dict[str, Any]]
-Fingerprinter = Callable[[dict[str, Any]], str]
+# Every fingerprint a persisted row for a report finding can carry (finding_identity_keys).
+IdentityKeys = Callable[[dict[str, Any]], Iterable[str]]
 
 _PROOF_KEYS = ("proof_state", "is_verified", "is_suspected")
 # Read for the projection only; never returned on the scan detail.
@@ -53,7 +54,7 @@ def project_scan_finding_proof(
     persisted_rows: list[dict[str, Any]],
     *,
     project: ProofProjector,
-    fingerprint: Fingerprinter,
+    identities: IdentityKeys,
 ) -> list[dict[str, Any]]:
     """Attach the canonical proof projection to ``report["findings"]`` and the persisted rows.
 
@@ -62,19 +63,23 @@ def project_scan_finding_proof(
     and is also verified when the report finding it fingerprints to is verified, so a proof
     from this run and a proof from a deterministic retest both count and neither downgrades
     the other.
+
+    A report finding names its row by the identity persistence stores it under: the canonical
+    (templated) fingerprint, or the older untemplated one for a row stored before that.
+    Matching by any other key misses the row and lets its weaker stored projection win.
     """
     report_findings = report.get("findings") if isinstance(report, dict) else None
     verified_fingerprints: set[str] = set()
     for finding in report_findings if isinstance(report_findings, list) else []:
         if not isinstance(finding, dict):
             continue
-        key = fingerprint(finding)
+        keys = identities(finding)
         projection = project(finding)
         if "proof_state" in finding and "scan_time_proof_state" not in finding:
             finding["scan_time_proof_state"] = finding["proof_state"]
         finding.update({name: projection[name] for name in _PROOF_KEYS})
-        if key and projection["is_verified"]:
-            verified_fingerprints.add(key)
+        if projection["is_verified"]:
+            verified_fingerprints.update(key for key in keys if key)
 
     for row in persisted_rows:
         projection = project(row)
