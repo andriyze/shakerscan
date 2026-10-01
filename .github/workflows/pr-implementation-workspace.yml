@@ -1,0 +1,49 @@
+name: Temporary PR implementation workspace
+
+on:
+  push:
+    branches:
+      - work/pr295-coverage-implementation
+      - work/pr294-target-unification
+
+permissions:
+  contents: write
+
+jobs:
+  implementation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+      - name: Apply reviewed source transformations on the isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF_NAME" in
+            work/pr295-coverage-implementation|work/pr294-target-unification) ;;
+            *) echo 'Ref is not an implementation workspace'; exit 1 ;;
+          esac
+          if test -f .implementation/apply.py; then
+            python3 .implementation/apply.py
+            git diff --check
+            git add -A
+            if ! git diff --cached --quiet; then
+              git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'fix: materialize reviewed implementation source changes'
+              git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+            fi
+            echo "IMPLEMENTATION_COMMIT=$(git rev-parse HEAD)"
+          else
+            echo 'Workspace initialized; no implementation script present yet.'
+          fi
+      - name: Run implementation checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f .implementation/check.sh; then
+            bash .implementation/check.sh
+          else
+            echo 'No implementation checks submitted yet.'
+          fi
