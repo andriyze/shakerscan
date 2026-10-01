@@ -192,9 +192,10 @@ def test_guidance_prefers_the_exposure_class_over_title_words():
 
 
 def test_title_matches_are_labelled_and_unknown_findings_get_none():
-    csp = finding_remediation({"title": "Missing HTTP response header: Content-Security-Policy"})
+    csp = finding_remediation({"title": "CSP header missing"})
     assert csp["matched_by"] == "title" and "Content Security Policy" in csp["title"]
-    assert finding_remediation({"title": "PII or credential pattern in response"}) is None
+    # Model Intake governance gaps have no entry: the right steps depend on that workflow.
+    assert finding_remediation({"title": "Model monitoring plan missing", "tool": "model_intake", "source": "model_intake"}) is None
 
 
 def test_a_path_in_the_title_does_not_choose_the_guidance():
@@ -208,3 +209,42 @@ def test_a_weak_policy_is_not_reported_as_a_missing_one():
                   "CSP: Trusted Types not required (optional)."):
         assert finding_remediation({"title": title})["title"] == "Content Security Policy Allows Unsafe Sources", title
     assert "Not Configured" in finding_remediation({"title": "CSP header missing"})["title"]
+
+
+@pytest.mark.parametrize(("finding", "title"), [
+    ({"title": "Missing HTTP response header: Referrer-Policy", "tool": "nuclei"}, "Referrer-Policy Header Missing"),
+    ({"title": "Permissions-Policy missing", "tool": "http_headers"}, "Permissions-Policy Header Missing"),
+    ({"title": "HTTP Missing Security Headers", "tool": "nuclei"}, "Security Headers Missing"),
+    ({"title": "No rate limiting detected on https://app.test/login", "tool": "rate_limiting"}, "No Rate Limiting"),
+    ({"title": "Brute-force protection missing: https://app.test/api/auth", "tool": "bruteforce_protection"}, "Brute-Force Protection Missing"),
+    ({"title": "CAA record missing", "tool": "dns_policy"}, "CAA Record Missing"),
+    ({"title": "Exposed file: .env (+6 duplicate paths) (confidence: medium)", "tool": "exposed_files"}, "Publicly Served File Containing Secrets"),
+    ({"title": "Webhook signature verification bypass: /api/webhooks/stripe", "tool": "webhook_checks"}, "Webhook Signature Not Verified"),
+    ({"title": "AWS access key id exposed: /api/cloud/metadata", "tool": "data_exposure"}, "Exposed Cloud Credentials"),
+    ({"title": "Database connection string exposed: /mcp/resources", "tool": "data_exposure"}, "Sensitive Data in API Response"),
+    ({"title": "Accessible Cloud Metadata: /.aws/config", "tool": "forced_browsing"}, "Exposed Cloud Credentials"),
+    ({"title": "Legacy TLS protocol negotiated", "tool": "tls.inspect"}, "Weak TLS Configuration"),
+    # AI Gate: the catalog title decides, whatever probe family produced it.
+    ({"title": "PII or credential pattern in response", "source": "ai_gate", "evidence": {"family": "tool_abuse"}}, "Sensitive Data in AI Responses"),
+    ({"title": "Excessive agency (LLM08)", "source": "ai_gate"}, "Excessive Agency"),
+    ({"title": "Executable content in model output", "source": "ai_gate", "evidence": {"family": "data_exfiltration"}}, "Unsafe Handling of Model Output"),
+    # A catalog title not listed falls back to the probe family.
+    ({"title": "A future probe title", "source": "ai_gate", "evidence": {"family": "prompt_leakage"}}, "System Prompt Leakage"),
+])
+def test_findings_are_matched_by_what_produced_them(finding, title):
+    guidance = finding_remediation(finding)
+    assert guidance and guidance["title"] == title and guidance["matched_by"] == "finding_type", guidance
+
+
+def test_positive_observations_get_no_guidance():
+    assert finding_remediation({"title": "WAF Detected: cloudflare", "tool": "waf_detection"}) is None
+    assert finding_remediation({"title": "Input validation detected (attack payloads blocked)", "tool": "input_validation"}) is None
+
+
+def test_every_mapped_key_has_an_entry():
+    from scanner_tools import remediation_kb, remediation_kb_findings as tables
+    keys = set(tables.TOOL_REMEDIATION.values()) | set(tables.HEADER_REMEDIATION.values())
+    keys |= set(tables.EXACT_TITLE_REMEDIATION.values()) | set(tables.AI_FAMILY_REMEDIATION.values())
+    keys |= {key for patterns in tables.TOOL_TITLE_REMEDIATION.values() for _, key in patterns}
+    keys |= set(remediation_kb.EXPOSURE_CLASS_REMEDIATION.values())
+    assert keys <= set(remediation_kb.REMEDIATION_DATABASE), sorted(keys - set(remediation_kb.REMEDIATION_DATABASE))

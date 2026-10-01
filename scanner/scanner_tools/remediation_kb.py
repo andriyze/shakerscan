@@ -4,8 +4,11 @@ Comprehensive remediation knowledge base with framework-specific code examples.
 Provides actionable fix guidance for security findings.
 """
 
+import json
 import re
 from typing import Any
+
+from .remediation_kb_findings import FINDING_TYPE_REMEDIATIONS, finding_type_remediation_key
 
 # ---------------------------------------------------------------------------
 # Remediation Database
@@ -1187,6 +1190,9 @@ location ~ ^/(swagger|openapi|api-docs) {
 }
 
 
+REMEDIATION_DATABASE.update(FINDING_TYPE_REMEDIATIONS)
+
+
 # ---------------------------------------------------------------------------
 # Finding-to-Remediation Mapping
 # ---------------------------------------------------------------------------
@@ -1264,6 +1270,40 @@ FINDING_TO_REMEDIATION_MAP = {
 }
 
 
+# "CORS allows credentialed cross-origin reads: /api/openapi.json" is about CORS; keyword matching
+# on the path after the colon gave the OpenAPI guidance.
+_TRAILING_LOCATION = re.compile(r":\s+(?:/|https?://)\S*.*$")
+
+
+def _evidence_dict(finding: dict[str, Any]) -> dict[str, Any]:
+    value = finding.get("evidence")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def match_remediation(finding: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """Guidance for a finding and how it was matched.
+
+    In order: ``exposure_class`` (the exposure prover's classification), ``finding_type`` (the check
+    that produced it, a fixed catalog title, or the header a missing-header finding names), and
+    ``title`` (keywords in the title: general guidance for that kind of issue).
+    """
+    evidence = _evidence_dict(finding)
+    entry = get_remediation_for_exposure_class(str(evidence.get("exposure_class") or ""))
+    if entry:
+        return entry, "exposure_class"
+    key = finding_type_remediation_key(finding, evidence)
+    if key and key in REMEDIATION_DATABASE:
+        return REMEDIATION_DATABASE[key].copy(), "finding_type"
+    subject = _TRAILING_LOCATION.sub("", str(finding.get("title") or "")).strip()
+    entry = _keyword_remediation(str(finding.get("tool") or ""), subject)
+    return (entry, "title") if entry else None
+
+
 def get_remediation_for_finding(finding: dict[str, Any]) -> dict[str, Any] | None:
     """
     Get comprehensive remediation guidance for a finding.
@@ -1271,8 +1311,13 @@ def get_remediation_for_finding(finding: dict[str, Any]) -> dict[str, Any] | Non
     Returns enriched remediation with code examples and documentation,
     or None if no specific remediation is available.
     """
-    tool = (finding.get("tool") or "").lower()
-    title = (finding.get("title") or "").lower()
+    matched = match_remediation(finding)
+    return matched[0] if matched else None
+
+
+def _keyword_remediation(tool: str, title: str) -> dict[str, Any] | None:
+    tool = (tool or "").lower()
+    title = (title or "").lower()
 
     # Try to match by keywords
     combined = f"{tool} {title}"

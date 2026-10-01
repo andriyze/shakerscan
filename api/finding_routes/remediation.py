@@ -1,55 +1,30 @@
 """Fix guidance for a finding, from the scanner's remediation knowledge base.
 
-A finding the exposure prover classified (evidence.exposure_class) maps to guidance by class.
-Anything else falls back to the knowledge base's title keywords, and says so: that match is a
-best guess, not a classification.
+The knowledge base matches by the exposure prover's class, then by the finding's type (the check
+that produced it, a fixed catalog title, or the header it names), then by title keywords. The
+response says which (``matched_by``): a keyword match is general guidance for that kind of issue.
 """
 
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 try:
-    from scanner_tools.remediation_kb import get_remediation_for_exposure_class, get_remediation_for_finding
+    from scanner_tools.remediation_kb import match_remediation
 except ImportError:  # host-side tests add api/ only; the runtime image has scanner_tools on /app
     import os
     import sys
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scanner"))
-    from scanner_tools.remediation_kb import get_remediation_for_exposure_class, get_remediation_for_finding
-
-
-def _evidence(finding: dict[str, Any]) -> dict[str, Any]:
-    value = finding.get("evidence")
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return {}
-    return value if isinstance(value, dict) else {}
-
-
-# "CORS allows credentialed cross-origin reads: /api/openapi.json" is about CORS; the path after
-# the colon names where, and matching words in it gave the OpenAPI guidance.
-_TRAILING_LOCATION = re.compile(r":\s+(?:/|https?://)\S*.*$")
-
-
-def _title_subject(title: Any) -> str:
-    return _TRAILING_LOCATION.sub("", str(title or "")).strip()
+    from scanner_tools.remediation_kb import match_remediation
 
 
 def finding_remediation(finding: dict[str, Any]) -> dict[str, Any] | None:
     """The guidance to show for ``finding``, or None when the knowledge base has none."""
-    exposure_class = str(_evidence(finding).get("exposure_class") or "")
-    entry = get_remediation_for_exposure_class(exposure_class) if exposure_class else None
-    matched_by = "exposure_class"
-    if entry is None:
-        entry = get_remediation_for_finding({"title": _title_subject(finding.get("title")), "tool": finding.get("tool")})
-        matched_by = "title"
-    if not entry:
+    matched = match_remediation(finding)
+    if not matched:
         return None
+    entry, matched_by = matched
     examples = entry.get("code_examples") or {}
     return {
         "title": entry.get("title"),
