@@ -305,7 +305,8 @@ def _candidate_to_pseudo_finding(row: dict[str, Any]) -> dict[str, Any]:
         "last_seen_at": row.get("last_seen_at"),
         "verification_status": row.get("status"),
         "is_verified": False,
-        "is_suspected": severity in ("high", "critical"),
+        # Agrees with proof_state: every open candidate is a suspected, unproven lead.
+        "is_suspected": True,
         "proof_state": "suspected",
         "trust_tier": "suspected",
     }
@@ -602,8 +603,9 @@ async def list_findings(
                 scan_id or ai_target_id or device_target_id or verification_verdict
                 or verification_mode or verified_only or driven_by
                 or research_campaign_id or resolved_within_days
-                # Candidates carry no proof; a proof filter is a question about findings.
-                or proof_states
+                # A candidate is an unproven Hunt lead and is always labelled `suspected`, so
+                # it belongs exactly to the proof filters that include `suspected`.
+                or (proof_states and "suspected" not in proof_states)
             )
         )
 
@@ -745,8 +747,14 @@ async def list_findings(
                 candidate_items.append(_candidate_to_pseudo_finding(cand_dict))
 
     findings_out = []
-    # A proof-filtered page is already projected (the filter needed the projection).
-    page_rows = proof_matches[offset:offset + limit] if proof_matches is not None else rows
+    # A proof-filtered page is already projected (the filter needed the projection). With
+    # candidates the merge cuts the page, so it gets the same offset+limit prefix as the SQL path.
+    if proof_matches is None:
+        page_rows = rows
+    elif candidates_included:
+        page_rows = proof_matches[:offset + limit]
+    else:
+        page_rows = proof_matches[offset:offset + limit]
     for row in page_rows:
         row_dict = dict(row)
         row_dict.pop("total_count", None)
