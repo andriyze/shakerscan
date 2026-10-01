@@ -106,7 +106,7 @@ def source_file_map(workspace_root: str = "/workspace") -> dict[str, str]:
     # never match the worker image. Require both execution anchors before
     # enumerating a workspace; otherwise return the complete legacy manifest so
     # require_all=True fails and callers correctly fall back to /app.
-    if not (scanner_root / "scanner.py").is_file() or not (api_root / "worker.py").is_file():
+    if not _is_file(scanner_root / "scanner.py") or not _is_file(api_root / "worker.py"):
         return {
             name: os.path.join(workspace_root, source_relative)
             for name, source_relative, _ in FINGERPRINT_SOURCE_FILES
@@ -183,6 +183,18 @@ def runtime_file_map(
         name: os.path.join(runtime_root, runtime_relative)
         for name, _, runtime_relative in FINGERPRINT_SOURCE_FILES
     }
+
+
+def _is_file(path: Path) -> bool:
+    """``Path.is_file`` that reads an unreadable path as absent.
+
+    ``is_file`` swallows only "not found" errors and raises on permission denied, so a workspace
+    the API cannot enter turned every /health call into HTTP 500 instead of falling back to /app.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def hash_source_files(file_map: dict[str, str], *, require_all: bool = False) -> str | None:

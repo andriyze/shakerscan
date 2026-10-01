@@ -64,11 +64,14 @@ agent through ShakerScan so runtime URLs, planner identity, and agent-specific i
 
 ```bash
 shakerscan agent             # auto-detects codex, claude, opencode, then pi
-shakerscan agent pi          # or name codex, claude, or opencode explicitly
+shakerscan agent opencode    # or name one: codex, claude, opencode, or pi
 ```
 
-Pi has no MCP client; the launcher passes the canonical ShakerScan skills and slash commands
-explicitly and Pi drives the instance through `shakerscan api`, `scan`, and `hunt`.
+The agent can drive Hunt, inspect findings, use saved credentials and request collections, and work
+through the same server-side authorization, scope, budget, evidence, and proof controls as the UI
+and CLI. Pi has no MCP client; the launcher passes the canonical ShakerScan skills and slash
+commands explicitly and Pi drives the instance through `shakerscan api`, `scan`, and `hunt`. The
+`.claude/` directory contains the same commands and agents for Claude Code.
 
 ## What to use
 
@@ -97,25 +100,10 @@ explicitly and Pi drives the instance through `shakerscan api`, `scan`, and `hun
                          - every request pinned to the authorized target and metered
 ```
 
-Hunt is planned by the coding agent you run (Codex, Claude Code, or OpenCode); ShakerScan keeps
+Hunt is planned by the coding agent you run (Codex, Claude Code, OpenCode, or Pi); ShakerScan keeps
 target binding, scope, policy, approval, budget, execution, evidence, and proof on the server.
 Architecture details are in the
 [documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md).
-
-## Use an AI agent
-
-ShakerScan ships `AGENTS.md` and task skills for Codex, Claude Code, and OpenCode. Start an
-installed agent inside the ShakerScan runtime:
-
-```bash
-shakerscan agent codex
-shakerscan agent claude
-shakerscan agent opencode
-```
-
-The agent can drive Hunt, inspect findings, use saved credentials and request collections, and work
-through the same server-side authorization, scope, budget, evidence, and proof controls as the UI
-and CLI. The `.claude/` directory contains the same commands and agents for Claude Code.
 
 ## LAN server
 

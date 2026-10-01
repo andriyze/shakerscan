@@ -24,6 +24,7 @@ import asyncio
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -33,6 +34,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.fields import FieldInfo
 
 try:
     import adjudicate
@@ -7154,6 +7156,29 @@ def _hypothesis_route_matches_finding(route: Any, finding: dict[str, Any]) -> bo
     )
 
 
+async def _call_route(route: Callable[..., Any], **values: Any) -> Any:
+    """Call a route handler as a plain function, with every omitted parameter at its declared default.
+
+    FastAPI resolves ``Query(...)`` defaults only while serving an HTTP request. Called directly,
+    a parameter left out arrives as the marker object itself, which is truthy and is not a value:
+    the handler filters on it or sends it to the database. A dispatcher that calls a handler
+    therefore goes through here, so a parameter added to the handler later cannot break it.
+    """
+    parameters = inspect.signature(route).parameters
+    unknown = sorted(set(values) - set(parameters))
+    if unknown:
+        raise TypeError(f"{route.__name__} has no parameter {', '.join(unknown)}")
+    arguments: dict[str, Any] = {}
+    for name, parameter in parameters.items():
+        if name in values:
+            arguments[name] = values[name]
+        elif isinstance(parameter.default, FieldInfo):
+            if parameter.default.is_required():
+                raise TypeError(f"{route.__name__} requires {name}")
+            arguments[name] = parameter.default.get_default(call_default_factory=True)
+    return await route(**arguments)
+
+
 async def _arsenal_dispatch_campaign_list(p: dict[str, Any]) -> dict[str, Any]:
     return await arsenal_campaigns(limit=_int_or_none(p.get("limit")) or 20, target_id=p.get("target_id"), status=p.get("status"))
 
@@ -7163,7 +7188,16 @@ async def _arsenal_dispatch_command_result_list(p: dict[str, Any]) -> dict[str, 
 
 
 async def _arsenal_dispatch_mission_timeline(p: dict[str, Any]) -> dict[str, Any]:
-    return await _operations.mission_timeline(limit=_int_or_none(p.get("limit")) or 50, target_id=p.get("target_id"))
+    included = {
+        name: bool(p[name])
+        for name in ("include_campaign_actions", "include_scans", "include_schedules",
+                     "include_evidence", "include_refuters", "include_exports")
+        if p.get(name) is not None
+    }
+    return await _call_route(
+        _operations.mission_timeline,
+        limit=_int_or_none(p.get("limit")) or 50, target_id=p.get("target_id"), **included,
+    )
 
 
 async def _arsenal_dispatch_tool_status(p: dict[str, Any]) -> dict[str, Any]:
@@ -7308,10 +7342,10 @@ async def _arsenal_dispatch_target_invariant_retire(
 
 
 async def _arsenal_dispatch_exposure_graph_get(p: dict[str, Any]) -> dict[str, Any]:
-    return await _exposure.exposure_graph(
+    return await _call_route(
+        _exposure.exposure_graph,
         focus=p.get("focus"),
         include_resolved=bool(p.get("include_resolved")),
-        limit=_int_or_none(p.get("limit")) or 500,
     )
 
 
@@ -7340,12 +7374,13 @@ async def _arsenal_dispatch_finding_list(p: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "severity", "status", "source_type", "target_id", "ai_target_id",
         "scan_id", "root_domain", "verification_verdict", "verification_mode",
-        "verified_only", "search", "seen_within_days", "first_seen_within_days",
-        "resolved_within_days", "sort_by", "sort_order", "limit", "offset",
+        "verified_only", "search", "seen_within_days", "not_seen_within_days",
+        "first_seen_within_days", "resolved_within_days", "sort_by", "sort_order", "limit", "offset",
     }
     query = {k: v for k, v in p.items() if k in allowed and v is not None}
-    return await _finding_routes.list_findings(
-        _ArsenalQueryRequest(query),
+    return await _call_route(
+        _finding_routes.list_findings,
+        request=_ArsenalQueryRequest(query),
         severity=p.get("severity"),
         status=p.get("status"),
         source_type=p.get("source_type"),
@@ -7358,6 +7393,7 @@ async def _arsenal_dispatch_finding_list(p: dict[str, Any]) -> dict[str, Any]:
         verified_only=bool(p.get("verified_only")),
         search=p.get("search"),
         seen_within_days=_int_or_none(p.get("seen_within_days")),
+        not_seen_within_days=_int_or_none(p.get("not_seen_within_days")),
         first_seen_within_days=_int_or_none(p.get("first_seen_within_days")),
         resolved_within_days=_int_or_none(p.get("resolved_within_days")),
         sort_by=p.get("sort_by"),
