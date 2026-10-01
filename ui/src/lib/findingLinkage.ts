@@ -75,3 +75,21 @@ export function linkedPersistedFinding(
   }
   return null
 }
+
+// A report result was observed by the scan that reported it. Show it with its durable record's
+// lifecycle when one is linked, and otherwise as seen when that scan completed: a result read
+// on its own carries no last_seen_at, which rendered findings this very run found as
+// "never observed".
+export function observedReportFinding(
+  finding: FindingLike,
+  persisted: FindingLike | null,
+  observedAt: unknown,
+): FindingLike {
+  const seenAt = persisted?.last_seen_at || observedAt || null
+  return {
+    ...finding,
+    first_seen_at: persisted?.first_seen_at || finding.first_seen_at || seenAt,
+    last_seen_at: seenAt,
+    ...(persisted?.status ? { status: persisted.status } : {}),
+  }
+}

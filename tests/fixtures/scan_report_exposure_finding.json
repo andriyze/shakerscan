@@ -1,0 +1,56 @@
+{
+    "proof_contract_v2": {
+        "capability_receipt": {
+            "receipt_hash": "b3dc8e3ad88e589829e65394040e08722b613e5cb2fed2a3a51e953e185c4d0e",
+            "receipt_id": "e2028514-304c-44d6-8630-2abb141e319c",
+            "schema_version": "capability-receipt-reference/v1"
+        },
+        "contract_id": "scan.exposure.verify_batch.sensitive_exposure_proof",
+        "contract_version": "1.0.0",
+        "controls": [
+            {
+                "canonical_capability": "exposure.verify_batch",
+                "normalization_boundary": "scan_finalizer"
+            }
+        ],
+        "family": "sensitive_exposure_proof",
+        "observations": [
+            {
+                "proof_basis": "canonical_capability_execution"
+            }
+        ],
+        "predicate": {
+            "met": [
+                "deterministic_proof"
+            ],
+            "missing": [],
+            "reason": "receipt-backed canonical capability proved the finding live",
+            "refuted_by": [],
+            "requirements": [
+                "deterministic_proof"
+            ],
+            "satisfied": true
+        },
+        "promotable": true,
+        "proof_basis": "canonical_capability_execution",
+        "reexecution": {
+            "performed": true,
+            "required": false,
+            "verifier_build": "exposure.verify_batch"
+        },
+        "schema_version": "proof-contract/v2",
+        "tool_receipt_ids": [],
+        "traffic_receipt_id": null,
+        "verdict": "verified"
+    },
+    "proof_state": "exploited",
+    "severity": "critical",
+    "title": "Sensitive exposure: private key material",
+    "tool": "shakerscan_exposure_probe",
+    "url": "https://honey.example.test/id_rsa",
+    "validation": {
+        "confidence": 0.9,
+        "evidence_level": "confirmed_exploit"
+    },
+    "verified": true
+}

@@ -161,3 +161,48 @@ def test_blocked_verdict_high_is_suspected_not_verified():
     r = pf({"severity": "high", "last_verification_verdict": "blocked_by_security"})
     assert r["is_verified"] is False
     assert r["proof_state"] == "suspected"
+
+
+# --- The scan detail speaks the same proof vocabulary -------------------------------------------
+
+def _exposure_report_finding(**overrides):
+    """A scan report finding exactly as the exposure prover writes it (honey /id_rsa, host renamed)."""
+    import json
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "scan_report_exposure_finding.json")
+    with open(path, encoding="utf-8") as handle:
+        finding = json.load(handle)
+    finding.update(overrides)
+    return finding
+
+
+def _project(report_findings, persisted_rows):
+    report = {"findings": report_findings}
+    rows = api_module.project_scan_finding_proof(
+        report, persisted_rows, project=pf, fingerprint=api_module.generate_finding_fingerprint,
+    )
+    return report["findings"], rows
+
+
+def test_scan_report_findings_carry_the_findings_api_proof_vocabulary():
+    """The scanner writes 'exploited'; the scan page read only 'verified' and showed proven
+    critical exposures as '0 proven, need verification'."""
+    candidate = {"severity": "medium", "title": "Git Configuration - Detect",
+                 "url": "https://honey.example.test/.git/config", "tool": "nuclei",
+                 "proof_state": "candidate", "suspected": True, "needs_verification": True}
+    (proven, lead), _ = _project([_exposure_report_finding(), candidate], [])
+    assert (proven["proof_state"], proven["is_verified"], proven["scan_time_proof_state"]) == ("verified", True, "exploited")
+    assert (lead["proof_state"], lead["is_suspected"], lead["scan_time_proof_state"]) == ("suspected", True, "candidate")
+
+
+def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof():
+    raw = _exposure_report_finding()
+    row_for_raw = {"id": "a", "fingerprint": api_module.generate_finding_fingerprint(raw), "severity": "critical",
+                   "evidence": None, "latest_retest_mode": None, "last_verification_verdict": "exploited"}
+    retested = {"id": "b", "fingerprint": "elsewhere", "severity": "high", "evidence": "{}",
+                "latest_retest_mode": "deterministic", "last_verification_verdict": "exploited"}
+    unproven = {"id": "c", "fingerprint": "other", "severity": "high", "evidence": None,
+                "latest_retest_mode": "ai_only", "last_verification_verdict": "exploited"}
+    _, rows = _project([raw], [row_for_raw, retested, unproven])
+    assert [row["proof_state"] for row in rows] == ["verified", "verified", "suspected"]
+    # The projection inputs are not part of the scan detail.
+    assert all("evidence" not in row and "latest_retest_mode" not in row for row in rows)

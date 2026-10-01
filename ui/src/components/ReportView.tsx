@@ -19,7 +19,7 @@ import { SEVERITY_BADGE_STYLES, type SeverityLevel } from '@/lib/constants'
 import { AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 import { normalizeSkipReasons } from '@/lib/deferredWorkContracts'
 import { deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
-import { buildFindingLinkageIndex, linkedPersistedFinding } from '@/lib/findingLinkage'
+import { buildFindingLinkageIndex, linkedPersistedFinding, observedReportFinding } from '@/lib/findingLinkage'
 import ScanCoverageSection, { type ScanCoverage } from '@/components/report/ScanCoverageSection'
 import InfrastructureIntelligenceSection from '@/components/report/InfrastructureIntelligenceSection'
 
@@ -3491,7 +3491,7 @@ export default function ReportView({ scan, shareControls, isAuthenticated, remed
               const canTrackFinding = Boolean(persistedFinding)
               return (
                 <div key={idx}>
-                  <FindingCard finding={finding} />
+                  <FindingCard finding={observedReportFinding(finding, persistedFinding, scan.completed_at || scan.updated_at) as typeof finding} />
                   {enableRemediationTracking && canTrackFinding && (
                     <div className="mt-2 ml-4 pl-4 border-l-2 border-gray-700">
                       <FindingActions
