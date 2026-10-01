@@ -15,7 +15,9 @@
 #   6. a POSTGRES_IMAGE override older than 18 is refused;
 #   7. the rollback data expires after SHAKERSCAN_POSTGRES_LEGACY_RETENTION_DAYS (default 30): starts
 #      announce the date in the last week, 0 keeps it, and expiry removes the 16 volume and the
-#      upgrade dump while the 18 data stays intact.
+#      upgrade dump while the 18 data stays intact;
+#   8. an expired set-aside copy that a recovery container runs on (beside PostgreSQL on the current
+#      data) is kept while that container exists, running or stopped, and removed once it is gone.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -293,5 +295,38 @@ docker run -d --name "${P7}-pg18" -e POSTGRES_PASSWORD=unused -v "${P7}_postgres
 wait_ready "${P7}-pg18"
 [ "$(count "${P7}-pg18" scanner "SELECT count(*) FROM smoke_rows")" = "20000" ] || fail "expiry touched the 18 data"
 docker rm -f "${P7}-pg18" > /dev/null
+
+echo "== 8. a set-aside copy a container still uses outlives its retention"
+# Scenario 3's --remigrate set the early 18 cluster aside. Age it past the 30-day retention.
+cluster_sh() {
+    docker run --rm -v "${P3}_postgres-cluster:/c" --entrypoint sh "$TARGET_IMAGE" -c "$1"
+}
+aside="$(cluster_sh 'cd /c && ls -d 18/replaced-* | head -n 1')"
+[ -n "$aside" ] || fail "scenario 3 left no set-aside copy"
+aged="18/replaced-$(python3 -c 'import datetime
+print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=40)).strftime("%Y%m%dT%H%M%SZ"))')"
+cluster_sh "mv '/c/$aside' '/c/$aged'"
+# A recovery run on the copy, the volume mounted elsewhere, beside PostgreSQL on the current data.
+docker run -d --name "${P3}-recovery" -e POSTGRES_PASSWORD=unused -e PGDATA="/recovery/$aged" \
+    -v "${P3}_postgres-cluster:/recovery" "$TARGET_IMAGE" > /dev/null
+wait_ready "${P3}-recovery"
+docker run -d --name "${P3}-pg18" -e POSTGRES_PASSWORD=unused -v "${P3}_postgres-cluster:/var/lib/postgresql" \
+    "$TARGET_IMAGE" > /dev/null
+wait_ready "${P3}-pg18"
+out="$(launcher "$P3" db-upgrade 2>&1)" || { echo "$out"; fail "a start beside a recovery container failed"; }
+show "$out"
+echo "$out" | grep -q "container ${P3}-recovery still uses it" || { echo "$out"; fail "retention did not say why it kept the copy"; }
+cluster_sh "test -d '/c/$aged'" || fail "retention deleted a set-aside copy a running container uses"
+docker stop -t 30 "${P3}-recovery" > /dev/null
+out="$(launcher "$P3" db-upgrade 2>&1)" || { echo "$out"; fail "a start beside a stopped recovery container failed"; }
+cluster_sh "test -d '/c/$aged'" || fail "retention deleted a set-aside copy a stopped container still holds"
+docker rm "${P3}-recovery" > /dev/null
+# The stack's own PostgreSQL on the current data does not hold the copy.
+out="$(launcher "$P3" db-upgrade 2>&1)" || { echo "$out"; fail "the start after the recovery failed"; }
+show "$out"
+echo "$out" | grep -q "Removed the set-aside copy $aged" || { echo "$out"; fail "the copy was not removed once unused"; }
+cluster_sh "test ! -e '/c/$aged'" || fail "the copy outlived its holder"
+[ "$(count "${P3}-pg18" scanner "SELECT count(*) FROM smoke_rows")" = "20000" ] || fail "removing the copy touched the current data"
+docker rm -f "${P3}-pg18" > /dev/null
 
 echo "PostgreSQL upgrade smoke: all scenarios passed"

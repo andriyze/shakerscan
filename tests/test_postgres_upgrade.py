@@ -8,6 +8,8 @@ path is exercised by scripts/postgres_upgrade_smoke.sh; these tests pin the deci
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -386,3 +388,256 @@ def test_old_upgrade_dumps_expire_and_other_backups_are_never_touched(tmp_path):
     assert (old / "source-fingerprint.txt").exists()
     assert (recent / "pg_dumpall.sql.gz").exists()
     assert (operator_backup / "postgres.dump").exists()
+
+
+# --- Directories a container still uses are never deleted ----------------------------------------
+
+FULL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+CANONICAL = {"Name": "/demo-postgres-1", "Config": {"Env": ["PGDATA=/var/lib/postgresql/18/docker"]},
+             "Mounts": [{"Name": "demo_postgres-cluster", "Destination": "/var/lib/postgresql"}]}
+UNKNOWN = {"Name": "/backup-shell", "Config": {"Env": ["PATH=/bin"]},
+           "Mounts": [{"Name": "demo_postgres-cluster", "Destination": "/c"}]}
+ASIDE = f"18/replaced-{_stamp(40)}"
+
+
+def _recovery(directory: str, name: str = "/recovery") -> dict:
+    # A recovery run on an older copy: the volume mounted elsewhere, PGDATA pointing into it.
+    return {"Name": name, "Config": {"Env": ["POSTGRES_PASSWORD=x", f"PGDATA=/data/{directory}"]},
+            "Mounts": [{"Name": "demo_postgres-cluster", "Destination": "/data"}]}
+
+
+def _cluster_harness(directory: Path, containers: list[dict]) -> tuple[str, Path]:
+    """Source the module with Docker answering from `containers` and the cluster shell recorded."""
+    directory.mkdir(parents=True, exist_ok=True)
+    log = directory / "calls"
+    inspect = directory / "inspect.json"
+    inspect.write_text(json.dumps(containers))
+    ids = " ".join(f"id{index}" for index in range(len(containers)))
+    harness = "\n".join([
+        'RED=""; YELLOW=""; NC=""',
+        f'source "{MODULE}"',
+        f'SCRIPT_DIR="{directory}"; LOG="{log}"; COMPOSE_PROJECT_NAME=demo',
+        "docker_cli() {",
+        '    case "$1" in',
+        f'        ps) echo "docker $*" >> "$LOG"; printf "%s\\n" {ids} ;;',
+        f'        inspect) cat "{inspect}" ;;',
+        '        *) echo "docker $*" >> "$LOG" ;;',
+        "    esac",
+        "}",
+        'postgres_cluster_shell() { echo "shell $2" >> "$LOG"; }',
+    ])
+    return harness, log
+
+
+def _calls(log: Path) -> list[str]:
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def _expire_aside(directory: Path, containers: list[dict]) -> tuple[str, list[str]]:
+    harness, log = _cluster_harness(directory, containers)
+    result = _bash(harness + f'\npostgres_expire_aged_copies "replaced_dirs={ASIDE}" image 30', env={"PATH": FULL_PATH})
+    assert result.returncode == 0, result.stderr
+    return result.stdout, _calls(log)
+
+
+def test_an_aged_set_aside_copy_a_recovery_container_uses_is_kept(tmp_path):
+    out, calls = _expire_aside(tmp_path, [CANONICAL, _recovery(ASIDE)])
+    assert not any(call.startswith("shell rm") for call in calls)
+    assert f"The set-aside copy {ASIDE} is past its 30-day retention but container recovery still uses it" in out
+    assert "removed on a later start" in out
+    # Stopped containers count too: the lookup lists every container, not only running ones.
+    assert "docker ps -aq --filter volume=demo_postgres-cluster" in calls
+
+
+def test_a_container_whose_data_directory_cannot_be_placed_holds_every_directory(tmp_path):
+    out, calls = _expire_aside(tmp_path, [UNKNOWN])
+    assert not any(call.startswith("shell rm") for call in calls)
+    assert "container backup-shell still uses it" in out
+
+
+def test_the_stacks_own_postgresql_does_not_hold_other_directories(tmp_path):
+    out, calls = _expire_aside(tmp_path, [CANONICAL])
+    assert f"shell rm -rf '/var/lib/postgresql/{ASIDE}'" in calls
+    assert f"Removed the set-aside copy {ASIDE}" in out
+
+
+def test_the_copy_is_removed_once_no_container_uses_it(tmp_path):
+    _, calls = _expire_aside(tmp_path, [])
+    assert f"shell rm -rf '/var/lib/postgresql/{ASIDE}'" in calls
+
+
+@pytest.mark.parametrize("data_directory", [f"{ASIDE}/nested", "18"])
+def test_a_data_directory_inside_or_around_the_copy_holds_it(tmp_path, data_directory):
+    _, calls = _expire_aside(tmp_path, [_recovery(data_directory)])
+    assert not any(call.startswith("shell rm") for call in calls)
+
+
+def test_an_older_major_directory_in_use_is_kept_past_its_retention(tmp_path):
+    expire = '\npostgres_expire_rollback_data "cluster_majors=17 18" 18 image 30'
+    harness, log = _cluster_harness(tmp_path / "held", [CANONICAL, _recovery("17/docker", "/pg17")])
+    result = _bash(harness + expire, env={"PATH": FULL_PATH})
+    assert result.returncode == 0, result.stderr
+    assert not any(call.startswith("shell rm") for call in _calls(log))
+    assert "PostgreSQL 17 rollback directory" in result.stdout and "container pg17 still uses it" in result.stdout
+
+    harness, log = _cluster_harness(tmp_path / "free", [CANONICAL])
+    result = _bash(harness + expire, env={"PATH": FULL_PATH})
+    assert "shell rm -rf '/var/lib/postgresql/17'" in _calls(log)
+    assert "Removed the PostgreSQL 17 rollback directory" in result.stdout
+
+
+def _remove_legacy(directory: Path, containers: list[dict]) -> tuple[subprocess.CompletedProcess, list[str]]:
+    harness, log = _cluster_harness(directory, containers)
+    script = "\n".join([
+        harness,
+        "postgres_target_image() { echo image; }",
+        "postgres_image_major() { echo 18; }",
+        f"postgres_probe_volumes() {{ printf 'cluster_majors=17 18\\nreceipt_majors=18\\nreplaced_dirs={ASIDE}\\n'; }}",
+        "postgres_volume_exists() { return 1; }",
+        "remove_legacy_postgres_data",
+    ])
+    return _bash(script, env={"PATH": FULL_PATH}, stdin="remove\n"), _calls(log)
+
+
+def test_remove_legacy_refuses_while_a_container_uses_a_directory_and_removes_nothing(tmp_path):
+    result, calls = _remove_legacy(tmp_path, [CANONICAL, _recovery(ASIDE)])
+    assert result.returncode == 1
+    assert "container recovery still uses" in result.stderr and "Nothing was removed" in result.stderr
+    # Not even the older major, which nothing uses: the refusal is all or nothing.
+    assert not any(call.startswith("shell rm") for call in calls)
+
+
+def test_remove_legacy_removes_everything_once_nothing_uses_it(tmp_path):
+    result, calls = _remove_legacy(tmp_path, [CANONICAL])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "shell rm -rf '/var/lib/postgresql/17'" in calls
+    assert f"shell rm -rf '/var/lib/postgresql/{ASIDE}'" in calls
+    assert not (tmp_path / ".shakerscan-postgres.lock").exists()
+
+
+# --- One PostgreSQL data operation at a time -----------------------------------------------------
+
+def _hold_lock(directory: Path, pid: int) -> Path:
+    lock = directory / ".shakerscan-postgres.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{pid}\n")
+    return lock
+
+
+RETENTION = "\npostgres_expire_legacy_data() { echo EXPIRED; }\npostgres_apply_legacy_retention probe 18 image"
+
+
+def test_retention_defers_while_another_operation_holds_the_lock(tmp_path):
+    _hold_lock(tmp_path, os.getpid())
+    harness, _ = _cluster_harness(tmp_path, [])
+    result = _bash(harness + RETENTION, env={"PATH": FULL_PATH})
+    assert result.returncode == 0, result.stderr
+    assert "EXPIRED" not in result.stdout
+    assert f"Another PostgreSQL data operation is running (process {os.getpid()})" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "command", ["remove_legacy_postgres_data", "remigrate_postgres_cluster", "keep_current_postgres_cluster"],
+)
+def test_interactive_operations_refuse_while_another_holds_the_lock(tmp_path, command):
+    _hold_lock(tmp_path, os.getpid())
+    harness, log = _cluster_harness(tmp_path, [])
+    result = _bash(harness + f"\n{command}", env={"PATH": FULL_PATH})
+    assert result.returncode == 1
+    assert "another PostgreSQL data operation is running" in result.stderr
+    assert _calls(log) == []
+
+
+def test_a_lock_left_by_a_process_that_exited_is_taken_over_and_released(tmp_path):
+    finished = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True, check=True)
+    lock = _hold_lock(tmp_path, int(finished.stdout))
+    harness, _ = _cluster_harness(tmp_path, [])
+    result = _bash(harness + RETENTION, env={"PATH": FULL_PATH})
+    assert result.returncode == 0, result.stderr
+    assert "EXPIRED" in result.stdout
+    assert not lock.exists()
+
+
+def test_the_lock_is_reentrant_within_one_process(tmp_path):
+    harness, _ = _cluster_harness(tmp_path, [])
+    script = harness + "\n" + "\n".join([
+        "inner() { postgres_lock_acquire && echo INNER; postgres_lock_release; }",
+        "postgres_locked inner",
+        f'[ -e "{tmp_path}/.shakerscan-postgres.lock" ] && echo LEFT || echo RELEASED',
+    ])
+    assert _bash(script, env={"PATH": FULL_PATH}).stdout.split() == ["INNER", "RELEASED"]
+
+
+# --- A copy is verified only when every verification query succeeded ----------------------------
+
+FAKE_PSQL = r"""#!/bin/sh
+db=""; cmd=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d) db="$2"; shift 2 ;;
+        -c) cmd="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+case "$cmd" in
+    *pg_authid*) echo "role|scanner|t|t|abc"; exit 0 ;;
+    *datname*)
+        [ "$FAKE" = enumeration ] && { echo "ERROR: enumeration failed" >&2; exit 2; }
+        [ "$FAKE" = empty ] && exit 0
+        printf 'postgres\nscanner\nmy db\n'; exit 0 ;;
+esac
+cat > /dev/null
+case "$db" in
+    scanner)
+        [ "$FAKE" = table ] && { echo "ERROR: table query failed" >&2; exit 3; }
+        echo "table|public.t|5"; echo "sequence|public.t_id_seq|5" ;;
+    "my db") echo "table|public.x|1" ;;
+esac
+"""
+
+
+def _fingerprint(directory: Path, command: str, fake: str = "") -> subprocess.CompletedProcess:
+    bin_dir = directory / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    psql = bin_dir / "psql"
+    psql.write_text(FAKE_PSQL)
+    psql.chmod(0o755)
+    script = "\n".join([
+        f'source "{MODULE}"',
+        # `docker exec -i <container> sh -s`: run the container's script here, against the fake psql.
+        'docker_cli() { shift 3; "$@"; }',
+        command,
+    ])
+    return _bash(script, env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE": fake})
+
+
+def test_the_fingerprint_lists_every_database_including_one_named_with_spaces(tmp_path):
+    result = _fingerprint(tmp_path, "postgres_cluster_fingerprint pg")
+    assert result.returncode == 0, result.stderr
+    assert sorted(result.stdout.splitlines()) == sorted([
+        "role|scanner|t|t|abc",
+        "db|postgres|present",
+        "db|scanner|present", "db|scanner|table|public.t|5", "db|scanner|sequence|public.t_id_seq|5",
+        "db|my db|present", "db|my db|table|public.x|1",
+    ])
+
+
+@pytest.mark.parametrize("fake", ["enumeration", "empty", "table"])
+def test_a_failed_verification_query_fails_the_fingerprint(tmp_path, fake):
+    # Before, an empty database list or a failed per-database query still exited 0, so a source and
+    # a copy that both lost the same lines compared equal.
+    assert _fingerprint(tmp_path, "postgres_cluster_fingerprint pg", fake).returncode != 0
+
+
+def test_the_saved_fingerprint_is_sorted_and_a_failure_is_not_masked_by_the_sort(tmp_path):
+    output = tmp_path / "fingerprint.txt"
+    result = _fingerprint(tmp_path, f'postgres_write_fingerprint pg "{output}"')
+    assert result.returncode == 0, result.stderr
+    lines = output.read_text().splitlines()
+    assert lines == sorted(lines) and "db|my db|present" in lines
+    assert not (tmp_path / "fingerprint.txt.unsorted").exists()
+
+    output.unlink()
+    failed = _fingerprint(tmp_path, f'postgres_write_fingerprint pg "{output}"', "table")
+    assert failed.returncode != 0
+    assert not output.exists()
