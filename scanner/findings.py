@@ -57,6 +57,37 @@ def template_path(path: str) -> str:
 def templated_finding_identity(finding: dict) -> str | None:
     """ID/payload-insensitive identity for an *endpoint* finding (docs §5).
 
+    See ``_templated_identity``; this is the current key, which names the check that fired.
+    """
+    return _templated_identity(finding, with_check=True)
+
+
+def pre_check_templated_finding_identity(finding: dict) -> str | None:
+    """The key a finding with a CWE carried before its check became part of its class.
+
+    Until then CWE alone was the class, so distinct checks sharing one CWE on one URL shared a
+    row: on one TLS origin, "chain is not trusted" and "expires within 30 days" (both CWE-295)
+    were stored as one row whose title flipped on every scan. Persistence uses this key to find
+    the row an existing installation holds and to carry its triage across. Returns None when the
+    key did not change (no CWE, or no declared check).
+    """
+    previous = _templated_identity(finding, with_check=False)
+    return previous if previous is not None and previous != templated_finding_identity(finding) else None
+
+
+def _declared_check(evidence: dict) -> str:
+    """The check that fired, when the finding names it: a template id plus the matcher that hit,
+    or the producer's ``check``."""
+    template_id = str(evidence.get("template_id") or "").strip()
+    matcher_name = str(evidence.get("matcher_name") or "").strip()
+    if template_id:
+        return template_id + (f"#{matcher_name}" if matcher_name else "")
+    return str(evidence.get("check") or "").strip()
+
+
+def _templated_identity(finding: dict, *, with_check: bool) -> str | None:
+    """ID/payload-insensitive identity for an *endpoint* finding (docs §5).
+
     Collapses the count-explosion — one templated BOLA route reported once per
     object id, one SQLi param reported once per payload variant — by keying on
     ``vuln_type | method | templated_path | sorted(param names)`` rather than the
@@ -64,8 +95,9 @@ def templated_finding_identity(finding: dict) -> str | None:
     endpoint URL (TLS / headers / DNS / config), which keep their existing identity.
 
     Distinct real vulns STAY distinct: a different path template, parameter,
-    method, or vuln class (CWE) yields a different key. Only same-endpoint,
-    same-param, same-class findings differing solely by id/payload collapse.
+    method, or vuln class (CWE plus the check that fired) yields a different key.
+    Only same-endpoint, same-param, same-check findings differing solely by
+    id/payload collapse.
     """
     evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
     raw_url = finding.get("url") or ""
@@ -98,21 +130,26 @@ def templated_finding_identity(finding: dict) -> str | None:
             params.add(v.strip())
 
     method = str(evidence.get("method") or finding.get("method") or "GET").upper()
-    # vuln class: CWE is the stable discriminator. Without one, the check that
-    # fired is the class: a template id plus the matcher that hit, or failing
-    # that the title. Falling back to the bare tool name keyed every CWE-less
-    # nuclei match on a route to one identity, so ten missing-header findings
-    # on "/" persisted as a single row whose title flipped on every scan.
-    template_id = str(evidence.get("template_id") or "").strip()
-    matcher_name = str(evidence.get("matcher_name") or "").strip()
-    check = template_id + (f"#{matcher_name}" if template_id and matcher_name else "")
-    vuln = (
-        str(finding.get("cwe") or "").strip()
-        or check
-        or str(finding.get("title") or "").strip().lower()
-        or str(finding.get("tool") or "").strip()
-        or "generic"
-    )
+    # vuln class: the CWE, plus the check that fired when the finding names one.
+    # A CWE alone is not a check: several checks share one (five TLS certificate
+    # checks are CWE-295), so keying on it merged them into one row per URL. The
+    # same check on another object id or payload still collapses. Without a CWE
+    # the check is the class, or failing that the title. Falling back to the bare
+    # tool name keyed every CWE-less nuclei match on a route to one identity, so
+    # ten missing-header findings on "/" persisted as a single row whose title
+    # flipped on every scan.
+    cwe = str(finding.get("cwe") or "").strip()
+    check = _declared_check(evidence)
+    if cwe:
+        vuln = f"{cwe}#{check}" if with_check and check else cwe
+    else:
+        legacy_check = check if str(evidence.get("template_id") or "").strip() else ""
+        vuln = (
+            legacy_check
+            or str(finding.get("title") or "").strip().lower()
+            or str(finding.get("tool") or "").strip()
+            or "generic"
+        )
     return f"{vuln}|{method}|{tpath}|{','.join(sorted(params))}"
 
 

@@ -61,10 +61,11 @@ def test_a_legacy_row_for_a_different_check_is_left_alone():
     assert all(item[0] != "execute" for item in conn.queries)
 
 
-def test_a_finding_with_a_cwe_never_looks_for_a_legacy_row():
+def test_a_finding_whose_key_never_changed_never_looks_for_a_legacy_row():
+    # A CWE finding that names no check kept its key through both identity changes.
     conn = _Conn({})
     row = asyncio.run(reconcile_legacy_finding_row(
-        conn, target_uuid=TARGET, fingerprint="t:x", finding={**_finding(), "cwe": "CWE-693"},
+        conn, target_uuid=TARGET, fingerprint="t:x", finding={**_finding(), "cwe": "CWE-693", "evidence": {}},
     ))
     assert row is None and conn.queries == []
     assert legacy_finding_fingerprint(None, "t:x") is None
