@@ -67,7 +67,8 @@ function evidenceSafe(id: string, value: unknown): boolean {
     ...(id === 'mail.dkim' ? ['selector', 'key_type', 'key_bits'] : [])];
   return keysOnly(evidence, allowed) && Object.entries(evidence).every(([key, v]) => {
     if (numeric.includes(key)) return Number.isInteger(v) && (v as number) >= 0 && (v as number) <=
-      (key === 'referenced_lookup_terms' ? 40960 : key === 'lookup_terms_in_record' ? 4096 : 128);
+      // A DMARC record may list any number of report URIs; one DNS reply (65535 bytes) bounds it.
+      (key === 'referenced_lookup_terms' ? 40960 : key === 'lookup_terms_in_record' ? 4096 : key === 'rua_count' || key === 'ruf_count' ? 65535 : 128);
     if (['names', 'sampled_names', 'untested_names', 'responding_names', 'unresponsive_names', 'parent_names', 'parent_sampled_names', 'parent_untested_names', 'delegation_names'].includes(key)) return Array.isArray(v) && v.length <= 16 && v.every(n => typeof n === 'string' && n.length <= 253 && /^[a-z0-9_.-]+$/.test(n));
     if (key === 'zone') return typeof v === 'string' && v.length <= 253 && /^[a-z0-9.-]+$/.test(v);
     if (key === 'soa_serials') return Array.isArray(v) && v.length <= 2 && v.every(x => typeof x === 'string' && /^[a-z0-9.-]{1,253} \d{1,10}$/.test(x));

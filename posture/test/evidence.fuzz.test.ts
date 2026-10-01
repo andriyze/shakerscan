@@ -71,11 +71,10 @@ test('fuzz: SPF include trees stay within their evaluation bounds and fetch each
 const dmarcTag = fc.oneof(
   fc.constantFrom('p=none', 'p=quarantine', 'p=reject', 'p=REJECT', 'p=bogus', 'sp=reject', 'sp=x', 'np=quarantine', 'psd=y', 'psd=n', 'psd=q', 't=y', 't=n',
     'adkim=s', 'aspf=r', 'adkim=x', 'pct=50', 'fo=1', 'P=none', '=x', 'p', ''),
-  // At most 128 report URIs: isObservation bounds rua_count and ruf_count at 128 while a record
-  // may list more. Whether the count or the bound should change is an open decision, so the
-  // generator stays within the bound rather than encoding either answer.
-  fc.integer({ min: 0, max: 128 }).map(n => `rua=${Array.from({ length: n }, () => 'mailto:a@e.x').join(',')}`),
-  fc.integer({ min: 0, max: 128 }).map(n => `ruf=${',mailto:f@e.x'.repeat(n)}`));
+  // Past 128 report URIs on purpose: the cache bound was once 128, so a record listing more
+  // could never be cached.
+  fc.integer({ min: 0, max: 400 }).map(n => `rua=${Array.from({ length: n }, () => 'mailto:a@e.x').join(',')}`),
+  fc.integer({ min: 0, max: 400 }).map(n => `ruf=${',mailto:f@e.x'.repeat(n)}`));
 const validTags = fc.uniqueArray(fc.constantFrom('sp=reject', 'sp=none', 'np=quarantine', 'psd=y', 'psd=n', 't=y', 't=n', 'adkim=s', 'aspf=r', 'pct=50', 'fo=1',
   'rua=mailto:a@e.x', 'ruf=mailto:f@e.x,mailto:g@e.x'), { selector: tag => tag.split('=')[0], maxLength: 4 });
 const dmarcRecord = fc.oneof(
