@@ -52,7 +52,7 @@ def test_migration_preserves_identity_and_has_one_inventory():
             device = await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('TV','device.example.test') RETURNING id")
             first = await conn.fetchval("INSERT INTO targets(url) VALUES('http://device.example.test:3000') RETURNING id")
             second = await conn.fetchval("INSERT INTO targets(url) VALUES('https://device.example.test:8443') RETURNING id")
-            scan = await conn.fetchval("INSERT INTO scans(target_url,device_target_id,run_kind) VALUES('device.example.test',$1,'device_posture') RETURNING id", device)
+            scan = await conn.fetchval("INSERT INTO scans(target_url,device_target_id,run_kind,status) VALUES('device.example.test',$1,'device_posture','completed') RETURNING id", device)
             await conn.execute("INSERT INTO device_interfaces(device_target_id,locator) VALUES($1,'192.0.2.10')", device)
             async with conn.transaction():
                 await migrate_target_assets(conn)

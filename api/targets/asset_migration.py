@@ -96,7 +96,7 @@ async def _install_host_key(conn: Any) -> None:
 
 async def _retarget_foreign_keys(conn: Any, old_table: str, new_table: str) -> None:
     """Preserve every FK's delete action and deferrability; no CASCADE schema drops."""
-    if old_table not in {"device_targets", "device_credential_profiles"} or new_table not in {"targets", "credential_profiles"}:
+    if old_table not in {"device_targets", "device_credential_profiles", "device_request_collections"} or new_table not in {"targets", "credential_profiles", "request_collections"}:
         raise ValueError("unsupported foreign-key migration")
     keys = await conn.fetch(
         """SELECT conrelid::regclass::text AS relation, conname,
