@@ -13394,6 +13394,9 @@ async def process_scan_job(job_data: dict):
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 options = _hydrate_scan_private_state_key(options)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    from devices.network_authorization import revalidate_network_authorization
+                    async with db_pool.acquire() as conn:
+                        await revalidate_network_authorization(conn,device_target_id,options)
                     options = await _hydrate_device_scan_credentials(options, scan_id)
                     options = await _hydrate_device_request_collections(options, scan_id)
                 if is_deterministic_dast(options):

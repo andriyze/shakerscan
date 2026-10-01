@@ -1459,7 +1459,11 @@ async def run_device_posture_scan(locator: str, options: dict[str, Any]) -> dict
         for port, fingerprint in (options.get("expected_ssh_host_keys") or {}).items()
         if str(port).isdigit() and 1 <= int(port) <= 65535 and str(fingerprint).startswith("SHA256:")
     }
-    profile = PROFILES[profile_name]
+    try:
+        from .device_scan_scope import with_udp_scope
+    except ImportError:
+        from device_scan_scope import with_udp_scope
+    profile = with_udp_scope(PROFILES[profile_name], options.get('device_udp_ports'))
     policy = options.get("device_policy") if isinstance(options.get("device_policy"), dict) else {}
     policy_name = str(policy.get("name") or "connected-device-default-v1")
     rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []

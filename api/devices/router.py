@@ -92,6 +92,8 @@ from .shared_credentials import (
     create_device_profile, rotate_device_profile, deactivate_device_profile, device_execution_capability,
 )
 from .shared_collections import save_device_collection, deactivate_device_collection, collection_view
+from .collection_environments import bind_environments
+from .network_authorization import network_authorization_snapshot
 
 router = APIRouter()
 
@@ -320,7 +322,16 @@ class DeviceScanRequest(BaseModel):
     )
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    udp_ports: list[int] | None = Field(default=None, max_length=1024)
+    request_collection_environment_ids: dict[str, str | None] = Field(default_factory=dict, max_length=8)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator('udp_ports', mode='before')
+    @classmethod
+    def validate_udp_scope(cls, value):
+        from scanner_tools.device_scan_scope import normalize_udp_ports
+        return normalize_udp_ports(value)
+
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
     allow_untrusted_tls_credentials: bool = Field(default=False, deprecated=True)
@@ -1218,9 +1229,12 @@ async def get_device(
                ORDER BY created_at DESC LIMIT 20""",
             device_uuid,
         )
+    async with _pool().acquire() as conn:
+        standing = await network_authorization_snapshot(conn, device_uuid)
     device_payload = _decode_device_row(row)
     return {
         "device": device_payload,
+        "authorization": standing,
         "reachability": device_payload.get("last_reachability"),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "locator_history": [_decode_device_row(item) for item in locator_history],
@@ -1435,6 +1449,10 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         request_collection_refs = await _validate_device_request_collection_refs(
             conn, device_uuid, request.request_collection_ids,
         )
+        request_collection_refs = await bind_environments(conn, request_collection_refs, request.request_collection_environment_ids)
+        standing = await network_authorization_snapshot(conn, device_uuid) if not request.confirm_authorized else None
+        if not request.confirm_authorized and not standing:
+            raise HTTPException(409, 'Standing asset authorization changed during submission; review it before retrying')
         if credential_refs and not safety_contract.credentials_allowed:
             raise HTTPException(
                 status_code=422,
@@ -1570,6 +1588,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_manufacturer": str(device["manufacturer"] or ""),
             "device_model": str(device["model"] or ""),
             "device_profile": request.profile,
+            "device_udp_ports": request.udp_ports,
+            "asset_authorization_receipt_id": standing['approval_receipt_id'] if standing else None,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
             "include_web_dast": request.include_web_dast,

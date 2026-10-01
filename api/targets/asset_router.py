@@ -116,3 +116,21 @@ async def enable_device_profile(target_id: str, request: DeviceProfileCreate):
     async with pool().acquire() as conn, conn.transaction():
         owner = await ensure_device_profile(conn,target_id,request)
     return {'asset_id':str(owner),'device_id':str(owner),'view':f'/devices/{owner}'}
+
+
+try:
+    from devices.router import DeviceScanRequest
+except ModuleNotFoundError:
+    from ..devices.router import DeviceScanRequest
+
+
+@router.post('/targets/{target_id}/network-scans')
+async def start_target_network_scan(target_id: str, request: DeviceScanRequest):
+    """Canonical entry point; same executor, queue, and ledger as the device view."""
+    try:
+        from devices.router import scan_device
+    except ModuleNotFoundError:
+        from ..devices.router import scan_device
+    async with pool().acquire() as conn, conn.transaction():
+        owner = await ensure_device_profile(conn,target_id,DeviceProfileCreate())
+    return await scan_device(str(owner),request)

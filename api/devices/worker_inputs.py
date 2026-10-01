@@ -10,6 +10,7 @@ try:
 except ModuleNotFoundError:
     from ..secret_store import decrypt_secret
 from .shared_credentials import resolve_device_credential
+from .collection_environments import hydrate_environment
 
 async def hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str, *, pool: Any, ssh_daily_cap: int, ssh_cooldown_seconds: int, utc_now: Any) -> dict[str, Any]:
     """Resolve device-bound credentials in worker memory without persisting secrets."""
@@ -136,6 +137,11 @@ async def hydrate_device_request_collections(options: dict[str, Any], scan_id: s
         expected = str(ref.get("document_sha256") or row.get("document_sha256") or "")
         if digest != expected or digest != str(row.get("document_sha256") or ""):
             raise ValueError("device request collection integrity check failed")
+        async with pool.acquire() as conn:
+            payload = await hydrate_environment(conn, ref, payload)
+        total_bytes += max(0, len(json.dumps(payload,ensure_ascii=False).encode()) - len(raw.encode()))
+        if total_bytes > 7 * 1024 * 1024:
+            raise ValueError('Device request collections and environments exceed the worker size limit')
         resolved.append({
             "collection_id": collection_id,
             "name": str(row.get("name") or ref.get("name") or "Imported requests"),

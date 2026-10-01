@@ -43,7 +43,7 @@ export function TargetAssetDetail({ id }: {id: string}) {
     setBusy(true);setError(null)
     try {
       if (!data.target.connected_device) await enableTargetNetworkView(data.target.id)
-      router.push(hunt ? `/hunt?target=${data.target.id}` : `/devices/${data.target.id}?action=scan`)
+      router.push(hunt ? `/devices/${data.target.id}/agent` : `/devices/${data.target.id}?action=scan`)
     } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not open network workflow')}
     finally {setBusy(false)}
   },[data,router])
