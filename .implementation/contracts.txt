@@ -1,0 +1,680 @@
+
+=== api/runtime/credential_store.py:255 _validate_kind_placement ===
+def _validate_kind_placement(*, auth_kind: str, target_kind: str, principal_slot: str) -> None:
+    if auth_kind in SSH_CREDENTIAL_KINDS:
+        if target_kind not in {"network", "device"}:
+            raise CredentialStoreError("SSH credentials require a network or device target")
+        if principal_slot != "ssh":
+            raise CredentialStoreError("SSH credentials require principal_slot=ssh")
+    elif principal_slot == "ssh":
+        raise CredentialStoreError("HTTP credentials cannot use principal_slot=ssh")
+
+=== api/runtime/credential_store.py:529 list_profiles ===
+    async def list_profiles(
+        self,
+        conn: CredentialDatabase,
+        *,
+        target_kind: str,
+        target_id: Any,
+        include_inactive: bool = False,
+    ) -> list[CredentialProfileMetadata]:
+        target_uuid = _target_id(target_id)
+        # The target's own profiles (a home binding may predate this table) and every profile
+        # shared with it through a grant that is not revoked. Own profiles sort first.
+        rows = await conn.fetch(
+            f"""SELECT p.*, b.allowed_capabilities, $2::text AS granted_target_id
+               FROM credential_profiles p
+               LEFT JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$2::text
+               WHERE {_KIND_COMPATIBLE_SQL.format(kind="$1")}
+                 AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.revoked_at IS NULL))
+                 AND ($4::boolean OR (p.is_active=true AND (b.id IS NULL OR b.is_active=true)))
+               ORDER BY (p.target_id=$3) DESC, p.is_active DESC, lower(p.name), p.id""",
+            _target_kind(target_kind),
+            str(target_uuid),
+            target_uuid,
+            bool(include_inactive),
+        )
+        return [CredentialProfileMetadata.from_row(item) for item in rows]
+
+=== api/runtime/credential_store.py:556 get_profile ===
+    async def get_profile(
+        self,
+        conn: CredentialDatabase,
+        *,
+        profile_id: Any,
+    ) -> CredentialProfileMetadata:
+        row = await conn.fetchrow(
+            """SELECT p.*, b.allowed_capabilities
+               FROM credential_profiles p
+               LEFT JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=p.target_id::text
+               WHERE p.id=$1""",
+            _profile_id(profile_id),
+        )
+        if not row:
+            raise CredentialStoreError("credential profile not found")
+        return CredentialProfileMetadata.from_row(row)
+
+=== api/runtime/request_collection_store.py:370 PostgresRequestCollectionStore ===
+class PostgresRequestCollectionStore:
+    async def ensure_schema(self, conn: Any) -> None:
+        await conn.execute(REQUEST_COLLECTION_RUNTIME_SCHEMA_SQL)
+
+=== api/runtime/models.py:16 target_kinds_share_asset ===
+def target_kinds_share_asset(left: str, right: str) -> bool:
+    """These kinds share one targets row. Callers must still compare the exact target UUID."""
+    return left == right or (left in WEB_ASSET_KINDS and right in WEB_ASSET_KINDS)
+
+=== api/devices/router.py:828 create_device ===
+async def create_device(request: DeviceTargetCreate):
+    if not _device_posture_enabled():
+        raise HTTPException(status_code=503, detail="Connected-device posture is disabled")
+    try:
+        locator = normalize_device_locator(request.primary_locator)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    policy_uuid = _device_uuid(request.policy_id, "policy") if request.policy_id else None
+    name = (request.name or locator).strip()
+    async with _pool().acquire() as conn:
+        async with conn.transaction():
+            if policy_uuid and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", policy_uuid):
+                raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO device_targets (
+                        name, primary_locator, device_class, manufacturer, model, firmware_version,
+                        stable_identity, identity_confidence, environment, policy_id, sensor_affinity,
+                        metadata_json, is_active
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
+                    """,
+                    name, locator, request.device_class.strip().lower(), request.manufacturer, request.model,
+                    request.firmware_version, request.stable_identity, request.identity_confidence,
+                    request.environment.strip().lower(), policy_uuid, request.sensor_affinity,
+                    json.dumps(request.metadata_json), request.is_active,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="An active connected device already uses this locator") from exc
+            await conn.execute(
+                """INSERT INTO device_interfaces (device_target_id, interface_type, locator_type, locator)
+                   VALUES ($1,'network',$2,$3) ON CONFLICT DO NOTHING""",
+                row["id"], _device_locator_type(locator), locator,
+            )
+            await conn.execute(
+                """INSERT INTO device_locator_history (
+                       device_target_id, previous_locator, locator, locator_type,
+                       change_reason, change_source
+                   ) VALUES ($1,NULL,$2,$3,'Initial registered locator','registration')""",
+                row["id"], locator, _device_locator_type(locator),
+            )
+    return {"device": _decode_device_row(row)}
+
+=== api/devices/router.py:873 list_device_credentials ===
+async def list_device_credentials(device_id: str, include_inactive: bool = False):
+    device_uuid = _device_uuid(device_id)
+    async with _pool().acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        rows = await conn.fetch(
+            """SELECT * FROM device_credential_profiles
+               WHERE device_target_id=$1 AND ($2::boolean OR is_active=true)
+               ORDER BY auth_kind, name""",
+            device_uuid,
+            include_inactive,
+        )
+    return {"profiles": [_public_device_credential_profile(row) for row in rows]}
+
+=== api/devices/router.py:889 create_device_credential ===
+async def create_device_credential(device_id: str, request: DeviceCredentialProfileCreate):
+    if not encryption_enabled():
+        raise HTTPException(status_code=503, detail="Credential encryption is not configured")
+    device_uuid = _device_uuid(device_id)
+    async with _pool().acquire() as conn, conn.transaction():
+        device = await conn.fetchrow("SELECT id, primary_locator FROM device_targets WHERE id=$1 AND is_active=true", device_uuid)
+        if not device:
+            raise HTTPException(status_code=404, detail="Active connected device not found")
+        approval_context = await _validate_approval_receipt_for_action(
+            conn, request.approval_receipt_id, target_url=str(device["primary_locator"]),
+            action_name="device.credential.create", risk_tier="active", created_by="device_credential_endpoint",
+        )
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO device_credential_profiles (
+                       device_target_id, name, auth_kind, username, secret_value,
+                       secret_preview, login_path, port, expires_at, metadata_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
+                device_uuid,
+                _normalize_target_credential_profile_name(request.name),
+                request.auth_kind,
+                str(request.username or "").strip() or None,
+                _device_credential_secret_value(request.secret, request.secondary_secret),
+                None,
+                request.login_path,
+                request.port,
+                request.expires_at,
+                json.dumps(_redact_agent_payload(request.metadata_json)),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(status_code=409, detail="Device credential profile name already exists") from exc
+        try:
+            await sync_legacy_device_credential(conn, row["id"])
+        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            raise _legacy_credential_migration_http_error(exc) from exc
+        operation = await _record_command_result(
+            conn, command="device.credential.create", status="completed", risk_tier="active",
+            approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+            scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+            operator_message="Created a connected-device credential profile",
+            result_json={"device_target_id": str(device_uuid), "credential_profile_id": str(row["id"]), "auth_kind": request.auth_kind},
+            created_by="device_credential_endpoint",
+        )
+    return {"profile": _public_device_credential_profile(row), "operation_id": str(operation["id"])}
+
+=== api/devices/router.py:1073 list_device_request_collections ===
+async def list_device_request_collections(device_id: str, include_inactive: bool = False):
+    device_uuid = _device_uuid(device_id)
+    async with _pool().acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+            raise HTTPException(status_code=404, detail="Connected device not found")
+        rows = await conn.fetch(
+            """SELECT * FROM device_request_collections
+               WHERE device_target_id=$1 AND ($2 OR is_active=true)
+               ORDER BY updated_at DESC, name""",
+            device_uuid, include_inactive,
+        )
+    # Metadata-only listing: a collection may now carry thousands of imported
+    # requests, so the full redacted inventory is only served on the detail route.
+    return {
+        "collections": [_public_device_request_collection(row, include_requests=False) for row in rows],
+        "count": len(rows),
+    }
+
+=== api/devices/router.py:1093 get_device_request_collection ===
+async def get_device_request_collection(device_id: str, collection_id: str):
+    device_uuid = _device_uuid(device_id)
+    collection_uuid = _device_uuid(collection_id, "request collection")
+    async with _pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM device_request_collections WHERE id=$1 AND device_target_id=$2",
+            collection_uuid, device_uuid,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Device request collection not found")
+    payload = _public_device_request_collection(row, include_requests=False)
+    summary = _json_object(row.get("summary_json"))
+    requests = summary.get("requests")
+    if isinstance(requests, list):
+        # Bounded preview on detail: the full inventory is redacted but can be
+        # thousands of rows; callers paginate via the summary count.
+        payload["summary"]["requests_preview"] = requests[:200]
+        payload["summary"]["requests_total"] = len(requests)
+    return {"collection": payload}
+
+=== api/devices/router.py:1115 create_device_request_collection ===
+async def create_device_request_collection(device_id: str, request: DeviceRequestCollectionCreate):
+    device_uuid = _device_uuid(device_id)
+    try:
+        payload, summary = validate_device_request_collection(
+            request.document if request.document is not None else request.collection,
+            request.environment,
+            requested_name=request.name,
+            import_format=request.format,
+            base_url=request.base_url,
+        )
+    except RequestImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    encrypted_payload = encrypt_secret(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+    if not str(encrypted_payload or "").startswith("enc:fernet:"):
+        raise HTTPException(status_code=503, detail="Encrypted storage is required for device request collections")
+    try:
+        async with _pool().acquire() as conn:
+            if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true", device_uuid):
+                raise HTTPException(status_code=404, detail="Active connected device not found")
+            row = await conn.fetchrow(
+                """INSERT INTO device_request_collections (
+                       device_target_id, name, format, document_sha256, encrypted_payload, summary_json
+                   ) VALUES ($1,$2,$3,$4,$5,$6)
+                   ON CONFLICT (device_target_id, name) DO UPDATE SET
+                       format=EXCLUDED.format,
+                       document_sha256=EXCLUDED.document_sha256,
+                       encrypted_payload=EXCLUDED.encrypted_payload,
+                       summary_json=EXCLUDED.summary_json,
+                       is_active=true,
+                       updated_at=NOW()
+                   WHERE device_request_collections.is_active=false
+                   RETURNING *""",
+                device_uuid, summary["name"], summary["format"], summary["document_sha256"],
+                encrypted_payload, json.dumps(summary),
+            )
+    except asyncpg.UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail="This device already has a request collection with that name") from exc
+    if not row:
+        raise HTTPException(status_code=409, detail="This device already has an active request collection with that name")
+    return {"collection": _public_device_request_collection(row)}
+
+=== api/devices/router.py:1290 update_device ===
+async def update_device(device_id: str, request: DeviceTargetUpdate):
+    device_uuid = _device_uuid(device_id)
+    payload = request.model_dump(exclude_unset=True)
+    if "primary_locator" in payload:
+        raise HTTPException(
+            status_code=422,
+            detail="Change a device address through POST /devices/{device_id}/locator with same-device confirmation",
+        )
+    if "policy_id" in payload:
+        payload["policy_id"] = _device_uuid(payload["policy_id"], "policy") if payload["policy_id"] else None
+    if "metadata_json" in payload:
+        payload["metadata_json"] = json.dumps(payload["metadata_json"] or {})
+    if "name" in payload:
+        normalized_name = str(payload.get("name") or "").strip()
+        if not normalized_name:
+            raise HTTPException(status_code=422, detail="Device name cannot be empty")
+        payload["name"] = normalized_name
+    for key in ("device_class", "environment"):
+        if key in payload and payload[key] is not None:
+            payload[key] = str(payload[key]).strip().lower()
+    allowed = {
+        "name", "primary_locator", "device_class", "manufacturer", "model", "firmware_version",
+        "stable_identity", "identity_confidence", "environment", "policy_id", "sensor_affinity",
+        "metadata_json", "is_active",
+    }
+    payload = {key: value for key, value in payload.items() if key in allowed}
+    async with _pool().acquire() as conn:
+        async with conn.transaction():
+            if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1", device_uuid):
+                raise HTTPException(status_code=404, detail="Connected device not found")
+            if payload.get("policy_id") and not await conn.fetchval("SELECT 1 FROM device_policies WHERE id=$1 AND is_active=true", payload["policy_id"]):
+                raise HTTPException(status_code=422, detail="policy_id must reference an active device policy")
+            try:
+                if payload:
+                    values = list(payload.values()) + [device_uuid]
+                    assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+                    await conn.execute(f"UPDATE device_targets SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc
+            row = await conn.fetchrow("SELECT * FROM device_targets WHERE id=$1", device_uuid)
+    return {"device": _decode_device_row(row)}
+
+=== api/devices/router.py:1334 change_device_locator ===
+async def change_device_locator(device_id: str, request: DeviceLocatorChangeRequest):
+    """Move one durable device identity to a new current IP address or hostname."""
+    if not request.confirm_same_device:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm that the new address belongs to this same physical device",
+        )
+    try:
+        locator = normalize_device_locator(request.locator)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    device_uuid = _device_uuid(device_id)
+    async with _pool().acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT primary_locator FROM device_targets WHERE id=$1 FOR UPDATE",
+                device_uuid,
+            )
+            if not current:
+                raise HTTPException(status_code=404, detail="Connected device not found")
+            approval_context = await _validate_approval_receipt_for_action(
+                conn, request.approval_receipt_id, target_url=str(current["primary_locator"]),
+                action_name="device.locator.change", risk_tier="active", created_by="device_locator_endpoint",
+            )
+            try:
+                row, history = await _change_device_primary_locator(
+                    conn,
+                    device_uuid,
+                    locator,
+                    reason=request.reason,
+                    source="operator",
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(status_code=409, detail="An active connected device already uses this locator") from exc
+            operation = await _record_command_result(
+                conn, command="device.locator.change", status="completed", risk_tier="active",
+                approval_receipt_id=(approval_context or {}).get("approval_receipt_id"),
+                scope_receipt_id=(approval_context or {}).get("scope_receipt_id"),
+                operator_message="Updated a connected-device address",
+                result_json={"device_target_id": str(device_uuid), "change_id": str(history["id"]) if history else None},
+                created_by="device_locator_endpoint",
+            )
+    return {
+        "status": "unchanged" if history is None else "changed",
+        "device": _decode_device_row(row),
+        "change": _decode_device_row(history) if history else None,
+        "operation_id": str(operation["id"]),
+    }
+
+=== DEVICE FUNCTION LOCATIONS ===
+configure_devices_router 97-103
+_pool 106-110
+_dep 113-117
+get_redis 129-130
+current_scanner_version 133-134
+expected_build_fingerprint 137-138
+worker_build_current 141-142
+sync_legacy_device_credential 145-146
+enqueue_job 149-150
+_legacy_credential_migration_http_error 153-154
+_normalize_target_credential_profile_name 157-158
+_redact_agent_payload 161-162
+_validate_approval_receipt_for_action 165-166
+_record_command_result 169-170
+_mark_scan_enqueue_failed 173-174
+_hunt_device_queue_metadata 350-367
+_device_posture_enabled 370-371
+_device_uuid 374-378
+_decode_device_row 381-388
+_device_locator_type 391-396
+_change_device_primary_locator 399-466
+_public_device_credential_profile 469-479
+_device_credential_secret_value 482-486
+_public_device_request_collection 489-498
+_validate_device_request_collection_refs 501-534
+_validate_device_credential_refs 537-568
+_device_has_standing_authorization 571-587
+_device_worker_readiness 590-664
+get_device_readiness 668-687
+get_device_capabilities 691-730
+list_device_policies 734-741
+create_device_policy 745-759
+update_device_policy 763-788
+list_devices 792-824
+create_device 828-869
+list_device_credentials 873-885
+create_device_credential 889-932
+rotate_device_credential 936-987
+deactivate_device_credential 991-1029
+acknowledge_device_credential_lockout 1033-1069
+list_device_request_collections 1073-1089
+get_device_request_collection 1093-1111
+create_device_request_collection 1115-1154
+update_device_request_collection 1158-1201
+deactivate_device_request_collection 1205-1216
+get_device 1220-1286
+update_device 1290-1330
+change_device_locator 1334-1381
+deactivate_device 1385-1391
+scan_device 1395-1738
+verify_device_service 1742-1937
+_build_device_agent_context_pack 1940-2034
+_device_agent_run_public 2037-2113
+_sanitize_device_agent_value 2116-2134
+get_device_agent_session 2140-2143
+cancel_device_agent_session 2151-2161
+list_device_agent_runs 2165-2213
+_confirm_device_queue_handoff 2216-2246
+_validate_device_policy_rules 2268-2317
+_device_scan_snapshot 2320-2359
+_diff_device_scan_snapshots 2362-2386
+_device_agent_action_public 2389-2403
+_device_agent_run_with_history 2406-2424
+_device_agent_run_or_404 2427-2434
+_execute_device_capability_operation 2437-2858
+_device_queue_handoff_readback_confirmed 2865-2888
+_device_agent_scan_ids 2891-2911
+_device_agent_add_evidence 2914-2920
+_device_confirmed_web_origins 2923-2974
+_device_operator_named_web_origin 2982-3014
+_bounded_device_scan_result 3017-3092
+_device_agent_credential_reference 3095-3111
+_device_verify_candidate_tool 3114-3229
+_scan_queue_handoff_confirmed 3236-3241
+_redact_hunt_path_query 3244-3265
+_redact_device_http_body_preview 3268-3281
+_verify_device_firmware_candidate 3282-3476
+_verify_device_control_authorization_candidate 3479-3917
+_device_control_authorization_blocked 3918-3962
+list_device_scans 3988-4013
+
+=== DEVICE LEGACY STORE REFERENCES ===
+api/credential_api.py:518: FROM device_credential_profiles WHERE id=$1""",
+api/credential_api.py:561: """UPDATE device_credential_profiles
+api/device_agent.py:811: refs = [ref for ref in state.get("device_request_collections") or [] if isinstance(ref, dict)]
+api/hunt/device_policy.py:171: "device_credential_profiles": [dict(item) for item in credential_refs],
+api/hunt/device_policy.py:172: "device_request_collections": [dict(item) for item in collection_refs],
+api/runtime/credential_migration.py:102: "created_by": "migration:device_credential_profiles",
+api/runtime/credential_migration.py:103: "legacy_source": "device_credential_profiles",
+api/runtime/credential_migration.py:581: "SELECT * FROM device_credential_profiles WHERE id=$1",
+api/runtime/credential_migration.py:628: created_by="migration:device_credential_profiles",
+api/runtime/credential_migration.py:663: created_by="migration:device_credential_profiles",
+api/runtime/credential_migration.py:703: rows = await conn.fetch("SELECT id FROM device_credential_profiles ORDER BY created_at, id")
+api/worker.py:2037: raw_refs = hydrated.get("device_credential_profiles")
+api/worker.py:2056: JOIN device_credential_profiles cp ON cp.device_target_id=s.device_target_id
+api/worker.py:2129: async def _hydrate_device_request_collections(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
+api/worker.py:2132: refs = [dict(item) for item in hydrated.get("device_request_collections") or [] if isinstance(item, dict)][:8]
+api/worker.py:2148: JOIN device_request_collections c ON c.device_target_id=s.device_target_id
+api/worker.py:2182: hydrated["_resolved_device_request_collections"] = resolved
+api/worker.py:2224: SELECT 1 FROM device_credential_profiles
+api/worker.py:8345: dict(item) for item in parent_options.get("_resolved_device_request_collections", [])
+api/worker.py:13532: options = await _hydrate_device_request_collections(options, scan_id)
+
+=== api/retest_contract.py:1110-1145 ===
+async def _run_schema_migrations_once(pool) -> None:
+    """Run all retest-related schema migrations with advisory lock to avoid races.
+
+    Called from both API and worker startup. Uses pg_advisory_lock so only one
+    process actually executes the DDL statements.
+    """
+    async with pool.acquire() as conn:
+        await assert_base_schema(conn)
+        # Advisory lock key: arbitrary 64-bit int unique to this migration set
+        await conn.execute("SELECT pg_advisory_lock(8675309)")
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            # Scan and Hunt capability budgets share one durable reservation store. Keep its
+            # schema under the same startup advisory lock as the rest of the authoritative
+            # control-plane schema so rolling API and worker starts cannot observe a half-created
+            # ledger.
+            await PostgresBudgetReservationStore().ensure_schema(conn)
+
+            # The fixed Scan graph records content-free stage outcomes after each
+            # stage so worker loss does not erase trustworthy partial orchestration
+            # state. Capability observations remain in their evidence/receipt stores.
+            await PostgresScanStageCheckpointStore().ensure_schema(conn)
+
+            # Canonical Scan admission persists the complete immutable action
+            # allocation before queue handoff. Install its scheduler index under
+            # the same startup lock as the shared reservation ledger.
+            await PostgresScanActionStore().ensure_schema(conn)
+
+            # Endpoint, candidate, saved-request, and template worklists are
+            # durable content-addressed inputs to the same action scheduler.
+
+=== api/retest_contract.py:4930-5024 ===
+                    observed_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                ALTER TABLE model_intake_evidence_manifests
+                ADD COLUMN IF NOT EXISTS deployment_bundle_json JSONB
+            """)
+            await conn.execute("""
+                UPDATE model_intake_submissions
+                SET state='blocked',updated_at=NOW()
+                WHERE state NOT IN (
+                    'submitted','scanning','evidence_ready','evidence_frozen','awaiting_approval',
+                    'policy_decided','admitted','promoted','blocked','cancelled'
+                )
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'model_intake_submission_state_check'
+                          AND conrelid = 'model_intake_submissions'::regclass
+                    ) THEN
+                        ALTER TABLE model_intake_submissions
+                        ADD CONSTRAINT model_intake_submission_state_check CHECK (state IN (
+                            'submitted','scanning','evidence_ready','evidence_frozen','awaiting_approval',
+                            'policy_decided','admitted','promoted','blocked','cancelled'
+                        ));
+                    END IF;
+                END
+                $$
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'model_intake_admissions_submission_id_fkey'
+                          AND conrelid = 'model_intake_admissions'::regclass
+                    ) THEN
+                        ALTER TABLE model_intake_admissions
+                        ADD CONSTRAINT model_intake_admissions_submission_id_fkey
+                        FOREIGN KEY (submission_id) REFERENCES model_intake_submissions(id) ON DELETE SET NULL;
+                    END IF;
+                END
+                $$
+            """)
+            # Older fresh-install schemas created deployment bindings before
+            # admissions existed and therefore omitted this FK. Preserve the
+            # binding row, clear any orphan reference, and converge both fresh
+            # and upgraded databases on the same ON DELETE SET NULL contract.
+            await conn.execute("""
+                UPDATE model_intake_deployment_bindings AS binding
+                SET admission_id = NULL
+                WHERE admission_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM model_intake_admissions AS admission
+                      WHERE admission.id = binding.admission_id
+                  )
+            """)
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'model_intake_deployment_bindings_admission_id_fkey'
+                          AND conrelid = 'model_intake_deployment_bindings'::regclass
+                    ) THEN
+                        ALTER TABLE model_intake_deployment_bindings
+                        ADD CONSTRAINT model_intake_deployment_bindings_admission_id_fkey
+                        FOREIGN KEY (admission_id) REFERENCES model_intake_admissions(id) ON DELETE SET NULL;
+                    END IF;
+                END
+                $$
+            """)
+
+            # Move legacy Web credential rows into the shared immutable profile store.
+            # The compatibility endpoints keep both representations synchronized until
+            # the old tables and callers are deleted later in the V2 migration.
+            async with conn.transaction():
+                await migrate_legacy_web_credentials(conn)
+                await migrate_scan_execute_capabilities(conn)
+                await migrate_legacy_device_credentials(conn)
+                await migrate_legacy_ai_credentials(conn)
+
+            # Canonical de-dupe prevention must be present before startup completes;
+            # current ON CONFLICT insert paths rely on this unique index. Keep the
+            # trigger rewrite, every child-row merge, and index replacement atomic so
+            # a failed collision repair cannot leave a half-migrated database.
+            async with conn.transaction():
+                await _ensure_target_canonical_key_invariant(conn)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(8675309)")
+
+
+=== api/api.py:5410-5500 ===
+        DevicePolicyCreate,
+        DevicePolicyUpdate,
+        DeviceScanRequest,
+        DeviceTargetCreate,
+        _HUNT_DEVICE_QUEUE_CORRELATION,
+        _QUEUE_HANDOFF_CONFIRMATION_KEY,
+        _build_device_agent_context_pack,
+        list_device_scans,
+        _confirm_device_queue_handoff,
+        _device_agent_credential_reference,
+        _device_confirmed_web_origins,
+        _device_verify_candidate_tool,
+        _redact_device_http_body_preview,
+        _redact_hunt_path_query,
+        _verify_device_control_authorization_candidate,
+        _verify_device_firmware_candidate,
+        _scan_queue_handoff_confirmed,
+        _target_credential_profile_status,
+        _validate_device_policy_rules,
+        _decode_device_row,
+        _device_agent_run_public,
+        _device_uuid,
+        _device_worker_readiness,
+        _hunt_device_queue_metadata,
+        _public_device_credential_profile,
+        _public_device_request_collection,
+        _sanitize_device_agent_value,
+        configure_devices_router,
+        router as devices_router,
+        scan_device,
+    )
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.devices.router import (
+        DEVICE_QUEUE_NAME,
+        _change_device_primary_locator,
+        DeviceAgentShellConfirmRequest,
+        DevicePolicyCreate,
+        DevicePolicyUpdate,
+        DeviceScanRequest,
+        DeviceTargetCreate,
+        _HUNT_DEVICE_QUEUE_CORRELATION,
+        _QUEUE_HANDOFF_CONFIRMATION_KEY,
+        _build_device_agent_context_pack,
+        list_device_scans,
+        _confirm_device_queue_handoff,
+        _device_agent_credential_reference,
+        _device_confirmed_web_origins,
+        _device_verify_candidate_tool,
+        _redact_device_http_body_preview,
+        _redact_hunt_path_query,
+        _verify_device_control_authorization_candidate,
+        _verify_device_firmware_candidate,
+        _scan_queue_handoff_confirmed,
+        _target_credential_profile_status,
+        _validate_device_policy_rules,
+        _decode_device_row,
+        _device_agent_run_public,
+        _device_uuid,
+        _device_worker_readiness,
+        _hunt_device_queue_metadata,
+        _public_device_credential_profile,
+        _public_device_request_collection,
+        _sanitize_device_agent_value,
+        configure_devices_router,
+        router as devices_router,
+        scan_device,
+    )
+configure_devices_router(
+    lambda: db_pool,
+    # All resolved lazily: hubs defined later in this module, and late
+    # resolution keeps existing test patches of these names effective.
+    get_redis=lambda *a, **k: get_redis(*a, **k),
+    enqueue_job=lambda *a, **k: enqueue_job(*a, **k),
+    current_scanner_version=lambda *a, **k: current_scanner_version(*a, **k),
+    expected_build_fingerprint=lambda *a, **k: expected_build_fingerprint(*a, **k),
+    worker_build_current=lambda *a, **k: worker_build_current(*a, **k),
+    sync_legacy_device_credential=lambda *a, **k: sync_legacy_device_credential(*a, **k),
+    legacy_credential_migration_http_error=lambda *a, **k: _legacy_credential_migration_http_error(*a, **k),
+    normalize_credential_profile_name=lambda *a, **k: _normalize_target_credential_profile_name(*a, **k),
+    redact_agent_payload=lambda *a, **k: _redact_agent_payload(*a, **k),
+    validate_approval_receipt=lambda *a, **k: _validate_approval_receipt_for_action(*a, **k),
+    record_command_result=lambda *a, **k: _record_command_result(*a, **k),
+    mark_scan_enqueue_failed=lambda *a, **k: _mark_scan_enqueue_failed(*a, **k),
+)
+app.include_router(devices_router)
+try:
+    from scan_list_filters import scan_list_filters
+except ModuleNotFoundError:  # package import in host-side tests
+    from api.scan_list_filters import scan_list_filters
+try:
+    from scan_finding_proof import SCAN_DETAIL_FINDINGS_SQL, project_scan_finding_proof
