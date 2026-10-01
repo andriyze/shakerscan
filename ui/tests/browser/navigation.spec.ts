@@ -59,7 +59,13 @@ test('production shell sends browser security headers', async ({ page }) => {
 
 test('README badge links have accessible image names', async ({ page }) => {
   await page.goto('/docs', { waitUntil: 'domcontentloaded' })
+  // The badge images are external (shields.io, GitHub, scorecard.dev). A link whose image has not
+  // loaded yet has no box, so asserting visibility made this test wait on third-party latency (the
+  // Scorecard badge redirect alone can take over 10 seconds). The accessible name is the contract:
+  // each link exists once and its image carries the alt text that names it.
   for (const name of ['License: AGPL-3.0-only', 'Latest release', 'Python suite', 'CodeQL', 'OpenSSF Scorecard']) {
-    await expect(page.getByRole('link', { name })).toBeVisible()
+    const link = page.getByRole('link', { name })
+    await expect(link).toHaveCount(1)
+    await expect(link.locator('img')).toHaveAttribute('alt', name)
   }
 })
