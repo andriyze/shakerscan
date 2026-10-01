@@ -46,7 +46,10 @@ from tests.test_hunt_authz_verification_limit import admission, Lifecycle, HUNT,
 from tests.test_hunt_replay_worker_lifecycle import Connection as ReplayConnection, noop
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = '9421'
+# The leak checks below look for the PIN in results that also carry random hex digests, UUIDs and
+# Fernet (base64url) tokens. A bare four-digit PIN occurs in those by chance (a digest containing
+# "b942197d" failed CI); "~" is in none of those alphabets, so a match here is always a real leak.
+PIN = '9421~pin'
 CHALLENGE = 'fixture-challenge-7283519'
 TOKEN = 'fixture-paired-credential-a61e79a0'
 PROFILE_ID = uuid.UUID(int=91)
