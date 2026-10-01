@@ -1,7 +1,7 @@
 'use client'
 import { featureEnabled, workspaceScanCeiling } from '@/lib/workspaceCapabilities'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { placementPreviewLabel } from '@/lib/labels'
 import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
@@ -22,6 +22,7 @@ import {
   type Target,
 } from '@/lib/api'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
+import { preferredCredentialId } from '@/lib/credentialDefaults'
 import { Button, Card, Field, useToast } from '@/components/ui'
 import {
   RequestCollectionPicker,
@@ -76,6 +77,9 @@ export default function NewScanPage() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [approvalReceipt, setApprovalReceipt] = useState('')
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>([])
+  // The target the loaded profiles belong to, so defaults never come from the previous target's list.
+  const [credentialProfilesTarget, setCredentialProfilesTarget] = useState<string | null>(null)
+  const credentialDefaultsTarget = useRef<string | null>(null)
   const [primaryCredentialId, setPrimaryCredentialId] = useState('')
   const [secondaryCredentialId, setSecondaryCredentialId] = useState('')
   const [requestCollectionIds, setRequestCollectionIds] = useState<string[]>([])
@@ -282,6 +286,7 @@ export default function NewScanPage() {
     setPrimaryCredentialId('')
     setSecondaryCredentialId('')
     setCredentialProfiles([])
+    setCredentialProfilesTarget(null)
     setCredentialError(null)
     setCredentialsLoading(false)
     if (batchMode || !selectedRegisteredTarget) return () => { cancelled = true }
@@ -293,6 +298,7 @@ export default function NewScanPage() {
       .then(({ profiles }) => {
         if (!cancelled) {
           setCredentialProfiles(profiles)
+          setCredentialProfilesTarget(selectedRegisteredTarget.id)
         }
       })
       .catch((cause) => {
@@ -303,6 +309,23 @@ export default function NewScanPage() {
       .finally(() => { if (!cancelled) setCredentialsLoading(false) })
     return () => { cancelled = true }
   }, [batchMode, selectedRegisteredTarget?.id, targetKind])
+
+  // A new Scan starts with the target's credentials (its own before shared ones) in each lane
+  // they fit; the pickers show the choice and Anonymous / No comparator clears it.
+  useEffect(() => {
+    const targetId = selectedRegisteredTarget?.id
+    if (!targetId || !scanContract || credentialProfilesTarget !== targetId) return
+    if (credentialDefaultsTarget.current === targetId) return
+    credentialDefaultsTarget.current = targetId
+    const primary = preferredCredentialId(credentialProfiles, (profile) => credentialCompatibility(profile, 'primary').compatible)
+    const secondary = preferredCredentialId(
+      credentialProfiles, (profile) => credentialCompatibility(profile, 'secondary').compatible, [primary],
+    )
+    setPrimaryCredentialId(primary)
+    setSecondaryCredentialId(secondary)
+    // credentialCompatibility reads the contract and families present when the list loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [credentialProfiles, credentialProfilesTarget, scanContract, selectedRegisteredTarget?.id])
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
@@ -710,7 +733,7 @@ export default function NewScanPage() {
                         const compatibility = credentialCompatibility(profile, 'primary')
                         return (
                           <option key={profile.id} value={profile.id} disabled={!compatibility.compatible}>
-                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
+                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
                           </option>
                         )
                       })}
@@ -724,7 +747,7 @@ export default function NewScanPage() {
                         const compatibility = credentialCompatibility(profile, 'secondary')
                         return (
                           <option key={profile.id} value={profile.id} disabled={!compatibility.compatible}>
-                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
+                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
                           </option>
                         )
                       })}
@@ -733,6 +756,9 @@ export default function NewScanPage() {
                 </div>
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
+              {(primaryCredentialId || secondaryCredentialId) && (
+                <p className="text-xs text-gray-400" data-testid="credential-defaults">This target&apos;s credentials are selected. Choose Anonymous to scan without them.</p>
+              )}
               <p className="text-xs text-gray-500">Only opaque IDs enter the Scan request and queue. The worker revalidates target authorization and decrypts the selected version immediately before execution. <Link href="/credentials" className="text-blue-300 hover:text-blue-200">Manage credentials</Link></p>
               <RequestCollectionPicker
                 targetId={batchMode ? undefined : selectedRegisteredTarget?.id}
