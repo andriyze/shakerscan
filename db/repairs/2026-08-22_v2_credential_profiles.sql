@@ -2,7 +2,6 @@
 -- Runtime startup installs the same idempotent schema under the global migration lock.
 
 BEGIN;
-
 CREATE TABLE IF NOT EXISTS credential_profiles (
     id UUID PRIMARY KEY,
     target_kind TEXT NOT NULL CHECK (target_kind IN ('web','api','network','device')),
@@ -99,4 +98,11 @@ INSERT INTO app_schema_migrations(name)
 VALUES ('v2_credential_query_parameter_v1')
 ON CONFLICT (name) DO NOTHING;
 
+-- Target grants: a profile shared with another target is a 'target' binding for that target.
+-- A revoked grant keeps its row (audit) and stays revoked when the profile is reactivated.
+ALTER TABLE credential_profile_bindings ADD COLUMN IF NOT EXISTS granted_by TEXT;
+ALTER TABLE credential_profile_bindings ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+INSERT INTO app_schema_migrations(name)
+VALUES ('v2_credential_profile_grants_v1')
+ON CONFLICT (name) DO NOTHING;
 COMMIT;

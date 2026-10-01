@@ -631,7 +631,7 @@ def admit_scan_credential_profiles(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= current):
             raise ScanCredentialError("Scan credential profile is inactive or expired")
-        if profile.target_id != normalized_target_id or not target_kinds_share_asset(profile.target_kind, normalized_kind):
+        if profile.granted_target_id != normalized_target_id or not target_kinds_share_asset(profile.target_kind, normalized_kind):
             raise ScanCredentialError("Scan credential profile target binding does not match")
         if profile.auth_kind not in HTTP_CREDENTIAL_KINDS:
             raise ScanCredentialError("Scan credentials must use an HTTP authentication kind")

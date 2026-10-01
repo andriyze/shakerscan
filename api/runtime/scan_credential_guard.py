@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .credential_resolver import validate_worker_credential_authority
 from .credential_store import PostgresCredentialProfileStore
+from .models import target_kinds_share_asset
 try:
     from authenticated_assurance.snapshots import bound_snapshot, snapshot_authority_current
     from authenticated_assurance.store import AssuranceStore
@@ -46,9 +47,11 @@ def build_scan_credential_check(pool, *, options: Mapping[str, Any], target, sca
                             return "authentication_uncertain"
                     profile = await store.get_profile(conn, profile_id=ref.get("profile_id"))
                     record_version = ref.get("credential_record_version")
+                    granted = await store.has_active_grant(conn, profile_id=ref.get("profile_id"),
+                        target_kind=target.target_kind, target_id=target.target_id)
                     if (not profile.is_active or
                             (profile.expires_at is not None and profile.expires_at <= datetime.now(timezone.utc)) or
-                            profile.target_id != target.target_id or profile.target_kind != target.target_kind or
+                            not granted or not target_kinds_share_asset(profile.target_kind, target.target_kind) or
                             type(ref.get("profile_version")) is not int or profile.current_version != ref["profile_version"] or
                             (record_version is not None and (type(record_version) is not int or profile.record_version != record_version)) or
                             profile.auth_kind != ref.get("auth_kind") or profile.principal_slot != ref.get("principal_slot") or

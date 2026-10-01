@@ -82,7 +82,7 @@ class MemoryCredentialConn:
             return "INSERT 0 1"
         if normalized.startswith("UPDATE credential_profile_bindings"):
             if "allowed_capabilities=COALESCE" in query:
-                capabilities, active, changed_at, _profile_id, _binding_id = args
+                capabilities, active, changed_at, _profile_id = args
                 if capabilities is not None:
                     self.binding["allowed_capabilities"] = json.loads(capabilities)
                 self.binding["is_active"] = active
@@ -191,10 +191,11 @@ class MemoryCredentialConn:
         if normalized.startswith("SELECT p.*, v.encrypted_secret"):
             if not self.profile or not self.binding or not self.binding["is_active"]:
                 return None
+            # The consuming target's own binding row (home or grant) must match.
             if (
                 self.profile["id"] != args[0]
                 or self.profile["target_kind"] != args[1]
-                or self.profile["target_id"] != args[2]
+                or self.binding["binding_id"] != args[2]
                 or not self.profile["is_active"]
             ):
                 return None
@@ -204,6 +205,7 @@ class MemoryCredentialConn:
                 "encrypted_secret": version["encrypted_secret"],
                 "encrypted_metadata": version["encrypted_metadata"],
                 "allowed_capabilities": self.binding["allowed_capabilities"],
+                "granted_target_id": args[2],
             }
         if normalized.startswith("UPDATE credential_profiles") and "is_active=false" in query:
             changed_at, profile_id, target_kind, target_id = args
@@ -222,12 +224,12 @@ class MemoryCredentialConn:
     async def fetch(self, query, *args):
         if not self.profile:
             return []
-        target_kind, target_id, include_inactive = args
+        target_kind, target_text, target_id, include_inactive = args
         if self.profile["target_kind"] != target_kind or self.profile["target_id"] != target_id:
             return []
         if not include_inactive and not self.profile["is_active"]:
             return []
-        return [dict(self.profile)]
+        return [{**self.profile, "granted_target_id": target_text}]
 
 
 async def _created(*, allowed_capabilities=()):

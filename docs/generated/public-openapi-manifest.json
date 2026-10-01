@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 186,
+  "component_schema_count": 187,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -56,6 +56,7 @@
     "BulkFindingUpdateRequest": "ab9b1e432ad383a93762b41a99a3c797962628406130be954a356b0b95edfa1d",
     "CampaignActionLinkRequest": "38c2784e4d2458c9257889d4316b5bab7dec9dbdabf05bd1e22bf85cee2304ed",
     "CampaignRequest": "d93684ab216e4304f708123ee41f543627384361a55b28a9b5e3c5f33a876591",
+    "CredentialGrantCreate": "3e5a611bf478571c2b71e44f2e1221e4d086d03751d11c57469a90d436ecd2e2",
     "CredentialProfileCreate": "e126e6b782f64c10eeb4544e2bc0f6719234992b16c69520d41847fdc8567738",
     "CredentialProfilePatch": "b27d3790c601e9eebf639ae8991422fe4b36d1e3c6d39a9ee6fd344d6482aca1",
     "CredentialProfileRotate": "4ca3ebdc99522e21b55ad4c1f39ef1ebe49103f815d8d6f566ab15b7ce24df46",
@@ -192,9 +193,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "677938976c6261a58c08f541354b997b4734ed238534e4b49545bd976c94e32c",
+  "contract_sha256": "dad2eb2b87ae924ce5caab87d26249cb7652f190d017cbeb8db734d7797c9cd6",
   "openapi": "3.1.0",
-  "operation_count": 427,
+  "operation_count": 430,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -239,6 +240,21 @@
       "deprecated": false,
       "operation_id": "delete_credential_profile_credential_profiles__profile_id__delete",
       "parameters_sha256": "7491c199dd70472dcc17b3560914325ff9487debef397d7c0cf4fca1a80de27a",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "credentials"
+      ]
+    },
+    "DELETE /credential-profiles/{profile_id}/grants/{target_id}": {
+      "deprecated": false,
+      "operation_id": "revoke_credential_grant_credential_profiles__profile_id__grants__target_id__delete",
+      "parameters_sha256": "ed85d307451274af9f17b998c366fb63a0a8118536c706a6d6abe923d078440b",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -1189,7 +1205,7 @@
     "GET /credential-profiles": {
       "deprecated": false,
       "operation_id": "list_credential_profiles_credential_profiles_get",
-      "parameters_sha256": "cae7755b32afe69d362be360d63f88f9e9aa8e88aa72ff10b42eb2eaa6ca811d",
+      "parameters_sha256": "447fce33981baa4468a57a34cc94917bffc1a3bd3653f8824524514adf2748d1",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -1220,6 +1236,21 @@
       "deprecated": false,
       "operation_id": "get_credential_profile_credential_profiles__profile_id__get",
       "parameters_sha256": "4d87faa0c9418c76504b21271470616a041acb43e6d10f48e535db4637ef784e",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "credentials"
+      ]
+    },
+    "GET /credential-profiles/{profile_id}/grants": {
+      "deprecated": false,
+      "operation_id": "list_credential_grants_credential_profiles__profile_id__grants_get",
+      "parameters_sha256": "84542e9b229a6295e1ab8578d94bc37aa6d35797070056c8936df4517345434f",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -3904,6 +3935,21 @@
         "credentials"
       ]
     },
+    "POST /credential-profiles/{profile_id}/grants": {
+      "deprecated": false,
+      "operation_id": "grant_credential_profile_credential_profiles__profile_id__grants_post",
+      "parameters_sha256": "7491c199dd70472dcc17b3560914325ff9487debef397d7c0cf4fca1a80de27a",
+      "request_schema_sha256": "6548a82e243323426d892756c42c5499129e74f82eda023a4cac8dade153be5d",
+      "response_schema_sha256": {
+        "201": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "credentials",
+      "tags": [
+        "credentials"
+      ]
+    },
     "POST /credential-profiles/{profile_id}/rotate": {
       "deprecated": false,
       "operation_id": "rotate_credential_profile_credential_profiles__profile_id__rotate_post",
@@ -5822,6 +5868,7 @@
     ],
     "credentials": [
       "DELETE /credential-profiles/{profile_id}",
+      "DELETE /credential-profiles/{profile_id}/grants/{target_id}",
       "GET /authenticated-scan-profiles",
       "GET /authenticated-scan-profiles/contract",
       "GET /authenticated-scan-profiles/validations/{request_id}",
@@ -5830,11 +5877,13 @@
       "GET /credential-profiles",
       "GET /credential-profiles/capabilities",
       "GET /credential-profiles/{profile_id}",
+      "GET /credential-profiles/{profile_id}/grants",
       "PATCH /credential-profiles/{profile_id}",
       "POST /authenticated-scan-profiles",
       "POST /authenticated-scan-profiles/validations/{request_id}/cancel",
       "POST /authenticated-scan-profiles/{profile_id}/validate",
       "POST /credential-profiles",
+      "POST /credential-profiles/{profile_id}/grants",
       "POST /credential-profiles/{profile_id}/rotate"
     ],
     "evidence": [

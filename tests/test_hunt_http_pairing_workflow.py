@@ -80,7 +80,9 @@ class Connection(ReplayConnection):
 
     async def fetchrow(self, sql, *args):
         if 'FROM credential_profiles p' in sql:
-            if args != (PROFILE_ID, 'device', TARGET) or not self.profile['is_active']:
+            # The worker lookup takes the consuming target as text: it matches that target's
+            # grant row (credential_profile_bindings.binding_id).
+            if args != (PROFILE_ID, 'device', str(TARGET)) or not self.profile['is_active']:
                 return None
             return dict(self.profile)
         if 'SELECT private_http_result' in sql:

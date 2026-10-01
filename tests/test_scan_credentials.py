@@ -64,6 +64,8 @@ def _profile(
         created_at=NOW,
         updated_at=NOW,
         allowed_capabilities=capabilities,
+        # As list_profiles returns it: listed for (granted to) the Scan's target.
+        granted_target_id=TARGET_ID,
     )
 
 
@@ -511,3 +513,17 @@ def test_reviewed_profile_never_falls_back_to_anonymous(change):
         options.pop("auth_header")
     with pytest.raises(ScanCredentialError, match="authenticated_profile_identity_unavailable"):
         resolve_scan_http_principal(options, capability_name="http.request")
+
+
+def test_admission_takes_a_profile_shared_with_the_target_and_refuses_one_listed_elsewhere():
+    from dataclasses import replace as _replace
+    shared = _replace(_profile("shared", slot="primary"), target_id="11111111-1111-4111-8111-111111111111")
+    rows = admit_scan_credential_profiles(
+        [shared.profile_id], [shared], target_id=TARGET_ID, target_kind="web", now=NOW,
+    )
+    assert rows[0]["profile_id"] == "shared"
+    elsewhere = _replace(_profile("elsewhere", slot="primary"), granted_target_id="33333333-3333-4333-8333-333333333333")
+    with pytest.raises(ScanCredentialError, match="target binding does not match"):
+        admit_scan_credential_profiles(
+            [elsewhere.profile_id], [elsewhere], target_id=TARGET_ID, target_kind="web", now=NOW,
+        )

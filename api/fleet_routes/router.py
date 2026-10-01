@@ -55,7 +55,7 @@ try:
     from pathlib import Path
     from retest_contract import parse_json_field
     from runtime.credential_resolver import CredentialResolutionError, WorkerCredentialResolver, validate_worker_credential_authority
-    from runtime.models import TargetBinding
+    from runtime.models import TargetBinding, target_kinds_share_asset
     from runtime.observation_store import PostgresObservationManifestStore
     from runtime.receipts import CapabilityReceipt
     from runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
@@ -105,7 +105,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     from pathlib import Path
     from ..retest_contract import parse_json_field
     from ..runtime.credential_resolver import CredentialResolutionError, WorkerCredentialResolver, validate_worker_credential_authority
-    from ..runtime.models import TargetBinding
+    from ..runtime.models import TargetBinding, target_kinds_share_asset
     from ..runtime.observation_store import PostgresObservationManifestStore
     from ..runtime.receipts import CapabilityReceipt
     from ..runtime.request_collection_store import RequestCollectionContractError, RequestCollectionSelection, request_collection_selection_digest
@@ -3413,7 +3413,7 @@ async def _hydrate_broker_generic_scan_credentials(
                     or profile.auth_kind != str(ref.get("auth_kind") or "")
                     or profile.principal_slot
                     != str(ref.get("principal_slot") or "")
-                    or profile.target_kind != target_kind
+                    or not target_kinds_share_asset(profile.target_kind, target_kind)
                     or tuple(profile.allowed_capabilities) != expected_allowed
                 ):
                     raise ScanCredentialError(

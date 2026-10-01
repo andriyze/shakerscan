@@ -135,6 +135,19 @@ class CredentialProfileCreate(BaseModel):
     created_by: str = Field(default="api", max_length=120)
 
 
+class CredentialGrantCreate(BaseModel):
+    """Share a profile with another target of the same asset kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: Literal["web", "api", "network", "device"]
+    target_id: uuid.UUID
+    # Required when the profile allows active capabilities: the receiving target must approve
+    # them itself, exactly as creating such a profile there would.
+    approval_receipt_id: str | None = None
+    granted_by: str = Field(default="api", max_length=120)
+
+
 class CredentialProfilePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -374,6 +387,38 @@ def _public(profile: CredentialProfileMetadata) -> dict[str, Any]:
     return result
 
 
+def _has_active_capabilities(profile: CredentialProfileMetadata) -> bool:
+    for name in profile.allowed_capabilities:
+        try:
+            spec = CAPABILITY_REGISTRY.require(name)
+        except KeyError:
+            return True  # unknown names are treated as the stricter case
+        if spec.risk_tier in {"active", "mutation"} or spec.required_approval == "active_testing":
+            return True
+    return False
+
+
+async def _target_labels(conn: Any, ids: set[str]) -> dict[str, dict[str, Any]]:
+    """Display names for targets of any kind, so a shared credential can say where it is from."""
+    uuids = [uuid.UUID(value) for value in ids if value]
+    if not uuids:
+        return {}
+    rows = await conn.fetch(
+        """SELECT id::text AS id, name, url AS locator, 'target' AS source FROM targets WHERE id=ANY($1::uuid[])
+           UNION ALL
+           SELECT id::text, name, primary_locator, 'device' FROM device_targets WHERE id=ANY($1::uuid[])""",
+        uuids,
+    )
+    return {row["id"]: {"name": row["name"], "locator": row["locator"]} for row in rows}
+
+
+def _with_home_label(item: dict[str, Any], labels: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    home = labels.get(str(item.get("home_target_id") or "")) or {}
+    item["home_target_name"] = home.get("name")
+    item["home_target_locator"] = home.get("locator")
+    return item
+
+
 def _store_error(exc: CredentialStoreError) -> HTTPException:
     if isinstance(exc, CredentialStoreConflict):
         return HTTPException(status_code=409, detail=str(exc))
@@ -595,28 +640,115 @@ async def create_credential_profile(request: Request, payload: CredentialProfile
 @router.get("")
 async def list_credential_profiles(
     request: Request,
-    target_kind: Literal["web", "api", "network", "device"],
-    target_id: uuid.UUID,
+    target_kind: Literal["web", "api", "network", "device"] | None = None,
+    target_id: uuid.UUID | None = None,
     include_inactive: bool = Query(default=False),
+    search: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
+    """With a target: every profile that target can use (its own and those shared with it).
+    Without one: the library of all profiles, with how many other targets each is shared with."""
+    if (target_kind is None) != (target_id is None):
+        raise HTTPException(status_code=422, detail="target_kind and target_id go together")
     pool = _pool(request)
     try:
         async with pool.acquire() as conn:
-            await _require_target(conn, target_kind=target_kind, target_id=target_id)
-            profiles = await _store.list_profiles(
-                conn,
-                target_kind=target_kind,
-                target_id=target_id,
-                include_inactive=include_inactive,
+            if target_id is not None:
+                await _require_target(conn, target_kind=target_kind, target_id=target_id)
+                profiles = await _store.list_profiles(
+                    conn,
+                    target_kind=target_kind,
+                    target_id=target_id,
+                    include_inactive=include_inactive,
+                )
+                labels = await _target_labels(conn, {p.target_id for p in profiles if p.shared})
+                items = [_with_home_label(_public(profile), labels) for profile in profiles]
+                return {
+                    "target_kind": target_kind,
+                    "target_id": str(target_id),
+                    "profiles": items,
+                    "count": len(items),
+                }
+            library, total = await _store.list_library(
+                conn, include_inactive=include_inactive, search=search, limit=limit, offset=offset,
             )
+            labels = await _target_labels(conn, {profile.target_id for profile, _ in library})
     except CredentialStoreError as exc:
         raise _store_error(exc) from exc
-    return {
-        "target_kind": target_kind,
-        "target_id": str(target_id),
-        "profiles": [_public(profile) for profile in profiles],
-        "count": len(profiles),
-    }
+    items = []
+    for profile, shared_count in library:
+        item = _with_home_label(_public(profile), labels)
+        item["shared_target_count"] = shared_count
+        items.append(item)
+    return {"profiles": items, "count": len(items), "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/{profile_id}/grants")
+async def list_credential_grants(
+    request: Request,
+    profile_id: uuid.UUID,
+    include_revoked: bool = Query(default=False),
+):
+    """The targets a profile serves: its home target, then the targets it is shared with."""
+    pool = _pool(request)
+    try:
+        async with pool.acquire() as conn:
+            grants = await _store.list_grants(conn, profile_id=profile_id, include_revoked=include_revoked)
+            labels = await _target_labels(conn, {grant["target_id"] for grant in grants})
+    except CredentialStoreError as exc:
+        raise _store_error(exc) from exc
+    for grant in grants:
+        label = labels.get(grant["target_id"]) or {}
+        grant["target_name"] = label.get("name")
+        grant["target_locator"] = label.get("locator")
+    return {"profile_id": str(profile_id), "grants": grants, "count": len(grants)}
+
+
+@router.post("/{profile_id}/grants", status_code=status.HTTP_201_CREATED)
+async def grant_credential_profile(request: Request, profile_id: uuid.UUID, payload: CredentialGrantCreate):
+    """Share a profile with another target. The grant makes it selectable there; testing that
+    target still needs the target's own authorization, checked when a Scan or Hunt uses it."""
+    pool = _pool(request)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await _require_target(conn, target_kind=payload.target_kind, target_id=payload.target_id)
+                profile = await _store.get_profile(conn, profile_id=profile_id)
+                if _has_active_capabilities(profile):
+                    await _require_active_capability_approval(
+                        conn, approval_receipt_id=payload.approval_receipt_id, target_id=payload.target_id,
+                    )
+                grant = await _store.grant_profile(
+                    conn,
+                    profile_id=profile_id,
+                    target_kind=payload.target_kind,
+                    target_id=payload.target_id,
+                    granted_by=payload.granted_by,
+                    now=datetime.now(timezone.utc),
+                )
+                labels = await _target_labels(conn, {grant["target_id"]})
+    except CredentialStoreError as exc:
+        raise _store_error(exc) from exc
+    label = labels.get(grant["target_id"]) or {}
+    grant.update({"target_name": label.get("name"), "target_locator": label.get("locator")})
+    return {"profile_id": str(profile_id), "grant": grant}
+
+
+@router.delete("/{profile_id}/grants/{target_id}")
+async def revoke_credential_grant(request: Request, profile_id: uuid.UUID, target_id: uuid.UUID):
+    """Stop sharing a profile with a target. Runs already admitted with it fail their next
+    credential check; the home target is removed only by deactivating the profile."""
+    pool = _pool(request)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                grant = await _store.revoke_grant(
+                    conn, profile_id=profile_id, target_id=target_id, now=datetime.now(timezone.utc),
+                )
+    except CredentialStoreError as exc:
+        raise _store_error(exc) from exc
+    return {"profile_id": str(profile_id), "grant": grant}
 
 
 @router.get("/{profile_id}")

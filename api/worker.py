@@ -145,7 +145,7 @@ from runtime.credential_refs import (
     CredentialReferenceError,
     select_hunt_principal_reference,
 )
-from runtime.models import PreparedExecution, ScanPolicy, TargetBinding
+from runtime.models import PreparedExecution, ScanPolicy, TargetBinding, target_kinds_share_asset
 from runtime.request_collection_store import (
     RequestCollectionContractError,
     RequestCollectionSelection,
@@ -1986,7 +1986,7 @@ async def _hydrate_generic_scan_credentials(
                     profile.current_version != expected_version
                     or profile.auth_kind != str(ref.get("auth_kind") or "")
                     or profile.principal_slot != str(ref.get("principal_slot") or "")
-                    or profile.target_kind != target_kind
+                    or not target_kinds_share_asset(profile.target_kind, target_kind)
                     or tuple(profile.allowed_capabilities) != expected_allowed
                 ):
                     raise ScanCredentialError(
@@ -12446,7 +12446,7 @@ async def _bind_scan_replay_primary_credential(
             or resolved.profile.auth_kind != str(primary.get("auth_kind") or "")
             or resolved.profile.principal_slot
             != str(primary.get("principal_slot") or "")
-            or resolved.profile.target_kind != target.target_kind
+            or not target_kinds_share_asset(resolved.profile.target_kind, target.target_kind)
         ):
             raise ReplayExecutionError(
                 "Scan replay credential changed after admission"

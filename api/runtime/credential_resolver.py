@@ -406,6 +406,10 @@ class ResolvedCredential:
             "principal_slot": self.profile.principal_slot,
             "principal_label": self.profile.principal_label,
             "target_kind": self.profile.target_kind,
+            # Which target's grant the credential was used through, and whether it is shared
+            # from another (home) target: the audit trail for one-to-many credentials.
+            "credential_home_target_id": self.profile.target_id,
+            "credential_granted_target_id": self.profile.granted_target_id,
             "approval_receipt_id": self.authority.approval_receipt_id,
             "scope_receipt_id": self.authority.scope_receipt_id,
             "secret_values_visible": False,
