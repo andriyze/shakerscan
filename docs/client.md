@@ -31,8 +31,13 @@ When both channels meet on one machine, the installer keeps a client it finds at
 `~/.local/bin/shakerscan` instead of replacing it, because the client already forwards engine
 commands to the install. If the launcher shim was there first and pipx refuses to overwrite it,
 `pipx install --force shakerscan` (or `uv tool install --force shakerscan`) replaces it; nothing is
-lost, `shakerscan start` still works through the client. Homebrew installs under its own prefix and
-never collides.
+lost, `shakerscan start` still works through the client.
+
+Homebrew links the command into its own `bin` (`/opt/homebrew/bin` on Apple silicon), which other
+tools share: a global npm package installed with Homebrew's Node also lands there. If
+`brew install` warns that it could not symlink `bin/shakerscan`, another program owns that name and
+keeps answering `shakerscan`; `which -a shakerscan` shows which one runs, and
+`brew link --overwrite shakerscan` makes it the ShakerScan client.
 
 ## Install
 
