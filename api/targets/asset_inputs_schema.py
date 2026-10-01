@@ -56,7 +56,7 @@ SELECT p.id, d.target_id AS device_target_id, d.target_id,
        NULL::text AS secret_preview, NULL::text AS login_path, p.service_port AS port,
        p.expires_at, (p.is_active AND b.is_active AND b.revoked_at IS NULL) AS is_active,
        '{}'::jsonb AS metadata_json, p.current_version,p.record_version,
-       b.allowed_capabilities,p.created_at,p.updated_at
+       b.allowed_capabilities,p.rotated_at,p.created_at,p.updated_at
 FROM target_device_profiles d CROSS JOIN credential_profiles p
 JOIN LATERAL target_credential_grant(p.id,d.target_id) b ON true
 JOIN credential_profile_versions v ON v.profile_id=p.id AND v.version=p.current_version;

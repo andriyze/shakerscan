@@ -15,7 +15,7 @@ from api.runtime.credentials import build_credential_secret, parse_credential_se
 from api.runtime.request_collection_store import PostgresRequestCollectionStore
 from api.targets.asset_inputs_migration import migrate_asset_inputs
 from api.targets.asset_migration import migrate_target_assets
-from test_target_asset_migration_postgres import database
+from tests.test_target_asset_migration_postgres import database
 
 
 def encryption(monkeypatch):

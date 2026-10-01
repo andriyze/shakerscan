@@ -49,7 +49,7 @@ async def migrate_asset_inputs(conn: Any) -> None:
     # validates stable IDs and handles any legacy write not synchronized before upgrade.
     profiles = await conn.fetch("SELECT id FROM device_credential_profiles ORDER BY id")
     for row in profiles:
-        await sync_legacy_device_credential(conn, legacy_profile_id=row["id"])
+        await sync_legacy_device_credential(conn, row["id"])
     await conn.execute(INPUTS_SCHEMA_SQL)
     await conn.execute("""UPDATE credential_profiles p SET service_port=d.port
         FROM device_credential_profiles d WHERE p.id=d.id""")
