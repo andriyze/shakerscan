@@ -30,16 +30,21 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF_NAME" = work/pr294-target-unification
-          if test -f .implementation/apply.py; then
-            python3 .implementation/apply.py
-            git diff --check
-            git add -A
-            if ! git diff --cached --quiet; then
-              git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'feat(targets): materialize reviewed unified-asset implementation'
-              git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
-            fi
-            echo "IMPLEMENTATION_COMMIT=$(git rev-parse HEAD)"
+          python3 .implementation/apply.py
+          git diff --check
+          git add -A
+          if ! git diff --cached --quiet; then
+            git -c user.name='ChatGPT' -c user.email='noreply@openai.com' commit -m 'feat(targets): materialize reviewed unified-asset implementation'
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
           fi
+          git archive --format=tar.gz HEAD > /tmp/shakerscan-source.tar.gz
+          echo "IMPLEMENTATION_COMMIT=$(git rev-parse HEAD)"
+      - name: Source snapshot for local review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: implementation-source
+          path: /tmp/shakerscan-source.tar.gz
+          retention-days: 1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
