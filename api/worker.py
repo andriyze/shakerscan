@@ -12551,9 +12551,9 @@ async def _execute_scan_request_collections(
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
-                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+                       WHERE c.id=$1 AND target_collection_visible(c.id,$4) AND c.is_active=true
                          AND b.target_id=$4 AND (b.target_kind=$5 OR
-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
+                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), row["target_id"], target_kind,
@@ -19279,10 +19279,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
-                       WHERE c.id=$1 AND c.{collection_owner_column}=$4
+                       WHERE c.id=$1 AND target_collection_visible(c.id,$4)
                          AND c.is_active=true
                          AND b.target_id=$4 AND (b.target_kind=$5 OR
-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
+                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), target_owner_id, target_kind,

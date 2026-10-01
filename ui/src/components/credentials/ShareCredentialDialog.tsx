@@ -22,9 +22,9 @@ export interface ShareTargetChoice {
   detail: string
 }
 
-const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network']
+const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
 
-// Web, API and network are views of one asset row; a device is a different asset.
+// All physical-target kinds are views; sharing still needs an explicit target grant.
 function sharesAsset(profileKind: CredentialTargetKind, targetKind: CredentialTargetKind): boolean {
   return profileKind === targetKind || (ASSET_KINDS.includes(profileKind) && ASSET_KINDS.includes(targetKind))
 }
@@ -112,7 +112,7 @@ export function ShareCredentialDialog({
           })
         : null
       await grantCredentialProfile(profile.id, {
-        target_kind: profile.target_kind === 'device' ? 'device' : profile.target_kind,
+        target_kind: chosen.kind,
         target_id: chosen.id,
         approval_receipt_id: approval?.approvalReceiptId,
       })

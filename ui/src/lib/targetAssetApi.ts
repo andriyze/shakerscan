@@ -101,3 +101,16 @@ export async function registerTargetAsset(input: {locator: string; name?: string
   }
   return detail.target.id
 }
+
+/** Fetch every metadata page; selectors must not silently lose assets after the first page. */
+export async function getAllTargetAssets(signal?: AbortSignal): Promise<TargetAsset[]> {
+  const assets = new Map<string, TargetAsset>()
+  let offset = 0
+  for (;;) {
+    const page = await getTargetAssets({limit:500,offset},signal)
+    for (const asset of page.targets) assets.set(asset.id,asset)
+    offset += page.targets.length
+    if (offset >= page.total) return [...assets.values()]
+    if (!page.targets.length) throw new Error('Target inventory changed while paging; refresh the selector')
+  }
+}

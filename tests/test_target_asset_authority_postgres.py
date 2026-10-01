@@ -3,6 +3,9 @@ import asyncio
 import json
 import uuid
 
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "api"))
 from api import target_authorization
 from api.targets.asset_authority import standing_authorization_matches_target
 from api.targets.asset_migration import migrate_target_assets
@@ -62,4 +65,32 @@ def test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host(
             assert not await standing_authorization_matches_target(conn,target_id=origin,scope_target_id=device,approval_receipt_id=host_approval)
             await conn.execute("UPDATE device_targets SET primary_locator='new-locator.test',locator_generation=locator_generation+1 WHERE id=$1",device)
             assert await target_authorization.current_target_authorization(conn,device) is None
+    asyncio.run(run())
+
+
+def test_worker_revalidates_parent_authority_not_a_client_flag():
+    from api.scan.authorization import revalidate_scan_action_authority, ActionAuthorityDecision, revalidate_action_authority
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            device=await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('Worker','worker.test') RETURNING id")
+            origin=await conn.fetchval("INSERT INTO targets(url) VALUES('https://worker.test:8443') RETURNING id")
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            approval=await receipt(conn,device,'worker.test')
+            current=await target_authorization.current_target_authorization(conn,origin)
+            binding={'target_id':str(origin),'canonical_host':'worker.test'}
+            action={'capability_name':'http.request','capability_input':{'method':'POST'}}
+            scope_id=current['scope_receipt_id']
+            allowed=await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
+                scope_receipt_id=scope_id,approval_receipt_id=str(approval))
+            assert allowed==ActionAuthorityDecision.ALLOWED
+            scope=await conn.fetchrow('SELECT * FROM scope_receipts WHERE id=$1',scope_id)
+            approved=await conn.fetchrow('SELECT * FROM approval_receipts WHERE id=$1',approval)
+            assert revalidate_action_authority(action=action,target_binding=binding,scope_receipt=scope,
+                approval_receipt=approved,scope_receipt_id=scope_id,approval_receipt_id=str(approval))==ActionAuthorityDecision.REJECTED_SCOPE
+            await target_authorization.revoke_target_authorization(conn,origin,revoked_by='fixture',reason='excluded')
+            assert await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
+                scope_receipt_id=scope_id,approval_receipt_id=str(approval)) != ActionAuthorityDecision.ALLOWED
     asyncio.run(run())

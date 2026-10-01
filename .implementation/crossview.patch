@@ -1,0 +1,949 @@
+diff --git a/.implementation/check.sh b/.implementation/check.sh
+index 1ed8a74..41ace14 100644
+--- a/.implementation/check.sh
++++ b/.implementation/check.sh
+@@ -1,9 +1,11 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
++export PYTHONPATH="$PWD:$PWD/api:$PWD/scanner"
+ python -m pip install -q --disable-pip-version-check --require-hashes -r scanner/requirements.lock
+ npm --prefix ui ci --silent
++python scripts/generate_public_api_contract.py
+ set +e
+-python -m pytest --tb=short -q tests/test_target_asset_migration_postgres.py tests/test_target_asset_inputs_postgres.py tests/test_device_shared_inputs_postgres.py tests/test_target_asset_startup_postgres.py tests/test_target_asset_store_postgres.py tests/test_target_asset_authority_postgres.py > .implementation/test-output.txt 2>&1
++python -m pytest --tb=short -q tests/test_target_asset_migration_postgres.py tests/test_target_asset_inputs_postgres.py tests/test_device_shared_inputs_postgres.py tests/test_target_asset_startup_postgres.py tests/test_target_asset_store_postgres.py tests/test_target_asset_authority_postgres.py tests/test_target_asset_collections_postgres.py > .implementation/test-output.txt 2>&1
+ result=$?
+ python scripts/check_module_size.py >> .implementation/test-output.txt 2>&1
+ ratchet=$?
+@@ -17,7 +19,7 @@ printf '\npytest_exit=%s module_size_exit=%s ui_tests_exit=%s types_exit=%s buil
+ cat .implementation/test-output.txt
+ tail -15 .implementation/ui-test-output.txt
+ tail -30 .implementation/ui-build-output.txt
+-git add .implementation/*output.txt
++git add .implementation/*output.txt docs/generated/public-openapi-manifest.json ui/src/lib/publicApi.generated.ts
+ if ! git diff --cached --quiet; then
+   git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'chore(dev): record isolated integration results'
+   git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+diff --git a/api/api.py b/api/api.py
+index 55ed01b..51e258c 100644
+--- a/api/api.py
++++ b/api/api.py
+@@ -10282,8 +10282,8 @@ async def _generic_collection_refs(
+                 status_code=422,
+                 detail="request collection selection_id is unavailable",
+             )
+-        owner_id = row["device_target_id"] if normalized_kind == "device" else row["target_id"]
+-        if str(owner_id or "") != str(bound_target_id):
++        visible = await conn.fetchval("SELECT target_collection_visible($1,$2)", row["id"], bound_target_id)
++        if not visible:
+             raise HTTPException(
+                 status_code=422,
+                 detail="request collection is bound to another target",
+@@ -10295,7 +10295,7 @@ async def _generic_collection_refs(
+                  ON e.id=b.environment_id AND e.is_active=true
+                WHERE b.collection_id=$1 AND b.target_id=$3
+                  AND (b.target_kind=$2 OR
+-                      (b.target_kind IN ('web','api','network') AND $2 IN ('web','api','network')))
++                      (b.target_kind IN ('web','api','network','device') AND $2 IN ('web','api','network','device')))
+                  AND b.is_active=true AND ($4::uuid IS NULL OR b.id=$4)
+                ORDER BY (b.target_kind=$2) DESC, b.updated_at DESC LIMIT 1""",
+             row["id"], normalized_kind, bound_target_id,
+diff --git a/api/credential_api.py b/api/credential_api.py
+index 1b1899d..6163ae0 100644
+--- a/api/credential_api.py
++++ b/api/credential_api.py
+@@ -352,14 +352,9 @@ def _pool(request: Request) -> Any:
+ 
+ 
+ async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) -> None:
+-    if target_kind == "device":
+-        row = await conn.fetchrow(
+-            "SELECT id FROM device_targets WHERE id=$1 AND is_active=true", target_id
+-        )
+-    else:
+-        row = await conn.fetchrow(
+-            "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
+-        )
++    row = await conn.fetchrow(
++        "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
++    )
+     if not row:
+         raise HTTPException(status_code=404, detail="active credential target not found")
+ 
+diff --git a/api/fleet_routes/router.py b/api/fleet_routes/router.py
+index 92a9437..677f8a5 100644
+--- a/api/fleet_routes/router.py
++++ b/api/fleet_routes/router.py
+@@ -3548,7 +3548,7 @@ async def _broker_private_replay_plan(
+            LEFT JOIN request_collection_environments e
+              ON e.id=b.environment_id AND e.collection_id=c.id
+             AND e.is_active=true
+-           WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
++           WHERE c.id=$1 AND target_collection_visible(c.id,$4) AND c.is_active=true
+              AND b.target_id=$4 AND b.target_kind=$5
+            FOR UPDATE OF c, b, s""",
+         collection_id, binding_id, selection_id, target_id, target.target_kind,
+diff --git a/api/request_collection_api.py b/api/request_collection_api.py
+index 4ea9c40..2c08fb2 100644
+--- a/api/request_collection_api.py
++++ b/api/request_collection_api.py
+@@ -105,7 +105,7 @@ class RequestCollectionEnvironmentCreate(BaseModel):
+ 
+ class RequestCollectionBindingUpsert(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+-    target_kind: Literal["web", "api", "device"]
++    target_kind: Literal["web", "api", "network", "device"]
+     target_id: str
+     allowed_origins: list[str] = Field(min_length=1, max_length=32)
+     environment_id: Optional[str] = None
+@@ -393,6 +393,10 @@ async def create_request_collection(request: RequestCollectionCreate):
+         web_target = await conn.fetchrow(
+             "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
+         )
++        if web_target:
++            owner_uuid = await conn.fetchval("SELECT target_asset_owner($1)", target_uuid)
++        else:
++            owner_uuid = target_uuid
+         device_target = None if web_target else await conn.fetchrow(
+             """SELECT id, primary_locator FROM device_targets
+                WHERE id=$1 AND is_active=true""",
+@@ -410,8 +414,8 @@ async def create_request_collection(request: RequestCollectionCreate):
+                                       ($3::uuid IS NOT NULL AND device_target_id=$3))
+                    FOR UPDATE""",
+                 collection_name,
+-                target_uuid if web_target else None,
+-                target_uuid if device_target else None,
++                owner_uuid,
++                None,
+             )
+             collection_id = existing["id"] if existing else uuid.uuid4()
+             row = await conn.fetchrow(
+@@ -428,8 +432,8 @@ async def create_request_collection(request: RequestCollectionCreate):
+                        metadata_json=EXCLUDED.metadata_json, updated_at=NOW(), is_active=true
+                    RETURNING *""",
+                 collection_id,
+-                target_uuid if web_target else None,
+-                target_uuid if device_target else None,
++                owner_uuid,
++                None,
+                 collection_name,
+                 summary.get("format") or request.format,
+                 encrypted_payload,
+@@ -532,7 +536,7 @@ async def create_request_collection(request: RequestCollectionCreate):
+             binding_row = None
+             binding_origin = None
+             binding_kind = "web"
+-            if web_target:
++            if web_target and str(web_target["url"]).startswith(("http://", "https://")):
+                 parsed_target = urllib.parse.urlsplit(str(web_target["url"] or ""))
+                 binding_origin = canonical_collection_origin(
+                     f"{parsed_target.scheme}://{parsed_target.netloc}"
+@@ -542,8 +546,11 @@ async def create_request_collection(request: RequestCollectionCreate):
+                 binding_origin = canonical_collection_origin(
+                     f"{parsed_base.scheme}://{parsed_base.netloc}"
+                 )
+-                binding_kind = "device"
++                binding_kind = "network"
+             if binding_origin:
++                from targets.asset_collections import asset_collection_binding
++                await asset_collection_binding(conn, dict(row), target_kind=binding_kind,
++                    target_id=target_uuid, allowed_origins=[binding_origin])
+                 binding_row = await conn.fetchrow(
+                     """INSERT INTO request_collection_bindings (
+                            collection_id, target_kind, target_id, allowed_origins,
+@@ -580,7 +587,7 @@ async def list_request_collections(
+     async with _pool().acquire() as conn:
+         rows = await conn.fetch(
+             """SELECT * FROM request_collections
+-               WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
++               WHERE is_active=true AND target_collection_visible(id,$1)
+                ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
+             target_uuid, limit, offset,
+         )
+@@ -854,8 +861,12 @@ async def upsert_request_collection_binding(
+     )
+     async with _pool().acquire() as conn:
+         collection = await _request_collection_owner(conn, collection_uuid)
+-        origins = _request_collection_owner_binding(
+-            collection,
++        try:
++            from targets.asset_collections import asset_collection_binding
++        except ModuleNotFoundError:
++            from api.targets.asset_collections import asset_collection_binding
++        origins = await asset_collection_binding(
++            conn, collection,
+             target_kind=request.target_kind,
+             target_id=target_uuid,
+             allowed_origins=request.allowed_origins,
+diff --git a/api/scan/authorization.py b/api/scan/authorization.py
+index 1ac6bf3..56a9a59 100644
+--- a/api/scan/authorization.py
++++ b/api/scan/authorization.py
+@@ -162,7 +162,7 @@ def revalidate_action_authority(
+             return ActionAuthorityDecision.REJECTED_SCOPE
+         target_id = str(_value(target_binding, "target_id", "") or "").strip()
+         scope_target_id = str(_value(scope_receipt, "target_id", "") or "").strip()
+-        if target_id and scope_target_id and target_id != scope_target_id:
++        if target_id and scope_target_id and target_id != scope_target_id and not asset_authority_validated:
+             return ActionAuthorityDecision.REJECTED_SCOPE
+         if not _host_in_scope(
+             str(_value(target_binding, "canonical_host", "") or ""), scope_receipt,
+@@ -228,12 +228,18 @@ async def revalidate_scan_action_authority(
+         approval_receipt = await conn.fetchrow(
+             "SELECT * FROM approval_receipts WHERE id=$1", approval_id,
+         )
+-    from targets.asset_authority import standing_authorization_matches_target
+     asset_authority_validated = False
+-    if approval and scope and str(approval.get("action_name") or "") == STANDING_ACTION_NAME:
+-        asset_authority_validated = await standing_authorization_matches_target(conn,
+-            target_id=target_binding.target_id,scope_target_id=scope.get("target_id"),
+-            approval_receipt_id=approval.get("id"))
++    target_id = str(_value(target_binding, "target_id", "") or "")
++    scope_target = str(_value(scope_receipt, "target_id", "") or "")
++    if _standing_authorization(approval_receipt) and target_id and scope_target and target_id != scope_target:
++        try:
++            from ..targets.asset_authority import standing_authorization_matches_target
++        except (ImportError, ModuleNotFoundError):
++            from targets.asset_authority import standing_authorization_matches_target
++        asset_authority_validated = await standing_authorization_matches_target(
++            conn, target_id=target_id, scope_target_id=scope_target,
++            approval_receipt_id=_value(approval_receipt, "id"),
++        )
+     return revalidate_action_authority(
+         asset_authority_validated=asset_authority_validated,
+         action=action,
+diff --git a/api/targets/asset_authority.py b/api/targets/asset_authority.py
+index 50220d4..7da6893 100644
+--- a/api/targets/asset_authority.py
++++ b/api/targets/asset_authority.py
+@@ -10,6 +10,19 @@ import uuid
+ 
+ MIGRATION = 'unified_target_asset_authority_v1'
+ SCHEMA = r"""
++ALTER TABLE request_collection_bindings DROP CONSTRAINT IF EXISTS request_collection_bindings_target_kind_check;
++ALTER TABLE request_collection_bindings ADD CONSTRAINT request_collection_bindings_target_kind_check
++    CHECK (target_kind IN ('web','api','network','device'));
++CREATE OR REPLACE FUNCTION retire_asset_members() RETURNS trigger
++LANGUAGE plpgsql AS $$
++BEGIN
++    IF OLD.is_active AND NOT NEW.is_active AND NEW.asset_owner_id IS NULL THEN
++        UPDATE targets SET is_active=false,updated_at=NOW() WHERE asset_owner_id=NEW.id AND is_active;
++    END IF;
++    RETURN NEW;
++END $$;
++CREATE TRIGGER target_asset_retirement AFTER UPDATE OF is_active ON targets
++FOR EACH ROW EXECUTE FUNCTION retire_asset_members();
+ ALTER TABLE targets ADD COLUMN IF NOT EXISTS authorization_inheritance BOOLEAN NOT NULL DEFAULT true;
+ CREATE OR REPLACE FUNCTION target_effective_authorization_target(consumer uuid) RETURNS uuid
+ LANGUAGE sql STABLE STRICT AS $$
+diff --git a/api/targets/asset_collections.py b/api/targets/asset_collections.py
+new file mode 100644
+index 0000000..c5713ba
+--- /dev/null
++++ b/api/targets/asset_collections.py
+@@ -0,0 +1,41 @@
++"""Asset-level collection ownership with exact, separately selected execution origins."""
++from __future__ import annotations
++
++from typing import Any, Mapping, Sequence
++import urllib.parse
++import uuid
++
++from fastapi import HTTPException
++
++try:
++    from runtime.request_collection_store import canonical_collection_origins, canonical_collection_origin, RequestCollectionContractError
++except ModuleNotFoundError:
++    from ..runtime.request_collection_store import canonical_collection_origins, canonical_collection_origin, RequestCollectionContractError
++
++
++async def asset_collection_binding(
++    conn: Any, collection: Mapping[str, Any], *, target_kind: str,
++    target_id: uuid.UUID, allowed_origins: Sequence[str],
++) -> tuple[str, ...]:
++    if target_kind not in {'web','api','network','device'}:
++        raise HTTPException(422, 'Unsupported collection target kind')
++    consumer = await conn.fetchrow('SELECT id,url,is_active FROM targets WHERE id=$1',target_id)
++    owner = collection.get('target_id') or collection.get('device_target_id')
++    same_asset = consumer and consumer['is_active'] and await conn.fetchval(
++        'SELECT target_asset_access_owner($1)=target_asset_access_owner($2)',owner,target_id,
++    )
++    if not same_asset:
++        raise HTTPException(422, 'Request collection and execution binding must belong to the same current asset')
++    try:
++        origins = canonical_collection_origins(list(allowed_origins))
++    except RequestCollectionContractError as exc:
++        raise HTTPException(422, str(exc)) from exc
++    parsed = urllib.parse.urlsplit(str(consumer['url']))
++    host = str(parsed.hostname or '').lower().rstrip('.')
++    if not host or any(str(urllib.parse.urlsplit(origin).hostname or '').lower().rstrip('.') != host for origin in origins):
++        raise HTTPException(422, 'Request collection binding origin is outside the exact target host')
++    if parsed.scheme in {'http','https'}:
++        exact = canonical_collection_origin(f'{parsed.scheme}://{parsed.netloc}')
++        if any(origin != exact for origin in origins):
++            raise HTTPException(422, 'An application binding must use its exact origin; select the host asset to bind additional services')
++    return origins
+diff --git a/api/worker.py b/api/worker.py
+index 17df8ab..5b2d798 100644
+--- a/api/worker.py
++++ b/api/worker.py
+@@ -12551,9 +12551,9 @@ async def _execute_scan_request_collections(
+                        LEFT JOIN request_collection_environments e
+                          ON e.id=b.environment_id AND e.collection_id=c.id
+                         AND e.is_active=true
+-                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
++                       WHERE c.id=$1 AND target_collection_visible(c.id,$4) AND c.is_active=true
+                          AND b.target_id=$4 AND (b.target_kind=$5 OR
+-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
++                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
+                        FOR UPDATE OF c, b, s""",
+                     uuid.UUID(collection_id), uuid.UUID(binding_id),
+                     uuid.UUID(selection_id), row["target_id"], target_kind,
+@@ -19279,10 +19279,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
+                        LEFT JOIN request_collection_environments e
+                          ON e.id=b.environment_id AND e.collection_id=c.id
+                         AND e.is_active=true
+-                       WHERE c.id=$1 AND c.{collection_owner_column}=$4
++                       WHERE c.id=$1 AND target_collection_visible(c.id,$4)
+                          AND c.is_active=true
+                          AND b.target_id=$4 AND (b.target_kind=$5 OR
+-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
++                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
+                        FOR UPDATE OF c, b, s""",
+                     uuid.UUID(collection_id), uuid.UUID(binding_id),
+                     uuid.UUID(selection_id), target_owner_id, target_kind,
+diff --git a/tests/test_target_asset_authority_postgres.py b/tests/test_target_asset_authority_postgres.py
+index 6614430..9f1af4e 100644
+--- a/tests/test_target_asset_authority_postgres.py
++++ b/tests/test_target_asset_authority_postgres.py
+@@ -3,6 +3,9 @@ import asyncio
+ import json
+ import uuid
+ 
++import sys
++from pathlib import Path
++sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "api"))
+ from api import target_authorization
+ from api.targets.asset_authority import standing_authorization_matches_target
+ from api.targets.asset_migration import migrate_target_assets
+@@ -63,3 +66,31 @@ def test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host(
+             await conn.execute("UPDATE device_targets SET primary_locator='new-locator.test',locator_generation=locator_generation+1 WHERE id=$1",device)
+             assert await target_authorization.current_target_authorization(conn,device) is None
+     asyncio.run(run())
++
++
++def test_worker_revalidates_parent_authority_not_a_client_flag():
++    from api.scan.authorization import revalidate_scan_action_authority, ActionAuthorityDecision, revalidate_action_authority
++    async def run():
++        async with database() as conn:
++            await prepare(conn)
++            device=await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('Worker','worker.test') RETURNING id")
++            origin=await conn.fetchval("INSERT INTO targets(url) VALUES('https://worker.test:8443') RETURNING id")
++            async with conn.transaction():
++                await migrate_target_assets(conn)
++                await migrate_asset_inputs(conn)
++            approval=await receipt(conn,device,'worker.test')
++            current=await target_authorization.current_target_authorization(conn,origin)
++            binding={'target_id':str(origin),'canonical_host':'worker.test'}
++            action={'capability_name':'http.request','capability_input':{'method':'POST'}}
++            scope_id=current['scope_receipt_id']
++            allowed=await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
++                scope_receipt_id=scope_id,approval_receipt_id=str(approval))
++            assert allowed==ActionAuthorityDecision.ALLOWED
++            scope=await conn.fetchrow('SELECT * FROM scope_receipts WHERE id=$1',scope_id)
++            approved=await conn.fetchrow('SELECT * FROM approval_receipts WHERE id=$1',approval)
++            assert revalidate_action_authority(action=action,target_binding=binding,scope_receipt=scope,
++                approval_receipt=approved,scope_receipt_id=scope_id,approval_receipt_id=str(approval))==ActionAuthorityDecision.REJECTED_SCOPE
++            await target_authorization.revoke_target_authorization(conn,origin,revoked_by='fixture',reason='excluded')
++            assert await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
++                scope_receipt_id=scope_id,approval_receipt_id=str(approval)) != ActionAuthorityDecision.ALLOWED
++    asyncio.run(run())
+diff --git a/tests/test_target_asset_collections_postgres.py b/tests/test_target_asset_collections_postgres.py
+new file mode 100644
+index 0000000..2ab66c3
+--- /dev/null
++++ b/tests/test_target_asset_collections_postgres.py
+@@ -0,0 +1,50 @@
++"""Reuse one document on explicit service bindings, never by copying it across views."""
++import asyncio
++import json
++
++import pytest
++from fastapi import HTTPException
++
++from api.devices.shared_collections import save_device_collection
++from api.targets.asset_collections import asset_collection_binding
++from api.targets.asset_migration import migrate_target_assets
++from api.targets.asset_inputs_migration import migrate_asset_inputs
++from tests.test_target_asset_migration_postgres import database
++from tests.test_target_asset_inputs_postgres import encryption, prepare
++
++
++def test_collection_owner_and_exact_service_bindings(monkeypatch):
++    secrets = encryption(monkeypatch)
++    async def run():
++        async with database() as conn:
++            await prepare(conn)
++            device = await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('Shared','collections.test') RETURNING id")
++            first = await conn.fetchval("INSERT INTO targets(url) VALUES('https://collections.test:8443') RETURNING id")
++            second = await conn.fetchval("INSERT INTO targets(url) VALUES('http://collections.test:3000') RETURNING id")
++            other = await conn.fetchval("INSERT INTO targets(url) VALUES('https://unrelated.test') RETURNING id")
++            async with conn.transaction():
++                await migrate_target_assets(conn)
++                await migrate_asset_inputs(conn)
++            from scanner.scanner_tools.request_collections import validate_request_collection
++            payload, summary = validate_request_collection({'info': {'name': 'Shared API'}, 'item':[
++                {'name':'status','request':{'method':'GET','url':'https://collections.test:8443/status'}}]})
++            view = await save_device_collection(conn,device,summary=summary,encrypted_payload=secrets.encrypt_secret(json.dumps(payload)))
++            collection = dict(await conn.fetchrow('SELECT * FROM request_collections WHERE id=$1',view['id']))
++            for target, origin in [(first,'https://collections.test:8443'),(second,'http://collections.test:3000')]:
++                origins = await asset_collection_binding(conn,collection,target_kind='web',target_id=target,allowed_origins=[origin])
++                await conn.execute("""INSERT INTO request_collection_bindings(collection_id,target_kind,target_id,allowed_origins)
++                    VALUES($1,'web',$2,$3)""",collection['id'],target,json.dumps(origins))
++                assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection['id'],target)
++            assert await conn.fetchval('SELECT count(*) FROM request_collections') == 1
++            assert await conn.fetchval('SELECT count(*) FROM request_collection_bindings WHERE collection_id=$1',collection['id']) == 2
++            for target, origin in [(other,'https://unrelated.test'),(first,'http://collections.test:3000'),(device,'https://unrelated.test')]:
++                with pytest.raises(HTTPException):
++                    await asset_collection_binding(conn,collection,target_kind='web',target_id=target,allowed_origins=[origin])
++            await conn.execute('UPDATE request_collection_bindings SET is_active=false WHERE collection_id=$1 AND target_id=$2',collection['id'],first)
++            assert not await conn.fetchval('SELECT target_collection_visible($1,$2)',collection['id'],first)
++            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection['id'],second)
++            await conn.execute('UPDATE targets SET is_active=false WHERE id=$1',device)
++            assert not await conn.fetchval('SELECT is_active FROM targets WHERE id=$1',first)
++            with pytest.raises(HTTPException):
++                await asset_collection_binding(conn,collection,target_kind='web',target_id=second,allowed_origins=['http://collections.test:3000'])
++    asyncio.run(run())
+diff --git a/ui/src/app/credentials/page.tsx b/ui/src/app/credentials/page.tsx
+index f5a477a..b2ceb96 100644
+--- a/ui/src/app/credentials/page.tsx
++++ b/ui/src/app/credentials/page.tsx
+@@ -6,12 +6,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
+ import { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+ import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
+ import {
+-  getDevices,
+-  getTarget,
+-  getTargets,
+   createTargetPolicyApprovalReceipt,
+-  type DeviceTarget,
+-  type Target,
+ } from '@/lib/api'
+ import {
+   createCredentialProfile,
+@@ -42,7 +37,7 @@ import {
+   Textarea,
+   useToast,
+ } from '@/components/ui'
+-import { usableWebTargets } from '@/lib/targetChoices'
++import { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'
+ import { useUrlFilters } from '@/lib/useUrlFilters'
+ 
+ const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
+@@ -249,8 +244,7 @@ function CredentialsContent() {
+   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
+   const [missingTarget, setMissingTarget] = useState<string | null>(null)
+   const latestProfileRequest = useRef(0)
+-  const [targets, setTargets] = useState<Target[]>([])
+-  const [devices, setDevices] = useState<DeviceTarget[]>([])
++  const [assets, setAssets] = useState<TargetAsset[]>([])
+   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
+   const [includeInactive, setIncludeInactive] = useState(false)
+   const [loading, setLoading] = useState(true)
+@@ -269,11 +263,9 @@ function CredentialsContent() {
+ 
+   useEffect(() => {
+     let cancelled = false
+-    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
+-      .then(([web, connected]) => {
+-        if (cancelled) return
+-        setTargets(usableWebTargets(web.targets || []))
+-        setDevices((connected.devices || []).filter((item) => item.is_active))
++    getAllTargetAssets()
++      .then((items) => {
++        if (!cancelled) setAssets(items)
+       })
+       .catch((cause) => {
+         if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
+@@ -282,46 +274,34 @@ function CredentialsContent() {
+     return () => { cancelled = true }
+   }, [])
+ 
+-  const choices = useMemo(() => targetKind === 'device'
+-    ? devices.map((item) => ({ id: item.id, label: item.name, detail: item.primary_locator }))
+-    : targets.map((item) => ({ id: item.id, label: item.name || item.url, detail: item.url })),
+-  [targetKind, devices, targets])
+-  // Every target a credential could be shared with; the dialog keeps those of the same asset kind.
+-  const shareTargets = useMemo<ShareTargetChoice[]>(() => [
+-    ...targets.map((item) => ({ id: item.id, kind: 'web' as CredentialTargetKind, label: item.name || item.url, detail: item.url })),
+-    ...devices.map((item) => ({ id: item.id, kind: 'device' as CredentialTargetKind, label: item.name, detail: item.primary_locator })),
+-  ], [devices, targets])
+-
+-  // A linked target outside the loaded list (500 most recent) is fetched by ID; one that does not
+-  // exist or cannot hold credentials is reported instead of silently dropped.
++  const choices = useMemo(() => assets.map((asset) => ({
++    id: asset.id, label: asset.name || asset.locator, detail: asset.locator,
++  })), [assets])
++  const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => ({
++    id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: asset.locator,
++  })), [assets])
++
+   useEffect(() => {
+-    if (loading || appliedDeepLink.current) return
+-    appliedDeepLink.current = true
+-    const requestedUrl = filters.target?.trim()
+-    if (requestedUrl && !targetId) {
+-      const web = targets.find((item) => item.url === requestedUrl)
+-      if (web) setFilters({ target_kind: undefined, target_id: web.id, target: undefined })
+-      else setMissingTarget(requestedUrl)
+-      return
+-    }
+-    if (!targetId) return
+-    if (targets.some((item) => item.id === targetId)) {
+-      if (targetKind === 'device') setFilters({ target_kind: undefined, target_id: targetId })
++    if (loading) return
++    const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
++    if (!targetId && requestedUrl) {
++      try {
++        const host = new URL(requestedUrl).hostname.toLowerCase().replace(/\.$/, '')
++        const asset = assets.find((item) => item.locator === host)
++        if (asset) setFilters({target_id:asset.id,target:undefined})
++      } catch { setMissingTarget(requestedUrl) }
+       return
+     }
+-    const device = devices.find((item) => item.id === targetId)
+-    if (device) {
+-      if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
+-      return
+-    }
+-    getTarget(targetId)
+-      .then((target) => {
+-        const usable = usableWebTargets([target])
+-        if (usable.length) setTargets((current) => [...current, ...usable])
+-        else setMissingTarget(target.url || targetId)
+-      })
+-      .catch(() => setMissingTarget(targetId))
+-  }, [devices, filters.target, loading, setFilters, targetId, targetKind, targets])
++    if (!targetId || assets.some((asset) => asset.id === targetId)) return
++    let cancelled = false
++    getTargetAsset(targetId).then((result) => {
++      if (cancelled) return
++      if (!result.target.is_active) {setMissingTarget(targetId);return}
++      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])
++      setFilters({target_id:result.target.id,target:undefined})
++    }).catch(() => {if (!cancelled) setMissingTarget(targetId)})
++    return () => {cancelled = true}
++  },[assets,filters.target,loading,setFilters,targetId])
+ 
+   const loadProfiles = useCallback(async () => {
+     // Only the latest request may fill the list: a slower answer for a target that is no longer
+@@ -357,11 +337,7 @@ function CredentialsContent() {
+ 
+   useEffect(() => { void loadProfiles() }, [loadProfiles])
+ 
+-  const availableKinds = targetKind === 'network'
+-    ? SSH_KINDS
+-    : targetKind === 'device'
+-      ? [...HTTP_KINDS, ...SSH_KINDS]
+-      : HTTP_KINDS
++  const availableKinds = ['network','device'].includes(targetKind) ? [...HTTP_KINDS, ...SSH_KINDS] : HTTP_KINDS
+ 
+   function openCreate() {
+     const firstKind = availableKinds[0]?.value || 'bearer_token'
+@@ -426,13 +402,11 @@ function CredentialsContent() {
+ 
+   function changeTargetKind(kind: CredentialTargetKind) {
+     if (kind === targetKind) return
+-    // A target ID is meaningful only inside its kind. Clear it in the same
+-    // event before the profile-loading effect can combine a new kind with the
+-    // previous kind's ID and surface a misleading 404.
++    // Switching capability views preserves the asset identity and shared records.
+     setProfiles([])
+     setError(null)
+     setMissingTarget(null)
+-    setFilters({ target_kind: kind === 'web' ? undefined : kind, target_id: undefined, target: undefined })
++    setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })
+   }
+ 
+   async function saveProfile() {
+@@ -521,7 +495,7 @@ function CredentialsContent() {
+   }
+ 
+   if (loading) return <div className="p-6 text-sm text-gray-400">Loading credential targets…</div>
+-  if (error && !targets.length && !devices.length) return <ErrorState message={error} />
++  if (error && !assets.length) return <ErrorState message={error} />
+ 
+   return (
+     <div className="mx-auto max-w-6xl p-6">
+diff --git a/ui/src/app/request-collections/page.tsx b/ui/src/app/request-collections/page.tsx
+index 9b1ffb2..daa2443 100644
+--- a/ui/src/app/request-collections/page.tsx
++++ b/ui/src/app/request-collections/page.tsx
+@@ -5,12 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
+ import { useUrlFilters } from '@/lib/useUrlFilters'
+ import { UploadAttempt } from '@/lib/uploadAttempt'
+ import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+-import {
+-  getDevices,
+-  getTargets,
+-  type DeviceTarget,
+-  type Target,
+-} from '@/lib/api'
++import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
+ import {
+   createRequestCollection,
+   deactivateRequestCollection,
+@@ -42,14 +37,13 @@ import {
+   Textarea,
+   useToast,
+ } from '@/components/ui'
+-import { usableWebTargets } from '@/lib/targetChoices'
+ 
+ type Choice = {
+   id: string
+   label: string
+   detail: string
+   locator: string
+-  ownerKind: 'web' | 'device'
++  ownerKind: 'network'
+ }
+ 
+ function splitValues(value: string): string[] {
+@@ -76,13 +70,13 @@ function defaultOrigin(choice: Choice | undefined): string {
+   if (!choice) return ''
+   try {
+     const parsed = new URL(choice.locator)
+-    return parsed.origin
++    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.origin : ''
+   } catch {
+     return ''
+   }
+ }
+ 
+-const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'device']
++const COLLECTION_TARGET_KINDS: RequestCollectionTargetKind[] = ['web', 'api', 'network', 'device']
+ 
+ export default function RequestCollectionsPage() {
+   return (
+@@ -94,18 +88,16 @@ export default function RequestCollectionsPage() {
+ 
+ function RequestCollectionsContent() {
+   const toast = useToast()
+-  const [targets, setTargets] = useState<Target[]>([])
+-  const [devices, setDevices] = useState<DeviceTarget[]>([])
++  const [assets, setAssets] = useState<TargetAsset[]>([])
+   // The collection owner lives in the URL, so reload, Back and links keep it.
+   const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
+     ? filters.target_kind as RequestCollectionTargetKind
+-    : 'web'
++    : 'network'
+   const targetId = filters.target_id || ''
+   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
+-    target_kind: kind === 'web' ? undefined : kind,
+-    target_id: undefined,
++    target_kind: kind, 
+   }), [setFilters])
+   const latestCollectionsRequest = useRef(0)
+   const [collections, setCollections] = useState<SharedRequestCollection[]>([])
+@@ -130,6 +122,8 @@ function RequestCollectionsContent() {
+   const [uploadErrors, setUploadErrors] = useState<{ document?: string; environment?: string; form?: string }>({})
+ 
+   const [bindingOrigins, setBindingOrigins] = useState('')
++  const [executionTargetId, setExecutionTargetId] = useState('')
++  const [assetOrigins, setAssetOrigins] = useState<AssetOrigin[]>([])
+   const [bindingEnvironmentId, setBindingEnvironmentId] = useState('')
+   const [newEnvironmentName, setNewEnvironmentName] = useState('')
+   const [newEnvironmentText, setNewEnvironmentText] = useState('')
+@@ -147,12 +141,9 @@ function RequestCollectionsContent() {
+ 
+   useEffect(() => {
+     let cancelled = false
+-    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
+-      .then(([web, connected]) => {
+-        if (cancelled) return
+-        setTargets(usableWebTargets(web.targets || []))
+-        setDevices((connected.devices || []).filter((item) => item.is_active))
+-      })
++    getAllTargetAssets().then((items) => {
++      if (!cancelled) setAssets(items)
++    })
+       .catch((cause) => {
+         if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
+       })
+@@ -160,32 +151,33 @@ function RequestCollectionsContent() {
+     return () => { cancelled = true }
+   }, [])
+ 
+-  const choices = useMemo<Choice[]>(() => targetKind === 'device'
+-    ? devices.map((item) => ({
+-        id: item.id,
+-        label: String(item.name || 'Connected device').slice(0, 160),
+-        detail: String(item.primary_locator || '').slice(0, 240),
+-        locator: String(item.primary_locator || '').slice(0, 2048),
+-        ownerKind: 'device' as const,
+-      }))
+-    : targets.map((item) => ({
+-        id: item.id,
+-        label: String(item.name || item.url || 'Web target').slice(0, 160),
+-        detail: String(item.url || '').slice(0, 240),
+-        locator: String(item.url || '').slice(0, 2048),
+-        ownerKind: 'web' as const,
+-      })), [devices, targetKind, targets])
++  const choices = useMemo<Choice[]>(() => assets.map((asset) => ({
++    id:asset.id,label:asset.name || asset.locator,detail:asset.locator,locator:asset.url,ownerKind:'network',
++  })),[assets])
+   const selectedChoice = choices.find((choice) => choice.id === targetId)
+-
+   useEffect(() => {
+-    // A target's ID is only checked once the lists have loaded, or a deep link would be cleared.
+-    if (loading || !targetId || choices.some((choice) => choice.id === targetId)) return
+-    if (targetKind !== 'device' && devices.some((item) => item.id === targetId)) {
+-      setFilters({ target_kind: 'device', target_id: targetId })
+-    } else {
+-      setTargetId('')
+-    }
+-  }, [choices, devices, loading, setFilters, setTargetId, targetId, targetKind])
++    setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')
++    if (!targetId) return
++    const controller = new AbortController()
++    getTargetAsset(targetId,controller.signal).then((result) => {
++      if (!controller.signal.aborted) setAssetOrigins(result.origins.filter((origin) => origin.is_active && origin.current_membership))
++    }).catch((cause) => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load application origins')})
++    return () => controller.abort()
++  },[targetId])
++  const executionOrigin = assetOrigins.find((origin) => origin.id === executionTargetId)
++  const executionKind: RequestCollectionTargetKind = executionOrigin ? 'web' : 'network'
++  const availableBindingTargets = useMemo(() => new Set([targetId,...assetOrigins.map((origin) => origin.id)]),[targetId,assetOrigins])
++  useEffect(() => {
++    if (loading || !targetId || assets.some((asset) => asset.id === targetId)) return
++    let cancelled = false
++    getTargetAsset(targetId).then((result) => {
++      if (cancelled) return
++      if (!result.target.is_active) {setError('The linked target is retired');return}
++      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])
++      setTargetId(result.target.id)
++    }).catch((cause) => {if (!cancelled) setError(cause instanceof Error ? cause.message : 'Target not found')})
++    return () => {cancelled = true}
++  },[assets,loading,setTargetId,targetId])
+ 
+   const loadCollections = useCallback(async () => {
+     // Only the latest request may fill the list, so a slow answer never shows another target's collections.
+@@ -241,8 +233,8 @@ function RequestCollectionsContent() {
+   useEffect(() => { void loadDetail(0) }, [loadDetail])
+ 
+   const matchingBindings = useMemo(() => (detail?.bindings || []).filter((binding) => (
+-    binding.target_id === targetId && binding.target_kind === targetKind
+-  )), [detail?.bindings, targetId, targetKind])
++    availableBindingTargets.has(binding.target_id)
++  )), [detail?.bindings, availableBindingTargets])
+ 
+   useEffect(() => {
+     setSelectionBindingId((current) => (
+@@ -296,7 +288,7 @@ function RequestCollectionsContent() {
+         document,
+         environment,
+         environment_name: environmentName.trim() || undefined,
+-        base_url: targetKind === 'device' && baseUrl.trim() ? baseUrl.trim() : undefined,
++        base_url: baseUrl.trim() || undefined,
+       }
+       const retryKey = await uploadAttempt.current.keyFor(payload)
+       const created = await createRequestCollection(payload, retryKey)
+@@ -342,8 +334,8 @@ function RequestCollectionsContent() {
+     setBusy(true)
+     try {
+       await upsertRequestCollectionBinding(detail.collection.id, {
+-        target_kind: targetKind,
+-        target_id: targetId,
++        target_kind: executionKind,
++        target_id: executionTargetId,
+         allowed_origins: splitValues(bindingOrigins),
+         environment_id: bindingEnvironmentId || undefined,
+       })
+@@ -430,13 +422,13 @@ function RequestCollectionsContent() {
+   }
+ 
+   if (loading) return <div className="p-6 text-sm text-gray-400">Loading collection targets…</div>
+-  if (error && !targets.length && !devices.length) return <ErrorState message={error} />
++  if (error && !assets.length) return <ErrorState message={error} />
+ 
+   return (
+     <div className="mx-auto max-w-7xl space-y-6 p-6">
+       <PageHeader
+         title="Request Collections"
+-        description="Upload once, assign the collection to one exact target ID, permit explicit origins on that target's hostname, and attach immutable selection digests to Scan or Hunt. Documents and environment values are never returned after upload."
++        description="Upload once for an asset, bind the same collection to its exact application origins, and attach immutable selection IDs to Scan or Hunt. Documents and environment values stay encrypted."
+         icon={<Braces className="h-6 w-6" />}
+         actions={<>
+           <Button variant="secondary" onClick={() => void loadCollections()} disabled={!targetId}>
+@@ -453,6 +445,7 @@ function RequestCollectionsContent() {
+           <Select value={targetKind} onChange={(event) => setTargetKind(event.target.value as RequestCollectionTargetKind)}>
+             <option value="web">Web application</option>
+             <option value="api">API</option>
++            <option value="network">Asset / network</option>
+             {featureEnabled('devices') && <option value="device">Connected device</option>}
+           </Select>
+         </Field>
+@@ -538,15 +531,26 @@ function RequestCollectionsContent() {
+                 <div>
+                   <h3 className="font-medium text-white">Exact-origin binding</h3>
+                   <p className="mt-1 text-xs text-gray-500">
+-                    Ownership is exact target ID. Each permitted origin is exact scheme + hostname + port; all origins must keep the owner&apos;s hostname, but may intentionally use a different discovered port.
++                    The asset owns one document. Choose a host or application service for execution; application bindings retain the exact scheme, hostname, and port.
+                   </p>
+                   {selectedChoice && <p className="mt-1 text-xs text-blue-300">Owner: {selectedChoice.label} · hostname source {selectedChoice.locator}</p>}
+                 </div>
+                 {matchingBindings.map((binding) => (
+                   <div key={binding.id} className="rounded-sm border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
+-                    {binding.allowed_origins.join(', ')} · {binding.environment_id ? 'environment attached' : 'no environment'}
++                    {binding.target_id === targetId ? 'Host' : 'Application service'} · {binding.allowed_origins.join(', ')} · {binding.environment_id ? 'environment attached' : 'no environment'}
+                   </div>
+                 ))}
++                <Field label="Execution target / service">
++                  <Select value={executionTargetId} onChange={(event) => {
++                    const next = event.target.value
++                    setExecutionTargetId(next)
++                    const origin = assetOrigins.find((item) => item.id === next)
++                    setBindingOrigins(origin ? new URL(origin.url).origin : '')
++                  }}>
++                    <option value={targetId}>Host asset · {selectedChoice?.label || targetId}</option>
++                    {assetOrigins.map((origin) => <option key={origin.id} value={origin.id}>{origin.url}</option>)}
++                  </Select>
++                </Field>
+                 <div className="grid gap-3 md:grid-cols-2">
+                   <Field label="Allowed origins (one per line)">
+                     <Textarea rows={3} value={bindingOrigins} onChange={(event) => setBindingOrigins(event.target.value)} placeholder={defaultOrigin(selectedChoice) || 'https://api.example.com'} />
+@@ -664,7 +668,7 @@ function RequestCollectionsContent() {
+             <Field label="Environment JSON file (optional)"><input type="file" accept=".json,application/json" onChange={(event) => void readFile(event.target.files?.[0]).then((value) => { if (value !== null) { setEnvironmentText(value); setUploadErrors({}) } }).catch((cause) => setUploadErrors({ environment: cause instanceof Error ? cause.message : 'Failed to read file', form: 'The environment file could not be read.' }))} className="block w-full text-sm text-gray-400" /></Field>
+           </div>
+           <Field label="Environment JSON (optional)" error={uploadErrors.environment}><Textarea rows={5} value={environmentText} onChange={(event) => { setEnvironmentText(event.target.value); setUploadErrors({}) }} /></Field>
+-          {targetKind === 'device' && <Field label="Device web base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
++          {<Field label="Application base URL (optional)"><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://device.local:8443" /></Field>}
+           <p className="rounded-sm border border-emerald-800 bg-emerald-950/20 p-3 text-xs text-emerald-200">After validation, only encrypted documents and a redacted index are stored. This screen never reads secret-bearing content back.</p>
+           <div className="flex justify-end gap-3">
+             <Button variant="secondary" onClick={() => setUploaderOpen(false)}>Cancel</Button>
+diff --git a/ui/src/components/credentials/ShareCredentialDialog.tsx b/ui/src/components/credentials/ShareCredentialDialog.tsx
+index c5fe143..e677459 100644
+--- a/ui/src/components/credentials/ShareCredentialDialog.tsx
++++ b/ui/src/components/credentials/ShareCredentialDialog.tsx
+@@ -22,9 +22,9 @@ export interface ShareTargetChoice {
+   detail: string
+ }
+ 
+-const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network']
++const ASSET_KINDS: CredentialTargetKind[] = ['web', 'api', 'network', 'device']
+ 
+-// Web, API and network are views of one asset row; a device is a different asset.
++// All physical-target kinds are views; sharing still needs an explicit target grant.
+ function sharesAsset(profileKind: CredentialTargetKind, targetKind: CredentialTargetKind): boolean {
+   return profileKind === targetKind || (ASSET_KINDS.includes(profileKind) && ASSET_KINDS.includes(targetKind))
+ }
+@@ -112,7 +112,7 @@ export function ShareCredentialDialog({
+           })
+         : null
+       await grantCredentialProfile(profile.id, {
+-        target_kind: profile.target_kind === 'device' ? 'device' : profile.target_kind,
++        target_kind: chosen.kind,
+         target_id: chosen.id,
+         approval_receipt_id: approval?.approvalReceiptId,
+       })
+diff --git a/ui/src/lib/requestCollectionApi.ts b/ui/src/lib/requestCollectionApi.ts
+index 100ac87..8990a34 100644
+--- a/ui/src/lib/requestCollectionApi.ts
++++ b/ui/src/lib/requestCollectionApi.ts
+@@ -6,7 +6,7 @@ import type {
+   RequestCollectionSelectionUpsert as GeneratedRequestCollectionSelectionUpsert,
+ } from './publicApi.generated'
+ 
+-export type RequestCollectionTargetKind = 'web' | 'api' | 'device'
++export type RequestCollectionTargetKind = 'web' | 'api' | 'network' | 'device'
+ export type RequestCollectionReplayPolicy = 'discovery_only' | 'safe_reads' | 'confirmed_active'
+ export type RequestCollectionImportFormat = NonNullable<GeneratedRequestCollectionCreate['format']>
+ 
+diff --git a/ui/src/lib/targetAssetApi.ts b/ui/src/lib/targetAssetApi.ts
+index ab79e77..8773d12 100644
+--- a/ui/src/lib/targetAssetApi.ts
++++ b/ui/src/lib/targetAssetApi.ts
+@@ -101,3 +101,16 @@ export async function registerTargetAsset(input: {locator: string; name?: string
+   }
+   return detail.target.id
+ }
++
++/** Fetch every metadata page; selectors must not silently lose assets after the first page. */
++export async function getAllTargetAssets(signal?: AbortSignal): Promise<TargetAsset[]> {
++  const assets = new Map<string, TargetAsset>()
++  let offset = 0
++  for (;;) {
++    const page = await getTargetAssets({limit:500,offset},signal)
++    for (const asset of page.targets) assets.set(asset.id,asset)
++    offset += page.targets.length
++    if (offset >= page.total) return [...assets.values()]
++    if (!page.targets.length) throw new Error('Target inventory changed while paging; refresh the selector')
++  }
++}
+diff --git a/ui/test-manifests/ui-route-action-manifest.json b/ui/test-manifests/ui-route-action-manifest.json
+index 8a5f3dd..9b3a1b0 100644
+--- a/ui/test-manifests/ui-route-action-manifest.json
++++ b/ui/test-manifests/ui-route-action-manifest.json
+@@ -305,6 +305,13 @@
+       "caseId": "XUI-022",
+       "stateAssertion": "Cross-product mission events and deep links render.",
+       "smokePath": "/timeline"
++    },
++    {
++      "route": "/targets/[id]/asset",
++      "source": "src/app/targets/[id]/asset/page.tsx",
++      "owner": "target-inventory",
++      "caseId": "ASSET-001",
++      "stateAssertion": "One canonical asset shows its origins, shared credential and collection IDs, combined history, and a network-view link without starting traffic on navigation."
+     }
+   ],
+   "workActions": [
+diff --git a/ui/tests/browser/target-assets.spec.ts b/ui/tests/browser/target-assets.spec.ts
+new file mode 100644
+index 0000000..576b8a2
+--- /dev/null
++++ b/ui/tests/browser/target-assets.spec.ts
+@@ -0,0 +1,41 @@
++import { expect, test, type Page } from '@playwright/test'
++import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
++
++const assetId = '00000000-0000-4000-8000-000000000294'
++const originId = '00000000-0000-4000-8000-000000000295'
++const profileId = '00000000-0000-4000-8000-000000000296'
++const collectionId = '00000000-0000-4000-8000-000000000297'
++const target = {id:assetId,asset_id:assetId,name:'Shared fixture',url:'host://asset.example.test',locator:'asset.example.test',is_active:true,environment:'lab',connected_device:true,device_class:'media',origin_count:2,service_count:2,active_findings_count:0,created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}
++const origins = [{id:originId,url:'https://asset.example.test:8443',name:'Management',is_active:true,current_membership:true,active_findings_count:0},{id:'00000000-0000-4000-8000-000000000298',url:'http://asset.example.test:3000',name:'API',is_active:true,current_membership:true,active_findings_count:0}]
++const history = {asset_id:assetId,kind:'scans',items:[],total:0,offset:0,limit:25}
++async function mock(page: Page) {
++  const writes: string[] = []
++  await pinMockApiOrigin(page)
++  await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
++    const request=route.request(), url=new URL(request.url())
++    if (!['GET','OPTIONS'].includes(request.method())) writes.push(`${request.method()} ${url.pathname}`)
++    if (url.pathname==='/targets/inventory') return route.fulfill({json:{targets:[target],total:1,offset:0,limit:50}})
++    if (url.pathname===`/targets/${assetId}/asset`) return route.fulfill({json:{target,origins,services:[],credentials:[{id:profileId,name:'One shared session',auth_kind:'cookie',current_version:2,is_active:true}],request_collections:[{id:collectionId,name:'One shared collection',request_count:3,is_active:true}],history,active_findings:{},authorization:{approved_by:'fixture'}}})
++    if (url.pathname===`/targets/${assetId}/history`) return route.fulfill({json:{...history,kind:url.searchParams.get('kind')}})
++    return route.fulfill({json:{status:'healthy',workers:[],devices:[],targets:[],total:0}})
++  })
++  return writes
++}
++
++test('ASSET-001 one asset owns service origins and shared IDs without executing on navigation', async ({page}) => {
++  const writes=await mock(page)
++  await page.goto('/targets')
++  await expect(page.getByTestId('target-asset-row')).toHaveCount(1)
++  await page.getByRole('link',{name:'Open asset',exact:true}).click()
++  await expect(page.getByRole('heading',{name:'Shared fixture',exact:true})).toBeVisible()
++  await expect(page.getByRole('link',{name:'https://asset.example.test:8443',exact:true})).toBeVisible()
++  await expect(page.getByRole('link',{name:'http://asset.example.test:3000',exact:true})).toBeVisible()
++  await expect(page.getByText(profileId,{exact:true})).toBeVisible()
++  await expect(page.getByText(collectionId,{exact:true})).toBeVisible()
++  await expect(page.getByRole('link',{name:'Connected Devices view →'})).toHaveAttribute('href',`/devices/${assetId}`)
++  const manage=page.getByRole('link',{name:'Manage',exact:true})
++  await expect(manage.nth(0)).toHaveAttribute('href',new RegExp(`target_id=${assetId}`))
++  await expect(manage.nth(1)).toHaveAttribute('href',new RegExp(`target_id=${assetId}`))
++  expect(writes).toEqual([])
++  expect(await page.evaluate(() => document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
++})

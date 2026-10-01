@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONPATH="$PWD:$PWD/api:$PWD/scanner"
 python -m pip install -q --disable-pip-version-check --require-hashes -r scanner/requirements.lock
 npm --prefix ui ci --silent
+python scripts/generate_public_api_contract.py
 set +e
-python -m pytest --tb=short -q tests/test_target_asset_migration_postgres.py tests/test_target_asset_inputs_postgres.py tests/test_device_shared_inputs_postgres.py tests/test_target_asset_startup_postgres.py tests/test_target_asset_store_postgres.py tests/test_target_asset_authority_postgres.py > .implementation/test-output.txt 2>&1
+python -m pytest --tb=short -q tests/test_target_asset_migration_postgres.py tests/test_target_asset_inputs_postgres.py tests/test_device_shared_inputs_postgres.py tests/test_target_asset_startup_postgres.py tests/test_target_asset_store_postgres.py tests/test_target_asset_authority_postgres.py tests/test_target_asset_collections_postgres.py > .implementation/test-output.txt 2>&1
 result=$?
 python scripts/check_module_size.py >> .implementation/test-output.txt 2>&1
 ratchet=$?
@@ -17,7 +19,7 @@ printf '\npytest_exit=%s module_size_exit=%s ui_tests_exit=%s types_exit=%s buil
 cat .implementation/test-output.txt
 tail -15 .implementation/ui-test-output.txt
 tail -30 .implementation/ui-build-output.txt
-git add .implementation/*output.txt
+git add .implementation/*output.txt docs/generated/public-openapi-manifest.json ui/src/lib/publicApi.generated.ts
 if ! git diff --cached --quiet; then
   git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'chore(dev): record isolated integration results'
   git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"

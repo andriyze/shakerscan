@@ -10,6 +10,19 @@ import uuid
 
 MIGRATION = 'unified_target_asset_authority_v1'
 SCHEMA = r"""
+ALTER TABLE request_collection_bindings DROP CONSTRAINT IF EXISTS request_collection_bindings_target_kind_check;
+ALTER TABLE request_collection_bindings ADD CONSTRAINT request_collection_bindings_target_kind_check
+    CHECK (target_kind IN ('web','api','network','device'));
+CREATE OR REPLACE FUNCTION retire_asset_members() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.is_active AND NOT NEW.is_active AND NEW.asset_owner_id IS NULL THEN
+        UPDATE targets SET is_active=false,updated_at=NOW() WHERE asset_owner_id=NEW.id AND is_active;
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER target_asset_retirement AFTER UPDATE OF is_active ON targets
+FOR EACH ROW EXECUTE FUNCTION retire_asset_members();
 ALTER TABLE targets ADD COLUMN IF NOT EXISTS authorization_inheritance BOOLEAN NOT NULL DEFAULT true;
 CREATE OR REPLACE FUNCTION target_effective_authorization_target(consumer uuid) RETURNS uuid
 LANGUAGE sql STABLE STRICT AS $$

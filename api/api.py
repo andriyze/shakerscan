@@ -10282,8 +10282,8 @@ async def _generic_collection_refs(
                 status_code=422,
                 detail="request collection selection_id is unavailable",
             )
-        owner_id = row["device_target_id"] if normalized_kind == "device" else row["target_id"]
-        if str(owner_id or "") != str(bound_target_id):
+        visible = await conn.fetchval("SELECT target_collection_visible($1,$2)", row["id"], bound_target_id)
+        if not visible:
             raise HTTPException(
                 status_code=422,
                 detail="request collection is bound to another target",
@@ -10295,7 +10295,7 @@ async def _generic_collection_refs(
                  ON e.id=b.environment_id AND e.is_active=true
                WHERE b.collection_id=$1 AND b.target_id=$3
                  AND (b.target_kind=$2 OR
-                      (b.target_kind IN ('web','api','network') AND $2 IN ('web','api','network')))
+                      (b.target_kind IN ('web','api','network','device') AND $2 IN ('web','api','network','device')))
                  AND b.is_active=true AND ($4::uuid IS NULL OR b.id=$4)
                ORDER BY (b.target_kind=$2) DESC, b.updated_at DESC LIMIT 1""",
             row["id"], normalized_kind, bound_target_id,

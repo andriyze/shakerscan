@@ -352,14 +352,9 @@ def _pool(request: Request) -> Any:
 
 
 async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) -> None:
-    if target_kind == "device":
-        row = await conn.fetchrow(
-            "SELECT id FROM device_targets WHERE id=$1 AND is_active=true", target_id
-        )
-    else:
-        row = await conn.fetchrow(
-            "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
-        )
+    row = await conn.fetchrow(
+        "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
+    )
     if not row:
         raise HTTPException(status_code=404, detail="active credential target not found")
 
