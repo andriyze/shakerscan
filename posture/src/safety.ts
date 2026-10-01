@@ -18,8 +18,9 @@ export function permitsAnyTarget(): boolean { return targetPolicy === 'any'; }
 export function isPublicAddress(value: string): boolean {
   try {
     const address = ipaddr.parse(value);
-    // Unspecified, multicast and broadcast addresses are never connectable destinations.
-    if (targetPolicy === 'any') return !['unspecified', 'multicast', 'broadcast'].includes(address.range());
+    // Unspecified, multicast and broadcast addresses are never connectable destinations. An
+    // IPv4-mapped spelling is the same destination: ::ffff:255.255.255.255 was permitted.
+    if (targetPolicy === 'any') return !['unspecified', 'multicast', 'broadcast'].includes(ipaddr.process(value).range());
     if (address.range() !== 'unicast') return false;
     if (address.kind() === 'ipv4') return !V4.some(r => address.match(r));
     // Only currently allocated global unicast; excludes mapped/NAT64/ULA/link-local/etc.

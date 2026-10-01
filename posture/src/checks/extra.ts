@@ -78,9 +78,10 @@ export async function securityTextFact(host: string, ip: string | undefined, bud
     const response = await getText(host, ip, '/.well-known/security.txt', budget);
     const result: Record<string, unknown> = { status_code: response.status };
     const contentType = response.content_type?.split(';')[0]?.trim().toLowerCase();
-    if (contentType) result.content_type = contentType;
+    // Header values arrive as latin1 and may hold tabs or C1 controls, which cached facts refuse.
+    if (contentType && /^[\x20-\x7e]+$/.test(contentType)) result.content_type = contentType;
     const charset = /(?:^|;)\s*charset\s*=\s*"?([^";\s]+)"?/i.exec(response.content_type ?? '')?.[1]?.toLowerCase();
-    if (charset) result.charset = charset.slice(0, 32);
+    if (charset && /^[\x20-\x7e]+$/.test(charset)) result.charset = charset.slice(0, 32);
     if (response.status === 200) {
       if (contentType === 'text/html' || /^\s*(?:<!doctype\s+html|<html\b)/i.test(response.body)) {
         result.format = 'html_fallback';

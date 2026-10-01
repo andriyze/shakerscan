@@ -22,7 +22,10 @@ export interface DnsAnswer {
 function invalid(): never { throw new Error('invalid_dns'); }
 export function encodeQuery(host: string, type: QueryType, id: number): Uint8Array {
   const labels = host === '.' ? [] : host.split('.');
-  if (labels.some(l => !l.length || l.length > 63) || host.length > 253) invalid();
+  // Only names the decoder can match are sent: it refuses label bytes outside printable ASCII
+  // and backslashes, and lowercases the question. Non-ASCII was also mis-encoded: 'š' was sent
+  // as 'a', and an astral character left a label length that did not match its bytes.
+  if (labels.some(l => !l.length || l.length > 63) || host.length > 253 || /[^\x21-\x7e]|[A-Z\\]/.test(host)) invalid();
   const data = new Uint8Array(12 + labels.reduce((n, label) => n + label.length + 1, 1) + 4 + 11);
   const view = new DataView(data.buffer);
   view.setUint16(0, id); view.setUint16(2, 0x0100); // RD; never CD.
@@ -123,7 +126,10 @@ export function decodeAnswer(data: Uint8Array, expected: { host: string; type: Q
         } else if (type === TYPES.CAA) {
           need(pos, 2, end); const length = data[pos + 1]!; need(pos + 2, length, end);
           record.flags = data[pos]!;
-          record.tag = String.fromCharCode(...data.subarray(pos + 2, pos + 2 + length)).toLowerCase();
+          // Like the value, a tag is kept only when printable; a NUL or space in it reached the
+          // displayed evidence ('0 iodef x <value>' read as an unredacted iodef record).
+          const tag = data.subarray(pos + 2, pos + 2 + length);
+          if (tag.every(ch => ch > 32 && ch <= 126)) record.tag = String.fromCharCode(...tag).toLowerCase();
           const value = data.subarray(pos + 2 + length, end);
           if (value.length <= 512 && value.every(ch => ch >= 32 && ch <= 126)) record.value = String.fromCharCode(...value);
         } else if (type === TYPES.SOA) {

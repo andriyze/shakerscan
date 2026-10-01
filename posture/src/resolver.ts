@@ -35,12 +35,16 @@ function tcp(server: string, port: number, query: Uint8Array, signal: AbortSigna
     const abort = () => done(new Error('dns_timeout'));
     signal.addEventListener('abort', abort, { once: true });
     socket.on('error', error => done(error));
+    // A peer that closes before sending a whole frame is refused now, not at the deadline.
+    socket.on('end', () => done(new Error('dns_truncated')));
     socket.on('connect', () => socket.end(Buffer.concat([Buffer.from([query.length >> 8, query.length & 255]), query])));
     socket.on('data', chunk => {
       chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
       const all = Buffer.concat(chunks);
-      if (all.length > 65537) done(new Error('dns_too_large'));
-      else if (all.length >= 2 && all.length >= 2 + all.readUInt16BE(0)) done(undefined, all.subarray(2, 2 + all.readUInt16BE(0)));
+      // The two-byte prefix bounds a frame at 65537 bytes, so a complete frame is always taken
+      // before more is buffered. Checking size first refused a 65535-byte reply whose last
+      // byte arrived together with any following byte.
+      if (all.length >= 2 && all.length >= 2 + all.readUInt16BE(0)) done(undefined, all.subarray(2, 2 + all.readUInt16BE(0)));
     });
   });
 }

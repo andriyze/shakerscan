@@ -1,6 +1,21 @@
 import { encodeQuery, TYPES, type QueryType } from '../src/wire.ts';
-import type { Fetcher } from '../src/types.ts';
+import { isObservation } from '../src/cache.ts';
+import type { Check, Fetcher, Observation } from '../src/types.ts';
 
+// Property-test run counts; POSTURE_FUZZ_SCALE=50 (for example) fuzzes longer locally.
+export const runs = (count: number) => Math.max(1, Math.round(count * (Number(process.env.POSTURE_FUZZ_SCALE) || 1)));
+// isObservation is the engine's schema for a cached observation. Evidence derived from any
+// network response must satisfy it, or that target's result is never reusable.
+type Fact = NonNullable<Observation['v2_extras']>[number];
+const CHECK_IDS = ['dns.addresses', 'dns.nameservers', 'dns.dnssec', 'dns.caa', 'mail.mx', 'mail.spf', 'mail.dmarc', 'mail.dkim',
+  'http.response', 'tls.handshake', 'tls.ciphers', 'http.headers', 'http.cors', 'http.redirect'];
+const FACT_IDS = ['ip.network', 'mail.mta_sts', 'mail.tls_rpt', 'http.security_txt', 'dns.https', 'http.connections'];
+/** Whether isObservation accepts an otherwise minimal observation carrying this check or fact. */
+export function cacheAccepts(item: Check | Fact, host = 'example.com'): boolean {
+  const checks = CHECK_IDS.map(id => id === item.id && !('scope' in item) ? item : { id, name: id, group: id.split('.')[0] as Check['group'], status: 'unknown' as const, detail: 'stub' });
+  const extras = FACT_IDS.map(id => id === item.id && 'scope' in item ? item : { id, name: id, group: id.split('.')[0] as Fact['group'], scope: 'stub', result: null });
+  return isObservation({ schema_version: '1', target: host, checked_at: new Date().toISOString(), summary: 'stub', checks, limitations: [], v2_extras: extras }, host);
+}
 export function name(value: string): number[] {
   return value ? [...value.split('.').flatMap(s => [s.length, ...Buffer.from(s)]), 0] : [0];
 }

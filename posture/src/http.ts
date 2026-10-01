@@ -32,9 +32,11 @@ export function redirectKind(location: string | undefined, host: string, https: 
   if (location.length > 2048 || /[\x00-\x20\x7f\\]/.test(location)) return 'refused';
   try {
     const url = new URL(location, `${https ? 'https' : 'http'}://${host}/`);
-    // Even explicit default ports are refused: URL.port alone erases them.
+    // Even explicit default ports are refused: URL.port alone erases them. URL.port still
+    // catches the authorities this pattern misses: 'http:host:8443' from an HTTPS page and
+    // '///host:8443' both name port 8443 and were classified as same-host.
     const authority = /^(?:[a-z]+:)?\/\/([^/]+)/i.exec(location)?.[1];
-    if (authority?.includes(':') || url.username || url.password || !['http:', 'https:'].includes(url.protocol) || (/^[\d.]+$|:/.test(host) ? url.hostname !== host : normalizeTarget(url.hostname) !== host)) return 'refused';
+    if (authority?.includes(':') || url.port || url.username || url.password || !['http:', 'https:'].includes(url.protocol) || (/^[\d.]+$|:/.test(host) ? url.hostname !== host : normalizeTarget(url.hostname) !== host)) return 'refused';
     return url.protocol === 'https:' ? 'same_host_https' : 'same_host_http';
   } catch { return 'refused'; }
 }
