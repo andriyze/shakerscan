@@ -756,6 +756,27 @@
     "name": "patch_credential_profile"
   },
   {
+    "path": "/credential-profiles/{profile_id}/grants",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_credential_grants"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/grants",
+    "methods": [
+      "POST"
+    ],
+    "name": "grant_credential_profile"
+  },
+  {
+    "path": "/credential-profiles/{profile_id}/grants/{target_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "revoke_credential_grant"
+  },
+  {
     "path": "/credential-profiles/{profile_id}/rotate",
     "methods": [
       "POST"

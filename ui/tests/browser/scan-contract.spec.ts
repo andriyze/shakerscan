@@ -146,6 +146,10 @@ test('authorized active Scan authorizes the target once and submits it in one fl
 
   await page.goto('/scan/new')
   await page.getByLabel('Target URL or hostname').fill(target.url)
+  // A new Scan starts with the target's credential selected; this is the plain active Scan, so
+  // the operator clears it (credential use takes the bounded credential-receipt path instead).
+  await expect(page.getByLabel('Primary identity')).toHaveValue(credential.id)
+  await page.getByLabel('Primary identity').selectOption('')
   await page.getByLabel('Allow active testing').check()
   const submit = page.getByRole('button', { name: 'Run Scan' })
   await expect(submit).toBeDisabled()
