@@ -8,6 +8,18 @@ jobs:
   implementation:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.23@sha256:885cf05d376c7cf27afef02073e6bdac3841252537f16e244fd1c1e6a7c99fb1
+        env:
+          POSTGRES_USER: scanner
+          POSTGRES_PASSWORD: migration-test-only
+          POSTGRES_DB: scanner
+        ports:
+          - 55432:5432
+        options: --health-cmd "pg_isready -U scanner" --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      TARGET_ASSET_TEST_DATABASE_URL: postgresql://scanner:migration-test-only@127.0.0.1:55432/scanner
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -28,6 +40,11 @@ jobs:
             fi
             echo "IMPLEMENTATION_COMMIT=$(git rev-parse HEAD)"
           fi
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scanner/requirements.lock
       - name: Set up supported Node runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
