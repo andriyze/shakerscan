@@ -90,10 +90,14 @@ def _has_verified_proof_contract_v2(finding: dict[str, Any]) -> bool:
     predicate = _as_dict(proof.get("predicate"))
     reexecution = _as_dict(proof.get("reexecution"))
     reexecution_required = reexecution.get("required", True) is not False
+    performed = reexecution.get("performed")
+    # Malformed envelopes fail closed rather than raise: a list or object `performed` is unhashable
+    # (`in {False, True}` raised TypeError) and a numeric `missing` is not iterable (`list()` raised),
+    # and either turned the findings list into an HTTP 500.
     reexecution_ok = (
-        reexecution.get("performed") is True
+        performed is True
         if reexecution_required
-        else reexecution.get("performed") in {False, True}
+        else not isinstance(performed, (list, dict)) and performed in {False, True}
     )
     return bool(
         proof.get("schema_version") == "proof-contract/v2"
@@ -104,7 +108,7 @@ def _has_verified_proof_contract_v2(finding: dict[str, Any]) -> bool:
         and proof.get("verdict") == "verified"
         and proof.get("promotable") is True
         and predicate.get("satisfied") is True
-        and not list(predicate.get("missing") or [])
+        and not predicate.get("missing")
     )
 
 

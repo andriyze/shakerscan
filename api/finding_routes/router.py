@@ -60,13 +60,50 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .hunt_scope import candidate_hunt_predicate, finding_hunt_predicate
 from .list_filters import (
-    PROOF_FILTER_MAX_ROWS, PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list,
-    project_and_filter_by_proof,
+    PROOF_STATES, SEVERITIES, host_in_domain_sql, parse_choice_list, stream_proof_matches,
 )
+from .proof_sql import proof_state_sql, undetermined_proof_sql
 from .remediation import finding_remediation
 
 
 router = APIRouter()
+
+# GET /findings: one row per finding with its target and latest retest. The proof projection reads
+# the latest retest's mode, so the SQL form of the projection uses the same expression.
+_LATEST_RETEST_MODE_SQL = "CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END"
+FINDINGS_LIST_SELECT_SQL = f"""
+            SELECT f.*,
+                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
+                   COALESCE(t.name, ait.name, dt.name) as target_name,
+                   t.root_domain,
+                   ait.endpoint_url as ai_target_url,
+                   ait.name as ai_target_name,
+                   latest_retest.status AS latest_retest_status,
+                   latest_retest.result_status AS latest_retest_result_status,
+                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
+                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
+                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
+                   {_LATEST_RETEST_MODE_SQL} AS latest_retest_mode,
+                   COUNT(*) OVER() AS total_count"""
+FINDINGS_LIST_FROM_SQL = """
+            FROM findings f
+            LEFT JOIN targets t ON f.target_id = t.id
+            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
+            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
+            LEFT JOIN LATERAL (
+                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
+                FROM finding_verifications
+                WHERE finding_id=f.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) latest_retest ON TRUE
+            WHERE 1=1
+        """
+FINDING_PROOF_STATE_SQL = proof_state_sql(
+    evidence="f.evidence", severity="f.severity",
+    verdict="f.last_verification_verdict", retest_mode=_LATEST_RETEST_MODE_SQL,
+)
+FINDING_PROOF_UNDETERMINED_SQL = undetermined_proof_sql("f.evidence")
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -426,33 +463,7 @@ async def list_findings(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async with _pool().acquire() as conn:
-        query = """
-            SELECT f.*,
-                   COALESCE(t.url, ait.endpoint_url, dt.primary_locator) as target_url,
-                   COALESCE(t.name, ait.name, dt.name) as target_name,
-                   t.root_domain,
-                   ait.endpoint_url as ai_target_url,
-                   ait.name as ai_target_name,
-                   latest_retest.status AS latest_retest_status,
-                   latest_retest.result_status AS latest_retest_result_status,
-                   COALESCE(latest_retest.verdict, f.last_verification_verdict) AS latest_retest_verdict,
-                   COALESCE(latest_retest.confidence, f.last_verification_confidence) AS latest_retest_confidence,
-                   COALESCE(latest_retest.completed_at, f.last_verified_at) AS latest_retest_completed_at,
-                   CASE WHEN latest_retest.verdict IS NOT NULL THEN latest_retest.verification_mode END AS latest_retest_mode,
-                   COUNT(*) OVER() AS total_count
-            FROM findings f
-            LEFT JOIN targets t ON f.target_id = t.id
-            LEFT JOIN ai_targets ait ON f.ai_target_id = ait.id
-            LEFT JOIN device_targets dt ON f.device_target_id = dt.id
-            LEFT JOIN LATERAL (
-                SELECT status, result_status, verdict, confidence, completed_at, verification_mode
-                FROM finding_verifications
-                WHERE finding_id=f.id
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-            ) latest_retest ON TRUE
-            WHERE 1=1
-        """
+        query = FINDINGS_LIST_SELECT_SQL + FINDINGS_LIST_FROM_SQL
         params: list = []
         param_idx = 1
 
@@ -609,14 +620,23 @@ async def list_findings(
             )
         )
 
+        # Proof is the canonical projection stated in SQL (proof_sql.py), so a proof filter is one
+        # more WHERE clause: the database counts and paginates it like any other. A row whose proof
+        # SQL cannot decide exactly sends the request through the streaming projection instead.
+        stream_proof = False
         if proof_states:
-            # Proof is projected per row, so every row the other filters leave is read,
-            # projected, and paginated here; a bounded read keeps that honest.
-            query += f"""
-                ORDER BY {order_clause}
-                LIMIT ${param_idx}
-            """
-            params.append(PROOF_FILTER_MAX_ROWS + 1)
+            stream_proof = bool(await conn.fetchval(
+                f"SELECT EXISTS (SELECT 1 {query[len(FINDINGS_LIST_SELECT_SQL):]}"
+                f" AND {FINDING_PROOF_UNDETERMINED_SQL})",
+                *params,
+            ))
+            if not stream_proof:
+                query += f" AND {FINDING_PROOF_STATE_SQL} = ANY(${param_idx}::text[])"
+                params.append(proof_states)
+                param_idx += 1
+
+        if stream_proof:
+            query += f" ORDER BY {order_clause}"
         elif candidates_included:
             # The Python merge below applies offset/limit over the combined list, so the
             # findings side only needs the same bounded prefix window, not its own OFFSET.
@@ -632,18 +652,16 @@ async def list_findings(
             """
             params.extend([limit, offset])
 
-        rows = await conn.fetch(query, *params)
-
         proof_matches: list[dict[str, Any]] | None = None
-        if proof_states:
-            if len(rows) > PROOF_FILTER_MAX_ROWS:
-                raise HTTPException(status_code=422, detail=(
-                    f"The proof filter checks at most {PROOF_FILTER_MAX_ROWS:,} findings and more than "
-                    "that match the other filters. Narrow the list (status, severity, target or a "
-                    "time window) and filter by proof again."
-                ))
-            proof_matches = project_and_filter_by_proof(rows, proof_states, finding_proof_fields)
+        if stream_proof:
+            # Every row the other filters leave is projected in Python, streamed from a cursor:
+            # memory holds the requested prefix only, and nothing is refused or sampled.
+            proof_matches, proof_total = await stream_proof_matches(
+                conn, query, params, proof_states, finding_proof_fields, keep=offset + limit,
+            )
             rows = []
+        else:
+            rows = await conn.fetch(query, *params)
 
         # `total_count` is identical on every row of the window. The empty
         # result set is ambiguous (truly no matches vs offset past end), so
@@ -651,7 +669,7 @@ async def list_findings(
         # and no rows we fall back to a dedicated COUNT(*) query so the UI
         # paginator can render correctly.
         if proof_matches is not None:
-            total = len(proof_matches)
+            total = proof_total
         elif rows:
             total = rows[0]["total_count"]
         elif offset > 0:

@@ -55,7 +55,7 @@ import api as api_module  # noqa: E402
 
 findings_router = sys.modules["finding_routes.router"]
 from capabilities import exposure_probe  # noqa: E402
-from finding_routes.list_filters import PROOF_FILTER_MAX_ROWS, parse_choice_list  # noqa: E402
+from finding_routes.list_filters import parse_choice_list  # noqa: E402
 from finding_routes.remediation import finding_remediation  # noqa: E402
 
 

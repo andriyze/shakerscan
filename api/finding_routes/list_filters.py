@@ -1,19 +1,18 @@
 """GET /findings filters that are more than one SQL equality.
 
 Severity takes several values (``severity=critical,high``). Proof is the canonical projection
-(``finding_proof_fields``) over stored evidence and the latest retest: it is not a column, and a
-second SQL predicate for it would drift from the badge the list shows. So a proof filter projects
-every row the other filters leave and paginates the matches; past PROOF_FILTER_MAX_ROWS rows it
-refuses instead of answering from a sample.
+(``finding_proof_fields``) over stored evidence and the latest retest. The proof filter applies its
+exact SQL form (``proof_sql.py``, held to the Python projection by a real-PostgreSQL parity test),
+so the database paginates and counts it; a row the SQL cannot decide sends the request through
+``stream_proof_matches``, which projects in Python from a cursor without loading the result set.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 PROOF_STATES = ("verified", "suspected", "unverified")
-PROOF_FILTER_MAX_ROWS = 20_000
 
 
 def parse_choice_list(value: str | None, allowed: Iterable[str], name: str) -> list[str] | None:
@@ -35,21 +34,33 @@ def parse_choice_list(value: str | None, allowed: Iterable[str], name: str) -> l
     return chosen or None
 
 
-def project_and_filter_by_proof(
-    rows: Iterable[Mapping[str, Any]],
+async def stream_proof_matches(
+    conn: Any,
+    query: str,
+    params: list,
     proof_states: Iterable[str],
     project: Callable[[dict[str, Any]], dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Rows (in their query order) whose projected proof_state is one of ``proof_states``."""
+    *,
+    keep: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Exact proof filter by projection, streamed: the first ``keep`` matches and the match count.
+
+    Rows come from a server-side cursor in query order, so memory holds the requested prefix and
+    one fetch batch, whatever the number of rows the other filters leave.
+    """
     wanted = set(proof_states)
-    matches: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        item.pop("total_count", None)
-        item.update(project(item))
-        if item.get("proof_state") in wanted:
-            matches.append(item)
-    return matches
+    kept: list[dict[str, Any]] = []
+    total = 0
+    async with conn.transaction():
+        async for row in conn.cursor(query, *params, prefetch=500):
+            item = dict(row)
+            item.pop("total_count", None)
+            item.update(project(item))
+            if item.get("proof_state") in wanted:
+                if total < keep:
+                    kept.append(item)
+                total += 1
+    return kept, total
 
 
 # The host part of a URL or locator ("https://user@app.example.com:8443/x", "app.example.com:22").

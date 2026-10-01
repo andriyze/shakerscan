@@ -36,6 +36,22 @@ def test_incomplete_or_unreexecuted_proof_contract_v2_fails_closed():
     assert has_deterministic_exploit_proof({"proof_contract_v2": proof}) is False
 
 
+def test_a_malformed_proof_contract_v2_fails_closed_instead_of_raising():
+    # A numeric `missing` is not iterable and a list/object `performed` is unhashable: both raised
+    # (TypeError) and turned any findings list holding such evidence into an HTTP 500.
+    for proof in (
+        _proof(predicate={"satisfied": True, "missing": 5}),
+        _proof(predicate={"satisfied": True, "missing": True}),
+        _proof(reexecution={"required": False, "performed": [True], "verifier_build": "worker:test"}),
+        _proof(reexecution={"required": False, "performed": {"ok": True}, "verifier_build": "worker:test"}),
+    ):
+        assert has_deterministic_exploit_proof({"proof_contract_v2": proof}) is False
+    # A contract that does not require re-execution still accepts a recorded True/False (or 0/1).
+    for performed in (False, True, 0, 1, 1.0):
+        proof = _proof(reexecution={"required": False, "performed": performed, "verifier_build": "worker:test"})
+        assert has_deterministic_exploit_proof({"proof_contract_v2": proof}) is True
+
+
 def test_generic_differential_label_is_not_deterministic_proof():
     assert has_deterministic_exploit_proof({"proof_type": "differential_response"}) is False
     assert has_deterministic_exploit_proof({"proof_type": "repeated_semantic_response_diff"}) is True
