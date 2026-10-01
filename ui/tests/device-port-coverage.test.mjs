@@ -9,7 +9,7 @@ function scanWith(posture) {
 
 const openTcp = (port, extra = {}) => ({ transport: 'tcp', port, state: 'open', service_name: 'http', ...extra })
 
-test('without a classification the remainder is "not open", never closed', () => {
+test('overlapping batch counters are not a unique examination total', () => {
   const coverage = devicePortCoverage(scanWith({
     services: [openTcp(80), openTcp(443), openTcp(8080)],
     completeness: {
@@ -24,7 +24,7 @@ test('without a classification the remainder is "not open", never closed', () =>
   assert.equal(coverage.tcp.scopeLabel, 'Top 100 + device priority TCP ports')
   assert.deepEqual(
     [coverage.tcp.examined, coverage.tcp.open, coverage.tcp.notOpen, coverage.tcp.closed, coverage.tcp.filtered],
-    [130, 3, 127, null, null],
+    [null, 3, null, null, null],
   )
   assert.equal(coverage.tcp.complete, true)
 })
@@ -34,6 +34,7 @@ test('a classified scan separates closed from filtered', () => {
     services: [openTcp(22, { service_name: 'ssh' }), openTcp(443)],
     completeness: {
       tcp_scope: 'all_tcp',
+      tcp_discovery_complete: true,
       tcp_required_port_count: 65535,
       tcp_completed_required_port_count: 65535,
       tcp_closed_filtered_classification_complete: true,
@@ -77,7 +78,7 @@ test('fingerprinting reports how many open ports were identified and versioned',
     },
   }))
   assert.deepEqual(
-    [coverage.fingerprint.ports, coverage.fingerprint.identified, coverage.fingerprint.withVersion],
+    [coverage.fingerprint.ports, coverage.identification.identified, coverage.identification.withVersion],
     [3, 2, 1],
   )
 })

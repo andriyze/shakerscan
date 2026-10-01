@@ -2,6 +2,7 @@
 
 import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
+import { DevicePortCoverage } from '@/components/DevicePortCoverage'
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
@@ -461,52 +462,7 @@ function DeviceDetailContent() {
         )}
       </Card>
 
-      {portCoverage && (
-        <section className="mb-6" data-testid="device-port-coverage">
-          <h2 className="mb-1 text-lg font-semibold text-white">Ports examined</h2>
-          <p className="mb-3 text-sm text-gray-500">
-            Closed means the device answered that nothing listens there. No response means the probe got no answer, so the port may be open behind a filter.
-          </p>
-          <Card className="overflow-hidden p-0">
-            <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-              <thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr>
-                <th className="px-4 py-3">Scope</th><th className="px-4 py-3">Examined</th><th className="px-4 py-3">Open</th><th className="px-4 py-3">Closed</th><th className="px-4 py-3">Filtered / no response</th><th className="px-4 py-3">Status</th>
-              </tr></thead>
-              <tbody className="divide-y divide-gray-800 bg-gray-950/50">
-                <tr>
-                  <td className="px-4 py-3 text-white">{portCoverage.tcp.scopeLabel}</td>
-                  <td className="px-4 py-3 text-gray-300">{portCoverage.tcp.examined ?? '—'}{portCoverage.tcp.required != null && portCoverage.tcp.examined != null && portCoverage.tcp.examined < portCoverage.tcp.required ? ` of ${portCoverage.tcp.required}` : ''}</td>
-                  <td className="px-4 py-3 font-semibold text-emerald-300">{portCoverage.tcp.open}</td>
-                  {portCoverage.tcp.classified ? <>
-                    <td className="px-4 py-3 text-gray-300">{portCoverage.tcp.closed ?? '—'}</td>
-                    <td className="px-4 py-3 text-amber-200">{portCoverage.tcp.filtered ?? '—'}</td>
-                  </> : (
-                    <td colSpan={2} className="px-4 py-3 text-gray-400">{portCoverage.tcp.notOpen ?? '—'} not open <span className="text-xs text-gray-600">(closed and filtered not told apart)</span></td>
-                  )}
-                  <td className="px-4 py-3 text-xs">{portCoverage.tcp.complete ? <span className="text-emerald-300">complete</span> : <span className="text-amber-200">incomplete</span>}</td>
-                </tr>
-                {portCoverage.udp && (
-                  <tr>
-                    <td className="px-4 py-3 text-white">Common UDP ports</td>
-                    <td className="px-4 py-3 text-gray-300">{portCoverage.udp.examined ?? '—'}</td>
-                    <td className="px-4 py-3 font-semibold text-emerald-300">{portCoverage.udp.open}</td>
-                    <td className="px-4 py-3 text-gray-300">{portCoverage.udp.closed}</td>
-                    <td className="px-4 py-3 text-amber-200">{portCoverage.udp.noResponse + portCoverage.udp.filtered}</td>
-                    <td className="px-4 py-3 text-xs">{portCoverage.udp.complete ? <span className="text-emerald-300">complete</span> : <span className="text-amber-200">incomplete</span>}</td>
-                  </tr>
-                )}
-              </tbody>
-            </table></div>
-            {portCoverage.fingerprint && (
-              <p className="border-t border-gray-800 px-4 py-3 text-xs text-gray-400">
-                Service identification ran on {portCoverage.fingerprint.ports} open TCP port{portCoverage.fingerprint.ports === 1 ? '' : 's'}: {portCoverage.fingerprint.identified} identified, {portCoverage.fingerprint.withVersion} with a version
-                {portCoverage.fingerprint.truncated > 0 ? `; ${portCoverage.fingerprint.truncated} not fingerprinted (port cap reached)` : ''}
-                {portCoverage.fingerprint.complete ? '' : ' · incomplete'}.
-              </p>
-            )}
-          </Card>
-        </section>
-      )}
+      {portCoverage && <DevicePortCoverage coverage={portCoverage} />}
 
       {selectedScanId && (
         <section className="mb-6">
