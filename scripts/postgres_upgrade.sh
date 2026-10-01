@@ -368,7 +368,9 @@ migrate_postgres_cluster() {
         return 1
     fi
     echo "Dumping PostgreSQL $source_major ($((size_bytes / 1048576)) MB)..."
-    if ! (set -o pipefail; docker_cli exec "$src" pg_dumpall -U scanner | gzip -c > "$backup_dir/pg_dumpall.sql.gz"); then
+    # gzip -1: on ShakerScan's text and JSON it compresses about as well as the default level at
+    # roughly 2.5x the speed, and a single-threaded compressor is what bounds the dump.
+    if ! (set -o pipefail; docker_cli exec "$src" pg_dumpall -U scanner | gzip -1 -c > "$backup_dir/pg_dumpall.sql.gz"); then
         postgres_upgrade_failed "$backup_dir" "$target_image" "$target" "$source_desc" "pg_dumpall failed"
         return 1
     fi
