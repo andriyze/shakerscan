@@ -50,9 +50,9 @@ def setup(monkeypatch):
 
 @pytest.mark.parametrize("change", [
     {"is_active": False}, {"current_version": 4}, {"record_version": 6},
-    # A revoked share; a device profile on a web asset.
+    # A revoked share remains invalid even when asset views can share a credential.
     {"allowed_capabilities": ()}, {"granted": False},
-    {"target_kind": "device"}, {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
+    {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
     {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)},
 ])
 def test_rechecks_metadata_before_each_action(monkeypatch, change):
@@ -65,6 +65,15 @@ def test_rechecks_metadata_before_each_action(monkeypatch, change):
         state["profile"] = replace(state["profile"], **change)
     assert asyncio.run(check(None)) == "authentication_uncertain"
     assert state["reads"] == 2
+
+
+def test_cross_view_profile_is_valid_only_while_its_exact_asset_grant_is_active(monkeypatch):
+    state, options = setup(monkeypatch)
+    state["profile"] = replace(state["profile"], target_kind="device")
+    check = guard.build_scan_credential_check(Pool(), options=options, target=_target(), scan_id="fixture")
+    assert asyncio.run(check(None)) is None
+    state["granted"] = False
+    assert asyncio.run(check(None)) == "authentication_uncertain"
 
 
 def test_authority_failure_is_content_free_and_never_loads_profile(monkeypatch):

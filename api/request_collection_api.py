@@ -393,10 +393,10 @@ async def create_request_collection(request: RequestCollectionCreate):
         web_target = await conn.fetchrow(
             "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
         )
-        if web_target:
-            owner_uuid = await conn.fetchval("SELECT target_asset_owner($1)", target_uuid)
-        else:
-            owner_uuid = target_uuid
+        # Keep one canonical document at the target where the operator created it.
+        # Asset visibility is resolved through bindings; do not rewrite ownership to
+        # the host, which would erase exact service provenance and break idempotency.
+        owner_uuid = target_uuid
         device_target = None if web_target else await conn.fetchrow(
             """SELECT id, primary_locator FROM device_targets
                WHERE id=$1 AND is_active=true""",

@@ -10282,7 +10282,10 @@ async def _generic_collection_refs(
                 status_code=422,
                 detail="request collection selection_id is unavailable",
             )
-        visible = await conn.fetchval("SELECT target_collection_visible($1,$2)", row["id"], bound_target_id)
+        direct_owner = str(row.get("target_id") or row.get("device_target_id") or "") == str(bound_target_id)
+        visible = direct_owner or await conn.fetchval(
+            "SELECT target_collection_visible($1,$2)", row["id"], bound_target_id,
+        )
         if not visible:
             raise HTTPException(
                 status_code=422,
