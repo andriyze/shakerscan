@@ -8,6 +8,12 @@ const previewId = '33333333-3333-4333-8333-333333333333'
 const receiptId = '44444444-4444-4444-8444-444444444444'
 const targetUrl = 'https://target.example.invalid'
 
+/** Deletion lives in the target row's menu, never as a front-line control. */
+async function openDelete(page: Page) {
+  await page.getByRole('button', { name: 'More actions for target.example.invalid', exact: true }).click()
+  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+}
+
 async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean } = {}) {
   const writes: { path: string; body: Record<string, unknown> }[] = []
   let deleted = false
@@ -64,15 +70,15 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
 test('target cancellation only previews; confirmed deletion uses the exact approval and refreshes', async ({ page }) => {
   const writes = await mockApi(page)
   await page.goto('/targets')
-  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await openDelete(page)
   const dialog = page.getByRole('dialog', { name: `Delete ${targetUrl}` })
   await expect(dialog.getByText('Not a complete data erasure')).toBeVisible()
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview'])
-  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await openDelete(page)
   await dialog.getByRole('button', { name: 'Approve and delete records' }).click()
   await expect(dialog).not.toBeVisible()
-  await expect(page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true })).toHaveCount(0)
+  await expect(page.getByTestId('target-asset-row')).toHaveCount(0)
   const approval = writes.find(w => w.path === '/arsenal/approvals')!
   expect(approval.body.action_context).toEqual({ preview_id: previewId, preview_hash: 'a'.repeat(64) })
   expect(approval.body.confirmations).toContain('confirm_delete_records')
@@ -82,7 +88,7 @@ test('target cancellation only previews; confirmed deletion uses the exact appro
 test('active-work blocker disables destructive confirmation without trapping cancellation', async ({ page }) => {
   const writes = await mockApi(page, { blocked: true })
   await page.goto('/targets')
-  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await openDelete(page)
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('alert')).toContainText('active record')
   await expect(dialog.getByRole('button', { name: 'Approve and delete records' })).toBeDisabled()
@@ -93,7 +99,7 @@ test('active-work blocker disables destructive confirmation without trapping can
 test('network retry reuses its receipt instead of creating another approval', async ({ page }) => {
   const writes = await mockApi(page, { retry: true })
   await page.goto('/targets')
-  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await openDelete(page)
   const dialog = page.getByRole('dialog')
   await dialog.getByRole('button', { name: 'Approve and delete records' }).click()
   await expect(dialog.getByRole('alert')).toBeVisible()
@@ -126,7 +132,7 @@ test('findings page deletes only the selected record IDs', async ({ page }) => {
 test('protected target offers a separately confirmed archive, never a deletion approval', async ({ page }) => {
   const writes = await mockApi(page, { blocked: true })
   await page.goto('/targets')
-  await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
+  await openDelete(page)
   await page.getByRole('dialog').getByRole('button', { name: 'Archive target instead', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: `Archive ${targetUrl}`, exact: true })
   await expect(dialog.getByText(/Already-admitted or running work is not cancelled/)).toBeVisible()
@@ -134,5 +140,5 @@ test('protected target offers a separately confirmed archive, never a deletion a
   await dialog.getByRole('button', { name: 'Archive target', exact: true }).click()
   await expect(dialog).not.toBeVisible()
   expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview', `/targets/${targetId}/archive`])
-  await expect(page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true })).toHaveCount(0)
+  await expect(page.getByTestId('target-asset-row')).toHaveCount(0)
 })

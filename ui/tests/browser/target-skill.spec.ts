@@ -7,6 +7,15 @@ const target = {id,asset_id:id,name:'Living room TV',url:'host://tv.test',locato
 const text = '## How to log in\nUse the saved TV administrator profile.\n\n## What to test\nInspect port 8443.\n\n## What to skip\nDo not reboot.'
 const skillDocument = (methodology = text, version = '1') => ({schema_version:'hunt-skill/v2',skill_id:`skill.target.${id}`,target_id:id,title:'TV investigation guide',methodology,version,body_sha256:'a'.repeat(64),updated_at:'2026-10-01T12:00:00Z'})
 
+/** The Targets list keeps instructions in each row's menu; the asset page keeps a button. */
+async function openInstructions(page: Page, verb: 'Create' | 'Edit') {
+  const name = `${verb} instructions for Living room TV`
+  if (new URL(page.url()).pathname === '/targets') {
+    await page.getByRole('button',{name:'More actions for tv.test'}).click()
+    await page.getByRole('menuitem',{name}).click()
+  } else await page.getByRole('button',{name}).click()
+}
+
 async function mock(page: Page, existing = false, conflict = false) {
   let revision = existing ? 1 : 0
   let saved: ReturnType<typeof skillDocument> | null = existing ? skillDocument() : null
@@ -40,7 +49,7 @@ async function mock(page: Page, existing = false, conflict = false) {
 test('SKILL-001 create, preview, update and delete instructions from the target row', async ({page}) => {
   const writes = await mock(page)
   await page.goto('/targets')
-  await page.getByRole('button',{name:'Create instructions for Living room TV'}).click()
+  await openInstructions(page,'Create')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await dialog.getByRole('button',{name:'Use starter template'}).click()
   await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue(/## How to log in/)
@@ -52,25 +61,26 @@ test('SKILL-001 create, preview, update and delete instructions from the target 
   await dialog.getByRole('button',{name:'Save instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes[0]).toMatchObject({method:'POST',body:{expected_revision:0,methodology:text}})
-  await page.getByRole('button',{name:'Edit instructions for Living room TV'}).click()
+  await openInstructions(page,'Edit')
   await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue(text)
   await dialog.getByLabel('Instructions',{exact:true}).fill(text+'\nCheck the management API.')
   await dialog.getByRole('button',{name:'Save instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes[1]).toMatchObject({method:'PUT',body:{expected_revision:1}})
-  await page.getByRole('button',{name:'Edit instructions for Living room TV'}).click()
+  await openInstructions(page,'Edit')
   await dialog.getByRole('button',{name:'Delete',exact:true}).click()
   await expect(dialog.getByText(/Existing Hunts keep their snapshot/)).toBeVisible()
   await dialog.getByRole('button',{name:'Delete instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes[2]).toMatchObject({method:'DELETE',revision:'2'})
-  await expect(page.getByRole('button',{name:'Create instructions for Living room TV'})).toBeVisible()
+  await page.getByRole('button',{name:'More actions for tv.test'}).click()
+  await expect(page.getByRole('menuitem',{name:'Create instructions for Living room TV'})).toBeVisible()
 })
 
 test('SKILL-002 dirty drafts survive cancellation until explicitly discarded', async ({page}) => {
   const writes = await mock(page,true)
   await page.goto('/targets')
-  await page.getByRole('button',{name:'Create instructions for Living room TV'}).click()
+  await openInstructions(page,'Create')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await dialog.getByLabel('Instructions',{exact:true}).fill('My unsaved draft')
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click()
@@ -86,7 +96,7 @@ test('SKILL-002 dirty drafts survive cancellation until explicitly discarded', a
 test('SKILL-003 a conflicting save preserves the draft and offers an explicit reload', async ({page}) => {
   const writes = await mock(page,true,true)
   await page.goto('/targets')
-  await page.getByRole('button',{name:'Create instructions for Living room TV'}).click()
+  await openInstructions(page,'Create')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await dialog.getByLabel('Instructions',{exact:true}).fill('Draft from this editor')
   await dialog.getByRole('button',{name:'Save instructions'}).click()
@@ -102,7 +112,7 @@ test('SKILL-004 failed reads cannot enable a destructive overwrite', async ({pag
   const writes = await mock(page)
   await page.route(`${MOCK_API_ORIGIN}/targets/${id}/skill`,route => route.fulfill({status:503,json:{detail:'Database unavailable'}}))
   await page.goto('/targets')
-  await page.getByRole('button',{name:'Create instructions for Living room TV'}).click()
+  await openInstructions(page,'Create')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await expect(dialog.getByRole('alert')).toContainText('Database unavailable')
   await expect(dialog.getByRole('button',{name:'Save instructions'})).toBeDisabled()
@@ -113,7 +123,7 @@ test('SKILL-005 target detail editor is usable at desktop and mobile widths', as
   await mock(page,true)
   await page.goto(`/targets/${id}/asset`)
   await expect(page.getByText('TV investigation guide',{exact:true})).toBeVisible()
-  await page.getByRole('button',{name:'Edit instructions for Living room TV'}).click()
+  await openInstructions(page,'Edit')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue(text)
   await expect(dialog.getByRole('button',{name:'Save instructions'})).toBeVisible()
@@ -127,7 +137,7 @@ test('SKILL-006 Hunt review retains its startup snapshot while editing future in
   await expect(page.getByRole('heading',{name:'Target instructions at startup'})).toBeVisible()
   await page.getByText('TV investigation guide',{exact:true}).click()
   await expect(page.getByText('Inspect port 8443.',{exact:true})).toBeVisible()
-  await page.getByRole('button',{name:'Edit instructions for Living room TV'}).click()
+  await openInstructions(page,'Edit')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
   await dialog.getByLabel('Instructions',{exact:true}).fill('Changed for future Hunts')
   await dialog.getByRole('button',{name:'Save instructions'}).click()

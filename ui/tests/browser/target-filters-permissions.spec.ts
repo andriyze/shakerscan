@@ -26,23 +26,27 @@ test('TARGET-FILTERS-001 server filters select Web and IP/network without losing
   })
   await page.goto('/targets')
   await expect(page.getByRole('link',{name:'example.test',exact:true})).toBeVisible()
-  await page.getByRole('button',{name:'Web',exact:true}).click()
-  await expect(page.getByRole('button',{name:'Web',exact:true})).toHaveAttribute('aria-pressed','true')
+  const surface=page.getByLabel('Surface',{exact:true})
+  await surface.selectOption('web')
   await expect(page.getByRole('link',{name:'Home TV',exact:true})).toHaveCount(0)
-  await expect(page.getByRole('button',{name:'Discover subdomains of example.test',exact:true})).toBeVisible()
-  await page.getByRole('button',{name:'IP / network',exact:true}).click()
+  await page.getByRole('button',{name:'More actions for example.test'}).click()
+  await expect(page.getByRole('menuitem',{name:'Discover subdomains of example.test',exact:true})).toBeVisible()
+  await page.keyboard.press('Escape')
+  await surface.selectOption('network')
   await expect(page.getByRole('link',{name:'Home TV',exact:true})).toBeVisible()
   await expect(page.getByRole('link',{name:'example.test',exact:true})).toHaveCount(0)
-  await expect(page.getByRole('button',{name:'Start network scan',exact:true})).toHaveCount(1)
-  await page.getByRole('button',{name:'All targets',exact:true}).click()
-  await expect(page.getByTestId('target-domain-group')).toHaveCount(2)
+  // A device without a web app offers discovery of its ports and services as the primary action.
+  await expect(page.getByRole('button',{name:'Discover services: 192.0.2.8',exact:true})).toHaveCount(1)
+  await surface.selectOption('')
+  await expect(page.getByTestId('target-domain-group')).toHaveCount(1)
+  await expect(page.getByTestId('target-network-group')).toHaveCount(1)
   expect(filters).toContain('web');expect(filters).toContain('network')
   expect(await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
-  expect(await page.getByTestId('target-domain-group').evaluateAll(cards =>
+  expect(await page.locator('[data-testid="target-domain-group"],[data-testid="target-network-group"]').evaluateAll(cards =>
     cards.every(card => card.scrollWidth <= card.clientWidth))).toBe(true)
-  const scan=page.getByRole('button',{name:'Start network scan',exact:true}).last()
+  const scan=page.getByRole('button',{name:'Discover services: 192.0.2.8',exact:true})
   expect(await scan.evaluate(button => {
-    const row=button.closest('[data-testid="target-domain-group"]')!
+    const row=button.closest('[data-testid="target-asset-row"]')!
     const control=button.getBoundingClientRect(),bounds=row.getBoundingClientRect()
     return control.left >= bounds.left && control.right <= bounds.right
   })).toBe(true)

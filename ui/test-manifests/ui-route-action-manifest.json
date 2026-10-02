@@ -360,44 +360,44 @@
     {
       "caseId": "START-007",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "scanTarget(targetId",
-      "assertion": "Root quick action queues one balanced Scan."
+      "source": "src/components/targets/TargetInventory.tsx",
+      "marker": "scanTarget(origin.id",
+      "assertion": "Row quick action queues one balanced Scan for each live web app of the asset."
     },
     {
       "caseId": "START-008",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "scanTarget(targetId",
-      "assertion": "Child quick action retains the child target binding."
+      "source": "src/components/targets/TargetInventory.tsx",
+      "marker": "scanTarget(web.id",
+      "assertion": "A domain without a known web app is registered scheme-less and its own new web target is scanned."
     },
     {
       "caseId": "START-009",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "Customize Scan\u2026",
-      "assertion": "Root custom action prefills New Scan."
+      "source": "src/components/targets/inventory/TargetRow.tsx",
+      "marker": "Customize Scan…",
+      "assertion": "Row custom action prefills New Scan with the asset's web apps."
     },
     {
       "caseId": "START-010",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "Customize Scan\u2026",
-      "assertion": "Child custom action prefills the child binding."
+      "source": "src/lib/targetInventoryModel.mjs",
+      "marker": "params.set('target', uniqueTargets[0])",
+      "assertion": "A single web app prefills New Scan with that exact target binding."
     },
     {
       "caseId": "START-011",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "Promise.allSettled(allTargets.map",
-      "assertion": "Domain quick action reports every success and failure."
+      "source": "src/components/targets/TargetInventory.tsx",
+      "marker": "Promise.allSettled(apps.map",
+      "assertion": "Multi-app and bulk quick actions report every success and failure."
     },
     {
       "caseId": "START-012",
       "route": "/targets",
-      "source": "src/app/targets/page.tsx",
-      "marker": "Customize batch\u2026",
-      "assertion": "Domain custom action opens the exact displayed batch."
+      "source": "src/components/targets/inventory/TargetGroups.tsx",
+      "marker": "Customize batch…",
+      "assertion": "Domain custom action opens the exact displayed batch in New Scan."
     },
     {
       "caseId": "START-013",

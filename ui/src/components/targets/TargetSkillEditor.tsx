@@ -25,12 +25,15 @@ export function TargetSkillPreview({text}: {text: string}) {
   </div>
 }
 
-export function TargetSkillEditor({targetId, targetName, compact = false, hasSkill = false}: {
+export function TargetSkillEditor({targetId, targetName, compact = false, hasSkill = false, menuItem = false}: {
   targetId: string; targetName: string; compact?: boolean; hasSkill?: boolean
+  /** Render the trigger as a full-width menu entry instead of a button. */
+  menuItem?: boolean
 }) {
   const [saved, setSaved] = useState<TargetSkillState | null>(null)
   const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(!compact)
+  const lazy = compact || menuItem
+  const [loading, setLoading] = useState(!lazy)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [title, setTitle] = useState('Target instructions')
@@ -42,14 +45,14 @@ export function TargetSkillEditor({targetId, targetName, compact = false, hasSki
   const exists = saved ? Boolean(saved.skill) : hasSkill
 
   useEffect(() => {
-    if (compact) return
+    if (lazy) return
     const controller = new AbortController()
     setLoading(true)
     getTargetSkill(targetId, controller.signal).then(result => {if (!controller.signal.aborted) {setSaved(result);setError(null)}})
       .catch(cause => {if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load target instructions')})
       .finally(() => {if (!controller.signal.aborted) setLoading(false)})
     return () => controller.abort()
-  }, [targetId, compact])
+  }, [targetId, lazy])
 
   async function edit() {
     setOpen(true);setLoading(true);setError(null);setConfirmation(null);setPreview(false);setNotice('')
@@ -84,10 +87,12 @@ export function TargetSkillEditor({targetId, targetName, compact = false, hasSki
     } catch (cause) {setError(cause instanceof Error ? cause.message : 'Could not delete target instructions');setConfirmation(null)}
     finally {setBusy(false)}
   }
-  const trigger = <Button size={compact ? 'sm' : 'md'} variant="secondary" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`}><FilePenLine className="h-4 w-4" aria-hidden="true" />{compact ? 'Instructions' : exists ? 'Edit instructions' : 'Create instructions'}</Button>
+  const trigger = menuItem
+    ? <button type="button" role="menuitem" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`} className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-gray-200 hover:bg-gray-800 focus:bg-gray-800 focus:outline-none"><FilePenLine className="h-4 w-4 text-gray-400" aria-hidden="true" />{exists ? 'Edit Hunt instructions' : 'Add Hunt instructions'}</button>
+    : <Button size={compact ? 'sm' : 'md'} variant="secondary" onClick={() => void edit()} aria-label={`${exists ? 'Edit' : 'Create'} instructions for ${targetName}`}><FilePenLine className="h-4 w-4" aria-hidden="true" />{compact ? 'Instructions' : exists ? 'Edit instructions' : 'Create instructions'}</Button>
 
   return <>
-    {compact ? <span className="relative inline-flex" onClick={event => event.stopPropagation()}>{trigger}<span role="status" className="sr-only">{notice}</span></span> : <Card className="relative mb-6 overflow-hidden p-5 border-blue-500/20 bg-linear-to-br from-blue-500/5 via-gray-900 to-gray-900">
+    {compact || menuItem ? <span className={menuItem ? 'block' : 'relative inline-flex'} onClick={event => event.stopPropagation()}>{trigger}<span role="status" className="sr-only">{notice}</span></span> : <Card className="relative mb-6 overflow-hidden p-5 border-blue-500/20 bg-linear-to-br from-blue-500/5 via-gray-900 to-gray-900">
       <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex gap-3"><div className="rounded-xl bg-blue-500/10 p-2.5 text-blue-300"><BookOpen className="h-5 w-5" aria-hidden="true" /></div><div><h2 className="text-base font-semibold text-white">Target instructions</h2><p className="mt-1 max-w-xl text-sm text-gray-400">Give Hunt a head start: how to log in, what matters, and what to skip.</p></div></div>{trigger}</div>
       {loading ? <p className="mt-4 text-sm text-gray-400" role="status">Loading instructions…</p> : error ? <p className="mt-4 text-sm text-red-300" role="alert">{error}</p> : saved?.skill ? <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40 p-4"><div className="mb-3 flex flex-wrap items-center gap-2"><span className="text-sm font-medium text-gray-200">{saved.skill.title}</span><span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-300">Version {saved.revision}</span></div><p className="whitespace-pre-wrap wrap-break-word text-sm leading-6 text-gray-400">{saved.skill.methodology.slice(0,300)}{saved.skill.methodology.length > 300 ? '…' : ''}</p></div> : <div className="mt-4 grid gap-2 text-xs text-gray-400 sm:grid-cols-3">{['Login steps & success signals','Priorities & known endpoints','Exclusions & fragile actions'].map(item => <div key={item} className="rounded-lg border border-dashed border-gray-700 px-3 py-3">{item}</div>)}</div>}
       <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-gray-500"><span className="inline-flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5 text-blue-300" aria-hidden="true" />Automatically included in new Hunts</span>{saved?.skill && <span>Saved {new Date(saved.skill.updated_at).toLocaleString()}</span>}</div><p role="status" className="mt-2 text-xs text-emerald-300">{notice}</p>

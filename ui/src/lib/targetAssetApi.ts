@@ -25,8 +25,35 @@ export interface TargetAsset {
   network_grade?: string | null
   network_last_scan_id?: string | null
   network_last_scanned_at?: string | null
+  /** Inventory listing only: linked web apps, newest scan, findings and authorization. */
+  origins?: InventoryOrigin[]
+  severity_counts?: Partial<Record<'critical' | 'high' | 'medium' | 'low' | 'info', number>>
+  last_scanned_at?: string | null
+  scanning?: boolean
+  authorized?: boolean
   created_at: string
   updated_at: string
+}
+
+export interface InventoryOrigin {
+  id: string
+  url: string
+  name: string | null
+  is_active: boolean
+  last_scanned_at?: string | null
+  last_grade?: string | null
+  last_score?: number | null
+  active_findings_count?: number | null
+}
+
+/** Counts for each filter value over the current search, before the other filters apply. */
+export interface InventoryFacets {
+  total: number
+  environment: Record<string, number>
+  authorization: {authorized: number; unauthorized: number}
+  findings: {any: number; critical_high: number; none: number}
+  activity: {scanned: number; never: number; scanning: number}
+  asset_type: {web: number; network: number}
 }
 
 export interface AssetOrigin {
@@ -84,9 +111,20 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 
 export interface TargetAssetGroup { root_domain: string; targets: TargetAsset[] }
 
-export function getTargetAssets(params: {search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean; include_services?: boolean; group_by?: 'domain'; asset_type?: 'web' | 'network'} = {}, signal?: AbortSignal): Promise<{targets: TargetAsset[]; groups?: TargetAssetGroup[]; total_groups?: number; total: number; offset: number; limit: number}> {
+export interface InventoryQuery {
+  search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean
+  include_services?: boolean; group_by?: 'domain'; asset_type?: 'web' | 'network'; environment?: string
+  authorization?: 'authorized' | 'unauthorized'; findings?: 'any' | 'critical_high' | 'none'
+  activity?: 'never' | 'scanned' | 'scanning'; sort?: 'name' | 'risk' | 'recent' | 'created'; include_facets?: boolean
+}
+export interface InventoryPage {
+  targets: TargetAsset[]; groups?: TargetAssetGroup[]; total_groups?: number; total: number
+  offset: number; limit: number; facets?: InventoryFacets
+}
+
+export function getTargetAssets(params: InventoryQuery = {}, signal?: AbortSignal): Promise<InventoryPage> {
   const search = new URLSearchParams()
-  for (const [key, value] of Object.entries(params)) if (value !== undefined) search.set(key, String(value))
+  for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value))
   return request(`/targets/inventory?${search}`, { signal })
 }
 export const getTargetAsset = (id: string, signal?: AbortSignal) => request<AssetDetail>(`/targets/${encodeURIComponent(id)}/asset`, { signal })
@@ -94,6 +132,24 @@ export const getTargetAssetHistory = (id: string, kind: AssetHistoryKind, offset
 export const enableTargetNetworkView = (id: string, deviceClass = 'generic') => request<{asset_id: string; device_id: string}>(`/targets/${encodeURIComponent(id)}/device-profile`, json('POST', {device_class: deviceClass}))
 export const renameTargetAsset = (id: string, name: string) => request(`/targets/${encodeURIComponent(id)}`, json('PATCH', {name}))
 export const authorizeTargetAsset = (id: string, approvedBy: string, environment?: string) => request(`/targets/${encodeURIComponent(id)}/authorization`, json('POST', {approved_by: approvedBy, environment, risk_tier:'active'}))
+export const revokeTargetAsset = (id: string, revokedBy: string, reason: string) => request<{revoked: number}>(`/targets/${encodeURIComponent(id)}/authorization`, json('DELETE', {revoked_by: revokedBy, reason}))
+
+/** Register a host-level target; port hints guide its network scans. */
+export const createHostTarget = (input: {locator: string; name?: string; environment: string; approvedBy?: string; portHints?: number[]}) =>
+  request<{id: string; asset_id: string; url: string; status: 'created' | 'already_exists'}>('/targets/hosts', json('POST', {
+    locator: input.locator, name: input.name, environment: input.environment,
+    approved_by: input.approvedBy, port_hints: input.portHints || [],
+  }))
+
+/** Register a web app. Without a scheme the scanner detects HTTP or HTTPS on the first scan. */
+export const createWebTarget = (url: string, environment: string, name?: string) =>
+  request<{id: string; url: string; status?: 'created' | 'already_exists'; dns_fallback?: unknown}>('/targets', json('POST', {url, name, cohort: environment}))
+
+/** Discover open ports and web services; discovered web apps link to the host automatically. */
+export const startTargetDiscovery = (id: string, portHints: number[] = []) =>
+  request<{scan_id?: string; id?: string}>(`/targets/${encodeURIComponent(id)}/network-scans`, json('POST', {
+    profile: 'inventory', include_web_dast: false, confirm_authorized: true, port_hints: portHints,
+  }))
 
 export async function registerTargetAsset(input: {locator: string; name?: string; environment: string; approvedBy?: string; portHints?: number[]}): Promise<string> {
   const value = input.locator.trim()

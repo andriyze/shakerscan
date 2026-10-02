@@ -63,21 +63,21 @@ test('successful detail-page retirement returns to the active inventory', async 
   await expect(page.getByRole('button', { name: `Retire ${device.name}`, exact: true })).toHaveCount(0)
 })
 
-for (const [status, message] of [['already_exists', 'Target already present'], ['created', 'Target added']]) {
+for (const [status, message] of [['already_exists', 'Already in your inventory'], ['created', 'Added']]) {
   test(`target creation reports ${status} honestly`, async ({ page }) => {
     await pinMockApiOrigin(page)
     await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
       const path = new URL(route.request().url()).pathname
+      if (path === '/targets/hosts') return route.fulfill({ json: { status, id, url: 'host://example.test' } })
       if (path === '/targets' && route.request().method() === 'POST') return route.fulfill({ json: { status, id, url: 'https://example.test' } })
-      if (path === '/targets/grouped') return route.fulfill({ json: { domains: [], total_targets: 0, total_root_domains: 0 } })
       return route.fulfill({ json: { status: 'healthy', workers: [], domains: [], targets: [], total: 0 } })
     })
-    await page.goto('/targets?view=domains')
-    await page.getByRole('button', { name: 'Add Target', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Add Target' })
-    await dialog.getByPlaceholder('https://example.com').fill('https://example.test')
-    await dialog.getByRole('button', { name: 'Add Target', exact: true }).click()
-    await expect(page.getByText(message, { exact: true })).toBeVisible()
+    await page.goto('/targets')
+    await page.getByRole('button', { name: 'Add targets', exact: true }).first().click()
+    const dialog = page.getByRole('dialog', { name: 'Add targets' })
+    await dialog.getByLabel('What do you want to test?').fill('https://example.test')
+    await page.getByRole('button', { name: 'Add target', exact: true }).click()
+    await expect(dialog.getByText(message, { exact: true })).toBeVisible()
   })
 }
 
@@ -90,14 +90,15 @@ test('target creation accepts an authorized local service on a nonstandard HTTPS
       submissions.push(route.request().postDataJSON())
       return route.fulfill({ json: { status: 'created', id, url: 'https://fixture-255:18443' } })
     }
-    if (path === '/targets/grouped') return route.fulfill({ json: { domains: [], total_targets: 0, total_root_domains: 0 } })
+    if (path === '/targets/hosts') return route.fulfill({ json: { status: 'created', id, url: 'host://fixture-255' } })
     return route.fulfill({ json: { status: 'healthy', workers: [], domains: [], targets: [], total: 0 } })
   })
-  await page.goto('/targets?view=domains')
-  await page.getByRole('button', { name: 'Add Target', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Add Target' })
-  await dialog.getByPlaceholder('https://example.com').fill('https://fixture-255:18443')
-  await dialog.getByRole('button', { name: 'Add Target', exact: true }).click()
-  await expect(page.getByText('Target added', { exact: true })).toBeVisible()
-  expect(submissions).toHaveLength(1)
+  await page.goto('/targets')
+  await page.getByRole('button', { name: 'Add targets', exact: true }).first().click()
+  const dialog = page.getByRole('dialog', { name: 'Add targets' })
+  await dialog.getByLabel('What do you want to test?').fill('https://fixture-255:18443')
+  await page.getByRole('button', { name: 'Add target', exact: true }).click()
+  await expect(dialog.getByText('Added', { exact: true })).toBeVisible()
+  // The nonstandard HTTPS port is kept exactly as entered: no scheme or port is guessed.
+  expect(submissions).toEqual([{ url: 'https://fixture-255:18443', cohort: 'production' }])
 })
