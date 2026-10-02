@@ -305,7 +305,29 @@ async def revoke_target_authorization(
         reason[:2000],
         STANDING_ACTION_NAME,
     )
-    try:
-        return int(str(result).split()[-1])
-    except (ValueError, IndexError):
-        return 0
+    # A www/apex alias receipt derived from this authority may be filed under another target
+    # (an application service that inherited the host's authorization). Revoking the source
+    # must end it too, or the service would stay authorized after its host was revoked.
+    derived = await conn.execute(
+        """
+        -- revoke derived alias lineage
+        UPDATE approval_receipts d
+           SET status='revoked', revoked_at=NOW(), revoked_by=$2, revocation_reason=$3
+         WHERE d.status = 'active' AND d.action_name = $4
+           AND d.action_context->>'derived_from_approval_receipt_id' IN (
+               SELECT a.id::text FROM approval_receipts a
+                 JOIN scope_receipts s ON s.id = a.scope_receipt_id
+                WHERE s.target_id = $1 AND a.action_name = $4 AND a.status = 'revoked')
+        """,
+        target_uuid,
+        revoked_by,
+        reason[:2000],
+        STANDING_ACTION_NAME,
+    )
+    count = 0
+    for value in (result, derived):
+        try:
+            count += int(str(value).split()[-1])
+        except (ValueError, IndexError):
+            pass
+    return count

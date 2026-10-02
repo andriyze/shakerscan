@@ -56,12 +56,20 @@ async def target_inventory(search: str = Query('', max_length=500), connected_on
                            include_inactive: bool = False, include_services: bool = False,
                            group_by: Literal['domain'] | None = None,
                            asset_type: Literal['web','network'] | None = None,
+                           environment: str | None = Query(None, max_length=40),
+                           authorization: Literal['authorized','unauthorized'] | None = None,
+                           findings: Literal['any','critical_high','none'] | None = None,
+                           activity: Literal['never','scanned','scanning'] | None = None,
+                           sort: Literal['name','risk','recent','created'] = 'name',
+                           include_facets: bool = False,
                            limit: int = Query(100, ge=1, le=500),
                            offset: int = Query(0, ge=0)):
     async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
                                  include_inactive=include_inactive, include_services=include_services,
-                                 limit=limit, offset=offset, group_by=group_by, asset_type=asset_type)
+                                 limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
+                                 environment=environment, authorization=authorization, findings=findings,
+                                 activity=activity, sort=sort, include_facets=include_facets)
 
 
 @router.post('/targets/hosts')

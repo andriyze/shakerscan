@@ -65,9 +65,13 @@ async def migrate_asset_inputs(conn: Any) -> None:
     await retarget_foreign_keys(conn, "device_credential_profiles", "credential_profiles")
     collections = await conn.fetch("SELECT * FROM device_request_collections ORDER BY created_at,id")
     # Old baseline imports were snapshots, not synchronized stores. Do not resurrect
-    # a deleted device document from its stale shared mirror.
+    # a deleted device document from its stale shared mirror. A mirror is recognisable:
+    # it was marked, or the 2.6 baseline copied the legacy summary with its request list.
+    # A collection uploaded for a device through the shared API never had a legacy row
+    # and never stored that list; it is the operator's current document and stays active.
     await conn.execute("""UPDATE request_collections c SET is_active=false,updated_at=NOW()
-        WHERE (c.metadata_json->>'legacy_source'='device_request_collections' OR c.device_target_id IS NOT NULL)
+        WHERE (c.metadata_json->>'legacy_source'='device_request_collections'
+               OR (c.device_target_id IS NOT NULL AND c.metadata_json ? 'requests'))
           AND NOT EXISTS (SELECT 1 FROM device_request_collections d WHERE d.id=c.id)""")
     for legacy in collections:
         summary = object_value(legacy["summary_json"])

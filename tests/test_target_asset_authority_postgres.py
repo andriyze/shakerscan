@@ -109,3 +109,30 @@ def test_worker_revalidates_parent_authority_not_a_client_flag():
             with pytest.raises(CredentialResolutionError,match='target changed'):
                 await validate_credentials()
     asyncio.run(run())
+
+
+def test_revoking_a_host_revokes_the_alias_receipt_its_service_derived():
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            from targets.asset_migration import BoundConnectionPool, host_url
+            import target_dns_alias
+            host = await conn.fetchval("INSERT INTO targets(url,discovery_source) VALUES($1,'host') RETURNING id", host_url('alias-lineage.test'))
+            service = await conn.fetchval("INSERT INTO targets(url) VALUES('https://alias-lineage.test') RETURNING id")
+            source = await receipt(conn, host, 'alias-lineage.test')
+            assert (await target_authorization.current_target_authorization(conn, service))['inherited']
+            derived = await target_dns_alias.standing_receipt_for_dns_alias(
+                BoundConnectionPool(conn), target_id=service, requested_url='https://alias-lineage.test',
+                effective_url='https://www.alias-lineage.test')
+            assert derived and derived != str(source)
+            # The derived receipt is filed under the service, so the service no longer inherits.
+            assert await conn.fetchval("SELECT s.target_id FROM approval_receipts a JOIN scope_receipts s ON s.id=a.scope_receipt_id WHERE a.id=$1", uuid.UUID(derived)) == service
+            assert (await target_authorization.current_target_authorization(conn, service))['approval_receipt_id'] == derived
+            revoked = await target_authorization.revoke_target_authorization(conn, host, revoked_by='fixture', reason='host withdrawn')
+            assert revoked == 2
+            assert await conn.fetchval('SELECT status FROM approval_receipts WHERE id=$1', uuid.UUID(derived)) == 'revoked'
+            assert await target_authorization.current_target_authorization(conn, service) is None
+    asyncio.run(run())

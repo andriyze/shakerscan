@@ -870,6 +870,12 @@ def test_native_hunt_start_persists_exact_contract_and_capability_allowlist(monk
     target_id = uuid.uuid4()
 
     class Connection:
+        async def fetchval(self, query, *args):
+            # Hunt admission snapshots the target's Hunt permissions; the asset owns itself.
+            if "FROM targets" in query or "target_asset_access_owner" in query:
+                return target_id
+            raise AssertionError(query)
+
         async def fetchrow(self, query, *args):
             if "FROM targets" in query:
                 return {

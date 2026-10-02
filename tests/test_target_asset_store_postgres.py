@@ -111,3 +111,81 @@ def test_domain_hierarchy_pages_complete_groups_without_merging_asset_authority(
             retired = await list_assets(conn,group_by='domain',include_inactive=True)
             assert active['total'] == len(hosts)-1 and retired['total'] == len(hosts)
     asyncio.run(run())
+
+
+def test_inventory_filters_counts_and_sorts_before_paging(monkeypatch):
+    encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            from targets.asset_migration import host_url
+            import target_authorization
+            ids = {}
+            for host, environment in [('alpha.test','production'),('beta.test','production'),('gamma.test','lab')]:
+                ids[host] = await conn.fetchval("""INSERT INTO targets(url,name,discovery_source,metadata_json)
+                    VALUES($1,$2,'host',jsonb_build_object('environment',$3::text)) RETURNING id""",
+                    host_url(host), host, environment)
+            origin = await conn.fetchval("INSERT INTO targets(url) VALUES('https://alpha.test:8443') RETURNING id")
+            await target_authorization.authorize_target(conn, ids['alpha.test'], approved_by='operator')
+            await conn.execute("""INSERT INTO findings(target_id,fingerprint,title,severity,status)
+                VALUES($1,'fp-critical','Critical issue','critical','active'),($1,'fp-low','Low issue','low','active')""",
+                ids['beta.test'])
+            await conn.execute("UPDATE targets SET last_scanned_at=NOW(),last_grade='B' WHERE id=$1", origin)
+            await conn.execute("INSERT INTO scans(target_url,target_id,status) VALUES('https://gamma.test',$1,'running')", ids['gamma.test'])
+
+            result = await list_assets(conn, group_by='domain', include_facets=True)
+            rows = {row['locator']: row for row in result['targets']}
+            assert rows['alpha.test']['authorized'] is True and rows['beta.test']['authorized'] is False
+            # A linked application origin inherits the host's standing authorization.
+            assert await conn.fetchval('SELECT target_effective_authorization_target($1)', origin) == ids['alpha.test']
+            assert [item['url'] for item in rows['alpha.test']['origins']] == ['https://alpha.test:8443']
+            assert rows['alpha.test']['origins'][0]['last_grade'] == 'B'
+            assert rows['alpha.test']['last_scanned_at'] is not None and rows['beta.test']['last_scanned_at'] is None
+            assert rows['beta.test']['severity_counts'] == {'critical': 1, 'low': 1}
+            assert rows['gamma.test']['scanning'] is True and rows['alpha.test']['scanning'] is False
+            assert rows['gamma.test']['environment'] == 'lab'
+            facets = result['facets']
+            assert facets['total'] == 3
+            assert facets['authorization'] == {'authorized': 1, 'unauthorized': 2}
+            assert facets['findings'] == {'any': 1, 'critical_high': 1, 'none': 2}
+            assert facets['activity'] == {'scanned': 1, 'never': 1, 'scanning': 1}
+            assert facets['environment'] == {'production': 2, 'lab': 1}
+
+            def locators(page):
+                return [row['locator'] for row in page['targets']]
+            assert locators(await list_assets(conn, authorization='authorized')) == ['alpha.test']
+            assert locators(await list_assets(conn, authorization='unauthorized')) == ['beta.test', 'gamma.test']
+            assert locators(await list_assets(conn, findings='critical_high')) == ['beta.test']
+            assert locators(await list_assets(conn, findings='none')) == ['alpha.test', 'gamma.test']
+            assert locators(await list_assets(conn, activity='never')) == ['beta.test']
+            assert locators(await list_assets(conn, activity='scanning')) == ['gamma.test']
+            assert locators(await list_assets(conn, environment='LAB')) == ['gamma.test']
+            assert locators(await list_assets(conn, sort='risk')) == ['beta.test', 'alpha.test', 'gamma.test']
+            assert locators(await list_assets(conn, sort='recent'))[0] == 'alpha.test'
+            # Facets describe the search scope, independent of the other filters.
+            filtered = await list_assets(conn, authorization='authorized', include_facets=True)
+            assert filtered['total'] == 1 and filtered['facets']['total'] == 3
+            assert (await list_assets(conn, search='beta', include_facets=True))['facets']['total'] == 1
+            # Revoking the host removes the authorized state the page shows.
+            await target_authorization.revoke_target_authorization(conn, ids['alpha.test'], revoked_by='operator', reason='test')
+            assert locators(await list_assets(conn, authorization='authorized')) == []
+    asyncio.run(run())
+
+
+def test_alphabetical_groups_follow_the_domain_not_member_names(monkeypatch):
+    encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            from targets.asset_migration import host_url
+            for locator, name in [('zeta.test', 'Alpha storefront'), ('alpha.test', 'Zulu portal'), ('mid.test', None)]:
+                await conn.execute("INSERT INTO targets(url,name,discovery_source) VALUES($1,$2,'host')", host_url(locator), name or locator)
+            result = await list_assets(conn, group_by='domain')
+            assert [group['root_domain'] for group in result['groups']] == ['alpha.test', 'mid.test', 'zeta.test']
+    asyncio.run(run())
