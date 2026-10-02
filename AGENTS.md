@@ -45,6 +45,10 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 12. Optimize for investigation efficacy and operator flow. A capability is valuable when it helps
     reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
     or refusal paths that do not improve those outcomes.
+13. Treat a connected host/device as one operator-managed target asset. Connected Devices is a
+    network-oriented view of that inventory; discovered web/API origins are linked services, not
+    duplicate asset ownership. Credentials and request collections may be reused across views only
+    through explicit target bindings/grants; same-host membership alone never grants secret access.
 
 The read-only posture check is a bounded standalone lookup outside Scan/Hunt capability execution.
 Unconfigured clients use the hosted service's public-target restrictions. Connected clients use
