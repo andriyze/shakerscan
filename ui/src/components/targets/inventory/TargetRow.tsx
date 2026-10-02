@@ -11,7 +11,7 @@ import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import type { TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { configureScanHref, latestGrade, originLabel, relativeTime, scanUrls, severitySummary } from '@/lib/targetInventoryModel.mjs'
-import { boundedDisplayText } from '@/lib/targetChoices'
+import { boundedDisplayText, boundedTargetDisplay } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
 import { TargetSkillEditor } from '../TargetSkillEditor'
 import { MenuItem, MenuSeparator, RowMenu } from './RowMenu'
@@ -126,7 +126,7 @@ export function TargetRow({ asset, selected, onSelect, actions, busy, nested = f
     <span role="cell" className={`flex min-w-0 items-start gap-3 pl-7 lg:pl-0 ${nested ? 'lg:pl-6' : ''}`}>
       <AssetIcon asset={asset} />
       <span className="min-w-0">
-        <Link href={`/targets/${asset.id}/asset`} className="block truncate font-medium text-gray-100 hover:text-blue-300" title={boundedDisplayText(asset.url, 300)}>
+        <Link href={`/targets/${asset.id}/asset`} className="block truncate font-medium text-gray-100 hover:text-blue-300" title={boundedTargetDisplay({ url: asset.url }, { maxLength: 300 })}>
           {name || locator}
         </Link>
         {name && <span className="block truncate font-mono text-xs text-gray-500">{locator}</span>}

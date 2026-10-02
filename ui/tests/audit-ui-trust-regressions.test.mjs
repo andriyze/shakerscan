@@ -81,7 +81,7 @@ test('docs and mobile operations expose truthful accessible labels', () => {
 
 test('executive posture defaults to an explicit operational cohort scope', () => {
   const dashboard = read('src/app/page.tsx')
-  const targets = read('src/app/targets/page.tsx')
+  const targets = read('src/components/targets/inventory/AddTargetsDialog.tsx')
   const triage = read('src/app/exposure/TriageTable.tsx')
   assert.match(dashboard, /useState<CohortView>\('operational'\)/)
   assert.match(dashboard, /Lab data is never silently mixed into it/)

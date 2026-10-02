@@ -31,7 +31,8 @@ class HostTargetCreate(BaseModel):
     model_config = ConfigDict(extra='forbid')
     locator: str = Field(min_length=1, max_length=253)
     name: str | None = Field(default=None, max_length=255)
-    environment: Literal['production', 'staging', 'development', 'lab'] = 'production'
+    # The operator cohorts web targets accept, plus the historical 'development' value.
+    environment: Literal['production', 'staging', 'development', 'lab', 'demo', 'calibration', 'internal'] = 'production'
     approved_by: str | None = Field(default=None, min_length=1, max_length=120)
     port_hints: list[int] = Field(default_factory=list,max_length=128)
 

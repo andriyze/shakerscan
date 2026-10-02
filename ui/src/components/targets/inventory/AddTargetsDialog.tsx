@@ -151,7 +151,9 @@ export function AddTargetsDialog({ open, onClose, onAdded }: { open: boolean; on
       <div className="grid gap-4 sm:grid-cols-2">
         {single && <Field label="Display name (optional)"><Input value={name} maxLength={255} onChange={event => setName(event.target.value)} placeholder="Customer portal" /></Field>}
         <Field label="Environment"><Select value={environment} onChange={event => setEnvironment(event.target.value)}>
-          <option value="production">Production</option><option value="staging">Staging</option><option value="development">Development</option><option value="lab">Lab</option>
+          {/* The cohorts both the host and web-app endpoints accept; lab, demo and calibration stay out of executive posture. */}
+          <option value="production">Production</option><option value="staging">Staging</option><option value="lab">Lab</option>
+          <option value="demo">Demo</option><option value="calibration">Calibration</option><option value="internal">Internal</option>
         </Select></Field>
         <Field label="Extra ports to check (optional)" hint={extraPorts.error || 'Network scans prioritize these, e.g. 8080, 8443, 9100.'}>
           <Input value={ports} onChange={event => setPorts(event.target.value)} placeholder="8080, 8443" aria-invalid={Boolean(extraPorts.error)}

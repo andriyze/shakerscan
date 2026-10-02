@@ -92,7 +92,7 @@
     "FleetNodeJoinRequest": "44d4c55086f9ec1ee5b0c771d8b6ce39b7f7af890cf8f148eb074b7e9cae9da0",
     "FleetScaleRequest": "78e53605ce3941f5f47a4246ccf758ce51f46bb4a1803fa9db036f563caafafe",
     "HTTPValidationError": "7373c21f1389312367e27e440140ba11d587693c56d8aa27249b36d3f58c10c6",
-    "HostTargetCreate": "83415450051ebf0ecbebb92ecd77e4e4a11fb188074778c64f14497b8f6121a9",
+    "HostTargetCreate": "dfc014fd6dff26939ea9136bf251fd41a6a2633fdf622e7f55c47ab611247c39",
     "HuntAuthorityWrite": "3fdac8c7af910e75fa75082f9beeb804d724e0a0720f3ed47286e559bc040b6c",
     "HuntBoundaryHandoffRequest": "122fee03ebae8d329cb1444013f0b97e8ea7ad26d2cb80118f263ec042e1e0d9",
     "HuntBoundaryPrincipal": "2201f424ce72eb27ebf6249af74d49197b5e8a6339f70f6dba4f0cc2cf99776c",
@@ -200,7 +200,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "e3cdbba3ab8527d33cf18437bfbdac57ed0b56c1624577f8100192a6307e1f33",
+  "contract_sha256": "f5c94b81961de2cd169b20db37530b74ca992d43507e9f55c7f79755e512c60d",
   "openapi": "3.1.0",
   "operation_count": 442,
   "operations": {
