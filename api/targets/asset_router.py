@@ -75,12 +75,23 @@ async def create_host_target(request: HostTargetCreate):
     async with pool().acquire() as conn, conn.transaction():
         row = await conn.fetchrow("""INSERT INTO targets(url,name,discovery_source,metadata_json)
             VALUES($1,$2,'host',$3) ON CONFLICT(canonical_key) DO UPDATE SET
-                metadata_json=CASE WHEN $4::boolean THEN targets.metadata_json || jsonb_build_object('port_hints',$3::jsonb->'port_hints') ELSE targets.metadata_json END
-            RETURNING id,url,name,(xmax=0) AS created""",host_url(locator),request.name or locator,
+                metadata_json=CASE WHEN $4::boolean THEN targets.metadata_json || jsonb_build_object('port_hints',(
+                    SELECT COALESCE(jsonb_agg(value ORDER BY first_seen),'[]'::jsonb) FROM (
+                        SELECT value,min(ordinality) AS first_seen FROM jsonb_array_elements(
+                            CASE WHEN jsonb_typeof(targets.metadata_json->'port_hints')='array'
+                                THEN targets.metadata_json->'port_hints' ELSE '[]'::jsonb END
+                            || ($3::jsonb->'port_hints')) WITH ORDINALITY
+                        GROUP BY value ORDER BY first_seen LIMIT 128
+                    ) hints)) ELSE targets.metadata_json END
+            RETURNING id,url,name,metadata_json,(xmax=0) AS created""",host_url(locator),request.name or locator,
             json.dumps({'environment':request.environment,'cohort':request.environment,
                         'port_hints':request.port_hints}),bool(request.port_hints))
         result = {'id':str(row['id']), 'asset_id':str(row['id']), 'url':row['url'],
                   'status':'created' if row['created'] else 'already_exists'}
+        saved = row['metadata_json']
+        if isinstance(saved,str):
+            saved = json.loads(saved)
+        result['port_hints_truncated'] = bool(set(request.port_hints) - set(saved.get('port_hints') or []))
         if request.approved_by:
             try:
                 import target_authorization

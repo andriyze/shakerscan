@@ -15252,7 +15252,10 @@ async def _validate_approval_receipt_for_action(
             scope_ref=scope_ref,
         )
     if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
-        from targets.asset_authority import standing_authorization_matches_target
+        try:
+            from targets.asset_authority import standing_authorization_matches_target
+        except ModuleNotFoundError:
+            from .targets.asset_authority import standing_authorization_matches_target
         inherited = standing and await standing_authorization_matches_target(conn,
             target_id=requested_target_id,scope_target_id=scope_target_id,approval_receipt_id=approval_ref)
         if not inherited:

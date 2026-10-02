@@ -611,6 +611,27 @@ export const HUNT_START_CONTRACT = {
     {
       "call": {
         "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/ssh.connect"
+      },
+      "description": "Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.",
+      "name": "ssh.connect",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "paramiko",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "paramiko"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/http.request"
       },
       "description": "Send one target-pinned request, optionally as a managed principal. POST/PUT/PATCH/DELETE require the Hunt's existing state-changing authority; GET/HEAD/OPTIONS remain available without it.",

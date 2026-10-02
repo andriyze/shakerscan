@@ -191,6 +191,7 @@ def validate_generic_credential_references(
             "auth_kind": profile.auth_kind,
             "principal_slot": profile.principal_slot,
             "profile_version": profile.current_version,
+            **({'service_port':profile.service_port} if profile.service_port is not None else {}),
             "allowed_capabilities": list(profile.allowed_capabilities),
             "configuration": dict(profile.configuration),
             "source": "credential_profiles",

@@ -3181,7 +3181,8 @@ async def _run_schema_migrations_once(pool) -> None:
                        COALESCE((summary_json->>'request_count')::int, 0),
                        COALESCE((summary_json->>'safe_request_count')::int, 0),
                        COALESCE((summary_json->>'state_changing_request_count')::int, 0),
-                       summary_json, is_active, created_at, updated_at
+                       summary_json || jsonb_build_object('legacy_source','device_request_collections'),
+                       is_active, created_at, updated_at
                 FROM device_request_collections
                 ON CONFLICT (id) DO NOTHING
             """)
@@ -5022,7 +5023,7 @@ async def _run_schema_migrations_once(pool) -> None:
                 await _ensure_target_canonical_key_invariant(conn)
 
             # Convert the inventory atomically after the baseline schema is current.
-            # Legacy device/input tables remain synchronized rollback mirrors for 2.6.x.
+            # Compatibility names become views. Downgrade restores a pre-upgrade backup.
             async with conn.transaction():
                 from targets.asset_migration import migrate_target_assets
                 from targets.asset_inputs_migration import migrate_asset_inputs

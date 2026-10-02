@@ -20,8 +20,7 @@ export function preferredCredentialId<T extends DefaultableCredential>(
   return candidates[0]?.id || ''
 }
 
-// SSH is never chosen automatically: its command plans stay inert until the operator confirms
-// them, so selecting an SSH identity stays a deliberate step.
+// SSH is selected deliberately for authentication or separately confirmed command plans.
 export const DEFAULTED_HUNT_SLOTS = ['primary', 'secondary', 'service'] as const
 
 export function defaultHuntCredentialIds<T extends DefaultableCredential>(

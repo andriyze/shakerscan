@@ -152,8 +152,8 @@ VALUES ('v2_credential_profile_grants_v1')
 ON CONFLICT (name) DO NOTHING;
 """
 
-# Web, API and network targets are views of the same asset rows (the targets table); a device
-# target is a different asset. A profile serves targets of its own asset kind only.
+# All target kinds use the canonical inventory. Kind compatibility makes a grant
+# selectable; only an exact, active consumer grant permits credential resolution.
 _KIND_COMPATIBLE_SQL = "(p.target_kind IN ('web','api','network','device') AND {kind} IN ('web','api','network','device'))"
 
 

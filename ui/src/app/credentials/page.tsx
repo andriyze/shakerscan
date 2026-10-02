@@ -275,10 +275,10 @@ function CredentialsContent() {
   }, [])
 
   const choices = useMemo(() => assets.map((asset) => ({
-    id: asset.id, label: asset.name || asset.locator, detail: asset.locator,
+    id: asset.id, label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
   })), [assets])
   const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => ({
-    id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: asset.locator,
+    id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
   })), [assets])
 
   useEffect(() => {
@@ -286,9 +286,13 @@ function CredentialsContent() {
     const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
     if (!targetId && requestedUrl) {
       try {
-        const host = new URL(requestedUrl).hostname.toLowerCase().replace(/\.$/, '')
-        const asset = assets.find((item) => item.locator === host)
+        const requested = new URL(requestedUrl)
+        const asset = assets.find((item) => {
+          if (/^https?:\/\//i.test(item.url)) return new URL(item.url).origin === requested.origin
+          return false
+        })
         if (asset) setFilters({target_id:asset.id,target:undefined})
+        else setMissingTarget(requestedUrl)
       } catch { setMissingTarget(requestedUrl) }
       return
     }
@@ -297,8 +301,10 @@ function CredentialsContent() {
     getTargetAsset(targetId).then((result) => {
       if (cancelled) return
       if (!result.target.is_active) {setMissingTarget(targetId);return}
-      setAssets((current) => current.some((asset) => asset.id === result.target.id) ? current : [...current,result.target])
-      setFilters({target_id:result.target.id,target:undefined})
+      const origin = result.origins.find((item) => item.id === targetId)
+      const exact = origin ? {...result.target,...origin,asset_id:result.target.id,locator:origin.url} : result.target
+      if (exact.id !== targetId || !exact.is_active) {setMissingTarget(targetId);return}
+      setAssets((current) => current.some((asset) => asset.id === exact.id) ? current : [...current,exact])
     }).catch(() => {if (!cancelled) setMissingTarget(targetId)})
     return () => {cancelled = true}
   },[assets,filters.target,loading,setFilters,targetId])
@@ -575,7 +581,7 @@ function CredentialsContent() {
                       <button
                         type="button"
                         className="text-blue-300 hover:text-blue-200"
-                        onClick={() => setFilters({ target_kind: profile.target_kind === 'device' ? 'device' : undefined, target_id: profile.target_id })}
+                        onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
                       >
                         {profile.home_target_name || profile.target_id}
                       </button>

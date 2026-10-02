@@ -837,6 +837,7 @@ start_services
             text=True,
             timeout=10,
             check=False,
+            env={**os.environ,"SCRIPT_DIR":str(ROOT)},
         )
         assert result.returncode == 0, result.stdout + result.stderr
         outputs[(mode, ready_rc)] = result.stdout
@@ -1203,6 +1204,7 @@ restart_services
         text=True,
         timeout=10,
         check=False,
+        env={**os.environ,"SCRIPT_DIR":str(ROOT)},
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

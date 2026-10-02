@@ -10,8 +10,12 @@ async def archive(pool, target_id: UUID):
         target = await conn.fetchval('SELECT id FROM targets WHERE id=$1 FOR UPDATE', target_id)
         if target is None:
             raise HTTPException(404, 'Target not found')
-        await conn.execute("UPDATE targets SET is_active=false, asm_enabled=false, updated_at=NOW() WHERE id=$1", target_id)
+        members = await conn.fetch("""SELECT id FROM targets
+            WHERE id=$1 OR (asset_owner_id=$1 AND target_asset_access_owner(id)=$1)
+            ORDER BY id FOR UPDATE""", target_id)
+        ids = [row['id'] for row in members]
         paused = await conn.fetch("""UPDATE schedules SET is_active=false, next_run_at=NULL, updated_at=NOW()
-            WHERE target_id=$1 AND (is_active=true OR next_run_at IS NOT NULL) RETURNING id""", target_id)
+            WHERE target_id=ANY($1::uuid[]) AND (is_active=true OR next_run_at IS NOT NULL) RETURNING id""", ids)
+        await conn.execute("UPDATE targets SET is_active=false, asm_enabled=false, updated_at=NOW() WHERE id=ANY($1::uuid[])", ids)
     return {'id': str(target_id), 'status': 'archived', 'records_deleted': False,
-            'schedules_paused': len(paused), 'running_work_cancelled': False}
+            'schedules_paused': len(paused), 'targets_archived': len(ids), 'running_work_cancelled': False}

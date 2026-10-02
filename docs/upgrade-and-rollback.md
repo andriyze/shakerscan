@@ -29,6 +29,13 @@ default. It contains:
 The backup contains sensitive scan evidence and configuration. Keep it encrypted or on storage with
 equivalent access controls. A directory containing `.incomplete` is not a valid restore point.
 
+Target unification replaces the legacy device and input tables with compatibility views. Before
+starting the new API/workers against an existing legacy database, the launcher automatically creates
+a backup and stops the upgrade if that backup fails. Rebuilds of a running API use the same check.
+Compatibility views do not support booting an older engine against the converted database.
+Downgrade by restoring the pre-upgrade dump and artifacts with the previous release and its saved
+configuration; simply switching images back is insufficient.
+
 For a managed-HTTPS Fleet control plane, also preserve the existing Compose `caddy-data` and
 `caddy-config` volumes. The ordinary installer and upgrade flow below leave them intact. Do not use
 `docker compose down -v`, `shakerscan reset`, or manual volume deletion during an upgrade: those

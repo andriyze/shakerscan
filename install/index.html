@@ -580,6 +580,7 @@ INSTALL_MANIFEST_FILE="$INSTALL_STAGE/$RUNTIME_MANIFEST_NAME"
 [ "$(grep -c . "$INSTALL_MANIFEST_FILE")" -gt 0 ] || fail "release manifest is empty"
 download "$REPO_RAW_BASE/scanner.sh" "$INSTALL_DIR/scanner.sh"
 download "$REPO_RAW_BASE/scripts/postgres_upgrade.sh" "$INSTALL_DIR/scripts/postgres_upgrade.sh"
+download "$REPO_RAW_BASE/scripts/target_upgrade_backup.sh" "$INSTALL_DIR/scripts/target_upgrade_backup.sh"
 download "$REPO_RAW_BASE/docker-compose.release.yml" "$INSTALL_DIR/docker-compose.release.yml"
 download "$REPO_RAW_BASE/docker-compose.worker.yml" "$INSTALL_DIR/docker-compose.worker.yml"
 download "$REPO_RAW_BASE/docker-compose.broker-worker.yml" "$INSTALL_DIR/docker-compose.broker-worker.yml"
@@ -692,6 +693,11 @@ download "$REPO_RAW_BASE/api/capabilities/http.py" "$INSTALL_DIR/api/capabilitie
 download "$REPO_RAW_BASE/api/capabilities/auth.py" "$INSTALL_DIR/api/capabilities/auth.py"
 download "$REPO_RAW_BASE/api/capabilities/browser_login.py" "$INSTALL_DIR/api/capabilities/browser_login.py"
 download "$REPO_RAW_BASE/api/capabilities/exposure_probe.py" "$INSTALL_DIR/api/capabilities/exposure_probe.py"
+download "$REPO_RAW_BASE/api/capabilities/ssh.py" "$INSTALL_DIR/api/capabilities/ssh.py"
+download "$REPO_RAW_BASE/api/capabilities/network_inputs.py" "$INSTALL_DIR/api/capabilities/network_inputs.py"
+download "$REPO_RAW_BASE/api/hunt/capability_executor.py" "$INSTALL_DIR/api/hunt/capability_executor.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/ssh_scanner.py" "$INSTALL_DIR/scanner/scanner_tools/ssh_scanner.py"
+download "$REPO_RAW_BASE/scanner/scanner_tools/device_shell.py" "$INSTALL_DIR/scanner/scanner_tools/device_shell.py"
 download "$REPO_RAW_BASE/api/runtime/v2_runtime_hardening.py" "$INSTALL_DIR/api/runtime/v2_runtime_hardening.py"
 download "$REPO_RAW_BASE/api/runtime/credential_resolver.py" "$INSTALL_DIR/api/runtime/credential_resolver.py"
 download "$REPO_RAW_BASE/api/runtime/credential_store.py" "$INSTALL_DIR/api/runtime/credential_store.py"
@@ -757,6 +763,11 @@ for skill_file in \
     30-scanner-orchestration-evidence-chaining-and-regression.md \
     31-edge-waf-and-origin-exposure-validation.md \
     32-service-protocol-and-device-investigation.md \
+    33-network-discovery-and-service-assessment.md \
+    34-smart-tv-network-and-application-assessment.md \
+    35-camera-network-and-management-assessment.md \
+    36-router-network-and-management-assessment.md \
+    37-managed-ssh-authentication-and-host-review.md \
     README.md; do
     download "$REPO_RAW_BASE/skills/web/$skill_file" "$INSTALL_DIR/skills/web/$skill_file"
 done

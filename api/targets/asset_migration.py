@@ -14,6 +14,7 @@ from typing import Any
 import urllib.parse
 
 from .asset_schema import ASSET_MIGRATION, ASSET_SCHEMA_SQL, ASSET_VIEW_SQL
+from .asset_invariants import _install_host_key
 
 
 def locator_from_url(value: str) -> str | None:
@@ -36,6 +37,17 @@ def locator_from_url(value: str) -> str | None:
 def host_url(locator: str) -> str:
     return f"host://[{locator}]" if ":" in locator else f"host://{locator}"
 
+def canonical_origin_url(value: str) -> str:
+    """Use the same literal host spelling for SQL membership and Python binding."""
+    locator = locator_from_url(value)
+    if locator is None:
+        raise ValueError('invalid application origin')
+    parsed = urllib.parse.urlsplit(value)
+    authority = f'[{locator}]' if ':' in locator else locator
+    if parsed.port is not None:
+        authority += f':{parsed.port}'
+    return parsed._replace(netloc=authority).geturl()
+
 
 class BoundConnectionPool:
     """Let the frozen baseline run inside the caller's connection and transaction."""
@@ -55,55 +67,6 @@ async def migration_applied(conn: Any) -> bool:
     ))
 
 
-async def _install_host_key(conn: Any) -> None:
-    """Install host canonicalization explicitly; never rewrite stored SQL source text."""
-    await conn.execute(r"""
-        CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
-        DECLARE raw TEXT; authority TEXT; host_part TEXT; port_part TEXT; scheme_part TEXT;
-        BEGIN
-            raw := lower(btrim(COALESCE(NEW.url, '')));
-            IF lower(COALESCE(NEW.discovery_source, '')) = 'host' THEN
-                host_part := regexp_replace(raw, '^host://', '');
-                host_part := regexp_replace(host_part, '[/?#].*$', '');
-                host_part := btrim(host_part, '[]');
-                IF host_part = '' THEN RAISE EXCEPTION 'invalid host target locator'; END IF;
-                NEW.url := CASE WHEN position(':' in host_part) > 0
-                    THEN 'host://[' || host_part || ']' ELSE 'host://' || host_part END;
-                NEW.canonical_key := 'host:' || host_part;
-                IF NOT NEW.is_active THEN
-                    NEW.url := NEW.url || '#retired=' || NEW.id::text;
-                    NEW.canonical_key := NEW.canonical_key || ':retired:' || NEW.id::text;
-                END IF;
-                RETURN NEW;
-            END IF;
-            scheme_part := substring(raw FROM '^(https?)://');
-            raw := regexp_replace(raw, '^https?://', '');
-            IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
-                NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
-            ELSE
-                authority := regexp_replace(raw, '[/?#].*$', '');
-                authority := regexp_replace(authority, '^.*@', '');
-                IF authority ~ '^\\[[^]]+\\]' THEN
-                    host_part := substring(authority FROM '^\\[([^]]+)\\]');
-                    port_part := substring(authority FROM '^\\[[^]]+\\]:([0-9]+)$');
-                ELSE
-                    host_part := regexp_replace(authority, ':[0-9]+$', '');
-                    port_part := substring(authority FROM ':([0-9]+)$');
-                END IF;
-                IF port_part IS NULL OR (scheme_part='https' AND port_part='443')
-                   OR (scheme_part='http' AND port_part='80')
-                   OR (scheme_part IS NULL AND port_part IN ('80','443')) THEN
-                    port_part := NULL;
-                END IF;
-                NEW.canonical_key := 'web:' || rtrim(host_part, '.') || COALESCE(':' || port_part, '');
-            END IF;
-            RETURN NEW;
-        END; $$ LANGUAGE plpgsql;
-        DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets;
-        CREATE TRIGGER trg_targets_canonical_key
-            BEFORE INSERT OR UPDATE OF url, discovery_source, is_active ON targets
-            FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key();
-    """)
 
 
 async def _canonical_device_references(conn: Any) -> None:
@@ -112,6 +75,7 @@ async def _canonical_device_references(conn: Any) -> None:
     await conn.execute("""
         ALTER TABLE request_collections DROP CONSTRAINT IF EXISTS request_collections_target_check;
         ALTER TABLE hunt_runs DROP CONSTRAINT IF EXISTS hunt_runs_target_check;
+        ALTER TABLE IF EXISTS investigation_candidates DROP CONSTRAINT IF EXISTS investigation_candidates_target_check;
     """)
     tables = await conn.fetch("""
         SELECT table_name FROM information_schema.columns
@@ -148,7 +112,7 @@ async def migrate_target_assets(conn: Any) -> None:
     for device in devices:
         locator = locator_from_url(host_url(str(device["primary_locator"])))
         if locator is None:
-            raise RuntimeError("stored device locator is invalid; migration rolled back")
+            raise RuntimeError(f"stored device locator is invalid for target {device['id']}; migration rolled back")
         metadata = device["metadata_json"] or {}
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
@@ -181,7 +145,13 @@ async def migrate_target_assets(conn: Any) -> None:
     for origin in origins:
         locator = locator_from_url(str(origin["url"]))
         if not locator:
-            raise RuntimeError("stored web origin is invalid; migration rolled back")
+            raise RuntimeError(f"stored web origin is invalid for target {origin['id']}; migration rolled back")
+        try:
+            normalized = canonical_origin_url(str(origin['url']))
+            if normalized != origin['url']:
+                await conn.execute('UPDATE targets SET url=$2 WHERE id=$1',origin['id'],normalized)
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError(f"stored web origin is invalid for target {origin['id']}; migration rolled back") from exc
         owner = await conn.fetchval("""
             INSERT INTO targets(url,name,discovery_source,root_domain,metadata_json)
             VALUES($1,$2,'host',$3,$4)
@@ -189,6 +159,8 @@ async def migrate_target_assets(conn: Any) -> None:
         """, host_url(locator), locator, origin["root_domain"], origin["metadata_json"])
         await conn.execute("UPDATE targets SET asset_owner_id=$2 WHERE id=$1", origin["id"], owner)
     await _canonical_device_references(conn)
+    from .asset_compatibility import repair_candidate_target_constraint
+    await repair_candidate_target_constraint(conn)
     await conn.execute("INSERT INTO app_schema_migrations(name) VALUES($1)", ASSET_MIGRATION)
 
 

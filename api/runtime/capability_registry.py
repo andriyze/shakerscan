@@ -1165,6 +1165,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_network",
         ),
         CapabilitySpec(
+            'ssh.connect', 'Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.',
+            'network_tcp','credential',_NETWORK_TARGETS,'paramiko','1','network_discovery',
+            {'hosts_attempted':1,'tcp_ports_attempted':1,'tool_wall_seconds':120,'device_fragility_points':3},
+            {'network_reachability':True,'credentials_resolved_server_side':True,'credential_binding':'ssh'},
+            _schema({'port':{'type':'integer','minimum':1,'maximum':65535},
+                     'host_key_fingerprint':{'type':'string','pattern':'^SHA256:[A-Za-z0-9+/]{43}$'}}),
+            'ssh-authentication/v1',('ssh_authentication_observation','tool_receipt'),
+            default_timeout_ms=120_000,hunt_executor='worker_network',credential_transport='exact_origin',credential_interruption='cooperative',
+        ),
+        CapabilitySpec(
             "scan.origin_select", "Select a reachable frozen HTTP origin for a scheme-inferred Scan.",
             "http", "passive", _HTTP_TARGETS, "scan.origin_select", "1",
             None, {"http_requests": 2, "tool_wall_seconds": 20},

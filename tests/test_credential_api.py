@@ -144,6 +144,15 @@ def _create_payload(**updates):
     return payload
 
 
+def test_capability_catalog_keeps_ssh_and_http_protocols_separate(client):
+    http,_ = client
+    ssh = http.get('/credential-profiles/capabilities',params={'target_kind':'network','auth_kind':'ssh_password'}).json()
+    assert 'ssh.connect' in {row['name'] for row in ssh['capabilities']}
+    assert 'http.request' not in {row['name'] for row in ssh['capabilities']}
+    web = http.get('/credential-profiles/capabilities',params={'target_kind':'network','auth_kind':'bearer_token'}).json()
+    assert 'ssh.connect' not in {row['name'] for row in web['capabilities']}
+
+
 def test_metadata_only_crud_and_rotation_never_return_secret_material(client):
     http, pool = client
 

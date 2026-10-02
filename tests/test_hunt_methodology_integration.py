@@ -63,7 +63,7 @@ def test_every_delivered_body_matches_its_declared_revision_and_real_operations(
 
 
 @pytest.mark.parametrize("kind", ["device", "network"])
-@pytest.mark.parametrize("signal", ["mqtt", "mosquitto", "ssh", "smb", "snmp", "upnp", "dlna"])
+@pytest.mark.parametrize("signal", ["mqtt", "mosquitto", "smb", "snmp", "upnp", "dlna"])
 def test_protocol_signals_select_native_methodology_without_inventing_http(library, kind, signal):
     result = library.suggest(goal="Investigate", target_kind=kind, signals=[signal],
                              allowed_capabilities=())

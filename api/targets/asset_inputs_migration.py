@@ -46,29 +46,39 @@ async def migrate_asset_inputs(conn: Any) -> None:
         await migrate_asset_compatibility(conn)
         return
     try:
-        from runtime.credential_migration import sync_legacy_device_credential
+        from runtime.credential_migration import sync_legacy_device_credential, LegacyCredentialMigrationError
     except ModuleNotFoundError:
-        from api.runtime.credential_migration import sync_legacy_device_credential
+        from api.runtime.credential_migration import sync_legacy_device_credential, LegacyCredentialMigrationError
     # Preserve the latest generic version when it is newer; the existing migration helper
     # validates stable IDs and handles any legacy write not synchronized before upgrade.
     profiles = await conn.fetch("SELECT id FROM device_credential_profiles ORDER BY id")
     for row in profiles:
-        await sync_legacy_device_credential(conn, row["id"])
+        try:
+            await sync_legacy_device_credential(conn, row["id"])
+        except LegacyCredentialMigrationError as exc:
+            raise LegacyCredentialMigrationError(f"device credential {row['id']}: {exc}") from exc
     await conn.execute(INPUTS_SCHEMA_SQL)
     await conn.execute("""UPDATE credential_profiles p SET service_port=d.port
         FROM device_credential_profiles d WHERE p.id=d.id""")
     await retarget_foreign_keys(conn, "device_credential_profiles", "credential_profiles")
     collections = await conn.fetch("SELECT * FROM device_request_collections ORDER BY created_at,id")
+    # Old baseline imports were snapshots, not synchronized stores. Do not resurrect
+    # a deleted device document from its stale shared mirror.
+    await conn.execute("""UPDATE request_collections c SET is_active=false,updated_at=NOW()
+        WHERE (c.metadata_json->>'legacy_source'='device_request_collections' OR c.device_target_id IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM device_request_collections d WHERE d.id=c.id)""")
     for legacy in collections:
         summary = object_value(legacy["summary_json"])
         index = collection_index(summary)
-        existing = await conn.fetchrow("SELECT id,payload_sha256 FROM request_collections WHERE id=$1", legacy["id"])
+        existing = await conn.fetchrow("SELECT id,payload_sha256,metadata_json,device_target_id,created_at FROM request_collections WHERE id=$1", legacy["id"])
         if existing:
-            if str(existing["payload_sha256"]) != str(legacy["document_sha256"]):
-                raise RuntimeError("device collection ID conflicts with a different shared collection")
-            continue
+            mirror = object_value(existing['metadata_json']).get('legacy_source') == 'device_request_collections'
+            mirror = mirror or (existing['device_target_id'] == legacy['device_target_id'] and existing['created_at'] == legacy['created_at'])
+            if not mirror:
+                raise RuntimeError(f"device collection {legacy['id']} conflicts with an independent shared collection")
+            await conn.execute("DELETE FROM request_collection_requests WHERE collection_id=$1",legacy['id'])
         name = str(legacy["name"])
-        if await conn.fetchval("SELECT 1 FROM request_collections WHERE target_id=$1 AND name=$2", legacy["device_target_id"], name):
+        if await conn.fetchval("SELECT 1 FROM request_collections WHERE target_id=$1 AND name=$2 AND id<>$3", legacy["device_target_id"], name,legacy["id"]):
             name = f"{name[:260]} (device {str(legacy['id'])[:8]})"
         metadata = {key: value for key, value in summary.items() if key != "requests"}
         metadata.update({"legacy_source": "device_request_collections", "environment_stored_separately": False})
@@ -76,7 +86,13 @@ async def migrate_asset_inputs(conn: Any) -> None:
             id,target_id,device_target_id,name,format,encrypted_payload,payload_sha256,
             request_count,safe_request_count,potentially_mutating_request_count,
             metadata_json,is_active,created_at,updated_at
-        ) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+        ) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT(id) DO UPDATE SET target_id=EXCLUDED.target_id,device_target_id=EXCLUDED.device_target_id,
+            name=EXCLUDED.name,format=EXCLUDED.format,encrypted_payload=EXCLUDED.encrypted_payload,
+            payload_sha256=EXCLUDED.payload_sha256,request_count=EXCLUDED.request_count,
+            safe_request_count=EXCLUDED.safe_request_count,
+            potentially_mutating_request_count=EXCLUDED.potentially_mutating_request_count,
+            metadata_json=EXCLUDED.metadata_json,is_active=EXCLUDED.is_active,updated_at=EXCLUDED.updated_at""",
             legacy["id"],legacy["device_target_id"],name,legacy["format"],
             legacy["encrypted_payload"],legacy["document_sha256"],
             int(summary.get("request_count") or len(index)),

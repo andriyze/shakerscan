@@ -22,10 +22,7 @@ RETURNS boolean LANGUAGE sql STABLE AS $$
         WHERE b.collection_id=collection AND b.target_id=consumer
         ORDER BY b.updated_at DESC,b.id LIMIT 1
     ), (
-        SELECT target_asset_access_owner(c.target_id)=target_asset_access_owner(consumer)
-            OR EXISTS (SELECT 1 FROM request_collection_bindings b
-                       WHERE b.collection_id=c.id AND b.is_active
-                         AND b.target_id=target_asset_access_owner(consumer))
+        SELECT c.target_id=consumer
         FROM request_collections c WHERE c.id=collection
     ), false)
 $$;

@@ -13390,6 +13390,10 @@ async def process_scan_job(job_data: dict):
             if job_data.get("_broker_result_id"):
                 result = await _load_broker_result(job_data, scan_id)
             else:
+                if device_target_id:
+                    from devices.network_authorization import revalidate_network_authorization
+                    async with db_pool.acquire() as conn:
+                        await revalidate_network_authorization(conn, device_target_id, options or {})
                 options = await _hydrate_generic_scan_credentials(options, scan_id)
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 options = _hydrate_scan_private_state_key(options)
@@ -21380,6 +21384,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     target=target,
                     args=capability_input,
                     policy=policy,
+                    **({'context':context} if capability_name == 'ssh.connect' else {}),
                 )
                 expected_input_digest = str(
                     job_data.get("expected_input_digest") or ""
@@ -21500,6 +21505,11 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
             max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
         )
+        if capability_name == 'ssh.connect':
+            from capabilities.ssh import SshExecutionAdapter
+            executable_network_adapter = SshExecutionAdapter(prepared=prepared,pool=db_pool,
+                run=run,target=target,policy=policy,target_url=target_url,
+                revalidate=_revalidate_hunt_action_authority)
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),

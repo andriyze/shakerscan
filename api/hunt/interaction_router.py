@@ -1746,6 +1746,7 @@ async def _execute_hunt_capability_lifecycle(
                     )
                     prepared_network = network_capability_adapter(name).prepare(
                         target=network_target, args=request.input, policy=network_policy,
+                        **({'context':authority_context} if name == 'ssh.connect' else {}),
                     )
                 except (CapabilityInputError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc

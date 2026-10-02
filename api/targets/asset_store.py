@@ -110,7 +110,8 @@ async def asset_detail(conn: Any, target_id: Any) -> dict[str, Any]:
     )
     collections = await conn.fetch("""SELECT id,name,format,target_id AS home_target_id,
         request_count,safe_request_count,potentially_mutating_request_count,is_active,updated_at
-        FROM request_collections WHERE target_collection_visible(id,$1) ORDER BY lower(name),id""", owner)
+        FROM request_collections WHERE target_collection_visible(id,$1)
+          OR target_asset_access_owner(target_id)=$1 ORDER BY lower(name),id""", owner)
     finding_counts = await conn.fetch("""SELECT severity,count(*) AS count FROM findings
         WHERE status='active' AND target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1)
         GROUP BY severity""", owner)

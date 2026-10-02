@@ -281,6 +281,9 @@ Do not ask the operator again or demand a repaired certificate after testing wit
 credentials has been authorized. Keep control-plane TLS verification separate and unchanged.
 Web, API and network are views of the same target row and reuse its credentials and collections;
 different target UUIDs and device identities remain distinct.
+An authorized host asset covers its currently linked same-host application services. The server
+checks current membership; an origin's own authorization or explicit revocation overrides inherited
+host authority. Credential grants and collection bindings still identify the exact consuming target.
 
 ### Authorized service reuse
 
@@ -360,7 +363,7 @@ devices do not belong in web target metrics.
 
 ### Connected devices
 
-Devices use separate inventory/workers. Confirm ownership/authorization. All-TCP examination is
+Connected Devices shares the target inventory and uses specialized workers. Confirm ownership/authorization. All-TCP examination is
 possible, so silence is inconclusive and receives no score. Imported Postman/HAR/OpenAPI never
 executes scripts, external references, or arbitrary destinations. In an authorized active Hunt,
 select an HTTP(S) service on the same canonical host at any valid port using `origin`; the target
@@ -371,8 +374,11 @@ uses the saved login service, not the inventory record's default port. Do not by
 credentials or redirect credentials to another asset; a credential reaches another target only
 through an operator's grant.
 
-SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
-uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
+SSH plans are immutable and inert until the user separately confirms exact commands. Hunt
+may authenticate through `ssh.connect` using its selected stored SSH identity on the operator's
+port, the saved profile port, or port 22. It pins the host key, reports authentication evidence, and
+closes the connection without executing commands.
+Device Hunt uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
 `./scanner.sh devices start|stop|status|logs` and must not consume ordinary DAST slots silently.
 
 ### Continuous ASM

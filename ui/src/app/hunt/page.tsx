@@ -391,9 +391,7 @@ function HuntContent() {
         : receiptRequired && !approvalReceipt.trim()
           ? 'Create or paste a target-bound approval receipt.'
           : null
-  const visibleCredentialSlots: CredentialPrincipalSlot[] = targetKind === 'network' || targetKind === 'device'
-    ? ['primary', 'secondary', 'service', 'ssh']
-    : ['primary', 'secondary', 'service']
+  const visibleCredentialSlots: CredentialPrincipalSlot[] = ['primary', 'secondary', 'service', 'ssh']
 
   async function start() {
     if (!targetId || !selectedChoice) return
@@ -733,7 +731,7 @@ function HuntContent() {
                               [slot]: event.target.value,
                             }))}
                           >
-                            <option value="">{slot === 'ssh' ? 'No SSH command proposals' : `No ${slot} identity`}</option>
+                            <option value="">{slot === 'ssh' ? 'No SSH identity' : `No ${slot} identity`}</option>
                             {candidates.map((profile) => (
                               <option key={profile.id} value={profile.id}>
                                 {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}
@@ -747,7 +745,7 @@ function HuntContent() {
                 )}
                 {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
                 <p className="text-xs text-gray-500">
-                  This target&apos;s credentials start selected; clear any you do not want. Existing target authorization also covers selected credentials. HTTP and untrusted HTTPS are supported. No SSH command runs until you separately confirm the exact immutable plan.
+                  This target&apos;s credentials start selected; clear any you do not want. Existing target authorization also covers selected credentials. HTTP, untrusted HTTPS, and SSH authentication are supported. No SSH command runs until you separately confirm the exact immutable plan.
                 </p>
               </div>
 

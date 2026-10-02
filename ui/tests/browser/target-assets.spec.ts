@@ -34,6 +34,7 @@ test('ASSET-001 one asset owns service origins and shared IDs without executing 
   await page.getByRole('link',{name:'Open asset',exact:true}).click()
   await expect(page.getByRole('heading',{name:'Shared fixture',exact:true})).toBeVisible()
   await expect(page.getByRole('link',{name:'https://asset.example.test:8443',exact:true})).toBeVisible()
+  await expect(page.getByRole('link',{name:'https://asset.example.test:8443',exact:true})).toHaveAttribute('href',`/targets/${originId}/asset`)
   await expect(page.getByRole('link',{name:'http://asset.example.test:3000',exact:true})).toBeVisible()
   await expect(page.getByText(profileId,{exact:true})).toBeVisible()
   await expect(page.getByText(collectionId,{exact:true})).toBeVisible()

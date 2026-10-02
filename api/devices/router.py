@@ -343,7 +343,10 @@ class DeviceScanRequest(BaseModel):
     @field_validator('udp_ports', mode='before')
     @classmethod
     def validate_udp_scope(cls, value):
-        from scanner_tools.device_scan_scope import normalize_udp_ports
+        try:
+            from scanner_tools.device_scan_scope import normalize_udp_ports
+        except ModuleNotFoundError:
+            from scanner.scanner_tools.device_scan_scope import normalize_udp_ports
         return normalize_udp_ports(value)
 
     confirm_request_replay: bool = False

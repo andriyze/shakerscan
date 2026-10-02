@@ -32,6 +32,7 @@ RETAINED = [
     'Historical scan reports and scan artifacts are retained; their target link is detached.',
     'External evidence files and their storage index are retained, not erased.',
     'Exports, backups, detached audit records, and other targets are retained.',
+    'Deleting a host retains its application origins as independent targets; archiving retires linked services together.',
     'Later scans or discovery may create a new target or finding record.',
     'Original links of retained and detached rows are recorded in this deletion receipt.',
 ]
@@ -134,7 +135,7 @@ async def summarize(conn, table, clause, roots, *, preserving=False):
     # Preserve these exact original links in the preview hash and durable result
     # before ON DELETE SET NULL or an explicit evidence detachment changes them.
     fields = ('id', 'target_id', 'device_target_id', 'ai_target_id', 'scan_id',
-              'finding_id', 'hunt_run_id', 'parent_target_id')
+              'finding_id', 'hunt_run_id', 'parent_target_id', 'asset_owner_id')
     links = 'jsonb_strip_nulls(jsonb_build_object(' + ','.join(
         f"'{field}',to_jsonb(r)->'{field}'" for field in fields) + '))'
     ownership = ", COALESCE(jsonb_agg(links ORDER BY links::text), '[]'::jsonb) AS ownership" if preserving else ''
