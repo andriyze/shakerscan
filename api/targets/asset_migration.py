@@ -55,43 +55,54 @@ async def migration_applied(conn: Any) -> bool:
 
 
 async def _install_host_key(conn: Any) -> None:
-    definition = await conn.fetchval(
-        "SELECT pg_get_functiondef('targets_set_canonical_key()'::regprocedure)",
-    )
-    if "host-target-identity/v1" not in definition:
-        branch = """BEGIN
-    -- host-target-identity/v1: retired identities do not reserve a recycled locator.
-    IF NEW.url LIKE 'host://%' THEN
-        host_part := target_asset_locator(NEW.url);
-        IF host_part IS NULL THEN RAISE EXCEPTION 'invalid host target locator'; END IF;
-        NEW.url := target_asset_url(host_part);
-        NEW.canonical_key := 'host:' || host_part;
-        IF NOT NEW.is_active THEN
-            NEW.url := NEW.url || '#retired=' || NEW.id::text;
-            NEW.canonical_key := NEW.canonical_key || ':retired:' || NEW.id::text;
-        END IF;
-        RETURN NEW;
-    END IF;"""
-        # The baseline canonical trigger declares host_part. Refuse an unknown source,
-        # rather than silently installing a different normalization policy.
-        if not re.search(r"\bhost_part\s+text\b", definition, re.I):
-            raise RuntimeError("canonical target trigger contract changed")
-        definition, changes = re.subn(r"\bBEGIN\b", branch, definition, count=1, flags=re.I)
-        if changes != 1:
-            raise RuntimeError("canonical target trigger has no body")
-        await conn.execute(definition)
-    triggers = await conn.fetch(
-        """SELECT tgname, pg_get_triggerdef(oid) AS definition FROM pg_trigger
-           WHERE tgrelid='targets'::regclass AND tgfoid='targets_set_canonical_key()'::regprocedure
-             AND NOT tgisinternal""",
-    )
-    for trigger in triggers:
-        definition = str(trigger["definition"])
-        if "is_active" in definition:
-            continue
-        definition = re.sub(r"UPDATE OF url, discovery_source", "UPDATE OF url, discovery_source, is_active", definition)
-        await conn.execute(f'DROP TRIGGER "{trigger["tgname"]}" ON targets')
-        await conn.execute(definition)
+    """Install host canonicalization explicitly; never rewrite stored SQL source text."""
+    await conn.execute(r"""
+        CREATE OR REPLACE FUNCTION targets_set_canonical_key() RETURNS trigger AS $$
+        DECLARE raw TEXT; authority TEXT; host_part TEXT; port_part TEXT; scheme_part TEXT;
+        BEGIN
+            raw := lower(btrim(COALESCE(NEW.url, '')));
+            IF lower(COALESCE(NEW.discovery_source, '')) = 'host' THEN
+                host_part := regexp_replace(raw, '^host://', '');
+                host_part := regexp_replace(host_part, '[/?#].*$', '');
+                host_part := btrim(host_part, '[]');
+                IF host_part = '' THEN RAISE EXCEPTION 'invalid host target locator'; END IF;
+                NEW.url := CASE WHEN position(':' in host_part) > 0
+                    THEN 'host://[' || host_part || ']' ELSE 'host://' || host_part END;
+                NEW.canonical_key := 'host:' || host_part;
+                IF NOT NEW.is_active THEN
+                    NEW.url := NEW.url || '#retired=' || NEW.id::text;
+                    NEW.canonical_key := NEW.canonical_key || ':retired:' || NEW.id::text;
+                END IF;
+                RETURN NEW;
+            END IF;
+            scheme_part := substring(raw FROM '^(https?)://');
+            raw := regexp_replace(raw, '^https?://', '');
+            IF lower(COALESCE(NEW.discovery_source, '')) = 'model-intake' THEN
+                NEW.canonical_key := 'artifact:' || rtrim(raw, '/');
+            ELSE
+                authority := regexp_replace(raw, '[/?#].*$', '');
+                authority := regexp_replace(authority, '^.*@', '');
+                IF authority ~ '^\\[[^]]+\\]' THEN
+                    host_part := substring(authority FROM '^\\[([^]]+)\\]');
+                    port_part := substring(authority FROM '^\\[[^]]+\\]:([0-9]+)$');
+                ELSE
+                    host_part := regexp_replace(authority, ':[0-9]+$', '');
+                    port_part := substring(authority FROM ':([0-9]+)$');
+                END IF;
+                IF port_part IS NULL OR (scheme_part='https' AND port_part='443')
+                   OR (scheme_part='http' AND port_part='80')
+                   OR (scheme_part IS NULL AND port_part IN ('80','443')) THEN
+                    port_part := NULL;
+                END IF;
+                NEW.canonical_key := 'web:' || rtrim(host_part, '.') || COALESCE(':' || port_part, '');
+            END IF;
+            RETURN NEW;
+        END; $$ LANGUAGE plpgsql;
+        DROP TRIGGER IF EXISTS trg_targets_canonical_key ON targets;
+        CREATE TRIGGER trg_targets_canonical_key
+            BEFORE INSERT OR UPDATE OF url, discovery_source, is_active ON targets
+            FOR EACH ROW EXECUTE FUNCTION targets_set_canonical_key();
+    """)
 
 
 async def _canonical_device_references(conn: Any) -> None:
