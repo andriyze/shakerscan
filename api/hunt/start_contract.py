@@ -153,6 +153,10 @@ class HuntStartContractError(ValueError):
 
 def hunt_start_public_contract() -> dict[str, Any]:
     """Return the API/UI contract generated from the server's authority constants."""
+    try:
+        from runtime.capability_registry import CAPABILITY_REGISTRY
+    except ModuleNotFoundError:
+        from ..runtime.capability_registry import CAPABILITY_REGISTRY
     return {
         "schema_version": HUNT_START_SCHEMA,
         "budget_schema_version": HUNT_BUDGET_SCHEMA,
@@ -173,6 +177,14 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "skill_id": _SKILL_RE.pattern,
         },
         "skill_catalog": "/hunt/skills",
+        "tool_calls": [
+            {"name": spec.name, "description": spec.description,
+             "tool": spec.planner_contract()["tool"],
+             "target_kinds": sorted(spec.target_kinds),
+             "required_approval": spec.required_approval,
+             "call": {"method":"POST", "url_template":f"/hunts/{{hunt_id}}/capabilities/{spec.name}"}}
+            for spec in CAPABILITY_REGISTRY.list() if spec.planner_visible
+        ],
         "budget_amendments": {
             "schema_version": "hunt-budget-amendment/v1",
             "url_template": "/hunts/{hunt_id}/budget-amendments",

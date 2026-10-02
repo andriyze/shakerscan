@@ -1327,7 +1327,10 @@ def test_hunt_nuclei_uses_server_owned_get_only_pack():
     assert argv[argv.index("-id") + 1] == at._CANONICAL_PASSIVE_NUCLEI_IDS
     assert "-no-interactsh" in argv
     assert "-tags" not in argv
-    for forbidden in ("tags", "severity", "template_ids", "template_pack_digest"):
+    assert at.CAPABILITY_REGISTRY.validate_hunt_input(
+        "templates.scan", {"tags":"exposure,config", "severity":"medium,info"},
+    ) == {"tags":"exposure,config", "severity":"medium,info"}
+    for forbidden in ("template_ids", "template_pack_digest"):
         with pytest.raises(CapabilityInputContractError, match="unsupported fields"):
             at.CAPABILITY_REGISTRY.validate_hunt_input(
                 "templates.scan", {forbidden: "cve"},

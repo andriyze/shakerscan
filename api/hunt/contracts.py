@@ -17,6 +17,7 @@ from .start_contract import HuntStartContract, HuntStartContractError
 
 
 _APPROVAL_POLICIES = frozenset({
+    "operator_intent",
     "active_testing",
     "credential_use",
     "network_discovery",

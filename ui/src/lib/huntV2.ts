@@ -63,6 +63,7 @@ export interface HuntV2 {
   capabilities?: Array<{
     name: string
     description: string
+    tool?: {name: string; binary: string | null; adapter: string; alternate_adapters: string[]}
     risk_tier: string
     input_schema: Record<string, unknown>
     budget_cost: Record<string, number>

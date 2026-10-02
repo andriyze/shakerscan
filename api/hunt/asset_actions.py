@@ -39,7 +39,7 @@ async def _perform_asset_action(pool, run, name, values):
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
-    if not policy.get('active_testing'):
+    if name not in {'targets.create', 'targets.update'} and not policy.get('active_testing'):
         raise HTTPException(403,'The Hunt has no active target-management authority')
     if name == 'targets.create':
         result = await create_host_target(HostTargetCreate(**{

@@ -33,12 +33,19 @@ not an authority grant or proof that execution will succeed on a particular targ
 | SQL/XSS proof | `sqli.verify`, `xss.verify` | Use the specific live verifier contract; a scanner signal alone is not proof |
 | Candidate verification | `candidate.verify` | Only candidate families/contracts actually supported by the server |
 | Service discovery | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect` | Registered/frozen asset and selected operation; NSE observations are not vulnerability proof |
-| Target and reusable input management | `targets.create`, `targets.update`, `credentials.grant`, `collections.bind` | Explicit operator intent; exact receiving target and origins; encrypted profiles remain opaque. Changes do not alter the running Hunt's frozen target or selected inputs. |
+| Target metadata | `targets.create`, `targets.update` | Explicit operator intent (`operator_confirmed`), independently of network-testing permission. Does not authorize testing or alter the frozen Hunt asset. |
+| Reusable input management | `credentials.grant`, `collections.bind` | Explicit operator intent and existing receiving-target authority; exact receiving target and origins; encrypted profiles remain opaque. Changes do not alter the running Hunt's selected inputs. |
 | Device tasks | `device.inspect`, `device.capabilities.inspect`, `device.service.verify`, `device.ssh.propose` | Device-only schemas; SSH proposal is not execution or approval of a changed plan |
 
 This table is a description, not an execution schema. Read the live contract for the exact fields,
 selected principal support, admitted service and resource costs. An operation may require additional
 implemented transport/worker prerequisites even when its capability name is present.
+
+`GET /hunts/contract` lists every registered planner tool call in `tool_calls`, including its
+underlying binary (Nmap, Naabu, Nuclei, Dalfox, SQLmap, Subfinder, HTTPX, Katana or FFUF).
+The running Hunt's manifest supplies the admitted input schemas and calls; catalog visibility
+does not grant authority. Nuclei accepts typed tag/severity filters over its reviewed GET-only
+pack. Tool identity is explicit metadata; the runtime owns process arguments and placement.
 
 For “scan my home smart TV's ports with Naabu”, resolve the existing target, start the shared
 Hunt with network-discovery permission, and invoke `ports.discover` with the desired port set.

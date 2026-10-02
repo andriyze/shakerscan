@@ -18,7 +18,9 @@ def asset_capability_specs(spec, schema, kinds):
          {'collection_id':identifier,'allowed_origins':{'type':'array','minItems':1,'maxItems':32,'items':{'type':'string','maxLength':2048}},
           'environment_id':identifier},('collection_id','allowed_origins')),
     )
-    return tuple(spec(name,description,'internal','active',kinds,name,'1','active_testing',
+    return tuple(spec(name,description,'internal',
+        'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
+        'operator_intent' if name.startswith('targets.') else 'active_testing',
         {'tool_wall_seconds':5},{'control_plane':True,'user_confirmation':True},
         schema({**properties,'operator_confirmed':confirmed},required=(*required,'operator_confirmed')),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')

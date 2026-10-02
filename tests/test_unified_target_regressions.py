@@ -144,7 +144,7 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
             monkeypatch.setattr(asset_router,'_pool_provider',lambda:pool)
             monkeypatch.setattr(asset_actions.request_collection_api,'_pool_provider',lambda:pool)
             run = {'id':uuid.uuid4(),'target_id':home,'device_target_id':home,
-                   'target_kind':'device','policy_json':{'active_testing':True}}
+                   'target_kind':'device','policy_json':{'active_testing':False}}
             for name in asset_actions.NAMES:
                 assert CAPABILITY_REGISTRY.require(name).target_kinds == frozenset({'web','api','network','device'})
                 with pytest.raises(HTTPException,match='Explicit operator'):
@@ -163,15 +163,19 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
             spec = CAPABILITY_REGISTRY.require('targets.update')
             adapter = ControlPlaneExecutionAdapter(specification=spec,
                 operation=lambda:asset_actions.execute_asset_action(pool,run,'targets.update',{'name':'Home TV','operator_confirmed':True}),
-                requested_budget={'tool_wall_seconds':5,'agent_actions':1,'active_actions':1},
+                requested_budget={'tool_wall_seconds':5,'agent_actions':1},
                 redacted_execution={'name':'Home TV','operator_confirmed':True},blocked_exceptions=(HTTPException,),conservative_full_budget=True)
             execution = await CapabilityExecutor().execute(CapabilityExecutionContext(specification=spec,
                 target=TargetBinding(target_id=str(tv),target_kind='network',canonical_host='tv.test'),
-                requested_budget={'tool_wall_seconds':5,'agent_actions':1,'active_actions':1}),adapter,
+                requested_budget={'tool_wall_seconds':5,'agent_actions':1}),adapter,
                 heartbeat=lambda:asyncio.sleep(0),cancelled=lambda:False)
             assert execution.status == 'success' and execution.observations[0]['kind'] == 'target_management_observation'
-            assert execution.actual_budget == {'tool_wall_seconds':5,'agent_actions':1,'active_actions':1}
+            assert execution.actual_budget == {'tool_wall_seconds':5,'agent_actions':1}
             assert await conn.fetchval('SELECT name FROM targets WHERE id=$1',tv) == 'Home TV'
+            with pytest.raises(HTTPException,match='no active'):
+                await asset_actions.execute_asset_action(pool,run,'credentials.grant',
+                    {'profile_id':str(uuid.uuid4()),'operator_confirmed':True})
+            run['policy_json'] = {'active_testing':True}
             material = build_credential_secret('bearer_token',secret='fixture-secret')
             profile = await PostgresCredentialProfileStore().create_profile(conn,target_kind='device',target_id=home,
                 name='Shared fixture',auth_kind='bearer_token',principal_slot='primary',principal_label=None,

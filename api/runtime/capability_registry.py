@@ -107,13 +107,22 @@ class CapabilitySpec:
             raise ValueError(
                 f"planner-visible capability {self.name} requires a Hunt executor"
             )
+        if self.required_approval == "operator_intent" and (
+            self.risk_tier != "read_only" or self.hunt_executor != "inline"
+            or not self.placement_requirements.get("control_plane")
+            or not self.placement_requirements.get("user_confirmation")
+            or self.placement_requirements.get("network_reachability")
+            or self.binary is not None
+            or set(self.budget_cost) - {"tool_wall_seconds"}
+        ):
+            raise ValueError("operator intent authority is limited to confirmed metadata actions")
         for dimension, amount in self.budget_cost.items():
             if not str(dimension).strip() or int(amount) < 0:
                 raise ValueError("budget costs require named non-negative dimensions")
 
     @property
     def requires_active_approval(self) -> bool:
-        return bool(self.required_approval) or self.risk_tier in {
+        return (self.required_approval not in {None, "operator_intent"}) or self.risk_tier in {
             "active", "credential", "mutation"
         }
 
@@ -149,7 +158,7 @@ class CapabilitySpec:
         }
 
     def planner_contract(self) -> dict[str, Any]:
-        """Return semantic planner authority without leaking adapter/tool selection."""
+        """Return typed planner authority and the fixed tool identity; never planner argv."""
         planner_input = dict(self.planner_input_schema or self.input_schema)
         placement_keys = {
             "network_reachability",
@@ -164,6 +173,12 @@ class CapabilitySpec:
         return {
             "name": self.name,
             "description": self.description,
+            "tool": {
+                "name": self.binary or self.adapter,
+                "binary": self.binary,
+                "adapter": self.adapter,
+                "alternate_adapters": [name for name, _ in self.alternate_adapters],
+            },
             "risk_tier": self.risk_tier,
             "target_kinds": sorted(self.target_kinds),
             "input_schema": planner_input,
@@ -561,6 +576,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
+                "severity": {
+                    "type": "string",
+                    "pattern": "^(info|low|medium|high|critical)(,(info|low|medium|high|critical))*$",
+                    "maxLength": 100,
+                },
+                "tags": {
+                    "type": "string", "pattern": "^[a-z0-9_-]+(,[a-z0-9_-]+)*$",
+                    "maxLength": 200,
+                    "description": "Filter the server-reviewed GET-only template pack by tag; cannot enable mutating or OOB templates.",
+                },
             }),
         ),
         CapabilitySpec(
@@ -1131,7 +1156,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "subdomains.discover", "Passive target-root-bound subdomain discovery.",
-            "external_tool", "passive", frozenset({"web", "api", "network"}),
+            "external_tool", "passive", _NETWORK_TARGETS,
             "subfinder", "1", None, {"hosts_attempted": 1, "tool_wall_seconds": 120},
             {"network_reachability": True, "binary": "subfinder"},
             _schema({"root_domain": {"type": "string"}}), "subfinder-lines/v1",

@@ -196,6 +196,832 @@ export const HUNT_START_CONTRACT = {
     "device",
     "network",
     "web"
+  ],
+  "tool_calls": [
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.create"
+      },
+      "description": "Register a hostname or IP as a canonical target without testing it.",
+      "name": "targets.create",
+      "required_approval": "operator_intent",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.create",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.create"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.update"
+      },
+      "description": "Rename this target or a current service view without changing frozen scope.",
+      "name": "targets.update",
+      "required_approval": "operator_intent",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.update",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.update"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/credentials.grant"
+      },
+      "description": "Explicitly grant an existing encrypted profile to this Hunt target. Receiving-target approval is revalidated; no secret is returned.",
+      "name": "credentials.grant",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "credentials.grant",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "credentials.grant"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/collections.bind"
+      },
+      "description": "Bind an existing collection to this Hunt target and exact selected HTTP origins, including an explicitly authorized cross-asset share.",
+      "name": "collections.bind",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "collections.bind",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "collections.bind"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/web.probe"
+      },
+      "description": "Passive HTTP fingerprint of a target-bound URL.",
+      "name": "web.probe",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "httpx",
+        "alternate_adapters": [],
+        "binary": "httpx",
+        "name": "httpx"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/templates.scan"
+      },
+      "description": "Reviewed target-bound GET-only Nuclei template scan.",
+      "name": "templates.scan",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "nuclei",
+        "alternate_adapters": [],
+        "binary": "nuclei",
+        "name": "nuclei"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/web.crawl"
+      },
+      "description": "Bounded same-host crawl and JavaScript endpoint discovery.",
+      "name": "web.crawl",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "katana",
+        "alternate_adapters": [],
+        "binary": "katana",
+        "name": "katana"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/web.browser_crawl"
+      },
+      "description": "Bounded same-host headless browse that observes the application's own runtime requests.",
+      "name": "web.browser_crawl",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "katana",
+        "alternate_adapters": [],
+        "binary": "katana",
+        "name": "katana"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/web.content_discover"
+      },
+      "description": "Bounded content discovery using a bundled wordlist.",
+      "name": "web.content_discover",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "ffuf",
+        "alternate_adapters": [],
+        "binary": "ffuf",
+        "name": "ffuf"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/xss.verify"
+      },
+      "description": "Bounded target-bound Dalfox XSS verification.",
+      "name": "xss.verify",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "dalfox",
+        "alternate_adapters": [
+          "playwright"
+        ],
+        "binary": "dalfox",
+        "name": "dalfox"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/sqli.verify"
+      },
+      "description": "Bounded target-bound SQL injection verification.",
+      "name": "sqli.verify",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "sqlmap",
+        "alternate_adapters": [],
+        "binary": "sqlmap",
+        "name": "sqlmap"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/service.fingerprint"
+      },
+      "description": "Bounded connection-based service/version fingerprint.",
+      "name": "service.fingerprint",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "nmap",
+        "alternate_adapters": [],
+        "binary": "nmap",
+        "name": "nmap"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/service.nse_check"
+      },
+      "description": "Run up to three reviewed, low-impact Nmap NSE service checks on up to four bound TCP ports; results are observations, not vulnerability proof.",
+      "name": "service.nse_check",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "nmap",
+        "alternate_adapters": [],
+        "binary": "nmap",
+        "name": "nmap"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/ports.discover"
+      },
+      "description": "Run built-in Naabu for bounded connection-based TCP port discovery.",
+      "name": "ports.discover",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "naabu",
+        "alternate_adapters": [],
+        "binary": "naabu",
+        "name": "naabu"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/subdomains.discover"
+      },
+      "description": "Passive target-root-bound subdomain discovery.",
+      "name": "subdomains.discover",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "subfinder",
+        "alternate_adapters": [],
+        "binary": "subfinder",
+        "name": "subfinder"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/http.request"
+      },
+      "description": "Send one target-pinned request, optionally as a managed principal. POST/PUT/PATCH/DELETE require the Hunt's existing state-changing authority; GET/HEAD/OPTIONS remain available without it.",
+      "name": "http.request",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "agent.http_request",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "agent.http_request"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/artifact.inspect"
+      },
+      "description": "Read one small redacted byte window from a target-bound public client artifact.",
+      "name": "artifact.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "artifact.inspect",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "artifact.inspect"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/javascript.analyze"
+      },
+      "description": "Statically analyze one bounded target JavaScript artifact for routes, source maps, client sinks, and decoded JWT claims without exposing token values.",
+      "name": "javascript.analyze",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "javascript.analyze",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "javascript.analyze"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/auth.session.establish"
+      },
+      "description": "Establish one target-bound worker-private form or OAuth HTTP session.",
+      "name": "auth.session.establish",
+      "required_approval": "credential_use",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "auth.session",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "auth.session"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/auth.session.refresh"
+      },
+      "description": "Refresh one opaque target-bound session using its current managed profile.",
+      "name": "auth.session.refresh",
+      "required_approval": "credential_use",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "auth.session",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "auth.session"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/auth.session.revoke"
+      },
+      "description": "Revoke one opaque target-bound session and destroy its sealed identity.",
+      "name": "auth.session.revoke",
+      "required_approval": "credential_use",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "auth.session",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "auth.session"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/authz.verify"
+      },
+      "description": "Verify one read-only cross-principal object-authorization differential.",
+      "name": "authz.verify",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "authz.differential",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "authz.differential"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/tls.inspect"
+      },
+      "description": "Inspect TLS configuration for a target-bound origin.",
+      "name": "tls.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "scanner.tls",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "scanner.tls"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/browser.login_check"
+      },
+      "description": "Run the operator-saved managed-profile login and fixed read-only QA checks; return sanitized verification results, never a browser session or vulnerability proof.",
+      "name": "browser.login_check",
+      "required_approval": "credential_use",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "playwright.login_check",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "playwright.login_check"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/browser.navigate"
+      },
+      "description": "Inspect a target-bound page or SPA route; optionally use a managed session. Returns a redacted actionable surface.",
+      "name": "browser.navigate",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "playwright",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "playwright"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/browser.interact"
+      },
+      "description": "Replay up to eight read-only clicks or non-secret field fills in one target-bound browser context; no writes or form submission.",
+      "name": "browser.interact",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "playwright",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "playwright"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.inspect"
+      },
+      "description": "Inspect the registered device, services, scans, and posture evidence.",
+      "name": "device.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.inspect_device",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.inspect_device"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.capabilities.inspect"
+      },
+      "description": "Inspect device-class protocol and application capabilities.",
+      "name": "device.capabilities.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.inspect_capabilities",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.inspect_capabilities"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/collections.inspect"
+      },
+      "description": "Inspect redacted request collections bound to this Hunt.",
+      "name": "collections.inspect",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "collections.inspect",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "collections.inspect"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/findings.create"
+      },
+      "description": "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
+      "name": "findings.create",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "findings.create",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "findings.create"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/findings.update"
+      },
+      "description": "Update metadata or triage state on a finding created by this Hunt without changing proof state.",
+      "name": "findings.update",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "findings.update",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "findings.update"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/findings.delete"
+      },
+      "description": "Delete one finding created by this Hunt after an explicit confirmation flag.",
+      "name": "findings.delete",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "findings.delete",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "findings.delete"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/candidate.verify"
+      },
+      "description": "Run one server-owned deterministic verifier for a candidate produced by this Hunt.",
+      "name": "candidate.verify",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "candidate.deterministic_verifier",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "candidate.deterministic_verifier"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/collections.select"
+      },
+      "description": "Select a bounded redacted request subset from a bound collection.",
+      "name": "collections.select",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "collections.select",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "collections.select"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/collections.replay_safe"
+      },
+      "description": "Replay up to 25 safe-method requests from a bound collection.",
+      "name": "collections.replay_safe",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "collections.replay",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "collections.replay"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/collections.replay_active"
+      },
+      "description": "Replay an exact approved state-changing request selection from a bound collection.",
+      "name": "collections.replay_active",
+      "required_approval": "state_changing_http",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "collections.replay",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "collections.replay"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.http.probe"
+      },
+      "description": "Send one target-pinned read-only request to a confirmed device web origin.",
+      "name": "device.http.probe",
+      "required_approval": null,
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.device_http_request",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.device_http_request"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.scan"
+      },
+      "description": "Queue one bounded device posture scan through the canonical scanner pipeline.",
+      "name": "device.scan",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.queue_device_scan",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.queue_device_scan"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.service.verify"
+      },
+      "description": "Queue a typed, fixed-port service-state verifier.",
+      "name": "device.service.verify",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.verify_service_state",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.verify_service_state"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/device.ssh.propose"
+      },
+      "description": "Propose an immutable command plan for a bound, host-key-pinned SSH service; this does not execute it.",
+      "name": "device.ssh.propose",
+      "required_approval": "active_testing",
+      "target_kinds": [
+        "device"
+      ],
+      "tool": {
+        "adapter": "device.propose_ssh_shell",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "device.propose_ssh_shell"
+      }
+    }
   ]
 } as const
 
