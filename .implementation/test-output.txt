@@ -1,42 +1,5 @@
-........FF........................                                       [100%]
-=================================== FAILURES ===================================
-_______ test_device_input_migration_keeps_ids_and_one_ciphertext_source ________
-tests/test_target_asset_inputs_postgres.py:105: in test_device_input_migration_keeps_ids_and_one_ciphertext_source
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_inputs_postgres.py:84: in run
-    resolved = await store.load_for_worker(conn,profile_id=credential,target_kind='network',target_id=origin,capability='device.ssh.propose')
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-api/runtime/credential_store.py:777: in load_for_worker
-    raise CredentialStoreError("credential profile is unavailable for target")
-E   runtime.credential_store.CredentialStoreError: credential profile is unavailable for target
-__ test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries __
-tests/test_target_asset_inputs_postgres.py:136: in test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries
-    asyncio.run(run())
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
-    return runner.run(main)
-           ^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
-    return future.result()
-           ^^^^^^^^^^^^^^^
-tests/test_target_asset_inputs_postgres.py:126: in run
-    assert await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
-E   assert False
-=========================== short test summary info ============================
-FAILED tests/test_target_asset_inputs_postgres.py::test_device_input_migration_keeps_ids_and_one_ciphertext_source - runtime.credential_store.CredentialStoreError: credential profile is unavailable for target
-FAILED tests/test_target_asset_inputs_postgres.py::test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries - assert False
-2 failed, 32 passed in 18.56s
+..................................                                       [100%]
+34 passed in 24.08s
 module size ratchet: OK
 
-pytest_exit=1 affected_exit=1 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0
+pytest_exit=0 affected_exit=0 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0

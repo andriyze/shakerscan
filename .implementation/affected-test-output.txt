@@ -1,38 +1,15 @@
 ....................................................................ssss [ 13%]
-sss.........................................FFF......................... [ 27%]
+sss..................................................................... [ 27%]
 ........................................................................ [ 40%]
 ........................................................................ [ 54%]
 ........................................................................ [ 68%]
 ........................................................................ [ 81%]
 ........................................................................ [ 95%]
 ........................                                                 [100%]
-=================================== FAILURES ===================================
-_ test_device_profile_reference_is_available_through_the_same_asset_view[web] __
-tests/test_credential_refs.py:217: in test_device_profile_reference_is_available_through_the_same_asset_view
-    refs,missing=validate_generic_credential_references(
-api/runtime/credential_refs.py:178: in validate_generic_credential_references
-    raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
-E   api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
-_ test_device_profile_reference_is_available_through_the_same_asset_view[api] __
-tests/test_credential_refs.py:217: in test_device_profile_reference_is_available_through_the_same_asset_view
-    refs,missing=validate_generic_credential_references(
-api/runtime/credential_refs.py:178: in validate_generic_credential_references
-    raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
-E   api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
-_ test_device_profile_reference_is_available_through_the_same_asset_view[network] _
-tests/test_credential_refs.py:217: in test_device_profile_reference_is_available_through_the_same_asset_view
-    refs,missing=validate_generic_credential_references(
-api/runtime/credential_refs.py:178: in validate_generic_credential_references
-    raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
-E   api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
 =============================== warnings summary ===============================
 ../../../../../opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/fastapi/testclient.py:1
   /opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-=========================== short test summary info ============================
-FAILED tests/test_credential_refs.py::test_device_profile_reference_is_available_through_the_same_asset_view[web] - api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
-FAILED tests/test_credential_refs.py::test_device_profile_reference_is_available_through_the_same_asset_view[api] - api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
-FAILED tests/test_credential_refs.py::test_device_profile_reference_is_available_through_the_same_asset_view[network] - api.runtime.credential_refs.CredentialReferenceError: ssh_credential_profile_id target kind does not match the Hunt
-3 failed, 518 passed, 7 skipped, 1 warning in 50.94s
+521 passed, 7 skipped, 1 warning in 57.84s
