@@ -1,5 +1,52 @@
-..................................                                       [100%]
-34 passed in 22.71s
+.........F........................                                       [100%]
+=================================== FAILURES ===================================
+__ test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries __
+asyncpg/protocol/prepared_stmt.pyx:175: in asyncpg.protocol.protocol.PreparedStatementState._encode_bind_msg
+    ???
+asyncpg/protocol/codecs/base.pyx:251: in asyncpg.protocol.protocol.Codec.encode
+    ???
+asyncpg/protocol/codecs/base.pyx:153: in asyncpg.protocol.protocol.Codec.encode_scalar
+    ???
+asyncpg/pgproto/codecs/text.pyx:29: in asyncpg.pgproto.pgproto.text_encode
+    ???
+asyncpg/pgproto/codecs/text.pyx:12: in asyncpg.pgproto.pgproto.as_pg_string_and_size
+    ???
+E   TypeError: expected str, got UUID
+
+The above exception was the direct cause of the following exception:
+tests/test_target_asset_inputs_postgres.py:136: in test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries
+    asyncio.run(run())
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_target_asset_inputs_postgres.py:126: in run
+    assert await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api/runtime/credential_store.py:850: in has_active_grant
+    row = await conn.fetchrow(
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:752: in fetchrow
+    data = await self._execute(
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:1873: in _execute
+    result, _ = await self.__execute(
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:1970: in __execute
+    result, stmt = await self._do_execute(
+/opt/hostedtoolcache/Python/3.12.14/x64/lib/python3.12/site-packages/asyncpg/connection.py:2033: in _do_execute
+    result = await executor(stmt, None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncpg/protocol/protocol.pyx:184: in bind_execute
+    ???
+asyncpg/protocol/prepared_stmt.pyx:204: in asyncpg.protocol.protocol.PreparedStatementState._encode_bind_msg
+    ???
+E   asyncpg.exceptions.DataError: invalid input for query argument $3: UUID('c528fc9a-fa19-41dd-b154-1a263f44fa... (expected str, got UUID)
+=========================== short test summary info ============================
+FAILED tests/test_target_asset_inputs_postgres.py::test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries - asyncpg.exceptions.DataError: invalid input for query argument $3: UUID('c528fc9a-fa19-41dd-b154-1a263f44fa... (expected str, got UUID)
+1 failed, 33 passed in 23.91s
 module size ratchet: OK
 
-pytest_exit=0 affected_exit=0 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0
+pytest_exit=1 affected_exit=0 module_size_exit=0 ui_tests_exit=0 types_exit=0 build_exit=0 browser_exit=0
