@@ -5,7 +5,7 @@ import pytest
 
 from api.hunt.contracts import capability_manifest
 from api.hunt.start_contract import normalize_hunt_start_payload
-from api.runtime.capability_registry import CAPABILITY_REGISTRY, CapabilityInputContractError
+from api.runtime.capability_registry import CAPABILITY_REGISTRY
 
 
 @pytest.mark.parametrize('kind', ['web', 'api', 'network', 'device'])
@@ -19,10 +19,11 @@ def test_passive_hunt_can_manage_metadata_without_granting_testing(kind):
     assert not names & {'credentials.grant', 'collections.bind', 'ports.discover', 'xss.verify', 'templates.scan'}
     for name in ('targets.create', 'targets.update'):
         spec = CAPABILITY_REGISTRY.require(name)
-        assert spec.required_approval == 'operator_intent'
+        assert spec.required_approval is None
         assert not spec.requires_active_approval
-        with pytest.raises(CapabilityInputContractError):
-            CAPABILITY_REGISTRY.validate_hunt_input(name, {'operator_confirmed':False})
+        inputs = {'locator':'tv.local'} if name == 'targets.create' else {'name':'My TV'}
+        assert CAPABILITY_REGISTRY.validate_hunt_input(name, inputs) == inputs
+        assert not spec.placement_requirements.get('user_confirmation')
 
 
 @pytest.mark.parametrize('changes', [
@@ -30,7 +31,7 @@ def test_passive_hunt_can_manage_metadata_without_granting_testing(kind):
     {'placement_requirements':{'control_plane':True,'user_confirmation':True,'network_reachability':True}},
     {'budget_cost':{'http_requests':1}},
 ])
-def test_operator_intent_cannot_become_network_authority(changes):
+def test_metadata_default_cannot_become_network_authority(changes):
     with pytest.raises(ValueError, match='metadata actions'):
         replace(CAPABILITY_REGISTRY.require('targets.create'), **changes)
 

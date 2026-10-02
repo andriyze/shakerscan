@@ -107,15 +107,20 @@ class CapabilitySpec:
             raise ValueError(
                 f"planner-visible capability {self.name} requires a Hunt executor"
             )
-        if self.required_approval == "operator_intent" and (
+        metadata_action = self.name in {
+            "targets.create", "targets.update", "targets.skill.create",
+            "targets.skill.update", "targets.skill.delete",
+        }
+        if (metadata_action or self.required_approval == "operator_intent") and (
             self.risk_tier != "read_only" or self.hunt_executor != "inline"
             or not self.placement_requirements.get("control_plane")
-            or not self.placement_requirements.get("user_confirmation")
+            or (self.required_approval == "operator_intent" and
+                not self.placement_requirements.get("user_confirmation"))
             or self.placement_requirements.get("network_reachability")
             or self.binary is not None
             or set(self.budget_cost) - {"tool_wall_seconds"}
         ):
-            raise ValueError("operator intent authority is limited to confirmed metadata actions")
+            raise ValueError("metadata actions must stay within the control plane")
         for dimension, amount in self.budget_cost.items():
             if not str(dimension).strip() or int(amount) < 0:
                 raise ValueError("budget costs require named non-negative dimensions")
