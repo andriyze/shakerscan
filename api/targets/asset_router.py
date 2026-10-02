@@ -54,12 +54,13 @@ class DeviceProfileCreate(BaseModel):
 @router.get('/targets/inventory')
 async def target_inventory(search: str = Query('', max_length=500), connected_only: bool = False,
                            include_inactive: bool = False, include_services: bool = False,
+                           group_by: Literal['domain'] | None = None,
                            limit: int = Query(100, ge=1, le=500),
                            offset: int = Query(0, ge=0)):
     async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
                                  include_inactive=include_inactive, include_services=include_services,
-                                 limit=limit, offset=offset)
+                                 limit=limit, offset=offset, group_by=group_by)
 
 
 @router.post('/targets/hosts')

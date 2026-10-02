@@ -77,7 +77,11 @@ commands explicitly and Pi drives the instance through `shakerscan api`, `scan`,
 
 - **Scan** — reproducible web/API assessment with `fast`, `balanced`, and `thorough` ceilings.
 - **Hunt** — adaptive investigation of an authorized web, API, network, or device target.
-- **Connected Devices** — inventory and assess network-connected devices.
+- **Connected Devices** — inventory and assess network targets with dedicated scanning capacity started automatically. Use `shakerscan devices stop` to disable that capacity on smaller installations, and `shakerscan devices start` to re-enable it.
+
+The Targets inventory groups root domains with their subdomains and keeps IP addresses and internal
+hosts independently selectable. Add a bare domain or IP with optional port hints, or an application
+URL. Domain grouping is navigation only; it does not share authorization or credentials across hosts.
 - **AI Gate** — test chat, RAG, agent, and MCP application surfaces.
 - **Model Intake** — inspect model artifacts before deployment.
 - **ASM** — maintain attack-surface inventory and coverage.

@@ -1,5 +1,7 @@
 'use client'
 
+import { NetworkScanReadiness, type NetworkReadiness } from '@/components/NetworkScanReadiness'
+
 import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { DevicePortCoverage } from '@/components/DevicePortCoverage'
@@ -76,8 +78,7 @@ function DeviceDetailContent() {
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [workerReady, setWorkerReady] = useState(false)
-  const [readinessReason, setReadinessReason] = useState<string | null>('checking_device_worker')
-  const [readinessRemedy, setReadinessRemedy] = useState<string | null>(null)
+  const [readinessState, setReadinessState] = useState<NetworkReadiness | null>(null)
   const [scanOpen, setScanOpen] = useState(searchParams.get('action') === 'scan')
   const [credentialOpen, setCredentialOpen] = useState(false)
   const [requestImportOpen, setRequestImportOpen] = useState(false)
@@ -115,7 +116,7 @@ function DeviceDetailContent() {
   const load = useCallback(async () => {
     try {
       const [device, credentialData, collectionData, huntData, readiness] = await Promise.all([getDevice(deviceId), getDeviceCredentials(deviceId), getDeviceRequestCollections(deviceId), listDeviceAgentSessions({ device_target_id: deviceId, limit: 5 }), getDeviceReadiness()])
-      setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setDeviceHunts(huntData.runs || []); setWorkerReady(readiness.enabled && readiness.status === 'ready'); setReadinessReason(readiness.reason || null); setReadinessRemedy(readiness.remedy || null); setFailed(false)
+      setData(device); setCredentials(credentialData.profiles || []); setRequestCollections(collectionData.collections || []); setDeviceHunts(huntData.runs || []); setWorkerReady(readiness.enabled && readiness.status === 'ready'); setReadinessState(readiness); setFailed(false)
     } catch { setFailed(true) } finally { setLoading(false) }
   }, [deviceId])
 
@@ -209,10 +210,7 @@ function DeviceDetailContent() {
 
   async function queueScan() {
     if (!workerReady) {
-      // Name the fix, not just the fault: on a fresh install no device worker exists at all.
-      toast.error(readinessRemedy
-        ? `Device scans are paused. ${readinessRemedy}`
-        : 'Device scans are paused until a current, tool-capable device worker is ready')
+      toast.error(readinessState?.message || 'Network scanning is unavailable. See Troubleshooting for help.')
       return
     }
     setScanning(true)
@@ -407,9 +405,9 @@ function DeviceDetailContent() {
   return (
     <div className="mx-auto max-w-7xl">
       <PageHeader backHref="/devices" backLabel="Connected devices" title={device.name} description={device.primary_locator} icon={<Router className="h-6 w-6" />} actions={<>        <Link href={`/targets/${deviceId}/asset`}><Button variant="secondary">Asset overview</Button></Link>
-<RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => router.push('/devices')} /><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?device_target_id=${device.id}&freshness=all`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan device' : 'A current device worker is required'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Start network scan</Button></>} />
+<RetireDeviceButton deviceId={device.id} name={device.name} onRetired={() => router.push('/devices')} /><Button variant="secondary" onClick={() => { setRenameName(device.name); setRenameOpen(true) }}><Pencil className="h-4 w-4" /> Rename</Button><Button variant="secondary" onClick={() => { setLocatorForm({ locator: device.primary_locator, reason: '', confirm_same_device: false }); setLocatorOpen(true) }}><MapPin className="h-4 w-4" /> Change address</Button><Link href={`/devices/${device.id}/agent`} className="inline-flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-sm text-violet-200 hover:bg-violet-200 hover:bg-violet-500/20"><Bot className="h-4 w-4" /> Hunt</Link><Link href={`/findings?device_target_id=${device.id}&freshness=all`} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700">View findings</Link><Button disabled={!workerReady} title={workerReady ? 'Scan target' : readinessState?.message || 'Network scanning is unavailable'} onClick={() => { setScan({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false }); setScanOpen(true) }}>Start network scan</Button></>} />
 
-      {!workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory remains available, but scans are paused until a current device worker with Nmap and Naabu is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.{readinessRemedy && <span className="mt-2 block text-amber-100">{readinessRemedy}</span>}</Card>}
+      <NetworkScanReadiness readiness={readinessState} />
 
       {deviceHunts.length > 0 && <Card className="mb-4 border-violet-500/20 bg-violet-500/4 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-violet-100">Legacy device-agent history</p><p className="mt-1 text-xs text-gray-500">Read-only investigations created before canonical Hunt · {deviceHunts.length} shown</p></div><div className="flex flex-wrap gap-2">{deviceHunts.slice(0, 3).map((run) => <Link key={run.id} href={`/hunt?target=${encodeURIComponent(device.id)}&legacy_run=${encodeURIComponent(run.id)}`} className="rounded-sm border border-violet-500/25 bg-gray-950/50 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-500/10">{run.status.replace(/_/g, ' ')} · {run.actions_used} actions · {run.scans_queued} scans</Link>)}<Link href={`/hunt?target=${encodeURIComponent(device.id)}`} className="rounded-sm px-3 py-1.5 text-xs text-blue-400 hover:text-blue-300">Open current Hunt</Link></div></div></Card>}
 

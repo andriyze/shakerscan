@@ -1,18 +1,30 @@
 # Connected-device security
 
-**Status:** current device product and safety boundary; reconciled 2026-08-29.
+**Status:** current network/device execution boundary; reconciled 2026-10-02.
 
 ShakerScan treats TVs, cameras, printers, routers, NAS systems, conference equipment, and other
-network-connected devices as a separate security product surface. A device is not a Web DAST target,
-even when it exposes one or more web interfaces.
+network-connected devices as canonical targets. Connected Devices is a network-oriented view of the
+shared inventory; discovered ports and service origins enrich the same asset used by Scan and Hunt.
 
-Device capacity is opt-in so an existing DAST installation does not lose worker slots or memory.
-Start it with `./scanner.sh devices start`; inspect it with `./scanner.sh devices status`, and stop it
-with `./scanner.sh devices stop`.
+Normal `shakerscan start` and `shakerscan restart` supply one dedicated network worker. Rebuilding a
+running installation supplies it too. It uses the existing scanner image and a separate queue, so
+network inventory does not occupy ordinary web-scan slots. Starting capacity does not submit scans
+or grant testing authority. The container has a 2 GiB memory limit; idle usage is not that limit.
+
+For resource-constrained installations, set `SHAKERSCAN_NETWORK_WORKER_ENABLED=false` in the
+installation's `.env`, or run `shakerscan devices stop`. The choice survives subsequent startup,
+restart, and rebuild. `shakerscan devices start` re-enables automatic startup; `shakerscan devices
+status` and `shakerscan devices logs` provide diagnostics. In a source checkout, replace `shakerscan`
+with `./scanner.sh`. Building a stopped installation does not start its services.
+
+During API startup, readiness may report `starting` for up to 120 seconds while waiting for a fresh,
+current, tool-capable worker heartbeat. After that, missing capacity reports `not_ready` with an
+operator remedy. Target pages refresh readiness automatically and keep diagnostics in Troubleshooting.
 
 ## Product boundary
 
-- Devices live in `device_targets`; their interfaces and observed services live in
+- Devices live in canonical `targets` with `target_device_profiles`; `device_targets` is a compatibility
+  view retaining existing UUIDs. Their interfaces and observed services live in
   `device_interfaces` and `device_services`. The `device_targets.id` UUID is the durable identity;
   its current IP address or hostname is mutable and every change is retained in
   `device_locator_history`.

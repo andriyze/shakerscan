@@ -52,7 +52,7 @@ async def resolve_asset_id(conn: Any, target_id: Any) -> uuid.UUID:
 
 async def list_assets(conn: Any, *, search: str = '', connected_only: bool = False,
                       include_inactive: bool = False, include_services: bool = False,
-                      limit: int = 100, offset: int = 0) -> dict[str, Any]:
+                      limit: int = 100, offset: int = 0, group_by: str | None = None) -> dict[str, Any]:
     base = "COALESCE(t.discovery_source,'manual') <> 'model-intake'" if include_services else ROOT_WHERE
     where = base + """
         AND ($1::boolean OR t.is_active)
@@ -62,6 +62,11 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
                         AND (member.name ILIKE '%' || $3 || '%' OR member.url ILIKE '%' || $3 || '%')))
     """
     parameters = [include_inactive, connected_only, search]
+    if group_by == 'domain':
+        if include_services:
+            raise HTTPException(400, 'Domain hierarchy groups assets; service records remain within their asset')
+        from .asset_groups import list_domain_assets
+        return await list_domain_assets(conn, where=where, parameters=parameters, limit=limit, offset=offset)
     total = await conn.fetchval(f'SELECT count(*) FROM {ROOT_FROM} WHERE {where}', *parameters)
     rows = await conn.fetch(f"""
         SELECT {ROOT_COLUMNS},

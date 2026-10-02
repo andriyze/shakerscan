@@ -9,7 +9,7 @@ const REFRESH_MS = 10_000
 const POOLS: { key: keyof NonNullable<WorkerStats['pools']>; label: string; detail: string; optIn?: boolean }[] = [
   { key: 'web_dast', label: 'Web DAST', detail: 'Deterministic Scan execution and verification' },
   { key: 'agent_tool', label: 'Agent tools', detail: 'Isolated process capabilities used by Hunt' },
-  { key: 'device', label: 'Connected devices', detail: 'Opt-in network and device examination', optIn: true },
+  { key: 'device', label: 'Network scanning', detail: 'Dedicated capacity for network and device examination' },
   { key: 'model_intake', label: 'Model Intake', detail: 'Dedicated artifact inspection toolchain' },
 ]
 

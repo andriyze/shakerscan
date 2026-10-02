@@ -241,11 +241,13 @@ start_services "$@"
 '''
 
 
-def _start(*args: str, reason: str) -> str:
+def _start(*args: str, reason: str, network_enabled: str = 'true', device_failure: bool = False) -> str:
     harness = (
         START_HARNESS.replace("__COMPOSE_UP__", SCRIPT.split("\ncompose_up() {", 1)[1].split("\n}", 1)[0])
         .replace("__START_SERVICES__", SCRIPT.split("\nstart_services() {", 1)[1].split("\n}", 1)[0])
     )
+    if device_failure:
+        harness = harness.replace('compose() { printf', 'compose() { [[ "$*" != *"up --no-build -d device-worker"* ]] || return 9; printf')
     result = subprocess.run(
         ["bash", "-c", harness, "harness", *args],
         cwd=ROOT,
@@ -253,10 +255,33 @@ def _start(*args: str, reason: str) -> str:
         text=True,
         timeout=20,
         check=False,
-        env={**os.environ, "REASON": reason, "SCRIPT_DIR": str(ROOT)},
+        env={**os.environ, "REASON": reason, "SCRIPT_DIR": str(ROOT),
+             "SHAKERSCAN_NETWORK_WORKER_ENABLED": network_enabled},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
+
+
+def test_fresh_start_supplies_network_capacity_and_requires_its_readiness():
+    output = _start(reason='')
+    assert 'compose:--profile devices up --no-build -d device-worker' in output
+    assert 'specialized:0:1' in output
+    assert '--force-recreate device-worker' not in output
+
+
+def test_explicit_network_opt_out_survives_restore_requests():
+    output = _start('3', '1', reason='', network_enabled='false')
+    assert 'compose:--profile devices stop device-worker' in output
+    assert 'up --no-build -d device-worker' not in output
+    assert '--force-recreate device-worker' not in output
+    assert 'specialized:0:0' in output
+
+
+def test_network_start_failure_does_not_report_services_started():
+    import pytest
+    with pytest.raises(AssertionError) as error:
+        _start(reason='', device_failure=True)
+    assert 'Services started.' not in str(error.value)
 
 
 def test_upgrade_start_stops_everything_then_restores_lanes_and_worker_count():

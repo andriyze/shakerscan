@@ -175,6 +175,13 @@ read_dotenv_value() {
 load_access_env() {
     local value
 
+    value="${SHAKERSCAN_NETWORK_WORKER_ENABLED:-$(read_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED)}"
+    case "${value:-true}" in
+        1|true|TRUE|yes|YES|on|ON) export SHAKERSCAN_NETWORK_WORKER_ENABLED=true ;;
+        0|false|FALSE|no|NO|off|OFF) export SHAKERSCAN_NETWORK_WORKER_ENABLED=false ;;
+        *) echo "SHAKERSCAN_NETWORK_WORKER_ENABLED must be true or false" >&2; return 1 ;;
+    esac
+
     # Record whether the user set BIND/PUBLIC host in their shell *before* we
     # pull defaults out of .env, so configure_access_mode can distinguish a
     # user override from a cached value that may be stale (e.g. Tailscale IP
@@ -1942,6 +1949,7 @@ ensure_directory_mode() {
 }
 
 prepare_runtime_files() {
+    write_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}"
     detect_platform
     export SHAKERSCAN_HOST_PLATFORM="$PLATFORM"
     write_dotenv_value SHAKERSCAN_HOST_PLATFORM "$SHAKERSCAN_HOST_PLATFORM"
@@ -2250,7 +2258,7 @@ print_help() {
     echo "  mcp                Start MCP: read-only Arsenal inspection plus target-bound Hunt V2"
     echo "  research <id> [N]  Run up to N bounded Codex decisions for a research episode"
     echo "  gungnir <cmd>      CT monitor: start, stop, status, logs"
-    echo "  devices <cmd>      Opt-in device worker: start, stop, restart, status, logs"
+    echo "  devices <cmd>      Network worker: start, stop, restart, status, logs"
     echo "  fleet init [...]   Initialize a WireGuard or outbound-HTTPS broker fleet"
     echo "  fleet preflight    Validate fleet prerequisites without changing state"
     echo "  fleet join-token   Mint a bounded ready-to-paste worker join command"
@@ -2376,10 +2384,17 @@ start_services() {
     fi
     source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh"
     ensure_target_upgrade_backup || return 1
-    compose_up -d --scale worker=$start_workers
-    if [ "$restore_device_workers" -gt 0 ]; then
+    compose_up -d --scale worker=$start_workers || return 1
+    if [ "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}" = "false" ]; then
+        compose --profile devices stop device-worker || return 1
+        restore_device_workers=0
+    elif [ "$restore_device_workers" -gt 0 ]; then
         echo -e "${YELLOW}Recreating connected-device worker from the selected image...${NC}"
         compose --profile devices up --no-build -d --force-recreate device-worker || return 1
+    else
+        echo -e "${GREEN}Starting network scanning capacity...${NC}"
+        compose --profile devices up --no-build -d device-worker || return 1
+        restore_device_workers=1
     fi
     if [ "$restore_gungnir" -gt 0 ]; then
         echo -e "${YELLOW}Recreating the Gungnir CT monitor from the selected image...${NC}"
@@ -2391,7 +2406,7 @@ start_services() {
     verify_running_build_identity
     verify_specialized_worker_identity \
         "$(running_compose_service_count agent-tool-worker)" \
-        "$(running_device_worker_count)" \
+        "$restore_device_workers" \
         "$(running_compose_service_count model-intake-worker)"
     if [ "$USE_PREBUILT" -eq 1 ]; then
         record_runtime_mode prebuilt
@@ -2419,10 +2434,8 @@ restart_services() {
     local restart_workers restart_device_workers restart_gungnir
     prepare_runtime_files
     restart_workers="$(restart_worker_count)"
-    # The connected-device worker and the Gungnir CT monitor are opt-in lanes
-    # that `stop` removes with the rest of the project. Remember which ones the
-    # operator had enabled, then recreate them from the selected image after the
-    # primary stack returns, so neither is lost nor left on a stale image.
+    # Preserve dedicated network capacity and the opt-in Gungnir monitor on the
+    # selected image. start_services also enables missing default network capacity.
     restart_device_workers="$(running_device_worker_count)"
     restart_gungnir="$(running_compose_service_count gungnir-worker)"
     stop_services
@@ -2456,7 +2469,7 @@ reload_services() {
         docker restart "$w" >/dev/null 2>&1 || true
     done
 
-    # Preserve opt-in isolation while keeping an already-running device worker
+    # Preserve queue isolation while keeping an already-running network worker
     # on the same live source as the API and ordinary workers.
     if [ "$(running_device_worker_count)" -gt 0 ]; then
         compose --profile devices restart device-worker || return 1
@@ -2701,7 +2714,7 @@ containers_started_outside_compose() {
     project_container_rows | awk -F'|' '$3 == "" { print $1 }' | sort
 }
 
-# Containers a plain `compose down` leaves behind: the opt-in device and Gungnir lanes (their
+# Containers a plain `compose down` leaves behind: the network and Gungnir lanes (their
 # profiles are not active for `down`), containers started outside Compose, and one-off
 # `compose run` containers. Each one still attached keeps the project networks "in use", and
 # survives an upgrade on its old image.
@@ -3133,6 +3146,16 @@ rebuild_images() {
     existing_agent_tool_worker="$(running_compose_service_count agent-tool-worker)"
     existing_device_workers="$(running_device_worker_count)"
     existing_api="$(running_compose_service_count api)"
+    # A running installation should gain default network capacity on rebuild too.
+    # Building a stopped stack still leaves all services stopped.
+    if [ "$REFRESH_WORKERS" -eq 1 ] && [ "${existing_api:-0}" -gt 0 ]; then
+        if [ "${SHAKERSCAN_NETWORK_WORKER_ENABLED:-true}" = "false" ]; then
+            compose --profile devices stop device-worker || return 1
+            existing_device_workers=0
+        elif [ "${existing_device_workers:-0}" -eq 0 ]; then
+            existing_device_workers=1
+        fi
+    fi
     existing_ui="$(running_compose_service_count ui)"
     existing_model_intake_signer="$(running_compose_service_count model-intake-signer)"
     existing_model_intake_sandbox="$(running_compose_service_count model-intake-sandbox)"
@@ -3675,8 +3698,8 @@ devices_cmd() {
 
     case "$subcmd" in
         start)
-            echo -e "${GREEN}Starting isolated connected-device worker...${NC}"
-            # Starting optional capacity must never trigger an implicit source
+            echo -e "${GREEN}Starting network scanning capacity...${NC}"
+            # Starting dedicated capacity must never trigger an implicit source
             # build. Source operators build once with `scanner.sh rebuild`;
             # release operators already have the selected prebuilt image.
             # `--no-build` also keeps enabling device capacity fast and avoids
@@ -3687,8 +3710,10 @@ devices_cmd() {
                 echo "Run './scanner.sh build' or './scanner.sh start --local' first." >&2
                 return 1
             fi
-            compose --profile devices up --no-build -d device-worker
-            echo -e "${GREEN}Connected-device worker started${NC}"
+            compose --profile devices up --no-build -d device-worker || return 1
+            export SHAKERSCAN_NETWORK_WORKER_ENABLED=true
+            write_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED true
+            echo -e "${GREEN}Network worker started; automatic startup enabled${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"
             ;;
         restart)
@@ -3699,14 +3724,18 @@ devices_cmd() {
                 echo "Run './scanner.sh build' or './scanner.sh start --local' first." >&2
                 return 1
             fi
-            compose --profile devices up --no-build -d --force-recreate device-worker
+            compose --profile devices up --no-build -d --force-recreate device-worker || return 1
+            export SHAKERSCAN_NETWORK_WORKER_ENABLED=true
+            write_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED true
             echo -e "${GREEN}Connected-device worker restarted${NC}"
             echo "Readiness: $(api_base_url)/devices/readiness"
             ;;
         stop)
             echo -e "${YELLOW}Stopping connected-device worker...${NC}"
-            compose --profile devices stop device-worker
-            echo -e "${GREEN}Connected-device worker stopped${NC}"
+            compose --profile devices stop device-worker || return 1
+            export SHAKERSCAN_NETWORK_WORKER_ENABLED=false
+            write_dotenv_value SHAKERSCAN_NETWORK_WORKER_ENABLED false
+            echo -e "${GREEN}Network worker stopped; automatic startup disabled${NC}"
             ;;
         status)
             compose --profile devices ps device-worker

@@ -378,8 +378,10 @@ SSH plans are immutable and inert until the user separately confirms exact comma
 may authenticate through `ssh.connect` using its selected stored SSH identity on the operator's
 port, the saved profile port, or port 22. It pins the host key, reports authentication evidence, and
 closes the connection without executing commands.
-Device Hunt uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
-`./scanner.sh devices start|stop|status|logs` and must not consume ordinary DAST slots silently.
+Device Hunt uses the shared runtime; do not revive retired device-agent writes. Normal startup supplies
+one dedicated network worker, separate from ordinary DAST slots. Resource-constrained operators may
+disable its automatic startup with `SHAKERSCAN_NETWORK_WORKER_ENABLED=false` or `shakerscan devices stop`;
+`shakerscan devices start` re-enables it. Use `./scanner.sh` only in source-development instructions.
 
 ### Continuous ASM
 
