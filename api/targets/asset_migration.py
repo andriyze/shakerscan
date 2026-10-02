@@ -94,27 +94,6 @@ async def _install_host_key(conn: Any) -> None:
         await conn.execute(definition)
 
 
-async def _retarget_foreign_keys(conn: Any, old_table: str, new_table: str) -> None:
-    """Preserve every FK's delete action and deferrability; no CASCADE schema drops."""
-    if old_table not in {"device_targets", "device_credential_profiles", "device_request_collections"} or new_table not in {"targets", "credential_profiles", "request_collections"}:
-        raise ValueError("unsupported foreign-key migration")
-    keys = await conn.fetch(
-        """SELECT conrelid::regclass::text AS relation, conname,
-                  pg_get_constraintdef(oid) AS definition
-           FROM pg_constraint WHERE contype='f' AND confrelid=$1::regclass""", old_table,
-    )
-    for key in keys:
-        definition = str(key["definition"])
-        updated = definition.replace(f"REFERENCES {old_table}(id)", f"REFERENCES {new_table}(id)")
-        if updated == definition:
-            raise RuntimeError(f"unsupported foreign key referencing {old_table}")
-        # Relations/constraint names come from pg_catalog, not a request.
-        relation = key["relation"]
-        name = str(key["conname"]).replace('"', '""')
-        await conn.execute(f'ALTER TABLE {relation} DROP CONSTRAINT "{name}"')
-        await conn.execute(f'ALTER TABLE {relation} ADD CONSTRAINT "{name}" {updated}')
-
-
 async def _canonical_device_references(conn: Any) -> None:
     # These were exclusive references to two inventories. Both now identify the same
     # target; the compatibility device column remains available for one release.
@@ -173,7 +152,8 @@ async def migrate_target_assets(conn: Any) -> None:
             last_score,last_grade,active_findings_count,locator_generation,created_at,updated_at
         FROM device_targets;
     """)
-    await _retarget_foreign_keys(conn, "device_targets", "targets")
+    from .asset_fk import retarget_foreign_keys
+    await retarget_foreign_keys(conn, "device_targets", "targets")
     await conn.execute("DROP TABLE device_targets")
     await conn.execute(ASSET_VIEW_SQL)
     origins = await conn.fetch("""
