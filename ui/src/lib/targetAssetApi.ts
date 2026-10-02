@@ -11,6 +11,7 @@ export interface TargetAsset {
   is_active: boolean
   environment: string
   port_hints?: number[]
+  has_target_skill?: boolean
   connected_device: boolean
   device_class?: string | null
   manufacturer?: string | null

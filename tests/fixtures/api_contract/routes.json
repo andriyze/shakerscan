@@ -3070,6 +3070,34 @@
     "name": "scan_target"
   },
   {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_target_skill"
+  },
+  {
     "path": "/timeline",
     "methods": [
       "GET"

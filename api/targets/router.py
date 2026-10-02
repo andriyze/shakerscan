@@ -129,8 +129,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 
 from .asset_router import router as asset_router, configure_asset_router
+from .skill import router as target_skill_router
 router = APIRouter()
 router.include_router(asset_router)
+router.include_router(target_skill_router)
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -3241,6 +3243,8 @@ class TargetUpdate(BaseModel):
     def metadata_cannot_bypass_cohort_validation(cls, value: Optional[dict]) -> Optional[dict]:
         if value and "cohort" in value:
             raise ValueError("set cohort through the validated cohort field")
+        if value and "target_skill" in value:
+            raise ValueError("edit target instructions through /targets/{id}/skill with a revision check")
         return value
 
 

@@ -197,7 +197,100 @@ export const HUNT_START_CONTRACT = {
     "network",
     "web"
   ],
+  "target_skill": {
+    "auto_load_at_start": true,
+    "editing_affects": "future_hunts",
+    "grants_authority": false,
+    "max_characters": 12000,
+    "one_per_target": true,
+    "snapshot_context_path": "target_skill",
+    "url_template": "/targets/{target_id}/skill"
+  },
   "tool_calls": [
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.read"
+      },
+      "description": "Read the current saved instructions for this target. They are context, not testing authority.",
+      "name": "targets.skill.read",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.read",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.read"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.create"
+      },
+      "description": "Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.",
+      "name": "targets.skill.create",
+      "required_approval": "operator_intent",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.create",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.create"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.update"
+      },
+      "description": "Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.",
+      "name": "targets.skill.update",
+      "required_approval": "operator_intent",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.update",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.update"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.skill.delete"
+      },
+      "description": "Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.",
+      "name": "targets.skill.delete",
+      "required_approval": "operator_intent",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.skill.delete",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.skill.delete"
+      }
+    },
     {
       "call": {
         "method": "POST",

@@ -60,6 +60,7 @@ export interface HuntV2 {
   budget_amendments_url?: string
   budget_used: Record<string, number>
   context_pack?: Record<string, unknown>
+  target_skill?: import('./targetSkillApi').TargetSkillSnapshot | null
   capabilities?: Array<{
     name: string
     description: string

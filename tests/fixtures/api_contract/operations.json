@@ -2165,6 +2165,26 @@
     "operation_id": "scan_target_targets__target_id__scan_post"
   },
   {
+    "path": "/targets/{target_id}/skill",
+    "method": "delete",
+    "operation_id": "delete_target_skill_targets__target_id__skill_delete"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "get",
+    "operation_id": "get_target_skill_targets__target_id__skill_get"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "post",
+    "operation_id": "create_target_skill_targets__target_id__skill_post"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "put",
+    "operation_id": "update_target_skill_targets__target_id__skill_put"
+  },
+  {
     "path": "/timeline",
     "method": "get",
     "operation_id": "mission_timeline_timeline_get"

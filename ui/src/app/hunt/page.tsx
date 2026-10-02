@@ -42,6 +42,7 @@ import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabiliti
 import HttpArchiveExport from '@/components/HttpArchiveExport'
 import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
 import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
+import { TargetSkillEditor, TargetSkillPreview } from '@/components/targets/TargetSkillEditor'
 
 type TargetChoice = {
   id: string
@@ -555,6 +556,8 @@ function HuntContent() {
                 <Textarea rows={4} value={objective} onChange={(event) => setObjective(event.target.value)} />
               </Field>
 
+              {selectedChoice && <TargetSkillEditor key={selectedChoice.id} targetId={selectedChoice.id} targetName={selectedChoice.label} />}
+
               <Field label="Budget profile">
                 <Select value={budget} onChange={(event) => setBudget(event.target.value as HuntBudgetProfile)}>
                   <option value="fast">Fast</option>
@@ -897,6 +900,8 @@ function HuntContent() {
             </Card>
 
             <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
+
+            {hunt.target_skill?.skill && <Card className="border-blue-500/20 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-medium text-white">Target instructions at startup</h2><span className="rounded-full bg-blue-500/10 px-2 py-1 text-xs text-blue-300">Version {hunt.target_skill.revision}</span></div><p className="mt-2 text-xs text-gray-500">This Hunt keeps the instructions it started with. Editing the saved skill affects future Hunts.</p><details className="mt-4"><summary className="cursor-pointer text-sm text-blue-300">{hunt.target_skill.skill.title}</summary><div className="mt-3"><TargetSkillPreview text={hunt.target_skill.skill.methodology} /></div></details><div className="mt-4"><TargetSkillEditor compact targetId={hunt.target_id} targetName={hunt.target_name || hunt.target_id} hasSkill /></div></Card>}
 
             <Card className="space-y-4 p-5">
               <div>

@@ -55,6 +55,7 @@ def test_registry_filters_target_kind_and_active_permission():
 
     assert safe_web == {
         "targets.create", "targets.update",
+        "targets.skill.read", "targets.skill.create", "targets.skill.update", "targets.skill.delete",
         "scan.finalize", "scan.execute", "scan.origin_select",
         "web.probe", "http.request", "artifact.inspect", "javascript.analyze",
         "dns.inspect", "infrastructure.inspect", "subdomains.discover", "tls.inspect", "browser.navigate",

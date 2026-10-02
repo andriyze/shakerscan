@@ -177,6 +177,13 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "skill_id": _SKILL_RE.pattern,
         },
         "skill_catalog": "/hunt/skills",
+        "target_skill": {
+            "url_template": "/targets/{target_id}/skill", "one_per_target": True,
+            "auto_load_at_start": True, "snapshot_context_path": "target_skill",
+            "editing_affects": "future_hunts",
+            "max_characters": CAPABILITY_REGISTRY.require("targets.skill.create").input_schema["properties"]["methodology"]["maxLength"],
+            "grants_authority": False,
+        },
         "tool_calls": [
             {"name": spec.name, "description": spec.description,
              "tool": spec.planner_contract()["tool"],

@@ -34,6 +34,7 @@ not an authority grant or proof that execution will succeed on a particular targ
 | Candidate verification | `candidate.verify` | Only candidate families/contracts actually supported by the server |
 | Service discovery | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect` | Registered/frozen asset and selected operation; NSE observations are not vulnerability proof |
 | Target metadata | `targets.create`, `targets.update` | Explicit operator intent (`operator_confirmed`), independently of network-testing permission. Does not authorize testing or alter the frozen Hunt asset. |
+| Target instructions | `targets.skill.read`, `targets.skill.create`, `targets.skill.update`, `targets.skill.delete` | One document per target UUID, automatically snapshotted at Hunt startup. Read the current revision before explicitly requested edits; preserve unrelated instructions. Changes apply to future Hunts and never grant network authority. |
 | Reusable input management | `credentials.grant`, `collections.bind` | Explicit operator intent and existing receiving-target authority; exact receiving target and origins; encrypted profiles remain opaque. Changes do not alter the running Hunt's selected inputs. |
 | Device tasks | `device.inspect`, `device.capabilities.inspect`, `device.service.verify`, `device.ssh.propose` | Device-only schemas; SSH proposal is not execution or approval of a changed plan |
 

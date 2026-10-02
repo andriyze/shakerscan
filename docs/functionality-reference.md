@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 446 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 374 | `api/**/*.py` |
+| Public REST operations | 450 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 375 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2132,6 +2132,10 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/targets/{target_id}/principals/{principal_id}` | `delete_target_principal` |
 | `PATCH` | `/targets/{target_id}/principals/{principal_id}` | `update_target_principal` |
 | `POST` | `/targets/{target_id}/scan` | `scan_target` |
+| `DELETE` | `/targets/{target_id}/skill` | `delete_target_skill` |
+| `GET` | `/targets/{target_id}/skill` | `get_target_skill` |
+| `POST` | `/targets/{target_id}/skill` | `create_target_skill` |
+| `PUT` | `/targets/{target_id}/skill` | `update_target_skill` |
 | `GET` | `/timeline` | `mission_timeline` |
 | `POST` | `/validate` | `validate` |
 | `GET` | `/workers` | `get_workers` |

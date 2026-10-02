@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 189,
+  "component_schema_count": 192,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -188,6 +188,9 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
+    "TargetSkillDocument": "67dd5c1a5d718eb850b321a193a8def51606ceb1ca0ba77cabdebdb99f45ccbe",
+    "TargetSkillResponse": "2a924c9a47d648154f579e92d2460b2ec7c6bd37b8837adf842e48f96054c843",
+    "TargetSkillWrite": "da423b66daafebea01c8fa2f52bf3d60c0de8ef0c26ea427efafa5234206adfb",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
@@ -195,9 +198,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "7a6ee783507cc61d6da2d42e36f056d6a7777e83b4c2f93341e46cbe66b88bcb",
+  "contract_sha256": "e3373ed15872c59846a6557bfc512d23f72df422ceb138aa0d1f1d23c378dcd0",
   "openapi": "3.1.0",
-  "operation_count": 436,
+  "operation_count": 440,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -578,6 +581,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "DELETE /targets/{target_id}/skill": {
+      "deprecated": false,
+      "operation_id": "delete_target_skill_targets__target_id__skill_delete",
+      "parameters_sha256": "9563f8356e65cfaf8c1a4fd168ab9d1606819cd82feda485e18e92dc4e580cb5",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "GET /": {
       "deprecated": false,
@@ -3089,6 +3107,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /targets/{target_id}/skill": {
+      "deprecated": false,
+      "operation_id": "get_target_skill_targets__target_id__skill_get",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "GET /timeline": {
       "deprecated": false,
@@ -5851,6 +5884,21 @@
       "surface": null,
       "tags": []
     },
+    "POST /targets/{target_id}/skill": {
+      "deprecated": false,
+      "operation_id": "create_target_skill_targets__target_id__skill_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "1bbde1f0b8b9e0af41b73c04eac6adfa756c55c55f8701983a421690ca72eb5b",
+      "response_schema_sha256": {
+        "201": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "POST /workers": {
       "deprecated": false,
       "operation_id": "scale_workers_workers_post",
@@ -5941,6 +5989,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "PUT /targets/{target_id}/skill": {
+      "deprecated": false,
+      "operation_id": "update_target_skill_targets__target_id__skill_put",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "1bbde1f0b8b9e0af41b73c04eac6adfa756c55c55f8701983a421690ca72eb5b",
+      "response_schema_sha256": {
+        "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     }
   },
   "schema_version": "shakerscan-public-openapi-manifest/v1",

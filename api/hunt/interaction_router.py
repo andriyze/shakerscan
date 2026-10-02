@@ -45,6 +45,7 @@ from .boundary_handoff import compile_candidate_boundary_handoff
 from .knowledge import KnowledgeQueryError, MAX_QUERY_ROWS, query_knowledge_page
 from .verification_budget import record_budget_shortage, web_candidate_budget
 from . import finding_actions as _hunt_finding_actions
+from .asset_actions import NAMES as ASSET_ACTION_NAMES
 from .cancellation import (
     HuntCancellationWatch,
     record_cancellable_job_durable,
@@ -2277,7 +2278,7 @@ async def _execute_hunt_capability_lifecycle(
             result = candidate_adapter.result
             if candidate_adapter.blocked_exception is not None:
                 raise candidate_adapter.blocked_exception
-        elif name in {"targets.create", "targets.update", "credentials.grant", "collections.bind"}:
+        elif name in ASSET_ACTION_NAMES:
             from .asset_actions import execute_asset_action
             asset_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,
@@ -3817,6 +3818,9 @@ def _hunt_redacted_capability_input(
 ) -> dict[str, Any]:
     """Return the bounded planner/audit projection of one capability input."""
     values = dict(capability_input or {})
+    if capability_name in {'targets.skill.create', 'targets.skill.update'} and 'methodology' in values:
+        body = str(values.pop('methodology'))
+        values.update(body_sha256=hashlib.sha256(body.encode('utf-8')).hexdigest(), characters=len(body))
     if capability_name == "http.request":
         values = redact_http_request_body(values)
     redacted = _arsenal_routes._redact_agent_payload(values)

@@ -304,6 +304,15 @@ origins. The exception does not apply to credentialed HTTP/session replay or to 
 
 ### Progressive methodologies
 
+Each target may have one saved custom skill at `/targets/{id}/skill`: instructions about login,
+priorities, exclusions and target knowledge, using opaque credential/collection references instead
+of secrets. A Hunt automatically snapshots this bounded document at startup and exposes it as
+`target_skill`; later edits or deletion affect future Hunts only. Use `targets.skill.read` and
+explicitly requested `targets.skill.create|update|delete` through the shared capability runtime,
+with revision checks. These are target metadata actions, independent of active testing; they grant
+no network authority and cannot address another target UUID. The current operator objective takes
+precedence over saved preferences; server scope, policy, approval and budgets remain authoritative.
+
 Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
 the library. Native protocol messages remain unavailable unless a live executor supports them.
 Do not preload them all or spend the context window on an index dump.

@@ -521,6 +521,7 @@ import agent_provenance
 import agent_text_toolcalls
 import agent_tools
 import target_authorization
+from targets import skill as target_skill
 import target_resolution
 import target_dns_alias
 import deployment_policy
@@ -13329,7 +13330,7 @@ async def _start_hunt_v2(contract: HuntStartContract) -> dict[str, Any]:
                 approval_context.get("runtime_scope_guard") or {}
             )
         context_pack["allowed_capabilities"] = list(allowed_capabilities)
-        context_pack["skills"] = dict(bound.context_section)
+        context_pack = await target_skill.attach_target_skill_snapshot(conn, target_uuid, context_pack, bound.context_section)
 
         row = await conn.fetchrow(
             """INSERT INTO hunt_runs (

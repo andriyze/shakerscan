@@ -204,6 +204,13 @@ class DeviceTargetCreate(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict, max_length=100)
     is_active: bool = True
 
+    @field_validator('metadata_json')
+    @classmethod
+    def reserved_skill(cls, value):
+        if value and 'target_skill' in value:
+            raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
+        return value
+
 
 class DeviceTargetUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=160)
@@ -219,6 +226,13 @@ class DeviceTargetUpdate(BaseModel):
     sensor_affinity: Optional[str] = Field(default=None, max_length=160)
     metadata_json: Optional[dict[str, Any]] = Field(default=None, max_length=100)
     is_active: Optional[bool] = None
+
+    @field_validator('metadata_json')
+    @classmethod
+    def reserved_skill(cls, value):
+        if value and 'target_skill' in value:
+            raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
+        return value
 
 
 class DeviceLocatorChangeRequest(BaseModel):
@@ -1290,7 +1304,9 @@ async def update_device(device_id: str, request: DeviceTargetUpdate):
             try:
                 if payload:
                     values = list(payload.values()) + [device_uuid]
-                    assignments = [f"{key}=${idx}" for idx, key in enumerate(payload, 1)]
+                    assignments = [f"metadata_json=COALESCE(metadata_json,'{{}}'::jsonb) || ${idx}::jsonb"
+                                   if key == 'metadata_json' else f"{key}=${idx}"
+                                   for idx, key in enumerate(payload, 1)]
                     await conn.execute(f"UPDATE device_targets SET {', '.join(assignments)}, updated_at=NOW() WHERE id=${len(values)}", *values)
             except asyncpg.UniqueViolationError as exc:
                 raise HTTPException(status_code=409, detail="A connected device already uses this locator") from exc

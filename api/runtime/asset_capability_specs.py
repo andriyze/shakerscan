@@ -1,10 +1,21 @@
 """Target management declarations composed into the canonical capability registry."""
 
+MAX_TARGET_SKILL_CHARACTERS = 12_000
 
 def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','enum':[True],'description':'The operator explicitly requested this control-plane change; this does not authorize target traffic.'}
     identifier = {'type':'string','format':'uuid'}
+    revision = {'type':'integer','minimum':0}
+    skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
+                  'methodology':{'type':'string','minLength':1,'maxLength':MAX_TARGET_SKILL_CHARACTERS},
+                  'expected_revision':revision}
     definitions = (
+        ('targets.skill.create','Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.',
+         skill_text,('methodology','expected_revision')),
+        ('targets.skill.update','Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.',
+         skill_text,('methodology','expected_revision')),
+        ('targets.skill.delete','Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.',
+         {'expected_revision':revision},('expected_revision',)),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
@@ -18,7 +29,11 @@ def asset_capability_specs(spec, schema, kinds):
          {'collection_id':identifier,'allowed_origins':{'type':'array','minItems':1,'maxItems':32,'items':{'type':'string','maxLength':2048}},
           'environment_id':identifier},('collection_id','allowed_origins')),
     )
-    return tuple(spec(name,description,'internal',
+    read = spec('targets.skill.read','Read the current saved instructions for this target. They are context, not testing authority.',
+        'internal','read_only',kinds,'targets.skill.read','1',None,
+        {'tool_wall_seconds':5},{'control_plane':True},schema({},required=()),
+        'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
+    return (read,) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
         'operator_intent' if name.startswith('targets.') else 'active_testing',
         {'tool_wall_seconds':5},{'control_plane':True,'user_confirmation':True},

@@ -4,6 +4,7 @@ import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
 import { DevicePortCoverage } from '@/components/DevicePortCoverage'
 import { SharedServicePorts } from '@/components/targets/SharedServicePorts'
+import { TargetSkillEditor } from '@/components/targets/TargetSkillEditor'
 import { DeviceCollectionEnvironments } from '@/components/DeviceCollectionEnvironments'
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
@@ -413,6 +414,7 @@ function DeviceDetailContent() {
       {deviceHunts.length > 0 && <Card className="mb-4 border-violet-500/20 bg-violet-500/4 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-violet-100">Legacy device-agent history</p><p className="mt-1 text-xs text-gray-500">Read-only investigations created before canonical Hunt · {deviceHunts.length} shown</p></div><div className="flex flex-wrap gap-2">{deviceHunts.slice(0, 3).map((run) => <Link key={run.id} href={`/hunt?target=${encodeURIComponent(device.id)}&legacy_run=${encodeURIComponent(run.id)}`} className="rounded-sm border border-violet-500/25 bg-gray-950/50 px-3 py-1.5 text-xs text-violet-200 hover:bg-violet-500/10">{run.status.replace(/_/g, ' ')} · {run.actions_used} actions · {run.scans_queued} scans</Link>)}<Link href={`/hunt?target=${encodeURIComponent(device.id)}`} className="rounded-sm px-3 py-1.5 text-xs text-blue-400 hover:text-blue-300">Open current Hunt</Link></div></div></Card>}
 
       <SharedServicePorts knowledge={data.service_intelligence} targetId={deviceId} />
+      <TargetSkillEditor key={deviceId} targetId={deviceId} targetName={device.name} />
       {selectedScanId && (
         <Card className="mb-4 border-blue-500/25 bg-blue-500/5 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">

@@ -7,6 +7,7 @@ import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal
 import { getTargetAssets, registerTargetAsset, enableTargetNetworkView, type TargetAsset } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
+import { TargetSkillEditor } from './TargetSkillEditor'
 
 export function TargetInventory({ domainView }: {domainView: ReactNode}) {
   const router = useRouter()
@@ -75,7 +76,7 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
         <td className="px-4 py-4 text-gray-300">{asset.origin_count ?? 0}</td>
         <td className="px-4 py-4 text-gray-300">{asset.service_count ?? 0}</td>
         <td className="px-4 py-4 text-gray-300">{asset.active_findings_count ?? 0}</td>
-        <td className="px-4 py-4"><div className="flex flex-wrap items-center gap-3"><Link href={`/targets/${asset.id}/asset`} className="text-blue-300">Open asset</Link><DeleteRecordsButton selection={{ kind: 'target', target_id: asset.id }} archived={!asset.is_active} subject={asset.url || asset.locator} onDeleted={() => setRefreshVersion((value) => value + 1)} onArchived={() => setRefreshVersion((value) => value + 1)} />{featureEnabled('devices') && asset.is_active && <Button size="sm" variant="secondary" loading={busy === asset.id} onClick={() => void network(asset)}>Start network scan</Button>}</div></td>
+        <td className="px-4 py-4"><div className="flex flex-wrap items-center gap-3"><Link href={`/targets/${asset.id}/asset`} className="text-blue-300">Open asset</Link><TargetSkillEditor compact targetId={asset.id} targetName={asset.name || asset.locator} hasSkill={asset.has_target_skill} /><DeleteRecordsButton selection={{ kind: 'target', target_id: asset.id }} archived={!asset.is_active} subject={asset.url || asset.locator} onDeleted={() => setRefreshVersion((value) => value + 1)} onArchived={() => setRefreshVersion((value) => value + 1)} />{featureEnabled('devices') && asset.is_active && <Button size="sm" variant="secondary" loading={busy === asset.id} onClick={() => void network(asset)}>Start network scan</Button>}</div></td>
       </tr>)}</tbody>
     </table></div></Card>}
     <div className="mt-4 flex items-center justify-between"><Button variant="secondary" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0,offset-50))}>Previous</Button><span className="text-xs text-gray-500">{total ? `${offset+1}–${Math.min(total,offset+50)} of ${total}` : '0 assets'}</span><Button variant="secondary" disabled={offset+50 >= total || loading} onClick={() => setOffset(offset+50)}>Next</Button></div>

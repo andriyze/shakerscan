@@ -147,6 +147,8 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                    'target_kind':'device','policy_json':{'active_testing':False}}
             for name in asset_actions.NAMES:
                 assert CAPABILITY_REGISTRY.require(name).target_kinds == frozenset({'web','api','network','device'})
+                if name == 'targets.skill.read':
+                    continue
                 with pytest.raises(HTTPException,match='Explicit operator'):
                     await asset_actions.execute_asset_action(pool,run,name,{})
             created = await asset_actions.execute_asset_action(pool,run,'targets.create',

@@ -16,6 +16,7 @@ async function mock(page: Page) {
     const request=route.request(), url=new URL(request.url())
     if (!['GET','OPTIONS'].includes(request.method())) writes.push(`${request.method()} ${url.pathname}`)
     if (url.pathname==='/targets/inventory') return route.fulfill({json:{targets:[target],total:1,offset:0,limit:50}})
+    if (url.pathname.endsWith('/skill')) return route.fulfill({json:{target_id:assetId,revision:0,skill:null,max_characters:12000}})
     if (url.pathname===`/targets/${assetId}/asset`) return route.fulfill({json:{target,origins,services:[],service_intelligence:serviceIntelligence,credentials:[{id:profileId,name:'One shared session',auth_kind:'cookie',current_version:2,is_active:true}],request_collections:[{id:collectionId,name:'One shared collection',request_count:3,is_active:true}],history,active_findings:{},authorization:{approved_by:'fixture'}}})
     if (url.pathname===`/targets/${assetId}/authorization`) return route.fulfill({json:{authorization:{standing:true,approved_by:'fixture'}}})
     if (url.pathname===`/devices/${assetId}`) return route.fulfill({json:{device:{...target,primary_locator:target.locator,metadata_json:{port_hints:[8008,8060]}},interfaces:[],locator_history:[],services:[],scans:[],service_intelligence:serviceIntelligence,authorization:{approved_by:'fixture'}}})
