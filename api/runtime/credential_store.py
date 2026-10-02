@@ -154,10 +154,7 @@ ON CONFLICT (name) DO NOTHING;
 
 # Web, API and network targets are views of the same asset rows (the targets table); a device
 # target is a different asset. A profile serves targets of its own asset kind only.
-_KIND_COMPATIBLE_SQL = (
-    "(p.target_kind={kind} OR (p.target_kind IN ('web','api','network') "
-    "AND {kind} IN ('web','api','network')))"
-)
+_KIND_COMPATIBLE_SQL = "(p.target_kind IN ('web','api','network','device') AND {kind} IN ('web','api','network','device'))"
 
 
 
