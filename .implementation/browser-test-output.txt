@@ -3,4 +3,4 @@ Running 2 tests using 2 workers
 
 [1/2] [chromium] › tests/browser/target-assets.spec.ts:25:5 › ASSET-001 one asset owns service origins and shared IDs without executing on navigation
 [2/2] [mobile-chromium] › tests/browser/target-assets.spec.ts:25:5 › ASSET-001 one asset owns service origins and shared IDs without executing on navigation
-  2 passed (2.3s)
+  2 passed (2.6s)
