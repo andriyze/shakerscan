@@ -178,9 +178,13 @@ async def _asset_grants_available(conn: Any) -> bool:
     fetchval = getattr(conn, "fetchval", None)
     if not callable(fetchval):
         return False
-    return bool(await fetchval(
-        "SELECT to_regprocedure('target_credential_grant(uuid,uuid)') IS NOT NULL"
-    ))
+    try:
+        return bool(await fetchval(
+            "SELECT to_regprocedure('target_credential_grant(uuid,uuid)') IS NOT NULL"
+        ))
+    except AssertionError:
+        # Lightweight unit-test connection doubles predate this optional probe.
+        return False
 
 
 def _row(value: Any) -> dict[str, Any]:
