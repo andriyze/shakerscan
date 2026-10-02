@@ -41,7 +41,7 @@ def main():
     network = next(iter(worker['NetworkSettings']['Networks']))
     name = 'hunt-ssh-fixture-' + uuid.uuid4().hex[:12]
     fixture = ROOT / 'tests/e2e/fixtures/ssh_server.py'
-    target_id = profile_id = hunt_id = ''
+    target_id = home_id = profile_id = hunt_id = ''
     try:
         docker('run', '--detach', '--rm', '--name', name,
                '--label', 'com.docker.compose.project=hunt-ssh-fixtures',
@@ -67,14 +67,26 @@ def main():
             'environment': 'lab', 'approved_by': 'hunt-ssh-acceptance', 'port_hints': [22, 2222]})
         target_id = target['id']
         approval = H.get(f'/targets/{target_id}/authorization')['authorization']['approval_receipt_id']
+        # Revocation applies to a shared grant; the profile's home binding is permanent.
+        home = accepted('/targets/hosts', {
+            'locator': f'127.76.{uuid.uuid4().int % 254 + 1}.{uuid.uuid4().int % 254 + 1}',
+            'name': 'Synthetic SSH identity home', 'environment': 'lab',
+            'approved_by': 'hunt-ssh-acceptance',
+        })
+        home_id = home['id']
+        home_approval = H.get(f'/targets/{home_id}/authorization')['authorization']['approval_receipt_id']
         profile = accepted('/credential-profiles', {
-            'target_kind': 'network', 'target_id': target_id, 'name': 'Synthetic SSH identity',
+            'target_kind': 'network', 'target_id': home_id, 'name': 'Synthetic SSH identity',
             'auth_kind': 'ssh_password', 'principal_slot': 'ssh', 'username': 'fixture-operator',
             'secret': 'fixture-only-password', 'allowed_capabilities': ['ssh.connect'],
-            'allow_active_capabilities': True, 'approval_receipt_id': approval,
+            'allow_active_capabilities': True, 'approval_receipt_id': home_approval,
             'created_by': 'hunt-ssh-acceptance',
         })
         profile_id = profile['profile']['id']
+        accepted(f'/credential-profiles/{profile_id}/grants', {
+            'target_kind': 'network', 'target_id': target_id,
+            'approval_receipt_id': approval, 'granted_by': 'hunt-ssh-acceptance',
+        })
         hunt = accepted('/hunts', {
             'schema_version': 'hunt-start/v2', 'target_id': target_id, 'target_kind': 'network',
             'goal': 'Authenticate on standard and operator-advised SSH ports; execute no commands.',
@@ -102,8 +114,8 @@ def main():
         assert denied['action_result']['status'] == 'failed'
         assert stats()['authentication_attempts'] == 2
         print('PASS wrong host key blocks identity authentication', flush=True)
-        code, _ = H.delete(f'/credential-profiles/{profile_id}/grants/{target_id}')
-        assert code < 300
+        code, revoked = H.delete(f'/credential-profiles/{profile_id}/grants/{target_id}')
+        assert code < 300, revoked
         code, denied = H.post(f'/hunts/{hunt_id}/capabilities/ssh.connect', {
             'idempotency_key': 'ssh-revoked-' + uuid.uuid4().hex,
             'input': {'port': 2222, 'host_key_fingerprint': baseline['host_key_fingerprint']},
@@ -119,6 +131,8 @@ def main():
             H.delete(f'/credential-profiles/{profile_id}')
         if target_id:
             H.post(f'/targets/{target_id}/archive', {})
+        if home_id:
+            H.post(f'/targets/{home_id}/archive', {})
         subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=30)
 
 

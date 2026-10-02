@@ -70,6 +70,9 @@ def test_locator_change_and_expired_explicit_authority_do_not_fall_back_to_host(
 
 def test_worker_revalidates_parent_authority_not_a_client_flag():
     from scan.authorization import revalidate_scan_action_authority, ActionAuthorityDecision, revalidate_action_authority
+    from runtime.credential_resolver import validate_worker_credential_authority, CredentialResolutionError
+    from runtime.models import TargetBinding
+    import pytest
     async def run():
         async with database() as conn:
             await prepare(conn)
@@ -83,6 +86,16 @@ def test_worker_revalidates_parent_authority_not_a_client_flag():
             binding={'target_id':str(origin),'canonical_host':'worker.test'}
             action={'capability_name':'http.request','capability_input':{'method':'POST'}}
             scope_id=current['scope_receipt_id']
+            credential_binding=TargetBinding(target_id=str(origin),target_kind='web',
+                canonical_host='worker.test',allowed_origins=('https://worker.test:8443',),
+                scope_receipt_id=scope_id)
+            async def validate_credentials():
+                return await validate_worker_credential_authority(conn,owner_kind='scan',
+                    owner_id='fixture-scan',target=credential_binding,
+                    approval_receipt_id=str(approval),scope_receipt_id=scope_id,
+                    action_name='scan')
+            # Credential decryption must reuse the same live asset authority as execution.
+            assert (await validate_credentials()).approval_validated
             allowed=await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
                 scope_receipt_id=scope_id,approval_receipt_id=str(approval))
             assert allowed==ActionAuthorityDecision.ALLOWED
@@ -93,4 +106,6 @@ def test_worker_revalidates_parent_authority_not_a_client_flag():
             await target_authorization.revoke_target_authorization(conn,origin,revoked_by='fixture',reason='excluded')
             assert await revalidate_scan_action_authority(conn,action=action,target_binding=binding,
                 scope_receipt_id=scope_id,approval_receipt_id=str(approval)) != ActionAuthorityDecision.ALLOWED
+            with pytest.raises(CredentialResolutionError,match='target changed'):
+                await validate_credentials()
     asyncio.run(run())
