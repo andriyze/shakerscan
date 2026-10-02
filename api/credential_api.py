@@ -352,14 +352,9 @@ def _pool(request: Request) -> Any:
 
 
 async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) -> None:
-    if target_kind == "device":
-        row = await conn.fetchrow(
-            "SELECT id FROM device_targets WHERE id=$1 AND is_active=true", target_id
-        )
-    else:
-        row = await conn.fetchrow(
-            "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
-        )
+    row = await conn.fetchrow(
+        "SELECT id FROM targets WHERE id=$1 AND is_active=true", target_id
+    )
     if not row:
         raise HTTPException(status_code=404, detail="active credential target not found")
 
@@ -539,6 +534,8 @@ async def _sync_legacy_device_from_generic(
     material: Mapping[str, Any] | None = None,
     rotated_at: datetime | None = None,
 ) -> None:
+    if await conn.fetchval("SELECT 1 FROM app_schema_migrations WHERE name='unified_target_asset_inputs_v1'"):
+        return  # device_credential_profiles is now a view of this exact canonical version.
     legacy = await _legacy_device_profile(conn, profile)
     if legacy is None:
         return

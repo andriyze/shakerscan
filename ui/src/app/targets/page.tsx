@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { TargetInventory } from '@/components/targets/TargetInventory'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
@@ -1189,7 +1190,7 @@ function TargetsContent() {
 export default function TargetsPage() {
   return (
     <Suspense fallback={<CardSkeleton count={4} />}>
-      <TargetsContent />
+      <TargetInventory domainView={<TargetsContent />} />
     </Suspense>
   )
 }

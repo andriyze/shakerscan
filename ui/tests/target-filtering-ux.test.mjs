@@ -31,7 +31,7 @@ test('a slow answer for a target no longer selected never fills the list', () =>
 })
 
 test('a linked credential target outside the loaded list is fetched, or reported', () => {
-  assert.match(credentials, /getTarget\(targetId\)/)
+  assert.match(credentials, /getTargetAsset\(targetId\)/)
   assert.match(credentials, /was not found among active targets that can hold credentials/)
   // An unknown ID is never sent to the profiles API.
   assert.match(credentials, /if \(targetId && !choices\.some\(\(item\) => item\.id === targetId\)\) \{\n      setProfiles\(\[\]\)/)

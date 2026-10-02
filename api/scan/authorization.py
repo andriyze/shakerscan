@@ -128,6 +128,7 @@ def revalidate_action_authority(
     scope_receipt_id: str | None = None,
     approval_receipt_id: str | None = None,
     now: datetime | None = None,
+    asset_authority_validated: bool = False,
 ) -> ActionAuthorityDecision:
     """Evaluate fresh durable authority without granting or widening scope."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -161,7 +162,7 @@ def revalidate_action_authority(
             return ActionAuthorityDecision.REJECTED_SCOPE
         target_id = str(_value(target_binding, "target_id", "") or "").strip()
         scope_target_id = str(_value(scope_receipt, "target_id", "") or "").strip()
-        if target_id and scope_target_id and target_id != scope_target_id:
+        if target_id and scope_target_id and target_id != scope_target_id and not asset_authority_validated:
             return ActionAuthorityDecision.REJECTED_SCOPE
         if not _host_in_scope(
             str(_value(target_binding, "canonical_host", "") or ""), scope_receipt,
@@ -227,7 +228,20 @@ async def revalidate_scan_action_authority(
         approval_receipt = await conn.fetchrow(
             "SELECT * FROM approval_receipts WHERE id=$1", approval_id,
         )
+    asset_authority_validated = False
+    target_id = str(_value(target_binding, "target_id", "") or "")
+    scope_target = str(_value(scope_receipt, "target_id", "") or "")
+    if _standing_authorization(approval_receipt) and target_id and scope_target and target_id != scope_target:
+        try:
+            from ..targets.asset_authority import standing_authorization_matches_target
+        except (ImportError, ModuleNotFoundError):
+            from targets.asset_authority import standing_authorization_matches_target
+        asset_authority_validated = await standing_authorization_matches_target(
+            conn, target_id=target_id, scope_target_id=scope_target,
+            approval_receipt_id=_value(approval_receipt, "id"),
+        )
     return revalidate_action_authority(
+        asset_authority_validated=asset_authority_validated,
         action=action,
         target_binding=target_binding,
         scope_receipt=scope_receipt,

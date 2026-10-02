@@ -1212,7 +1212,10 @@ async def run_pinned_device_web_scan(
     if credential:
         kind = str(credential.get("auth_kind") or "")
         secret = str(credential.get("secret") or "")
-        if kind == "web_authorization_header":
+        if kind == "web_headers":
+            request_headers.update(_safe_request_headers(dict(credential.get("headers") or {})))
+            credentials_attempted = bool(request_headers)
+        elif kind == "web_authorization_header":
             request_headers["Authorization"] = secret
             credentials_attempted = True
         elif kind == "web_cookie":

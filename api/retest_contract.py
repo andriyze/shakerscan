@@ -1063,22 +1063,29 @@ async def _migrate_evidence_scan_identity(conn) -> None:
     )
 
 
-async def run_schema_migrations(pool) -> None:
-    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
+async def _run_unified_schema_migrations_once(db_pool) -> None:
+    """Apply the frozen baseline and asset conversion in one serialized transaction."""
+    from targets.asset_migration import run_unified_startup
+    await run_unified_startup(db_pool, _run_schema_migrations_26_baseline)
 
-    The advisory lock serializes new ShakerScan processes, but during a rolling
-    rebuild an older API can still be using a relation while the first new
-    worker applies idempotent DDL. PostgreSQL may choose the migrator as the
-    deadlock victim. Retry in-process so a healthy worker does not crash-loop.
-    """
+
+async def run_schema_migrations(db_pool):
+    """Upgrade atomically while preserving fail-fast base-schema and deadlock behavior."""
+    async with db_pool.acquire() as conn:
+        await assert_base_schema(conn)
     for attempt in range(3):
         try:
-            await _run_schema_migrations_once(pool)
+            await _run_unified_schema_migrations_once(db_pool)
             return
         except Exception as exc:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
                 raise
             await asyncio.sleep(0.2 * (attempt + 1))
+
+
+async def _run_schema_migrations_26_baseline(pool) -> None:
+    """Frozen pre-unification schema migration executed inside the caller transaction."""
+    await _run_schema_migrations_once(pool)
 
 
 class MissingBaseSchemaError(RuntimeError):

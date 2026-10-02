@@ -154,10 +154,7 @@ ON CONFLICT (name) DO NOTHING;
 
 # Web, API and network targets are views of the same asset rows (the targets table); a device
 # target is a different asset. A profile serves targets of its own asset kind only.
-_KIND_COMPATIBLE_SQL = (
-    "(p.target_kind={kind} OR (p.target_kind IN ('web','api','network') "
-    "AND {kind} IN ('web','api','network')))"
-)
+_KIND_COMPATIBLE_SQL = "(p.target_kind IN ('web','api','network','device') AND {kind} IN ('web','api','network','device'))"
 
 
 
@@ -173,6 +170,21 @@ class CredentialDatabase(Protocol):
     async def execute(self, query: str, *args: Any) -> Any: ...
     async def fetchrow(self, query: str, *args: Any) -> Any: ...
     async def fetch(self, query: str, *args: Any) -> Any: ...
+    async def fetchval(self, query: str, *args: Any) -> Any: ...
+
+
+async def _asset_grants_available(conn: Any) -> bool:
+    """Whether the unified asset grant resolver has been installed in this database."""
+    fetchval = getattr(conn, "fetchval", None)
+    if not callable(fetchval):
+        return False
+    try:
+        return bool(await fetchval(
+            "SELECT to_regprocedure('target_credential_grant(uuid,uuid)') IS NOT NULL"
+        ))
+    except AssertionError:
+        # Lightweight unit-test connection doubles predate this optional probe.
+        return False
 
 
 def _row(value: Any) -> dict[str, Any]:
@@ -354,6 +366,7 @@ class CredentialProfileMetadata:
     # The target this copy was loaded for through an active grant (list_profiles,
     # load_for_worker). None when loaded by ID alone (get_profile).
     granted_target_id: str | None = None
+    service_port: int | None = None
 
     @property
     def shared(self) -> bool:
@@ -398,6 +411,7 @@ class CredentialProfileMetadata:
             created_at=item["created_at"],
             updated_at=item["updated_at"],
             allowed_capabilities=tuple(_capabilities(raw_capabilities)),
+            service_port=int(item['service_port']) if item.get('service_port') is not None else None,
             granted_target_id=(
                 str(_target_id(item["granted_target_id"])) if item.get("granted_target_id") else None
             ),
@@ -421,6 +435,7 @@ class CredentialProfileMetadata:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "allowed_capabilities": list(self.allowed_capabilities),
+            "service_port": self.service_port,
             "home_target_id": self.target_id,
             "granted_target_id": self.granted_target_id,
             "shared": self.shared,
@@ -537,20 +552,29 @@ class PostgresCredentialProfileStore:
         target_uuid = _target_id(target_id)
         # The target's own profiles (a home binding may predate this table) and every profile
         # shared with it through a grant that is not revoked. Own profiles sort first.
-        rows = await conn.fetch(
-            f"""SELECT p.*, b.allowed_capabilities, $2::text AS granted_target_id
-               FROM credential_profiles p
-               LEFT JOIN credential_profile_bindings b
-                 ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$2::text
-               WHERE {_KIND_COMPATIBLE_SQL.format(kind="$1")}
-                 AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.revoked_at IS NULL))
-                 AND ($4::boolean OR (p.is_active=true AND (b.id IS NULL OR b.is_active=true)))
-               ORDER BY (p.target_id=$3) DESC, p.is_active DESC, lower(p.name), p.id""",
-            _target_kind(target_kind),
-            str(target_uuid),
-            target_uuid,
-            bool(include_inactive),
-        )
+        if await _asset_grants_available(conn):
+            rows = await conn.fetch(
+                f"""SELECT p.*, b.allowed_capabilities, $2::text AS granted_target_id
+                   FROM credential_profiles p
+                   LEFT JOIN LATERAL target_credential_grant(p.id,$3::uuid) b ON true
+                   WHERE {_KIND_COMPATIBLE_SQL.format(kind="$1")}
+                     AND b.id IS NOT NULL AND b.revoked_at IS NULL
+                     AND ($4::boolean OR (p.is_active=true AND b.is_active=true))
+                   ORDER BY (p.target_id=$3) DESC, p.is_active DESC, lower(p.name), p.id""",
+                _target_kind(target_kind), str(target_uuid), target_uuid, bool(include_inactive),
+            )
+        else:
+            rows = await conn.fetch(
+                f"""SELECT p.*, b.allowed_capabilities, $2::text AS granted_target_id
+                   FROM credential_profiles p
+                   LEFT JOIN credential_profile_bindings b
+                     ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$2::text
+                   WHERE {_KIND_COMPATIBLE_SQL.format(kind="$1")}
+                     AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.revoked_at IS NULL))
+                     AND ($4::boolean OR (p.is_active=true AND (b.id IS NULL OR b.is_active=true)))
+                   ORDER BY (p.target_id=$3) DESC, p.is_active DESC, lower(p.name), p.id""",
+                _target_kind(target_kind), str(target_uuid), target_uuid, bool(include_inactive),
+            )
         return [CredentialProfileMetadata.from_row(item) for item in rows]
 
     async def get_profile(
@@ -731,22 +755,35 @@ class PostgresCredentialProfileStore:
             raise CredentialStoreError("capability is invalid")
         # The consuming target must hold an active grant: its own home binding, or a share
         # an operator made and has not revoked.
-        row = await conn.fetchrow(
-            f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
-                      b.allowed_capabilities, b.binding_id AS granted_target_id
-               FROM credential_profiles p
-               JOIN credential_profile_versions v
-                 ON v.profile_id=p.id AND v.version=p.current_version
-               JOIN credential_profile_bindings b
-                 ON b.profile_id=p.id AND b.binding_kind='target'
-                AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
-               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
-                 AND p.is_active=true
-                 AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
-            _profile_id(profile_id),
-            _target_kind(target_kind),
-            str(_target_id(target_id)),
-        )
+        if await _asset_grants_available(conn):
+            row = await conn.fetchrow(
+                f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
+                          b.allowed_capabilities, $3::text AS granted_target_id
+                   FROM credential_profiles p
+                   JOIN credential_profile_versions v
+                     ON v.profile_id=p.id AND v.version=p.current_version
+                   JOIN LATERAL target_credential_grant(p.id,$3::uuid) b
+                     ON b.is_active=true AND b.revoked_at IS NULL
+                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
+                     AND p.is_active=true
+                     AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
+                _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
+            )
+        else:
+            row = await conn.fetchrow(
+                f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
+                          b.allowed_capabilities, b.binding_id AS granted_target_id
+                   FROM credential_profiles p
+                   JOIN credential_profile_versions v
+                     ON v.profile_id=p.id AND v.version=p.current_version
+                   JOIN credential_profile_bindings b
+                     ON b.profile_id=p.id AND b.binding_kind='target'
+                    AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
+                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
+                     AND p.is_active=true
+                     AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
+                _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
+            )
         if not row:
             raise CredentialStoreError("credential profile is unavailable for target")
         item = _row(row)
@@ -809,17 +846,23 @@ class PostgresCredentialProfileStore:
         target_id: Any,
     ) -> bool:
         """The profile is active and the target holds an active grant for it."""
-        row = await conn.fetchrow(
-            f"""SELECT 1
-               FROM credential_profiles p
-               JOIN credential_profile_bindings b
-                 ON b.profile_id=p.id AND b.binding_kind='target'
-                AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
-               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")} AND p.is_active=true""",
-            _profile_id(profile_id),
-            _target_kind(target_kind),
-            str(_target_id(target_id)),
-        )
+        if await _asset_grants_available(conn):
+            row = await conn.fetchrow(
+                f"""SELECT 1 FROM credential_profiles p
+                   JOIN LATERAL target_credential_grant(p.id,$3::uuid) b
+                     ON b.is_active=true AND b.revoked_at IS NULL
+                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")} AND p.is_active=true""",
+                _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
+            )
+        else:
+            row = await conn.fetchrow(
+                f"""SELECT 1 FROM credential_profiles p
+                   LEFT JOIN credential_profile_bindings b
+                     ON b.profile_id=p.id AND b.binding_kind='target' AND b.binding_id=$3::text
+                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")} AND p.is_active=true
+                     AND (p.target_id=$3 OR (b.id IS NOT NULL AND b.is_active=true AND b.revoked_at IS NULL))""",
+                _profile_id(profile_id), _target_kind(target_kind), _target_id(target_id),
+            )
         return bool(row)
 
     async def grant_profile(

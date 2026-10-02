@@ -88,6 +88,13 @@ except ModuleNotFoundError:  # package import in host-side tests
     from scanner.scanner_tools.device_request_formats import resolve_imported_requests as _resolve_imported_device_requests
 
 
+from .shared_credentials import (
+    create_device_profile, rotate_device_profile, deactivate_device_profile, device_execution_capability,
+)
+from .shared_collections import save_device_collection, deactivate_device_collection, collection_view
+from .collection_environments import bind_environments
+from .network_authorization import network_authorization_snapshot
+
 router = APIRouter()
 
 _pool_provider: Callable[[], Any] | None = None
@@ -315,7 +322,16 @@ class DeviceScanRequest(BaseModel):
     )
     ssh_credential_profile_id: Optional[str] = None
     web_credential_profile_id: Optional[str] = None
+    udp_ports: list[int] | None = Field(default=None, max_length=1024)
+    request_collection_environment_ids: dict[str, str | None] = Field(default_factory=dict, max_length=8)
     request_collection_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator('udp_ports', mode='before')
+    @classmethod
+    def validate_udp_scope(cls, value):
+        from scanner_tools.device_scan_scope import normalize_udp_ports
+        return normalize_udp_ports(value)
+
     confirm_request_replay: bool = False
     allow_state_changing_requests: bool = False
     allow_untrusted_tls_credentials: bool = Field(default=False, deprecated=True)
@@ -551,7 +567,7 @@ async def _validate_device_credential_refs(
             continue
         profile_id = _device_uuid(raw_id, f"{role} credential profile")
         row = await conn.fetchrow(
-            """SELECT id, auth_kind, port FROM device_credential_profiles
+            """SELECT id, auth_kind, port, current_version, record_version, allowed_capabilities FROM device_credential_profiles
                WHERE id=$1 AND device_target_id=$2 AND is_active=true
                  AND (expires_at IS NULL OR expires_at > NOW())""",
             profile_id,
@@ -559,7 +575,16 @@ async def _validate_device_credential_refs(
         )
         if not row or str(row["auth_kind"]) not in allowed_kinds:
             raise HTTPException(status_code=422, detail=f"Active {role} credential profile is unavailable for this device")
+        allowed = row['allowed_capabilities']
+        if isinstance(allowed, str):
+            allowed = json.loads(allowed)
+        capability = device_execution_capability(role, allowed)
+        if not capability:
+            raise HTTPException(status_code=422, detail=f'This {role} profile has no applicable capability grant')
         refs.append({
+            'current_version': int(row['current_version']),
+            'record_version': int(row['record_version']),
+            'capability': capability,
             "role": role,
             "profile_id": str(profile_id),
             "auth_kind": str(row["auth_kind"]),
@@ -899,27 +924,8 @@ async def create_device_credential(device_id: str, request: DeviceCredentialProf
             action_name="device.credential.create", risk_tier="active", created_by="device_credential_endpoint",
         )
         try:
-            row = await conn.fetchrow(
-                """INSERT INTO device_credential_profiles (
-                       device_target_id, name, auth_kind, username, secret_value,
-                       secret_preview, login_path, port, expires_at, metadata_json
-                   ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
-                device_uuid,
-                _normalize_target_credential_profile_name(request.name),
-                request.auth_kind,
-                str(request.username or "").strip() or None,
-                _device_credential_secret_value(request.secret, request.secondary_secret),
-                None,
-                request.login_path,
-                request.port,
-                request.expires_at,
-                json.dumps(_redact_agent_payload(request.metadata_json)),
-            )
-        except asyncpg.UniqueViolationError as exc:
-            raise HTTPException(status_code=409, detail="Device credential profile name already exists") from exc
-        try:
-            await sync_legacy_device_credential(conn, row["id"])
-        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            row = await create_device_profile(conn, device_uuid, request)
+        except CredentialStoreError as exc:
             raise _legacy_credential_migration_http_error(exc) from exc
         operation = await _record_command_result(
             conn, command="device.credential.create", status="completed", risk_tier="active",
@@ -958,22 +964,9 @@ async def rotate_device_credential(
         )
         if str(existing["auth_kind"]).startswith("web_") and ("\r" in request.secret or "\n" in request.secret):
             raise HTTPException(status_code=422, detail="Web credential values must not contain CR or LF")
-        row = await conn.fetchrow(
-            """UPDATE device_credential_profiles
-               SET secret_value=$3, secret_preview=$4,
-                   expires_at=CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
-                   is_active=true, rotated_at=NOW(), updated_at=NOW()
-               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
-            profile_uuid,
-            device_uuid,
-            _device_credential_secret_value(request.secret, request.secondary_secret),
-            None,
-            request.clear_expiry,
-            request.expires_at,
-        )
         try:
-            await sync_legacy_device_credential(conn, profile_uuid)
-        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            row = await rotate_device_profile(conn, device_uuid, profile_uuid, request)
+        except CredentialStoreError as exc:
             raise _legacy_credential_migration_http_error(exc) from exc
         await conn.execute("DELETE FROM device_credential_attempts WHERE device_target_id=$1 AND credential_profile_id=$2", device_uuid, profile_uuid)
         operation = await _record_command_result(
@@ -1008,15 +1001,9 @@ async def deactivate_device_credential(
             conn, approval_receipt_id, target_url=str(existing["primary_locator"]),
             action_name="device.credential.deactivate", risk_tier="active", created_by="device_credential_endpoint",
         )
-        row = await conn.fetchrow(
-            """UPDATE device_credential_profiles SET is_active=false, updated_at=NOW()
-               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
-            profile_uuid,
-            device_uuid,
-        )
         try:
-            await sync_legacy_device_credential(conn, profile_uuid)
-        except (LegacyCredentialMigrationError, CredentialStoreError) as exc:
+            row = await deactivate_device_profile(conn, device_uuid, profile_uuid)
+        except CredentialStoreError as exc:
             raise _legacy_credential_migration_http_error(exc) from exc
         operation = await _record_command_result(
             conn, command="device.credential.deactivate", status="completed", risk_tier="active",
@@ -1094,10 +1081,7 @@ async def get_device_request_collection(device_id: str, collection_id: str):
     device_uuid = _device_uuid(device_id)
     collection_uuid = _device_uuid(collection_id, "request collection")
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM device_request_collections WHERE id=$1 AND device_target_id=$2",
-            collection_uuid, device_uuid,
-        )
+        row = await collection_view(conn, device_uuid, collection_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Device request collection not found")
     payload = _public_device_request_collection(row, include_requests=False)
@@ -1107,7 +1091,7 @@ async def get_device_request_collection(device_id: str, collection_id: str):
         # Bounded preview on detail: the full inventory is redacted but can be
         # thousands of rows; callers paginate via the summary count.
         payload["summary"]["requests_preview"] = requests[:200]
-        payload["summary"]["requests_total"] = len(requests)
+        payload["summary"]["requests_total"] = int(summary.get("requests_total") or summary.get("request_count") or len(requests))
     return {"collection": payload}
 
 
@@ -1131,22 +1115,7 @@ async def create_device_request_collection(device_id: str, request: DeviceReques
         async with _pool().acquire() as conn:
             if not await conn.fetchval("SELECT 1 FROM device_targets WHERE id=$1 AND is_active=true", device_uuid):
                 raise HTTPException(status_code=404, detail="Active connected device not found")
-            row = await conn.fetchrow(
-                """INSERT INTO device_request_collections (
-                       device_target_id, name, format, document_sha256, encrypted_payload, summary_json
-                   ) VALUES ($1,$2,$3,$4,$5,$6)
-                   ON CONFLICT (device_target_id, name) DO UPDATE SET
-                       format=EXCLUDED.format,
-                       document_sha256=EXCLUDED.document_sha256,
-                       encrypted_payload=EXCLUDED.encrypted_payload,
-                       summary_json=EXCLUDED.summary_json,
-                       is_active=true,
-                       updated_at=NOW()
-                   WHERE device_request_collections.is_active=false
-                   RETURNING *""",
-                device_uuid, summary["name"], summary["format"], summary["document_sha256"],
-                encrypted_payload, json.dumps(summary),
-            )
+            row = await save_device_collection(conn, device_uuid, summary=summary, encrypted_payload=encrypted_payload)
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="This device already has a request collection with that name") from exc
     if not row:
@@ -1188,14 +1157,8 @@ async def update_device_request_collection(device_id: str, collection_id: str, r
         raise HTTPException(status_code=503, detail="Encrypted storage is required for device request collections")
     try:
         async with _pool().acquire() as conn:
-            row = await conn.fetchrow(
-                """UPDATE device_request_collections
-                   SET name=$1, format=$2, document_sha256=$3, encrypted_payload=$4,
-                       summary_json=$5, updated_at=NOW()
-                   WHERE id=$6 AND device_target_id=$7 RETURNING *""",
-                summary["name"], summary["format"], summary["document_sha256"], encrypted_payload,
-                json.dumps(summary), collection_uuid, device_uuid,
-            )
+            row = await save_device_collection(conn, device_uuid, collection_id=collection_uuid,
+                summary=summary, encrypted_payload=encrypted_payload, expected_digest=str(current['document_sha256']))
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="This device already has a request collection with that name") from exc
     return {"collection": _public_device_request_collection(row)}
@@ -1206,11 +1169,7 @@ async def deactivate_device_request_collection(device_id: str, collection_id: st
     device_uuid = _device_uuid(device_id)
     collection_uuid = _device_uuid(collection_id, "request collection")
     async with _pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE device_request_collections SET is_active=false, updated_at=NOW()
-               WHERE id=$1 AND device_target_id=$2 RETURNING *""",
-            collection_uuid, device_uuid,
-        )
+        row = await deactivate_device_collection(conn, device_uuid, collection_uuid)
     if not row:
         raise HTTPException(status_code=404, detail="Device request collection not found")
     return {"status": "deactivated", "collection": _public_device_request_collection(row)}
@@ -1270,9 +1229,12 @@ async def get_device(
                ORDER BY created_at DESC LIMIT 20""",
             device_uuid,
         )
+    async with _pool().acquire() as conn:
+        standing = await network_authorization_snapshot(conn, device_uuid)
     device_payload = _decode_device_row(row)
     return {
         "device": device_payload,
+        "authorization": standing,
         "reachability": device_payload.get("last_reachability"),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "locator_history": [_decode_device_row(item) for item in locator_history],
@@ -1487,6 +1449,10 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
         request_collection_refs = await _validate_device_request_collection_refs(
             conn, device_uuid, request.request_collection_ids,
         )
+        request_collection_refs = await bind_environments(conn, request_collection_refs, request.request_collection_environment_ids)
+        standing = await network_authorization_snapshot(conn, device_uuid) if not request.confirm_authorized else None
+        if not request.confirm_authorized and not standing:
+            raise HTTPException(409, 'Standing asset authorization changed during submission; review it before retrying')
         if credential_refs and not safety_contract.credentials_allowed:
             raise HTTPException(
                 status_code=422,
@@ -1622,6 +1588,8 @@ async def scan_device(device_id: str, request: DeviceScanRequest):
             "device_manufacturer": str(device["manufacturer"] or ""),
             "device_model": str(device["model"] or ""),
             "device_profile": request.profile,
+            "device_udp_ports": request.udp_ports,
+            "asset_authorization_receipt_id": standing['approval_receipt_id'] if standing else None,
             "safety_profile": request.safety_profile,
             "confirm_authorized": True,
             "include_web_dast": request.include_web_dast,

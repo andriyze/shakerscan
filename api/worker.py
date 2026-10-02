@@ -2032,155 +2032,15 @@ def _hydrate_scan_private_state_key(options: Mapping[str, Any]) -> dict[str, Any
 
 
 async def _hydrate_device_scan_credentials(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
-    """Resolve device-bound credentials in worker memory without persisting secrets."""
-    hydrated = dict(options or {})
-    raw_refs = hydrated.get("device_credential_profiles")
-    if not isinstance(raw_refs, list) or not raw_refs:
-        return hydrated
-    if str(hydrated.get("safety_profile") or "") != "authenticated_active":
-        raise ValueError("device credentials require safety_profile=authenticated_active")
-    refs = [dict(item) for item in raw_refs if isinstance(item, dict)][:2]
-    roles = [str(item.get("role") or "") for item in refs]
-    if len(roles) != len(set(roles)) or not all(role in {"ssh", "web"} for role in roles):
-        raise ValueError("invalid device credential profile references")
-    try:
-        profile_ids = [uuid.UUID(str(item.get("profile_id") or "")) for item in refs]
-        scan_uuid = uuid.UUID(str(scan_id))
-    except ValueError as exc:
-        raise ValueError("invalid device credential profile id") from exc
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT cp.id, cp.auth_kind, cp.username, cp.secret_value,
-                      cp.login_path, cp.port
-               FROM scans s
-               JOIN device_credential_profiles cp ON cp.device_target_id=s.device_target_id
-               WHERE s.id=$1 AND cp.id=ANY($2::uuid[]) AND cp.is_active=true
-                 AND (cp.expires_at IS NULL OR cp.expires_at > NOW())""",
-            scan_uuid,
-            profile_ids,
-        )
-        attempt_rows = await conn.fetch(
-            """WITH latest_success AS (
-                   SELECT credential_profile_id, MAX(attempted_at) AS succeeded_at
-                   FROM device_credential_attempts
-                   WHERE credential_profile_id=ANY($1::uuid[]) AND outcome='succeeded'
-                   GROUP BY credential_profile_id
-               )
-               SELECT a.credential_profile_id,
-                      COUNT(*) FILTER (WHERE a.outcome IN ('rejected','error')) AS failure_count,
-                      MAX(a.attempted_at) FILTER (WHERE a.outcome IN ('rejected','error')) AS last_failure_at
-               FROM device_credential_attempts a
-               LEFT JOIN latest_success s ON s.credential_profile_id=a.credential_profile_id
-               WHERE a.credential_profile_id=ANY($1::uuid[])
-                 AND a.attempted_at >= NOW() - INTERVAL '24 hours'
-                 AND (s.succeeded_at IS NULL OR a.attempted_at > s.succeeded_at)
-               GROUP BY a.credential_profile_id""",
-            profile_ids,
-        )
-    by_id = {str(row["id"]): dict(row) for row in rows}
-    attempts_by_id = {str(row["credential_profile_id"]): dict(row) for row in attempt_rows}
-    resolved: list[dict[str, Any]] = []
-    for ref in refs:
-        role = str(ref["role"])
-        profile_id = str(ref["profile_id"])
-        row = by_id.get(profile_id)
-        if row is None:
-            raise ValueError(f"device {role} credential profile is unavailable")
-        auth_kind = str(row.get("auth_kind") or "")
-        if (role == "ssh") != auth_kind.startswith("ssh_"):
-            raise ValueError(f"device {role} credential profile kind mismatch")
-        if role == "ssh":
-            attempt_state = attempts_by_id.get(profile_id, {})
-            failure_count = int(attempt_state.get("failure_count") or 0)
-            last_failure_at = attempt_state.get("last_failure_at")
-            if failure_count >= DEVICE_SSH_AUTH_DAILY_FAILURE_CAP:
-                raise ValueError("device SSH credential daily authentication failure cap is active")
-            if last_failure_at:
-                now = utc_now()
-                if last_failure_at.tzinfo is None:
-                    now = datetime.now()
-                if (now - last_failure_at).total_seconds() < DEVICE_SSH_AUTH_COOLDOWN_SECONDS:
-                    raise ValueError("device SSH credential authentication cooldown is active")
-        raw_secret = str(decrypt_secret(row.get("secret_value")) or "")
-        if not raw_secret or raw_secret.startswith("enc:fernet:"):
-            raise ValueError(f"device {role} credential profile could not be decrypted")
-        try:
-            secret_payload = json.loads(raw_secret)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"device {role} credential profile has an invalid secret payload") from exc
-        secret = str(secret_payload.get("secret") or "")
-        secondary_secret = str(secret_payload.get("secondary_secret") or "") or None
-        if not secret or (role == "web" and ("\r" in secret or "\n" in secret)):
-            raise ValueError(f"device {role} credential profile is invalid")
-        resolved.append({
-            "role": role,
-            "profile_id": profile_id,
-            "auth_kind": auth_kind,
-            "username": str(row.get("username") or "") or None,
-            "secret": secret,
-            "secondary_secret": secondary_secret,
-            "login_path": str(row.get("login_path") or "") or None,
-            "port": int(row["port"]) if row.get("port") is not None else None,
-        })
-    hydrated["_resolved_device_credentials"] = resolved
-    return hydrated
+    from devices.worker_inputs import hydrate_device_scan_credentials
+    return await hydrate_device_scan_credentials(options, scan_id, pool=db_pool,
+        ssh_daily_cap=DEVICE_SSH_AUTH_DAILY_FAILURE_CAP,
+        ssh_cooldown_seconds=DEVICE_SSH_AUTH_COOLDOWN_SECONDS, utc_now=utc_now)
 
 
 async def _hydrate_device_request_collections(options: dict[str, Any], scan_id: str) -> dict[str, Any]:
-    """Resolve encrypted device-bound request documents only in worker memory."""
-    hydrated = dict(options or {})
-    refs = [dict(item) for item in hydrated.get("device_request_collections") or [] if isinstance(item, dict)][:8]
-    if not refs:
-        return hydrated
-    if not hydrated.get("confirm_request_replay") or not hydrated.get("include_web_dast"):
-        raise ValueError("imported device requests require confirmed Web DAST execution")
-    try:
-        collection_ids = [uuid.UUID(str(item.get("collection_id") or "")) for item in refs]
-        scan_uuid = uuid.UUID(str(scan_id))
-    except ValueError as exc:
-        raise ValueError("invalid device request collection reference") from exc
-    if len(collection_ids) != len(set(collection_ids)):
-        raise ValueError("duplicate device request collection reference")
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT c.id, c.name, c.document_sha256, c.encrypted_payload
-               FROM scans s
-               JOIN device_request_collections c ON c.device_target_id=s.device_target_id
-               WHERE s.id=$1 AND c.id=ANY($2::uuid[]) AND c.is_active=true""",
-            scan_uuid, collection_ids,
-        )
-    by_id = {str(row["id"]): dict(row) for row in rows}
-    resolved: list[dict[str, Any]] = []
-    total_bytes = 0
-    for ref in refs:
-        collection_id = str(ref.get("collection_id") or "")
-        row = by_id.get(collection_id)
-        if row is None:
-            raise ValueError("device request collection is unavailable")
-        raw = str(decrypt_secret(row.get("encrypted_payload")) or "")
-        if not raw or raw.startswith("enc:fernet:"):
-            raise ValueError("device request collection could not be decrypted")
-        total_bytes += len(raw.encode("utf-8"))
-        if total_bytes > 7 * 1024 * 1024:
-            raise ValueError("selected device request collections exceed the execution size limit")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("device request collection has an invalid encrypted payload") from exc
-        digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-        ).hexdigest()
-        expected = str(ref.get("document_sha256") or row.get("document_sha256") or "")
-        if digest != expected or digest != str(row.get("document_sha256") or ""):
-            raise ValueError("device request collection integrity check failed")
-        resolved.append({
-            "collection_id": collection_id,
-            "name": str(row.get("name") or ref.get("name") or "Imported requests"),
-            "document_sha256": digest,
-            "payload": payload,
-        })
-    hydrated["_resolved_device_request_collections"] = resolved
-    return hydrated
+    from devices.worker_inputs import hydrate_device_request_collections
+    return await hydrate_device_request_collections(options, scan_id, pool=db_pool)
 
 
 async def _persist_device_credential_attempts(result: dict[str, Any], scan_id: str) -> None:
@@ -12691,9 +12551,9 @@ async def _execute_scan_request_collections(
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
-                       WHERE c.id=$1 AND c.target_id=$4 AND c.is_active=true
+                       WHERE c.id=$1 AND target_collection_visible(c.id,$4) AND c.is_active=true
                          AND b.target_id=$4 AND (b.target_kind=$5 OR
-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
+                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), row["target_id"], target_kind,
@@ -13451,6 +13311,7 @@ async def process_scan_job(job_data: dict):
     r.delete(f"scan:{scan_id}:device_activity")
 
     # Update database
+    canonical_target_id = None
     target_id = None
     ai_target_id = None
     device_target_id = None
@@ -13481,9 +13342,14 @@ async def process_scan_job(job_data: dict):
         # Get target references
         row = await conn.fetchrow("SELECT target_id, ai_target_id, device_target_id FROM scans WHERE id = $1", uuid.UUID(scan_id))
         if row:
-            target_id = str(row['target_id']) if row['target_id'] else None
-            ai_target_id = str(row['ai_target_id']) if row['ai_target_id'] else None
-            device_target_id = str(row['device_target_id']) if row['device_target_id'] else None
+            from targets.asset_execution import execution_target_refs
+            references = execution_target_refs(row)
+            # target_id below is the application-only persistence path. Device scans
+            # retain their canonical target_id in the database and execution receipts.
+            canonical_target_id = references.canonical_target_id
+            target_id = references.web_target_id
+            ai_target_id = references.ai_target_id
+            device_target_id = references.device_target_id
 
     # A broker ingest job carries immutable output from execution that already
     # happened on the remote node. It must not reserve execution budget again:
@@ -13528,6 +13394,9 @@ async def process_scan_job(job_data: dict):
                 options = await _hydrate_managed_scan_credentials(options, scan_id)
                 options = _hydrate_scan_private_state_key(options)
                 if device_target_id and (options or {}).get("run_kind") == "device_posture":
+                    from devices.network_authorization import revalidate_network_authorization
+                    async with db_pool.acquire() as conn:
+                        await revalidate_network_authorization(conn,device_target_id,options)
                     options = await _hydrate_device_scan_credentials(options, scan_id)
                     options = await _hydrate_device_request_collections(options, scan_id)
                 if is_deterministic_dast(options):
@@ -13745,7 +13614,7 @@ async def process_scan_job(job_data: dict):
                 scan_id=scan_id,
                 job_id=job_id,
                 target=target,
-                target_id=target_id,
+                target_id=canonical_target_id,
                 ai_target_id=ai_target_id,
                 options=options,
                 result=result,
@@ -19419,10 +19288,10 @@ async def process_request_collection_replay_job(job_data: dict[str, Any]) -> Non
                        LEFT JOIN request_collection_environments e
                          ON e.id=b.environment_id AND e.collection_id=c.id
                         AND e.is_active=true
-                       WHERE c.id=$1 AND c.{collection_owner_column}=$4
+                       WHERE c.id=$1 AND target_collection_visible(c.id,$4)
                          AND c.is_active=true
                          AND b.target_id=$4 AND (b.target_kind=$5 OR
-                           (b.target_kind IN ('web','api','network') AND $5 IN ('web','api','network')))
+                           (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
                        FOR UPDATE OF c, b, s""",
                     uuid.UUID(collection_id), uuid.UUID(binding_id),
                     uuid.UUID(selection_id), target_owner_id, target_kind,

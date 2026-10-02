@@ -128,7 +128,9 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 
+from .asset_router import router as asset_router, configure_asset_router
 router = APIRouter()
+router.include_router(asset_router)
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -140,6 +142,7 @@ def configure_targets_router(
     """Bind the pool and the collaborators this domain needs."""
     global _pool_provider
     _pool_provider = pool_provider
+    configure_asset_router(pool_provider)
     _deps.update(collaborators)
 
 

@@ -134,16 +134,16 @@ async def device_prior_knowledge(conn: Any, device_target_id: Any) -> dict[str, 
     )
     findings_by_severity = await conn.fetch(
         "SELECT severity, count(*) AS count FROM findings "
-        "WHERE device_target_id=$1 AND status='active' GROUP BY severity",
+        "WHERE target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1) AND status='active' GROUP BY severity",
         device_target_id,
     )
     verified = await conn.fetchval(
-        "SELECT count(*) FROM findings WHERE device_target_id=$1 AND status='active' "
+        "SELECT count(*) FROM findings WHERE target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1) AND status='active' "
         "AND last_verification_verdict='exploited'",
         device_target_id,
     )
     last_scan = await conn.fetchrow(
-        "SELECT id, completed_at FROM scans WHERE device_target_id=$1 AND status='completed' "
+        "SELECT id, completed_at FROM scans WHERE target_id IN (SELECT id FROM targets WHERE id=$1 OR asset_owner_id=$1) AND status='completed' "
         "ORDER BY completed_at DESC NULLS LAST LIMIT 1",
         device_target_id,
     )

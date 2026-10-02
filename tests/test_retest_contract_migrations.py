@@ -145,8 +145,13 @@ def test_schema_migration_retries_a_transient_postgres_deadlock(monkeypatch):
         if calls == 1:
             raise DeadlockDetectedError("injected DDL deadlock")
 
-    monkeypatch.setattr(retest_contract, "_run_schema_migrations_once", migrate_once)
-    asyncio.run(retest_contract.run_schema_migrations(object()))
+    class BaseSchemaConn:
+        async def fetchval(self, query, *args):
+            assert "to_regclass('public.scans')" in query
+            return "scans"
+
+    monkeypatch.setattr(retest_contract, "_run_unified_schema_migrations_once", migrate_once)
+    asyncio.run(retest_contract.run_schema_migrations(_FakePool(BaseSchemaConn())))
 
     assert calls == 2
 

@@ -10282,8 +10282,11 @@ async def _generic_collection_refs(
                 status_code=422,
                 detail="request collection selection_id is unavailable",
             )
-        owner_id = row["device_target_id"] if normalized_kind == "device" else row["target_id"]
-        if str(owner_id or "") != str(bound_target_id):
+        direct_owner = str(row.get("target_id") or row.get("device_target_id") or "") == str(bound_target_id)
+        visible = direct_owner or await conn.fetchval(
+            "SELECT target_collection_visible($1,$2)", row["id"], bound_target_id,
+        )
+        if not visible:
             raise HTTPException(
                 status_code=422,
                 detail="request collection is bound to another target",
@@ -10295,7 +10298,7 @@ async def _generic_collection_refs(
                  ON e.id=b.environment_id AND e.is_active=true
                WHERE b.collection_id=$1 AND b.target_id=$3
                  AND (b.target_kind=$2 OR
-                      (b.target_kind IN ('web','api','network') AND $2 IN ('web','api','network')))
+                      (b.target_kind IN ('web','api','network','device') AND $2 IN ('web','api','network','device')))
                  AND b.is_active=true AND ($4::uuid IS NULL OR b.id=$4)
                ORDER BY (b.target_kind=$2) DESC, b.updated_at DESC LIMIT 1""",
             row["id"], normalized_kind, bound_target_id,
@@ -15248,7 +15251,11 @@ async def _validate_approval_receipt_for_action(
             scope_ref=scope_ref,
         )
     if requested_target_id and scope_target_id and requested_target_id != scope_target_id:
-        await _deny("approval_scope_target_mismatch", "Approval receipt scope target does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
+        from targets.asset_authority import standing_authorization_matches_target
+        inherited = standing and await standing_authorization_matches_target(conn,
+            target_id=requested_target_id,scope_target_id=scope_target_id,approval_receipt_id=approval_ref)
+        if not inherited:
+            await _deny("approval_scope_target_mismatch", "Approval receipt scope target does not match requested target", approval_ref=approval_ref, scope_ref=scope_ref)
 
     if target_url:
         parsed = urllib.parse.urlparse(target_url if "://" in target_url else f"https://{target_url}")

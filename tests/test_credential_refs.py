@@ -91,7 +91,7 @@ def test_primary_and_secondary_profiles_resolve_to_content_free_rows():
         ("cookie_credential_id", _profile("p", kind="bearer_token"), "incompatible"),
         (
             "ssh_credential_profile_id",
-            _profile("p", kind="ssh_password", slot="ssh", target_kind="device"),
+            _profile("p", kind="ssh_password", slot="ssh", target_kind="model"),
             "target kind",
         ),
         (
@@ -209,3 +209,12 @@ def test_hunt_principal_selection_rejects_ambiguity_and_unknown_slots():
         select_hunt_principal_reference({"credential_refs": [row, dict(row)]}, "primary")
     with pytest.raises(CredentialReferenceError, match="must be anonymous"):
         select_hunt_principal_reference({"credential_refs": []}, "administrator")
+
+
+@pytest.mark.parametrize('view_kind',['web','api','network','device'])
+def test_device_profile_reference_is_available_through_the_same_asset_view(view_kind):
+    profile=_profile('device-profile',kind='ssh_password',slot='ssh',target_kind='device')
+    refs,missing=validate_generic_credential_references(
+        {'ssh_credential_profile_id':profile.profile_id},[profile],target_kind=view_kind,now=NOW)
+    assert not missing and refs[0]['profile_id']==profile.profile_id
+    assert refs[0]['secret_values_visible'] is False

@@ -298,7 +298,7 @@ def test_web_retest_endpoints_reject_device_findings():
 
 def test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memory():
     api = api_tree_source()
-    worker = (ROOT / "api" / "worker.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text() + (ROOT / "api" / "devices" / "worker_inputs.py").read_text()
     schema = (ROOT / "db" / "init.sql").read_text()
     assert "CREATE TABLE device_credential_profiles" in schema
     assert "Credential encryption is not configured" in api
@@ -313,7 +313,7 @@ def test_device_credentials_are_bound_encrypted_and_resolved_only_in_worker_memo
 
 def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transcript():
     api = api_tree_source()
-    worker = (ROOT / "api" / "worker.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text() + (ROOT / "api" / "devices" / "worker_inputs.py").read_text()
     assert "Credentialed device scans require safety_profile=authenticated_active" in api
     # The investigation-start copy lived in the deleted legacy session handler.
     # Canonical device Hunt enforces the same rule in the worker, immediately
@@ -325,7 +325,7 @@ def test_device_auth_requires_authenticated_safety_and_never_enters_agent_transc
 def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     api = api_tree_source()
     collection_api = (ROOT / "api" / "request_collection_api.py").read_text()
-    worker = (ROOT / "api" / "worker.py").read_text()
+    worker = (ROOT / "api" / "worker.py").read_text() + (ROOT / "api" / "devices" / "worker_inputs.py").read_text()
     agent = (ROOT / "api" / "device_agent.py").read_text()
     schema = (ROOT / "db" / "init.sql").read_text()
     web = (ROOT / "scanner" / "scanner_tools" / "device_web.py").read_text()
@@ -339,7 +339,11 @@ def test_device_request_collections_are_encrypted_pinned_and_agent_bounded():
     assert route_is_declared("POST", "/devices/{device_id}/request-collections")
     assert "Encrypted storage is required for device request collections" in api
     assert 'summary = _json_object(payload.get("summary_json"))' in api
-    assert "WHERE device_request_collections.is_active=false" in api
+    shared = (ROOT / "api" / "devices" / "shared_collections.py").read_text()
+    assert "INSERT INTO request_collections" in shared
+    assert "This target already has an active request collection with that name" in shared
+    assert "expected_digest" in shared
+    assert "save_device_collection" in api
     update_handler = route_source(
         "PATCH", "/devices/{device_id}/request-collections/{collection_id}"
     )

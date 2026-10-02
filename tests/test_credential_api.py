@@ -24,6 +24,11 @@ class ApiCredentialConn(MemoryCredentialConn):
         self.legacy_web = None
         self.legacy_device = None
 
+    async def fetchval(self, query, *args):
+        if "app_schema_migrations" in query:
+            return None  # This fixture exercises the pre-conversion compatibility writer.
+        raise AssertionError(query)
+
     def transaction(self):
         @asynccontextmanager
         async def transaction_context():

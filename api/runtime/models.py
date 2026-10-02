@@ -14,7 +14,7 @@ WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
 
 
 def target_kinds_share_asset(left: str, right: str) -> bool:
-    """These kinds share one targets row. Callers must still compare the exact target UUID."""
+    """Web/API/network share execution semantics; device credentials remain protocol-specific."""
     return left == right or (left in WEB_ASSET_KINDS and right in WEB_ASSET_KINDS)
 
 

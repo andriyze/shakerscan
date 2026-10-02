@@ -305,6 +305,13 @@
       "caseId": "XUI-022",
       "stateAssertion": "Cross-product mission events and deep links render.",
       "smokePath": "/timeline"
+    },
+    {
+      "route": "/targets/[id]/asset",
+      "source": "src/app/targets/[id]/asset/page.tsx",
+      "owner": "target-inventory",
+      "caseId": "ASSET-001",
+      "stateAssertion": "One canonical asset shows its origins, shared credential and collection IDs, combined history, and a network-view link without starting traffic on navigation."
     }
   ],
   "workActions": [

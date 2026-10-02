@@ -6,7 +6,7 @@ import type {
   RequestCollectionSelectionUpsert as GeneratedRequestCollectionSelectionUpsert,
 } from './publicApi.generated'
 
-export type RequestCollectionTargetKind = 'web' | 'api' | 'device'
+export type RequestCollectionTargetKind = 'web' | 'api' | 'network' | 'device'
 export type RequestCollectionReplayPolicy = 'discovery_only' | 'safe_reads' | 'confirmed_active'
 export type RequestCollectionImportFormat = NonNullable<GeneratedRequestCollectionCreate['format']>
 
