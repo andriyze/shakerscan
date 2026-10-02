@@ -14,6 +14,10 @@ from runtime.credentials import SSH_CREDENTIAL_KINDS, parse_credential_secret
 from runtime.models import PreparedExecution
 from secret_store import decrypt_secret
 from .network_inputs import CapabilityInputError, _addresses, _require_network_policy
+try:
+    from targets.hunt_authority import read_hunt_authority, pin_authorized_first_contact
+except ModuleNotFoundError:
+    from ..targets.hunt_authority import read_hunt_authority, pin_authorized_first_contact
 
 
 class SshConnectAdapter:
@@ -97,34 +101,45 @@ class SshExecutionAdapter:
             if cancelled():
                 raise asyncio.CancelledError()
             fingerprint = values.get('host_key_fingerprint')
-            provenance = 'operator' if fingerprint else None
+            provenance = 'planner_hint' if fingerprint else None
             async with self.pool.acquire() as conn:
                 await self.revalidate(conn,run=self.run,target=self.target,
                     target_url=self.target_url,policy=self.policy,capability_name=self.capability_name)
-                if not fingerprint:
-                    row = await conn.fetchrow('''SELECT metadata_json FROM device_services
-                        WHERE target_id=$1 AND transport='tcp' AND port=$2 AND state='open'
-                        ORDER BY last_seen_at DESC LIMIT 1''', self.run['device_target_id'] or self.run['target_id'],values['port'])
-                    if row:
-                        import json
-                        metadata = row['metadata_json'] or {}
-                        if isinstance(metadata,str):
-                            metadata = json.loads(metadata)
-                        ssh = metadata.get('ssh') or {}
-                        fingerprint = ssh.get('pinned_host_key_fingerprint') or (ssh.get('host_key') or {}).get('fingerprint_sha256')
-                        if fingerprint:
-                            provenance = 'retained_service_evidence'
-            if not fingerprint:
+                authority = await read_hunt_authority(conn, self.run.get('device_target_id') or self.run['target_id'])
+                trusted_key = next((key for key in authority['ssh_host_keys'] if key['port'] == values['port']), None)
+                trusted = trusted_key['fingerprint'] if trusted_key else None
+                if trusted:
+                    if fingerprint and fingerprint != trusted:
+                        raise CapabilityInputError('Planner SSH fingerprint differs from the operator’s saved host key')
+                    fingerprint = trusted
+                    provenance = 'operator_authorized_first_contact' if trusted_key.get('source') == 'authorized_first_contact' else 'operator_saved'
+            if not trusted:
                 probe = await ssh_call()
-                fingerprint = (probe.get('host_key') or {}).get('fingerprint_sha256')
-                provenance = 'observed_before_login'
+                observed = (probe.get('host_key') or {}).get('fingerprint_sha256')
+                observations.append({'kind':'ssh_host_key_observation','address':values['address'],
+                    'port':values['port'],'host_key':probe.get('host_key'),
+                    'authentication_attempted':False,'commands_executed':False})
+                if not authority['ssh_trust_first_contact']:
+                    raise CapabilityInputError(f'SSH host key {observed or "unavailable"} is not trusted. Save its verified fingerprint or authorize first-contact trust in target Hunt permissions.')
+                if fingerprint and fingerprint != observed:
+                    raise CapabilityInputError('Observed SSH host key differs from the requested fingerprint')
+                fingerprint = observed
+                provenance = 'operator_authorized_first_contact'
                 if not fingerprint:
                     raise CapabilityInputError('SSH host key could not be established')
+                async with self.pool.acquire() as conn:
+                    await pin_authorized_first_contact(conn, self.run.get('device_target_id') or self.run['target_id'],
+                                                       values['port'], fingerprint)
             if cancelled():
                 raise asyncio.CancelledError()
             async with self.pool.acquire() as conn:
                 await self.revalidate(conn,run=self.run,target=self.target,
                     target_url=self.target_url,policy=self.policy,capability_name=self.capability_name)
+                current_authority = await read_hunt_authority(conn, self.run.get('device_target_id') or self.run['target_id'])
+                current_key = next((key['fingerprint'] for key in current_authority['ssh_host_keys']
+                                    if key['port'] == values['port']), None)
+                if current_key != fingerprint and (current_key or not current_authority['ssh_trust_first_contact']):
+                    raise CapabilityInputError('SSH trust changed before authentication')
                 resolved = await PostgresCredentialProfileStore().load_for_worker(conn,
                     profile_id=values['profile_id'],target_kind=self.target.target_kind,
                     target_id=self.target.target_id,capability=self.capability_name)

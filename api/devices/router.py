@@ -211,6 +211,8 @@ class DeviceTargetCreate(BaseModel):
     def reserved_skill(cls, value):
         if value and 'target_skill' in value:
             raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
+        if value and 'hunt_authority' in value:
+            raise ValueError('edit Hunt permissions through /targets/{id}/hunt-authority with a revision check')
         return value
 
 
@@ -234,6 +236,8 @@ class DeviceTargetUpdate(BaseModel):
     def reserved_skill(cls, value):
         if value and 'target_skill' in value:
             raise ValueError('edit target instructions through /targets/{id}/skill with a revision check')
+        if value and 'hunt_authority' in value:
+            raise ValueError('edit Hunt permissions through /targets/{id}/hunt-authority with a revision check')
         return value
 
 

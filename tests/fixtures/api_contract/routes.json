@@ -2937,6 +2937,20 @@
     "name": "get_asset_history"
   },
   {
+    "path": "/targets/{target_id}/hunt-authority",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_hunt_authority"
+  },
+  {
+    "path": "/targets/{target_id}/hunt-authority",
+    "methods": [
+      "PUT"
+    ],
+    "name": "put_hunt_authority"
+  },
+  {
     "path": "/targets/{target_id}/invariants",
     "methods": [
       "GET"

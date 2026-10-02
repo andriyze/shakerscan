@@ -84,7 +84,7 @@ const json = (method: string, body: unknown): RequestInit => ({ method, headers:
 
 export interface TargetAssetGroup { root_domain: string; targets: TargetAsset[] }
 
-export function getTargetAssets(params: {search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean; include_services?: boolean; group_by?: 'domain'} = {}, signal?: AbortSignal): Promise<{targets: TargetAsset[]; groups?: TargetAssetGroup[]; total_groups?: number; total: number; offset: number; limit: number}> {
+export function getTargetAssets(params: {search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean; include_services?: boolean; group_by?: 'domain'; asset_type?: 'web' | 'network'} = {}, signal?: AbortSignal): Promise<{targets: TargetAsset[]; groups?: TargetAssetGroup[]; total_groups?: number; total: number; offset: number; limit: number}> {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) if (value !== undefined) search.set(key, String(value))
   return request(`/targets/inventory?${search}`, { signal })

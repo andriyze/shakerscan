@@ -17,6 +17,15 @@ TARGET = uuid.uuid4()
 FINGERPRINT = 'SHA256:' + base64.b64encode(b'x'*32).decode().rstrip('=')
 
 
+@pytest.fixture(autouse=True)
+def operator_authorized_first_contact(monkeypatch):
+    from api.capabilities import ssh as adapter_module
+    async def read(*args): return {'ssh_host_keys':[], 'ssh_trust_first_contact':True}
+    async def pin(*args): pass
+    monkeypatch.setattr(adapter_module,'read_hunt_authority',read)
+    monkeypatch.setattr(adapter_module,'pin_authorized_first_contact',pin)
+
+
 def prepare(port=None, saved_port=None, kind='network', capabilities=('ssh.connect',)):
     args = {} if port is None else {'port':port}
     ref = {'profile_id':PROFILE,'profile_version':1,'principal_slot':'ssh',
@@ -133,9 +142,10 @@ def test_worker_uses_encrypted_identity_and_real_shared_paramiko_driver(monkeypa
     assert calls and all(item == ('192.0.2.10',port) for item in calls)
     assert [e[0] for e in events] == ['authority','authority','load','decrypt']
     assert events[2][1] == {'profile_id':PROFILE,'target_kind':target_kind,'target_id':str(TARGET),'capability':'ssh.connect'}
-    assert result.observations[0]['authentication_succeeded'] is True
-    assert result.observations[0]['connection_closed'] is True
-    assert result.observations[0]['commands_executed'] is False
+    assert result.observations[-1]['authentication_succeeded'] is True
+    assert result.observations[-1]['connection_closed'] is True
+    assert result.observations[-1]['commands_executed'] is False
+    assert result.observations[-1]['host_key_provenance'] == 'operator_authorized_first_contact'
     assert 'hidden' not in str(result) and 'passphrase' not in str(result)
 
 

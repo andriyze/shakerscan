@@ -9,6 +9,34 @@ from tests.test_target_asset_migration_postgres import database
 from tests.test_target_asset_inputs_postgres import prepare, encryption
 
 
+def test_web_and_network_filters_apply_before_complete_group_pagination(monkeypatch):
+    encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            ids={}
+            for host in ['example.test','api.example.test','tv.example.test','192.0.2.8','2001:db8::8','router.local']:
+                from targets.asset_migration import host_url
+                ids[host]=await conn.fetchval("INSERT INTO targets(url,discovery_source) VALUES($1,'host') RETURNING id",host_url(host))
+            await conn.execute("INSERT INTO targets(url) VALUES('http://192.0.2.8:8080')")
+            await ensure_device_profile(conn,ids['tv.example.test'],DeviceProfileCreate(device_class='media'))
+            web=await list_assets(conn,asset_type='web',group_by='domain')
+            network=await list_assets(conn,asset_type='network',group_by='domain')
+            assert {row['locator'] for row in web['targets']} == {'example.test','api.example.test','tv.example.test','192.0.2.8'}
+            assert {row['locator'] for row in network['targets']} == {'tv.example.test','192.0.2.8','2001:db8::8','router.local'}
+            pages=[await list_assets(conn,asset_type='web',group_by='domain',limit=1,offset=i) for i in range(web['total_groups'])]
+            assert sum(len(page['targets']) for page in pages)==web['total']
+            assert any(len(page['targets'])==3 for page in pages)
+            assert (await list_assets(conn,asset_type='network',search='tv.example'))['total']==1
+            await conn.execute('UPDATE targets SET is_active=false WHERE id=$1',ids['192.0.2.8'])
+            assert (await list_assets(conn,asset_type='network'))['total']==3
+            assert (await list_assets(conn,asset_type='network',include_inactive=True))['total']==4
+    asyncio.run(run())
+
+
 def test_inventory_groups_origins_and_profile_addition_reuses_the_asset(monkeypatch):
     encryption(monkeypatch)
     async def run():

@@ -4074,7 +4074,8 @@ async def _hunt_bound_collection(
     )
     if ref.get('binding_id'):
         binding = await conn.fetchrow("""SELECT allowed_origins,environment_id FROM request_collection_bindings
-            WHERE id=$1 AND collection_id=$2 AND target_id=$3 AND is_active=true""",
+            WHERE id=$1 AND collection_id=$2 AND target_id=$3 AND is_active=true
+              AND target_collection_visible(collection_id,target_id)""",
             _uuid_or_400(str(ref['binding_id']), 'collection binding id'),actual_collection_uuid,
             run['device_target_id'] or run['target_id'])
         if not binding:

@@ -27,8 +27,11 @@ async def asset_collection_binding(
     )
     if not consumer or not consumer['is_active']:
         raise HTTPException(422, 'Execution target is unavailable')
-    if not same_asset and not authorize_cross_asset:
-        raise HTTPException(422, 'Request collection and execution binding must belong to the same current asset')
+    if not same_asset:
+        from .hunt_authority import read_hunt_authority
+        authority = await read_hunt_authority(conn, target_id)
+        if str(collection['id']) not in authority['collection_ids']:
+            raise HTTPException(403, 'Sharing this collection requires a saved operator grant in target Hunt permissions')
     try:
         origins = canonical_collection_origins(list(allowed_origins))
     except RequestCollectionContractError as exc:

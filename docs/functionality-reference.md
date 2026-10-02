@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 450 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 375 | `api/**/*.py` |
+| Public REST operations | 452 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 376 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -2113,6 +2113,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
 | `GET` | `/targets/{target_id}/history` | `get_asset_history` |
+| `GET` | `/targets/{target_id}/hunt-authority` | `get_hunt_authority` |
+| `PUT` | `/targets/{target_id}/hunt-authority` | `put_hunt_authority` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |

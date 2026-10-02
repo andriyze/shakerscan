@@ -34,6 +34,7 @@ class TargetSkillDocument(BaseModel):
     version: str
     body_sha256: str
     updated_at: str
+    written_by: str | None = None
 
 
 class TargetSkillResponse(BaseModel):
@@ -102,6 +103,7 @@ def _public(row: Any) -> dict[str, Any]:
             'title': saved['title'], 'methodology': saved['methodology'],
             'version': str(revision), 'body_sha256': saved['body_sha256'],
             'updated_at': saved['updated_at'],
+            'written_by': saved.get('written_by'),
         }
     return {'target_id': str(row['id']), 'revision': revision, 'skill': skill,
             'max_characters': MAX_TARGET_SKILL_CHARACTERS}
@@ -112,7 +114,8 @@ async def read_target_skill(conn: Any, target_id: Any) -> dict[str, Any]:
 
 
 async def write_target_skill(conn: Any, target_id: Any, operation: str,
-                             *, expected_revision: int, request: TargetSkillWrite | None = None):
+                             *, expected_revision: int, request: TargetSkillWrite | None = None,
+                             source: str = 'operator:target-skill-api'):
     async with conn.transaction():
         row = await _target(conn, target_id, lock=True)
         current = _public(row)
@@ -125,7 +128,11 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
         if operation not in {'create', 'update', 'delete'}:
             raise HTTPException(422, 'Unsupported target skill operation')
         saved = {'revision': current['revision'] + 1,
-                 'updated_at': datetime.now(timezone.utc).isoformat()}
+                 'updated_at': datetime.now(timezone.utc).isoformat(), 'written_by': source}
+        history = object_history(row)
+        if current['skill'] is not None:
+            history.append(current['skill'])
+        saved['history'] = history[-20:]
         if operation != 'delete':
             if request is None:
                 raise HTTPException(422, 'Target instructions are required')
@@ -141,6 +148,8 @@ async def attach_target_skill_snapshot(conn: Any, target_id: Any, context: dict,
                                       methodology_context: Any) -> dict:
     """Compose the library methodologies and saved target instructions at admission."""
     context['skills'] = dict(methodology_context)
+    from .hunt_authority import read_hunt_authority
+    context['hunt_authority'] = await read_hunt_authority(conn, target_id)
     saved = await read_target_skill(conn, target_id)
     context['target_skill'] = {
         **saved, 'loaded_at_start': True, 'authority_granted': False,
@@ -148,6 +157,12 @@ async def attach_target_skill_snapshot(conn: Any, target_id: Any, context: dict,
         'instruction_precedence': 'Current operator objective, then target instructions; server scope, policy, approval and budgets always apply.',
     }
     return context
+
+
+def object_history(row):
+    saved = _saved(row)
+    history = saved.get('history')
+    return list(history) if isinstance(history, list) else []
 
 
 @router.get('/targets/{target_id}/skill', response_model=TargetSkillResponse)

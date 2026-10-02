@@ -312,8 +312,8 @@ priorities, exclusions and target knowledge, using opaque credential/collection 
 of secrets. A Hunt automatically snapshots this bounded document at startup and exposes it as
 `target_skill`; later edits or deletion affect future Hunts only. Use `targets.skill.read` and
 explicitly requested `targets.skill.create|update|delete` through the shared capability runtime,
-with revision checks. These are target metadata actions, independent of active testing; they grant
-no network authority and cannot address another target UUID. The current operator objective takes
+with revision checks and saved target Hunt delegation. Planner confirmation flags grant nothing;
+metadata delegation grants no network authority or edits to another UUID. The operator objective takes
 precedence over saved preferences; server scope, policy, approval and budgets remain authoritative.
 
 Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes

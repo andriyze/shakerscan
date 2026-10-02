@@ -3,7 +3,7 @@
 MAX_TARGET_SKILL_CHARACTERS = 12_000
 
 def asset_capability_specs(spec, schema, kinds):
-    confirmed = {'type':'boolean','enum':[True],'description':'The operator explicitly requested this control-plane change; this does not authorize target traffic.'}
+    confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Saved target Hunt permissions govern changes.'}
     identifier = {'type':'string','format':'uuid'}
     revision = {'type':'integer','minimum':0}
     skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
@@ -37,6 +37,6 @@ def asset_capability_specs(spec, schema, kinds):
         'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
         'operator_intent' if name.startswith('targets.') else 'active_testing',
         {'tool_wall_seconds':5},{'control_plane':True,'user_confirmation':True},
-        schema({**properties,'operator_confirmed':confirmed},required=(*required,'operator_confirmed')),
+        schema({**properties,'operator_confirmed':confirmed},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

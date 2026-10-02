@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
+import { ArrowUpRight, Globe2, Network, Search, Layers3, Plus } from 'lucide-react'
 import { Button, Card, CardSkeleton, EmptyState, ErrorState, Field, Input, Modal, PageHeader, Select } from '@/components/ui'
 import { getTargetAssets, registerTargetAsset, enableTargetNetworkView, type TargetAsset, type TargetAssetGroup } from '@/lib/targetAssetApi'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
@@ -15,6 +16,10 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
   const parameters = useSearchParams()
   const domains = parameters.get('view') === 'domains'
   const [search, setSearch] = useState(parameters.get('search') || '')
+  const [assetType, setAssetType] = useState<'all'|'web'|'network'>(() => {
+    const view = parameters.get('type')
+    return view === 'web' || view === 'network' ? view : 'all'
+  })
   const [offset, setOffset] = useState(0)
   const [includeInactive, setIncludeInactive] = useState(false)
   const [assets, setAssets] = useState<TargetAsset[]>([])
@@ -35,7 +40,8 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
     const controller = new AbortController()
     setLoading(true)
     const timer = setTimeout(() => {
-      getTargetAssets({search,offset,limit:50,include_inactive:includeInactive,group_by:'domain'}, controller.signal)
+      getTargetAssets({search,offset,limit:50,include_inactive:includeInactive,group_by:'domain',
+        asset_type:assetType === 'all' ? undefined : assetType}, controller.signal)
         .then((result) => { if (!controller.signal.aborted) {
           setAssets(result.targets); setTotal(result.total)
           // Tolerate an older server's flat response during a rolling upgrade.
@@ -46,7 +52,7 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
         .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     }, 200)
     return () => { clearTimeout(timer); controller.abort() }
-  }, [domains, search, offset, includeInactive, refreshVersion])
+  }, [domains, search, offset, includeInactive, refreshVersion, assetType])
 
   async function add(event: FormEvent) {
     event.preventDefault(); setBusy('add'); setFormError(null)
@@ -71,11 +77,18 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
 
   if (domains) return <><div className="mb-4"><Link href="/targets" className="text-sm text-blue-300">← Asset inventory</Link><p className="mt-1 text-xs text-gray-500">Domain discovery and application-service configuration. These service records belong to the same assets.</p></div>{domainView}</>
   return <div>
-    <PageHeader title="Targets" description="Domains with their subdomains, plus IP and internal hosts. Each target shares services, credentials, findings, and instructions across Scan and Hunt." actions={<div className="flex flex-wrap gap-2"><Link href="/targets?view=domains"><Button variant="secondary">Domain discovery</Button></Link><Button onClick={() => { setAdding(true); setFormError(null) }}>Add target</Button></div>} />
-    <Card className="mb-5 flex flex-wrap items-center gap-4">
-      <Input aria-label="Search target assets" placeholder="Search assets or application origins" value={search} onChange={(event) => {setSearch(event.target.value);setOffset(0)}} className="max-w-md" />
-      <label className="flex items-center gap-2 text-sm text-gray-400"><input type="checkbox" checked={includeInactive} onChange={(event) => {setIncludeInactive(event.target.checked);setOffset(0)}} /> Include retired targets</label>
-      <span className="ml-auto text-sm text-gray-400">{loading ? 'Loading…' : `${total} target${total === 1 ? '' : 's'} · ${totalGroups} domain / host group${totalGroups === 1 ? '' : 's'}`}</span>
+    <PageHeader title="Targets" description="Your domains, devices, and services — ready for Scan and Hunt." actions={<div className="flex flex-wrap gap-2"><Link href="/targets?view=domains"><Button variant="secondary">Domain discovery</Button></Link><Button onClick={() => { setAdding(true); setFormError(null) }}><Plus className="mr-2 h-4 w-4" />Add target</Button></div>} />
+    <Card className="mb-6 overflow-hidden border-gray-800/80 bg-gradient-to-br from-gray-900 to-gray-950">
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 sm:p-5">
+        <div role="group" aria-label="Target view" className="flex max-w-full flex-wrap gap-1 rounded-xl bg-gray-950/80 p-1">
+          {([{id:'all',label:'All targets',icon:Layers3},{id:'web',label:'Web',icon:Globe2},{id:'network',label:'IP / network',icon:Network}] as const).map(item => <button key={item.id} aria-pressed={assetType === item.id} onClick={() => {setAssetType(item.id);setOffset(0)}} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${assetType === item.id ? 'bg-blue-500/15 text-blue-200 ring-1 ring-inset ring-blue-400/25' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}><item.icon className="h-4 w-4" />{item.label}</button>)}
+        </div>
+        <span className="text-sm text-gray-400" aria-live="polite">{loading ? 'Updating…' : <><strong className="font-semibold text-gray-200">{total}</strong> target{total === 1 ? '' : 's'} <span className="mx-2 text-gray-700">/</span>{totalGroups} group{totalGroups === 1 ? '' : 's'}</>}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-4 border-t border-gray-800/70 px-4 py-3 sm:px-5">
+        <div className="relative min-w-0 flex-1 sm:min-w-64"><Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-500" /><Input aria-label="Search target assets" placeholder="Search targets or services…" value={search} onChange={(event) => {setSearch(event.target.value);setOffset(0)}} className="w-full pl-9" /></div>
+        <label className="flex items-center gap-2 text-xs text-gray-400"><input className="accent-blue-500" type="checkbox" checked={includeInactive} onChange={(event) => {setIncludeInactive(event.target.checked);setOffset(0)}} /> Include retired targets</label>
+      </div>
     </Card>
     {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
     {loading && assets.length === 0 ? <CardSkeleton count={3} /> : assets.length === 0 ? <EmptyState message="No targets" hint="Add a domain, hostname, IP address, or application URL." /> : <TargetHierarchy groups={groups} searching={Boolean(search.trim())} expanded={expandedDomains} onToggle={domain => setExpandedDomains(current => {
@@ -87,11 +100,9 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
       setExpandedDomains(current => new Set(current).add(domain))
       setRefreshVersion(value => value + 1)
     }} renderAsset={(asset) => <tr key={asset.id} data-testid="target-asset-row">
-        <td className="px-4 py-4"><Link href={`/targets/${asset.id}/asset`} className="font-medium text-white hover:text-blue-300">{asset.name || asset.locator}</Link><div className="mt-1 break-all font-mono text-xs text-gray-500">{asset.locator}</div><div className="mt-1 text-xs text-gray-500">{asset.environment}{asset.is_active ? '' : ' · retired'}{asset.connected_device ? ` · ${asset.device_class || 'connected device'}` : ''}</div></td>
-        <td className="px-4 py-4 text-gray-300">{asset.origin_count ?? 0}</td>
-        <td className="px-4 py-4 text-gray-300">{asset.service_count ?? 0}</td>
-        <td className="px-4 py-4 text-gray-300">{asset.active_findings_count ?? 0}</td>
-        <td className="px-4 py-4"><div className="flex flex-wrap items-center gap-3"><Link href={`/targets/${asset.id}/asset`} className="text-blue-300">Open asset</Link><TargetSkillEditor compact targetId={asset.id} targetName={asset.name || asset.locator} hasSkill={asset.has_target_skill} /><DeleteRecordsButton selection={{ kind: 'target', target_id: asset.id }} archived={!asset.is_active} subject={asset.url || asset.locator} onDeleted={() => setRefreshVersion((value) => value + 1)} onArchived={() => setRefreshVersion((value) => value + 1)} />{featureEnabled('devices') && asset.is_active && <Button size="sm" variant="secondary" loading={busy === asset.id} onClick={() => void network(asset)}>Start network scan</Button>}</div></td>
+        <td className="w-[35%] px-4 py-4"><div className="flex items-start gap-3"><div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${asset.connected_device || asset.locator.includes(':') || /^\d+\./.test(asset.locator) ? 'bg-cyan-500/10 text-cyan-300' : 'bg-blue-500/10 text-blue-300'}`}>{asset.connected_device ? <Network className="h-4 w-4" /> : <Globe2 className="h-4 w-4" />}</div><div className="min-w-0"><Link href={`/targets/${asset.id}/asset`} className="break-all font-medium text-gray-100 hover:text-blue-300">{asset.name || asset.locator}</Link>{asset.name && asset.name !== asset.locator && <div className="mt-0.5 break-all font-mono text-xs text-gray-500">{asset.locator}</div>}<div className="mt-1.5 flex flex-wrap gap-1.5 text-[11px] text-gray-400"><span className="rounded-md bg-gray-800/70 px-1.5 py-0.5">{asset.environment}</span>{!asset.is_active && <span className="text-amber-300">Retired</span>}{asset.connected_device && <span className="px-1.5 py-0.5">{asset.device_class || 'Network'}</span>}</div></div></div></td>
+        <td className="px-3 py-4"><div className="flex flex-wrap gap-x-4 gap-y-2 text-xs"><span className="text-gray-500"><strong className="mr-1 font-medium text-gray-300">{asset.origin_count ?? 0}</strong>apps</span><span className="text-gray-500"><strong className="mr-1 font-medium text-gray-300">{asset.service_count ?? 0}</strong>ports</span><span className={(asset.active_findings_count ?? 0) > 0 ? 'text-amber-300/80' : 'text-gray-500'}><strong className="mr-1 font-medium">{asset.active_findings_count ?? 0}</strong>findings</span></div></td>
+        <td className="px-4 py-4"><div className="flex flex-wrap items-center justify-end gap-2"><Link href={`/targets/${asset.id}/asset`} className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-blue-300 hover:bg-blue-400/10">Open asset<ArrowUpRight className="h-3.5 w-3.5" /></Link><TargetSkillEditor compact targetId={asset.id} targetName={asset.name || asset.locator} hasSkill={asset.has_target_skill} />{featureEnabled('devices') && asset.is_active && <Button aria-label="Start network scan" size="sm" variant="secondary" loading={busy === asset.id} onClick={() => void network(asset)}>Network scan</Button>}<DeleteRecordsButton selection={{ kind: 'target', target_id: asset.id }} archived={!asset.is_active} subject={asset.url || asset.locator} onDeleted={() => setRefreshVersion((value) => value + 1)} onArchived={() => setRefreshVersion((value) => value + 1)} /></div></td>
       </tr>} />}
     <div className="mt-4 flex items-center justify-between"><Button variant="secondary" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0,offset-50))}>Previous</Button><span className="text-xs text-gray-500">{totalGroups ? `Groups ${offset+1}–${Math.min(totalGroups,offset+50)} of ${totalGroups}` : '0 groups'}</span><Button variant="secondary" disabled={offset+50 >= totalGroups || loading} onClick={() => setOffset(offset+50)}>Next</Button></div>
     <Modal open={adding} title="Add target asset" onClose={() => {if (busy !== 'add') setAdding(false)}}><form onSubmit={(event) => void add(event)} className="space-y-4">

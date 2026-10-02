@@ -23,6 +23,22 @@ operator remedy. Target pages refresh readiness automatically and keep diagnosti
 
 ## Product boundary
 
+Target detail includes **Hunt permissions**. Delegate metadata work once to allow Hunt to create
+targets, rename this asset, and manage its instructions without network-testing permission or
+repeated prompts. Planner confirmation flags cannot create this authority. Instruction edits retain
+their author and the previous 20 revisions; each running Hunt keeps its admission snapshot.
+
+Select exact credential profile IDs for one-time sharing and exact collection IDs for revocable
+sharing. Same-asset service reuse remains automatic. Revoking collection sharing blocks visibility
+and subsequent Scan/Hunt replay, including queued work. Existing cross-asset bindings without a
+recorded sharing grant need operator approval; they are not silently grandfathered as authorized.
+
+For SSH, save verified SHA256 fingerprints by port, or explicitly allow first-contact trust. With
+first-contact trust, the first key is pinned atomically and a changed key blocks login. An observed
+or planner-supplied key alone cannot authorize sending credentials. Hunt reports an untrusted key
+without authenticating so the operator can verify it. Passwords remain encrypted on the wire, but
+an impersonating server present on first contact could receive them when first-contact trust is used.
+
 - Devices live in canonical `targets` with `target_device_profiles`; `device_targets` is a compatibility
   view retaining existing UUIDs. Their interfaces and observed services live in
   `device_interfaces` and `device_services`. The `device_targets.id` UUID is the durable identity;

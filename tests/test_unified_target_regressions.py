@@ -149,8 +149,12 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                 assert CAPABILITY_REGISTRY.require(name).target_kinds == frozenset({'web','api','network','device'})
                 if name == 'targets.skill.read':
                     continue
-                with pytest.raises(HTTPException,match='Explicit operator'):
+                expected = 'metadata changes' if name.startswith('targets.') else 'no active'
+                with pytest.raises(HTTPException,match=expected):
                     await asset_actions.execute_asset_action(pool,run,name,{})
+            from targets.hunt_authority import authority_row, save_authority, record_collection_share
+            await save_authority(conn,await authority_row(conn,home),
+                {'revision':1,'metadata_changes':True},recorded_by='operator:fixture')
             created = await asset_actions.execute_asset_action(pool,run,'targets.create',
                 {'locator':'tv.test','name':'TV','port_hints':[8008,8008,8060],'operator_confirmed':True})
             tv = uuid.UUID(created['id'])
@@ -159,6 +163,8 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
             with pytest.raises(HTTPException,match='outside the Hunt'):
                 await asset_actions.execute_asset_action(pool,run,'targets.update',{'target_id':str(tv),'name':'Wrong','operator_confirmed':True})
             run.update(target_id=tv,device_target_id=None,target_kind='network')
+            await save_authority(conn,await authority_row(conn,tv),
+                {'revision':1,'metadata_changes':True},recorded_by='operator:fixture')
             from capabilities.inline import ControlPlaneExecutionAdapter
             from hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
             from runtime.models import TargetBinding
@@ -185,6 +191,8 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                 encrypted_secret=asset_actions.credential_api.encrypt_secret(material),
                 encrypted_metadata=asset_actions.credential_api.encrypt_secret('{}'),expires_at=None,
                 allowed_capabilities=['http.request'],now=datetime.now(timezone.utc))
+            await save_authority(conn,await authority_row(conn,tv),
+                {'revision':2,'metadata_changes':True,'credential_profile_ids':[str(profile.profile_id)]},recorded_by='operator:fixture')
             grant = await asset_actions.execute_asset_action(pool,run,'credentials.grant',
                 {'profile_id':profile.profile_id,'operator_confirmed':True})
             assert grant['secret_values_visible'] is False and 'fixture-secret' not in json.dumps(grant,default=str)
@@ -194,6 +202,7 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                 'item':[{'name':'status','request':{'method':'GET','url':'http://source.test/status'}}]})
             collection = await save_device_collection(conn,home,summary=summary,
                 encrypted_payload=asset_actions.credential_api.encrypt_secret(json.dumps(payload)))
+            await record_collection_share(conn,tv,collection['id'],recorded_by='operator:fixture')
             with pytest.raises(HTTPException):
                 await asset_actions.execute_asset_action(pool,run,'collections.bind',{'collection_id':str(collection['id']),
                     'allowed_origins':['https://foreign.test'],'operator_confirmed':True})

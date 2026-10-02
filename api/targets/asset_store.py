@@ -21,6 +21,15 @@ ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,t.asse
     p.last_score AS network_score,p.last_grade AS network_grade"""
 ROOT_FROM = "targets t LEFT JOIN target_device_profiles p ON p.target_id=t.id"
 ROOT_WHERE = "t.asset_owner_id IS NULL AND COALESCE(t.discovery_source,'manual') <> 'model-intake'"
+HOST_NETWORK = """(target_asset_locator(t.url) LIKE '%:%'
+    OR target_asset_locator(t.url) ~ '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$'
+    OR target_asset_locator(t.url) NOT LIKE '%.%'
+    OR target_asset_locator(t.url) ~ '\\.(local|internal|localhost)$')"""
+NETWORK_VIEW = f"""({HOST_NETWORK} OR p.target_id IS NOT NULL
+    OR EXISTS(SELECT 1 FROM device_services service WHERE service.target_id=t.id AND service.state='open'))"""
+WEB_VIEW = f"""(NOT {HOST_NETWORK} OR t.url ~ '^https?://'
+    OR EXISTS(SELECT 1 FROM targets member WHERE member.asset_owner_id=t.id AND member.is_active
+              AND member.url ~ '^https?://'))"""
 
 
 def public_asset(row: Any) -> dict[str, Any]:
@@ -52,7 +61,8 @@ async def resolve_asset_id(conn: Any, target_id: Any) -> uuid.UUID:
 
 async def list_assets(conn: Any, *, search: str = '', connected_only: bool = False,
                       include_inactive: bool = False, include_services: bool = False,
-                      limit: int = 100, offset: int = 0, group_by: str | None = None) -> dict[str, Any]:
+                      limit: int = 100, offset: int = 0, group_by: str | None = None,
+                      asset_type: str | None = None) -> dict[str, Any]:
     base = "COALESCE(t.discovery_source,'manual') <> 'model-intake'" if include_services else ROOT_WHERE
     where = base + """
         AND ($1::boolean OR t.is_active)
@@ -62,6 +72,10 @@ async def list_assets(conn: Any, *, search: str = '', connected_only: bool = Fal
                         AND (member.name ILIKE '%' || $3 || '%' OR member.url ILIKE '%' || $3 || '%')))
     """
     parameters = [include_inactive, connected_only, search]
+    if asset_type not in {None, 'web', 'network'}:
+        raise HTTPException(400, 'Unknown target view')
+    if asset_type:
+        where += ' AND ' + (WEB_VIEW if asset_type == 'web' else NETWORK_VIEW)
     if group_by == 'domain':
         if include_services:
             raise HTTPException(400, 'Domain hierarchy groups assets; service records remain within their asset')
