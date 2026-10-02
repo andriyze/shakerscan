@@ -730,35 +730,20 @@ class PostgresCredentialProfileStore:
             raise CredentialStoreError("capability is invalid")
         # The consuming target must hold an active grant: its own home binding, or a share
         # an operator made and has not revoked.
-        if await _asset_grants_available(conn):
-            row = await conn.fetchrow(
-                f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
-                          b.allowed_capabilities, $3::text AS granted_target_id
-                   FROM credential_profiles p
-                   JOIN credential_profile_versions v
-                     ON v.profile_id=p.id AND v.version=p.current_version
-                   JOIN LATERAL target_credential_grant(p.id,$3::uuid) b
-                     ON b.is_active=true AND b.revoked_at IS NULL
-                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
-                     AND p.is_active=true
-                     AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
-                _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
-            )
-        else:
-            row = await conn.fetchrow(
-                f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
-                          b.allowed_capabilities, b.binding_id AS granted_target_id
-                   FROM credential_profiles p
-                   JOIN credential_profile_versions v
-                     ON v.profile_id=p.id AND v.version=p.current_version
-                   JOIN credential_profile_bindings b
-                     ON b.profile_id=p.id AND b.binding_kind='target'
-                    AND b.binding_id=$3 AND b.is_active=true AND b.revoked_at IS NULL
-                   WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
-                     AND p.is_active=true
-                     AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
-                _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
-            )
+        row = await conn.fetchrow(
+            f"""SELECT p.*, v.encrypted_secret, v.encrypted_metadata,
+                      b.allowed_capabilities, b.binding_id AS granted_target_id
+               FROM credential_profiles p
+               JOIN credential_profile_versions v
+                 ON v.profile_id=p.id AND v.version=p.current_version
+               JOIN credential_profile_bindings b
+                 ON b.profile_id=p.id AND b.binding_kind='target'
+                AND b.binding_id=$3::text AND b.is_active=true AND b.revoked_at IS NULL
+               WHERE p.id=$1 AND {_KIND_COMPATIBLE_SQL.format(kind="$2")}
+                 AND p.is_active=true
+                 AND (p.expires_at IS NULL OR p.expires_at > NOW())""",
+            _profile_id(profile_id), _target_kind(target_kind), str(_target_id(target_id)),
+        )
         if not row:
             raise CredentialStoreError("credential profile is unavailable for target")
         item = _row(row)
