@@ -1063,29 +1063,22 @@ async def _migrate_evidence_scan_identity(conn) -> None:
     )
 
 
-async def _run_unified_schema_migrations_once(db_pool) -> None:
-    """Apply the frozen baseline and asset conversion in one serialized transaction."""
-    from targets.asset_migration import run_unified_startup
-    await run_unified_startup(db_pool, _run_schema_migrations_26_baseline)
+async def _run_unified_schema_migrations_once(pool) -> None:
+    await _run_schema_migrations_once(pool)
 
 
-async def run_schema_migrations(db_pool):
-    """Upgrade atomically while preserving fail-fast base-schema and deadlock behavior."""
-    async with db_pool.acquire() as conn:
+async def run_schema_migrations(pool) -> None:
+    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock."""
+    async with pool.acquire() as conn:
         await assert_base_schema(conn)
     for attempt in range(3):
         try:
-            await _run_unified_schema_migrations_once(db_pool)
+            await _run_unified_schema_migrations_once(pool)
             return
         except Exception as exc:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
                 raise
             await asyncio.sleep(0.2 * (attempt + 1))
-
-
-async def _run_schema_migrations_26_baseline(pool) -> None:
-    """Frozen pre-unification schema migration executed inside the caller transaction."""
-    await _run_schema_migrations_once(pool)
 
 
 class MissingBaseSchemaError(RuntimeError):
@@ -5026,6 +5019,14 @@ async def _run_schema_migrations_once(pool) -> None:
             # a failed collision repair cannot leave a half-migrated database.
             async with conn.transaction():
                 await _ensure_target_canonical_key_invariant(conn)
+
+            # Convert the inventory atomically after the baseline schema is current.
+            # Legacy device/input tables remain synchronized rollback mirrors for 2.6.x.
+            async with conn.transaction():
+                from targets.asset_migration import migrate_target_assets
+                from targets.asset_inputs_migration import migrate_asset_inputs
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
