@@ -3,7 +3,7 @@
 ASSET_MIGRATION = "unified_target_assets_v1"
 
 ASSET_SCHEMA_SQL = r"""
-ALTER TABLE targets ADD COLUMN IF NOT EXISTS asset_owner_id UUID REFERENCES targets(id) ON DELETE CASCADE;
+ALTER TABLE targets ADD COLUMN IF NOT EXISTS asset_owner_id UUID REFERENCES targets(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_targets_asset_owner ON targets(asset_owner_id);
 ALTER TABLE targets ADD CONSTRAINT targets_asset_not_self CHECK (asset_owner_id IS NULL OR asset_owner_id <> id);
 
