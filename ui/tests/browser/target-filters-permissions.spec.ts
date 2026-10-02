@@ -38,6 +38,14 @@ test('TARGET-FILTERS-001 server filters select Web and IP/network without losing
   await expect(page.getByTestId('target-domain-group')).toHaveCount(2)
   expect(filters).toContain('web');expect(filters).toContain('network')
   expect(await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth)).toBe(false)
+  expect(await page.getByTestId('target-domain-group').evaluateAll(cards =>
+    cards.every(card => card.scrollWidth <= card.clientWidth))).toBe(true)
+  const scan=page.getByRole('button',{name:'Start network scan',exact:true}).last()
+  expect(await scan.evaluate(button => {
+    const row=button.closest('[data-testid="target-domain-group"]')!
+    const control=button.getBoundingClientRect(),bounds=row.getBoundingClientRect()
+    return control.left >= bounds.left && control.right <= bounds.right
+  })).toBe(true)
 })
 
 test('TARGET-PERMISSIONS-001 operator delegates metadata, named inputs and an SSH key through target API',async ({page}) => {

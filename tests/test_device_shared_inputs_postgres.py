@@ -71,7 +71,10 @@ def test_device_collection_crud_reuses_shared_document_id(monkeypatch):
             encrypted=secret_store.encrypt_secret(json.dumps(payload))
             row=await save_device_collection(conn,device,summary=summary,encrypted_payload=encrypted)
             assert await conn.fetchval('SELECT count(*) FROM request_collections')==1
-            assert not await conn.fetchval('SELECT target_collection_visible($1,$2)',row['id'],origin)
+            # Same-asset service reuse needs no cross-asset sharing grant.
+            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',row['id'],origin)
+            unrelated=await conn.fetchval("INSERT INTO targets(url) VALUES('https://unrelated.test') RETURNING id")
+            assert not await conn.fetchval('SELECT target_collection_visible($1,$2)',row['id'],unrelated)
             await conn.execute("""INSERT INTO request_collection_bindings(collection_id,target_kind,target_id,allowed_origins)
                 VALUES($1,'web',$2,'["https://collections.test:8443"]')""",row['id'],origin)
             assert await conn.fetchval('SELECT target_collection_visible($1,$2)',row['id'],origin)

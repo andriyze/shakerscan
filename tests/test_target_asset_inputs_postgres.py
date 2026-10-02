@@ -78,7 +78,10 @@ def test_device_input_migration_keeps_ids_and_one_ciphertext_source(monkeypatch)
             assert await conn.fetchval('SELECT count(*) FROM credential_profiles WHERE id=$1',credential) == 1
             assert await conn.fetchval('SELECT encrypted_payload FROM request_collections WHERE id=$1',collection) == ciphertext
             assert await conn.fetchval('SELECT count(*) FROM request_collection_requests WHERE collection_id=$1',collection) == 1
-            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,origin) is False
+            # The web service and device are views of one canonical asset.
+            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,origin) is True
+            unrelated = await conn.fetchval("INSERT INTO targets(url) VALUES('https://unrelated.example.test') RETURNING id")
+            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,unrelated) is False
             assert await conn.fetchval('SELECT port FROM device_credential_profiles WHERE id=$1 AND device_target_id=$2',credential,device) == 2222
             store = PostgresCredentialProfileStore()
             with pytest.raises(CredentialStoreError):
