@@ -3,7 +3,7 @@ PY ?= python3
 UV ?= uv
 UVX ?= uvx
 
-.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-hunt e2e-platform e2e-scan-parity e2e-wire e2e-api-overlay test \
+.PHONY: e2e e2e-model-intake e2e-model-intake-fixture e2e-ai-gate e2e-dast e2e-hunt e2e-hunt-ssh e2e-platform e2e-scan-parity e2e-wire e2e-api-overlay test \
 	release-gates dependency-lock dependency-audit installer-smoke installer-upgrade-smoke installed-stack-smoke upgrade-smoke fleet-acceptance
 
 ## Regenerate the cross-platform Python 3.12 runtime lock consumed by scanner/Dockerfile.
@@ -62,6 +62,10 @@ e2e-dast:
 
 e2e-hunt:
 	$(PY) tests/e2e/run_e2e.py --area hunt
+
+## Real stored-credential SSH through Hunt, on an owned disposable fixture.
+e2e-hunt-ssh:
+	$(PY) tests/e2e/run_hunt_ssh_acceptance.py
 
 e2e-platform:
 	$(PY) tests/e2e/run_e2e.py --area platform

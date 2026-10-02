@@ -98,6 +98,9 @@ jobs:
           python3 tests/e2e/run_e2e.py --area all \
             --scorecard artifacts/e2e-scorecard.json
 
+      - name: Verify stored SSH credentials through Hunt
+        run: python3 tests/e2e/run_hunt_ssh_acceptance.py | tee artifacts/hunt-ssh-acceptance.log
+
       - name: Require executed trust-anchor lifecycle passes
         run: |
           python3 scripts/summarize_e2e_debt.py artifacts/e2e-scorecard.json \

@@ -77,3 +77,24 @@ test('target instructions persist through the real editor and passive Hunt CRUD'
     await request.post(`${API}/targets/${id}/archive`, { data: {} })
   }
 })
+
+test('connected-device view reuses real Hunt ports and opens the same target workflow', async ({ page, request }) => {
+  const id = process.env.SHAKERSCAN_E2E_DEVICE_TARGET_ID || ''
+  test.skip(!REAL_STACK || !id, 'requires the owned local network acceptance fixture')
+  const response = await request.get(`${API}/targets/${id}/asset`)
+  expect(response.ok()).toBeTruthy()
+  const asset = await response.json()
+  expect(asset.target.connected_device).toBe(true)
+  await page.goto(`/devices/${id}`)
+  await expect(page.getByRole('heading', { name: 'Ports discovered across Scans and Hunts' })).toBeVisible()
+  for (const port of [22, 2222, 8081, 8443]) {
+    await expect(page.getByRole('cell', { name: new RegExp(`^${port}/tcp`) }).first()).toBeVisible()
+  }
+  await page.getByRole('button', { name: 'Start network scan', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: `Scan ${asset.target.name}` })
+  await expect(dialog.getByLabel('Known TCP ports (optional)')).toHaveValue('22, 2222, 8081, 8443')
+  await expect(dialog.getByRole('button', { name: 'Queue scan', exact: true })).toBeEnabled()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('link', { name: 'Start Hunt', exact: true }).first().click()
+  await expect(page.getByLabel('Target', { exact: true })).toHaveValue(id)
+})

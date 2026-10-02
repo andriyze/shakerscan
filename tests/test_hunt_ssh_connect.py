@@ -36,7 +36,13 @@ def test_preparation_uses_operator_then_saved_then_standard_port(port,saved,expe
     assert execution.redacted_execution['address'] == '192.0.2.10'
     assert not execution.commands
     assert execution.estimated_budget['tcp_ports_attempted'] == 1
-    assert execution.estimated_budget['device_fragility_points'] == (3 if kind == 'device' else 0)
+    assert execution.estimated_budget.get('device_fragility_points', 0) == (3 if kind == 'device' else 0)
+    # The worker must reconstruct the exact persisted hold; its normalization drops zeroes.
+    from api.runtime.budget_reservations import DurableBudgetReservation
+    charges = {**execution.estimated_budget, 'agent_actions': 1, 'active_actions': 1}
+    reservation = DurableBudgetReservation.request(owner_kind='hunt', owner_id='hunt-fixture',
+        capability_name='ssh.connect', amounts=charges)
+    assert dict(reservation.requested) == charges
 
 
 @pytest.mark.parametrize('port',[True,0,65536,'22'])

@@ -103,6 +103,10 @@ jobs:
           print(f"declared-debt rows: {len(debt)}; gate: {card.get('gate')}")
           PY
 
+      - name: Verify stored SSH credentials through Hunt
+        if: github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' && (steps.changes.outputs.e2e_area == 'all' || steps.changes.outputs.e2e_area == 'hunt')
+        run: python3 tests/e2e/run_hunt_ssh_acceptance.py | tee artifacts/hunt-ssh-acceptance.log
+
       - name: Report actual assertions and validate E2E completeness
         if: ${{ always() && github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true' }}
         env:

@@ -45,7 +45,7 @@ class SshConnectAdapter:
                   'device_fragility_points':3 if target.target_kind == 'device' else 0}
         return PreparedExecution('ssh.connect','paramiko','1',(),
             {'hosts_attempted':1,'tcp_ports_attempted':1,'tool_wall_seconds':120,
-             'device_fragility_points':values['device_fragility_points']}, PreparedExecution.digest_input(values), values,
+             **({'device_fragility_points':values['device_fragility_points']} if values['device_fragility_points'] else {})}, PreparedExecution.digest_input(values), values,
             'ssh-authentication/v1')
 
 
