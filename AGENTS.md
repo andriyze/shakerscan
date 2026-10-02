@@ -45,6 +45,10 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 12. Optimize for investigation efficacy and operator flow. A capability is valuable when it helps
     reach useful evidence or falsify a hypothesis; avoid adding top-level surfaces, copied policy,
     or refusal paths that do not improve those outcomes.
+13. Treat a connected host/device as one operator-managed target asset. Connected Devices is a
+    network-oriented view of that inventory; discovered web/API origins are linked services, not
+    duplicate asset ownership. Credentials and request collections may be reused across views only
+    through explicit target bindings/grants; same-host membership alone never grants secret access.
 
 The read-only posture check is a bounded standalone lookup outside Scan/Hunt capability execution.
 Unconfigured clients use the hosted service's public-target restrictions. Connected clients use
@@ -137,7 +141,7 @@ Reusable secrets belong only in encrypted credential profiles or request collect
   operator grant (`POST /credential-profiles/{id}/grants`), recorded and revocable per target.
   A grant makes the profile selectable on that target; it never authorizes testing it, which
   still needs that target's own standing authorization. Grants stay within one asset kind (web,
-  api and network share; device does not), and active capabilities need the receiving target's
+  api, network and connected-device views share), and active capabilities need the receiving target's
   own approval. Never share a profile an operator did not ask to share.
 - Scan and Hunt requests carry opaque profile/selection IDs, never tokens, cookies, passwords,
   private keys, client secrets, secret headers, or raw environment values.
@@ -277,6 +281,9 @@ Do not ask the operator again or demand a repaired certificate after testing wit
 credentials has been authorized. Keep control-plane TLS verification separate and unchanged.
 Web, API and network are views of the same target row and reuse its credentials and collections;
 different target UUIDs and device identities remain distinct.
+An authorized host asset covers its currently linked same-host application services. The server
+checks current membership; an origin's own authorization or explicit revocation overrides inherited
+host authority. Credential grants and collection bindings still identify the exact consuming target.
 
 ### Authorized service reuse
 
@@ -299,6 +306,15 @@ Every hop is pinned and metered; this bridge never loads credentials or changes 
 origins. The exception does not apply to credentialed HTTP/session replay or to another asset.
 
 ### Progressive methodologies
+
+Each target may have one saved custom skill at `/targets/{id}/skill`: instructions about login,
+priorities, exclusions and target knowledge, using opaque credential/collection references instead
+of secrets. A Hunt automatically snapshots this bounded document at startup and exposes it as
+`target_skill`; later edits or deletion affect future Hunts only. Use `targets.skill.read` and
+explicitly requested `targets.skill.create|update|delete` through the shared capability runtime,
+with revision checks. These are target metadata actions, independent of active testing; they grant
+no network authority and cannot address another target UUID. The current operator objective takes
+precedence over saved preferences; server scope, policy, approval and budgets remain authoritative.
 
 Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
 the library. Native protocol messages remain unavailable unless a live executor supports them.
@@ -347,7 +363,7 @@ devices do not belong in web target metrics.
 
 ### Connected devices
 
-Devices use separate inventory/workers. Confirm ownership/authorization. All-TCP examination is
+Connected Devices shares the target inventory and uses specialized workers. Confirm ownership/authorization. All-TCP examination is
 possible, so silence is inconclusive and receives no score. Imported Postman/HAR/OpenAPI never
 executes scripts, external references, or arbitrary destinations. In an authorized active Hunt,
 select an HTTP(S) service on the same canonical host at any valid port using `origin`; the target
@@ -358,8 +374,11 @@ uses the saved login service, not the inventory record's default port. Do not by
 credentials or redirect credentials to another asset; a credential reaches another target only
 through an operator's grant.
 
-SSH plans are immutable and inert until the user separately confirms exact commands. Device Hunt
-uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
+SSH plans are immutable and inert until the user separately confirms exact commands. Hunt
+may authenticate through `ssh.connect` using its selected stored SSH identity on the operator's
+port, the saved profile port, or port 22. It pins the host key, reports authentication evidence, and
+closes the connection without executing commands.
+Device Hunt uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
 `./scanner.sh devices start|stop|status|logs` and must not consume ordinary DAST slots silently.
 
 ### Continuous ASM

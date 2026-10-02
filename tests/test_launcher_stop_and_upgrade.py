@@ -253,7 +253,7 @@ def _start(*args: str, reason: str) -> str:
         text=True,
         timeout=20,
         check=False,
-        env={**os.environ, "REASON": reason},
+        env={**os.environ, "REASON": reason, "SCRIPT_DIR": str(ROOT)},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout

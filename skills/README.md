@@ -43,7 +43,7 @@ session hook automatically.
 | [`review-skills`](review-skills/SKILL.md) | Audit the skills, slash commands, and specialized agents |
 
 The [`web`](web/README.md) directory is the server-shipped Hunt methodology catalog: web-testing
-playbooks plus native service/device investigation, with routing metadata and explicit execution
+playbooks plus network discovery and TV, camera, router and native service investigation, with routing metadata and explicit execution
 gaps. It is not a skill to load wholesale. Start with the objective and retained evidence, receive
 compact suggestions, and read a relevant method when needed. Useful partial methods can be bound;
 reference guidance stays readable. Binding never changes the run's scope, capabilities or budgets.

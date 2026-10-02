@@ -44,7 +44,7 @@ FROM hunt_runs h JOIN hunt_actions a ON a.hunt_run_id=h.id
 JOIN budget_reservations b ON b.owner_kind='hunt' AND b.owner_id=h.id::text
  AND b.action_id=a.id::text AND b.capability_name=a.capability_name
 WHERE (($1::text='web' AND h.target_id=$2 AND h.device_target_id IS NULL)
-    OR ($1::text='device' AND h.device_target_id=$2 AND h.target_id IS NULL))
+    OR ($1::text='device' AND h.device_target_id=$2 AND (h.target_id IS NULL OR h.target_id=$2)))
  AND b.capability_name=ANY($4::text[])
  AND b.status IN ('committed','failed')
  AND a.status IN ('completed','partial','failed','cancelled','blocked')
@@ -82,7 +82,10 @@ def validated_hunt_source(row: Mapping[str, Any], target: Mapping[str, Any]) -> 
             or stored.action_id != str(row["hunt_action_id"])
             or row.get("target_kind") not in ({"device"} if target["kind"] == "device" else {"web", "api", "network"})
             or receipt.redacted_execution.get("target_kind") != row.get("target_kind")
-            or str(row.get(owner)) != str(target["id"]) or row.get(opposite) is not None
+            or str(row.get(owner)) != str(target["id"])
+            or (row.get(opposite) is not None and not (
+                owner == "device_target_id" and str(row[opposite]) == str(target["id"])
+            ))
             or record.owner_id != str(row["hunt_id"]) or receipt.hunt_id != record.owner_id
             or receipt.scan_id is not None or receipt.validation_id is not None
             or receipt.target_id != str(target["id"])
@@ -107,7 +110,8 @@ def validated_hunt_source(row: Mapping[str, Any], target: Mapping[str, Any]) -> 
         context = object_value(row.get("target_context"))
         locator = str(context.get("url") or context.get("locator") or "")
         context_origin = origin(locator)
-        host = urlsplit(context_origin).hostname if context_origin else locator.lower().rstrip(".")
+        parsed_locator = urlsplit(locator)
+        host = parsed_locator.hostname if parsed_locator.scheme in {'http','https','host'} else locator.lower().rstrip(".")
         hosts = {host}
         for value in context.get("origins") or ():
             if (candidate := origin(value)):
@@ -146,7 +150,11 @@ def validated_hunt_source(row: Mapping[str, Any], target: Mapping[str, Any]) -> 
                 generation = target.get("locator_generation")
             historical = generation is None
         else:
-            historical = not context_origin or context_origin != origin(target.get("locator"))
+            current = urlsplit(str(target.get('locator') or ''))
+            if parsed_locator.scheme == 'host' and current.scheme == 'host':
+                historical = parsed_locator.hostname != current.hostname
+            else:
+                historical = not context_origin or context_origin != origin(target.get("locator"))
         return {
             "ref": f"hunt:{receipt.hunt_id}:{stored.action_id}", "hunt_id": receipt.hunt_id,
             "action_id": stored.action_id, "sha256": receipt.receipt_hash,

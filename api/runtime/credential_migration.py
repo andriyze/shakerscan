@@ -703,9 +703,12 @@ async def migrate_legacy_device_credentials(
     rows = await conn.fetch("SELECT id FROM device_credential_profiles ORDER BY created_at, id")
     migrated = 0
     for row in rows:
-        profile = await sync_legacy_device_credential(
-            conn, row["id"], store=store, now=now,
-        )
+        try:
+            profile = await sync_legacy_device_credential(
+                conn, row["id"], store=store, now=now,
+            )
+        except LegacyCredentialMigrationError as exc:
+            raise LegacyCredentialMigrationError(f"device credential {row['id']}: {exc}") from exc
         if profile is not None:
             migrated += 1
     await conn.execute(

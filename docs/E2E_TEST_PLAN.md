@@ -98,6 +98,27 @@ runtime refactors.
 | P-7 | Implemented | schedules | create, disable, read, and delete lifecycle works |
 | P-8 | Implemented | findings + evidence | manual record appears in filtered findings and its evidence projection, then is deleted |
 
+### Hunt and target instructions
+
+`make e2e-hunt` exercises the live shared Hunt runtime through REST, the installed CLI and MCP:
+policy-derived budgets, durable receipts, cancellation, revoked authority, exact collection
+replay with two principals, network binding, device state, adaptive methodology usage, and
+deterministically verified findings with protected/shared-object negative controls. Its adaptive
+case needs `SHAKERSCAN_E2E_HUNT_TARGET` to identify the owned Juice Shop fixture.
+
+After rebuilding the local stack, `make e2e-hunt-ssh` starts a disposable SSH server using the
+exact running worker image. It selects an encrypted SSH profile through the public Hunt API,
+authenticates on port 22 and an operator-selected port 2222, and checks durable settlement,
+redaction, wrong-key rejection, revoked grants, and absence of command channels. The fixture's
+independent login counters prevent a successful receipt from passing without authentication.
+The runner cleans up its own container and archives its own target; it contacts no external asset.
+PR E2E runs it when the selected area includes Hunt; the full release workflow always runs it.
+
+`PLAYWRIGHT_REAL_STACK=1` enables `target-skill-real.spec.ts` on the production UI/API. This covers
+the instruction editor, Markdown preview, revision-checked persistence, passive Hunt CRUD,
+frozen startup snapshots, deletion/recreation tombstones, and desktop/mobile layout. The test
+uses metadata-only disposable targets and performs no network testing.
+
 ## Every recent bug → the e2e test that catches it
 Implemented: MI-1 (206) · AI-2 (redaction) · AI-3 (prod bypass) · AI-4 (confirm) ·
 MI-5/6 (trust root) · D-4 (phantom chains).

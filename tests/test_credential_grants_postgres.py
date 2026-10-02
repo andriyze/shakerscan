@@ -104,9 +104,9 @@ def test_a_profile_serves_its_home_target_and_only_targets_it_was_granted_to():
         own = await STORE.list_profiles(conn, target_kind="api", target_id=HOME)
         assert [(item.profile_id, item.shared) for item in own] == [(pid, False)]
 
-        with pytest.raises(CredentialStoreError, match="cannot be shared with a device target"):
-            await STORE.grant_profile(conn, profile_id=pid, target_kind="device", target_id=DEVICE,
-                                      granted_by="operator", now=NOW)
+        await STORE.grant_profile(conn, profile_id=pid, target_kind="device", target_id=DEVICE,
+                                  granted_by="operator", now=NOW)
+        assert await STORE.has_active_grant(conn, profile_id=pid, target_kind="device", target_id=DEVICE)
         with pytest.raises(CredentialStoreError, match="already belongs to this target"):
             await STORE.grant_profile(conn, profile_id=pid, target_kind="api", target_id=HOME,
                                       granted_by="operator", now=NOW)
@@ -263,9 +263,16 @@ def test_grant_routes_share_list_and_revoke_with_target_names():
         assert listed["profiles"] == []
         # The home target is removed by deactivating the profile, not by revoking it.
         assert client.delete(f"/credential-profiles/{passive_id}/grants/{HOME}").status_code == 422
-        # A device is a different asset; a missing target is not granted anything.
-        assert client.post(f"/credential-profiles/{passive_id}/grants",
-                           json={"target_kind": "device", "target_id": str(DEVICE)}).status_code == 422
+        # Physical target views support explicit sharing, never implicit access.
+        device_params = {"target_kind": "device", "target_id": str(DEVICE)}
+        assert client.get("/credential-profiles", params=device_params).json()["profiles"] == []
+        device_grant = client.post(f"/credential-profiles/{passive_id}/grants", json=device_params)
+        assert device_grant.status_code == 201, device_grant.text
+        device_profiles = client.get("/credential-profiles", params=device_params).json()["profiles"]
+        assert [(item["id"], item["shared"]) for item in device_profiles] == [(passive_id, True)]
+        assert client.delete(f"/credential-profiles/{passive_id}/grants/{DEVICE}").status_code == 200
+        assert client.get("/credential-profiles", params=device_params).json()["profiles"] == []
+        # A missing target is not granted anything.
         assert client.post(f"/credential-profiles/{passive_id}/grants",
                            json={"target_kind": "web", "target_id": str(uuid.uuid4())}).status_code == 404
         assert client.get("/credential-profiles", params={"target_kind": "web"}).status_code == 422

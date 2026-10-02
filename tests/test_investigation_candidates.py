@@ -291,7 +291,7 @@ def test_candidate_verification_is_an_approval_bound_canonical_capability():
     specification = CAPABILITY_REGISTRY.require("candidate.verify")
     assert specification.hunt_executor == "inline"
     assert specification.requires_active_approval
-    assert specification.target_kinds == frozenset({"web", "api", "device"})
+    assert specification.target_kinds == frozenset({"web", "api", "network", "device"})
     assert specification.budget_cost == {"tool_wall_seconds": 180}
 
     verify_handler = route_source(

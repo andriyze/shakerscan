@@ -174,7 +174,12 @@ def validate_generic_credential_references(
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if not profile.is_active or (expires_at is not None and expires_at <= normalized_now):
             raise CredentialReferenceError(f"{role} is inactive or expired")
-        if not target_kinds_share_asset(profile.target_kind, target_kind):
+        device_ssh_asset_view = (
+            role == "ssh_credential_profile_id"
+            and profile.target_kind == "device"
+            and target_kind in {"web", "api", "network"}
+        )
+        if not device_ssh_asset_view and not target_kinds_share_asset(profile.target_kind, target_kind):
             raise CredentialReferenceError(f"{role} target kind does not match the Hunt")
         if not _role_compatible(role, profile):
             raise CredentialReferenceError(
@@ -186,6 +191,7 @@ def validate_generic_credential_references(
             "auth_kind": profile.auth_kind,
             "principal_slot": profile.principal_slot,
             "profile_version": profile.current_version,
+            **({'service_port':profile.service_port} if profile.service_port is not None else {}),
             "allowed_capabilities": list(profile.allowed_capabilities),
             "configuration": dict(profile.configuration),
             "source": "credential_profiles",

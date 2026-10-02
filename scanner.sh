@@ -2374,6 +2374,8 @@ start_services() {
         echo -e "${YELLOW}Stopping the running stack first (${clean_slate_reason}); it restarts with $start_workers worker(s).${NC}"
         stop_services
     fi
+    source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh"
+    ensure_target_upgrade_backup || return 1
     compose_up -d --scale worker=$start_workers
     if [ "$restore_device_workers" -gt 0 ]; then
         echo -e "${YELLOW}Recreating connected-device worker from the selected image...${NC}"
@@ -3147,6 +3149,11 @@ rebuild_images() {
 
     record_runtime_mode local
 
+    if [ "$REFRESH_WORKERS" -eq 1 ] && \
+        [ "$((${existing_api:-0} + ${existing_workers:-0} + ${existing_device_workers:-0} + ${existing_agent_tool_worker:-0} + ${existing_model_intake_worker:-0}))" -gt 0 ]; then
+        source "$SCRIPT_DIR/scripts/target_upgrade_backup.sh"
+        ensure_target_upgrade_backup || return 1
+    fi
     if [ "$REFRESH_WORKERS" -eq 1 ]; then
         refresh_workers_after_rebuild "$existing_workers" "$existing_model_intake_sandbox"
         refresh_running_service_after_rebuild agent-tool-worker "$existing_agent_tool_worker"

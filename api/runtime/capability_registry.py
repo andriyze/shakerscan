@@ -107,13 +107,22 @@ class CapabilitySpec:
             raise ValueError(
                 f"planner-visible capability {self.name} requires a Hunt executor"
             )
+        if self.required_approval == "operator_intent" and (
+            self.risk_tier != "read_only" or self.hunt_executor != "inline"
+            or not self.placement_requirements.get("control_plane")
+            or not self.placement_requirements.get("user_confirmation")
+            or self.placement_requirements.get("network_reachability")
+            or self.binary is not None
+            or set(self.budget_cost) - {"tool_wall_seconds"}
+        ):
+            raise ValueError("operator intent authority is limited to confirmed metadata actions")
         for dimension, amount in self.budget_cost.items():
             if not str(dimension).strip() or int(amount) < 0:
                 raise ValueError("budget costs require named non-negative dimensions")
 
     @property
     def requires_active_approval(self) -> bool:
-        return bool(self.required_approval) or self.risk_tier in {
+        return (self.required_approval not in {None, "operator_intent"}) or self.risk_tier in {
             "active", "credential", "mutation"
         }
 
@@ -149,7 +158,7 @@ class CapabilitySpec:
         }
 
     def planner_contract(self) -> dict[str, Any]:
-        """Return semantic planner authority without leaking adapter/tool selection."""
+        """Return typed planner authority and the fixed tool identity; never planner argv."""
         planner_input = dict(self.planner_input_schema or self.input_schema)
         placement_keys = {
             "network_reachability",
@@ -164,6 +173,12 @@ class CapabilitySpec:
         return {
             "name": self.name,
             "description": self.description,
+            "tool": {
+                "name": self.binary or self.adapter,
+                "binary": self.binary,
+                "adapter": self.adapter,
+                "alternate_adapters": [name for name, _ in self.alternate_adapters],
+            },
             "risk_tier": self.risk_tier,
             "target_kinds": sorted(self.target_kinds),
             "input_schema": planner_input,
@@ -480,8 +495,11 @@ def _http_principal_schema(
     return _schema(merged, required=required)
 
 
+from .asset_capability_specs import asset_capability_specs
+
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
+        *asset_capability_specs(CapabilitySpec, _schema, _HTTP_TARGETS),
         CapabilitySpec(
             "scan.finalize",
             "Build one deterministic report from immutable action receipts and manifests.",
@@ -558,6 +576,16 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             hunt_executor="worker_scanner",
             planner_input_schema=_http_principal_schema({
                 "path": _SAME_ORIGIN_PATH_PROPERTY,
+                "severity": {
+                    "type": "string",
+                    "pattern": "^(info|low|medium|high|critical)(,(info|low|medium|high|critical))*$",
+                    "maxLength": 100,
+                },
+                "tags": {
+                    "type": "string", "pattern": "^[a-z0-9_-]+(,[a-z0-9_-]+)*$",
+                    "maxLength": 200,
+                    "description": "Filter the server-reviewed GET-only template pack by tag; cannot enable mutating or OOB templates.",
+                },
             }),
         ),
         CapabilitySpec(
@@ -1109,7 +1137,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             arsenal_status="gated", hunt_executor="worker_network",
         ),
         CapabilitySpec(
-            "ports.discover", "Bounded connection-based TCP port discovery.",
+            "ports.discover", "Run built-in Naabu for bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {
                 "hosts_attempted": _NETWORK_ADDRESS_GRANT,
@@ -1128,13 +1156,23 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "subdomains.discover", "Passive target-root-bound subdomain discovery.",
-            "external_tool", "passive", frozenset({"web", "api", "network"}),
+            "external_tool", "passive", _NETWORK_TARGETS,
             "subfinder", "1", None, {"hosts_attempted": 1, "tool_wall_seconds": 120},
             {"network_reachability": True, "binary": "subfinder"},
             _schema({"root_domain": {"type": "string"}}), "subfinder-lines/v1",
             ("passive_discovery_observation",), binary="subfinder", default_timeout_ms=120_000,
             version_args=("-version",), common_paths=("/opt/tools/subfinder",),
             hunt_executor="worker_network",
+        ),
+        CapabilitySpec(
+            'ssh.connect', 'Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.',
+            'network_tcp','credential',_NETWORK_TARGETS,'paramiko','1','network_discovery',
+            {'hosts_attempted':1,'tcp_ports_attempted':1,'tool_wall_seconds':120,'device_fragility_points':3},
+            {'network_reachability':True,'credentials_resolved_server_side':True,'credential_binding':'ssh'},
+            _schema({'port':{'type':'integer','minimum':1,'maximum':65535},
+                     'host_key_fingerprint':{'type':'string','pattern':'^SHA256:[A-Za-z0-9+/]{43}$'}}),
+            'ssh-authentication/v1',('ssh_authentication_observation','tool_receipt'),
+            default_timeout_ms=120_000,hunt_executor='worker_network',credential_transport='exact_origin',credential_interruption='cooperative',
         ),
         CapabilitySpec(
             "scan.origin_select", "Select a reachable frozen HTTP origin for a scheme-inferred Scan.",
@@ -1533,7 +1571,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.inspect", "Inspect redacted request collections bound to this Hunt.",
-            "internal", "read_only", frozenset({"web", "api", "device"}),
+            "internal", "read_only", _HTTP_TARGETS,
             "collections.inspect", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(),
             "request-collection-index/v2", ("request_collection_observation",),
             hunt_executor="inline",
@@ -1541,7 +1579,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.create",
             "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.create", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1576,7 +1614,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.update",
             "Update metadata or triage state on a finding created by this Hunt without changing proof state.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.update", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1612,7 +1650,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.delete",
             "Delete one finding created by this Hunt after an explicit confirmation flag.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.delete", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1638,7 +1676,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "candidate.verify",
             "Run one server-owned deterministic verifier for a candidate produced by this Hunt.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "candidate.deterministic_verifier", "1", "active_testing",
             {"tool_wall_seconds": 180},
             {
@@ -1660,7 +1698,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.select", "Select a bounded redacted request subset from a bound collection.",
-            "internal", "read_only", frozenset({"web", "api", "device"}),
+            "internal", "read_only", _HTTP_TARGETS,
             "collections.select", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},

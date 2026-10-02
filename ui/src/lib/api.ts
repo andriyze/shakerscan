@@ -1485,6 +1485,8 @@ export interface DeviceScanActivity {
 }
 
 export interface DeviceDetailResponse {
+  service_intelligence?: import('@/components/targets/SharedServicePorts').SharedServiceKnowledge
+  authorization?: { approved_by: string; approval_receipt_id: string } | null
   device: DeviceTarget
   reachability?: DeviceReachability | null
   interfaces: DeviceInterface[]
@@ -5360,6 +5362,8 @@ export async function scanDevice(deviceId: string, payload: {
   web_scan_type: 'quick' | 'standard' | 'deep'
   max_web_origins?: number
   port_hints?: number[]
+  udp_ports?: number[]
+  request_collection_environment_ids?: Record<string, string | null>
   ssh_credential_profile_id?: string
   web_credential_profile_id?: string
   request_collection_ids?: string[]
@@ -5368,7 +5372,7 @@ export async function scanDevice(deviceId: string, payload: {
   allow_untrusted_tls_credentials?: boolean
   capability_ids?: string[]
 }): Promise<{ scan_id: string; job_id: string; status: string; ui_url: string }> {
-  const res = await fetch(`${API_URL}/devices/${encodeURIComponent(deviceId)}/scan`, {
+  const res = await fetch(`${API_URL}/targets/${encodeURIComponent(deviceId)}/network-scans`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

@@ -30,7 +30,7 @@ test('secret-bearing forms require an explicit target choice', () => {
   assert.match(credentialsPage, /onClick=\{openCreate\} disabled=\{!targetId\}/)
   // A target ID from the URL is used only once it is one of the choices.
   assert.match(credentialsPage, /choices\.some\(\(item\) => item\.id === targetId\) \? targetId : ''/)
-  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| choices\.some\(\(choice\) => choice\.id === targetId\)\) return/)
+  assert.match(collectionsPage, /if \(loading \|\| !targetId \|\| assets\.some\(\(asset\) => asset\.id === targetId\)\) return/)
   // With no target chosen the credentials page is the library, and says how to create one.
   assert.match(credentialsPage, /Choose a target to create a credential/)
   assert.match(collectionsPage, /Choose a collection owner/)

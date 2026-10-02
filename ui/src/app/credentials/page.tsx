@@ -6,12 +6,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
 import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
 import {
-  getDevices,
-  getTarget,
-  getTargets,
   createTargetPolicyApprovalReceipt,
-  type DeviceTarget,
-  type Target,
 } from '@/lib/api'
 import {
   createCredentialProfile,
@@ -42,7 +37,7 @@ import {
   Textarea,
   useToast,
 } from '@/components/ui'
-import { usableWebTargets } from '@/lib/targetChoices'
+import { getAllTargetAssets, getTargetAsset, type TargetAsset } from '@/lib/targetAssetApi'
 import { useUrlFilters } from '@/lib/useUrlFilters'
 
 const HTTP_KINDS: { value: CredentialAuthKind; label: string }[] = [
@@ -249,8 +244,7 @@ function CredentialsContent() {
   const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, target: undefined }), [setFilters])
   const [missingTarget, setMissingTarget] = useState<string | null>(null)
   const latestProfileRequest = useRef(0)
-  const [targets, setTargets] = useState<Target[]>([])
-  const [devices, setDevices] = useState<DeviceTarget[]>([])
+  const [assets, setAssets] = useState<TargetAsset[]>([])
   const [profiles, setProfiles] = useState<CredentialProfile[]>([])
   const [includeInactive, setIncludeInactive] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -269,11 +263,9 @@ function CredentialsContent() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getTargets({ limit: 500 }), featureEnabled('devices') ? getDevices({ limit: 500 }) : Promise.resolve({ devices: [] })])
-      .then(([web, connected]) => {
-        if (cancelled) return
-        setTargets(usableWebTargets(web.targets || []))
-        setDevices((connected.devices || []).filter((item) => item.is_active))
+    getAllTargetAssets(undefined, true)
+      .then((items) => {
+        if (!cancelled) setAssets(items)
       })
       .catch((cause) => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : 'Failed to load targets')
@@ -282,46 +274,40 @@ function CredentialsContent() {
     return () => { cancelled = true }
   }, [])
 
-  const choices = useMemo(() => targetKind === 'device'
-    ? devices.map((item) => ({ id: item.id, label: item.name, detail: item.primary_locator }))
-    : targets.map((item) => ({ id: item.id, label: item.name || item.url, detail: item.url })),
-  [targetKind, devices, targets])
-  // Every target a credential could be shared with; the dialog keeps those of the same asset kind.
-  const shareTargets = useMemo<ShareTargetChoice[]>(() => [
-    ...targets.map((item) => ({ id: item.id, kind: 'web' as CredentialTargetKind, label: item.name || item.url, detail: item.url })),
-    ...devices.map((item) => ({ id: item.id, kind: 'device' as CredentialTargetKind, label: item.name, detail: item.primary_locator })),
-  ], [devices, targets])
+  const choices = useMemo(() => assets.map((asset) => ({
+    id: asset.id, label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
+  })), [assets])
+  const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => ({
+    id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
+  })), [assets])
 
-  // A linked target outside the loaded list (500 most recent) is fetched by ID; one that does not
-  // exist or cannot hold credentials is reported instead of silently dropped.
   useEffect(() => {
-    if (loading || appliedDeepLink.current) return
-    appliedDeepLink.current = true
-    const requestedUrl = filters.target?.trim()
-    if (requestedUrl && !targetId) {
-      const web = targets.find((item) => item.url === requestedUrl)
-      if (web) setFilters({ target_kind: undefined, target_id: web.id, target: undefined })
-      else setMissingTarget(requestedUrl)
+    if (loading) return
+    const requestedUrl = typeof filters.target === 'string' ? filters.target : ''
+    if (!targetId && requestedUrl) {
+      try {
+        const requested = new URL(requestedUrl)
+        const asset = assets.find((item) => {
+          if (/^https?:\/\//i.test(item.url)) return new URL(item.url).origin === requested.origin
+          return false
+        })
+        if (asset) setFilters({target_id:asset.id,target:undefined})
+        else setMissingTarget(requestedUrl)
+      } catch { setMissingTarget(requestedUrl) }
       return
     }
-    if (!targetId) return
-    if (targets.some((item) => item.id === targetId)) {
-      if (targetKind === 'device') setFilters({ target_kind: undefined, target_id: targetId })
-      return
-    }
-    const device = devices.find((item) => item.id === targetId)
-    if (device) {
-      if (targetKind !== 'device') setFilters({ target_kind: 'device', target_id: device.id })
-      return
-    }
-    getTarget(targetId)
-      .then((target) => {
-        const usable = usableWebTargets([target])
-        if (usable.length) setTargets((current) => [...current, ...usable])
-        else setMissingTarget(target.url || targetId)
-      })
-      .catch(() => setMissingTarget(targetId))
-  }, [devices, filters.target, loading, setFilters, targetId, targetKind, targets])
+    if (!targetId || assets.some((asset) => asset.id === targetId)) return
+    let cancelled = false
+    getTargetAsset(targetId).then((result) => {
+      if (cancelled) return
+      if (!result.target.is_active) {setMissingTarget(targetId);return}
+      const origin = result.origins.find((item) => item.id === targetId)
+      const exact = origin ? {...result.target,...origin,asset_id:result.target.id,locator:origin.url} : result.target
+      if (exact.id !== targetId || !exact.is_active) {setMissingTarget(targetId);return}
+      setAssets((current) => current.some((asset) => asset.id === exact.id) ? current : [...current,exact])
+    }).catch(() => {if (!cancelled) setMissingTarget(targetId)})
+    return () => {cancelled = true}
+  },[assets,filters.target,loading,setFilters,targetId])
 
   const loadProfiles = useCallback(async () => {
     // Only the latest request may fill the list: a slower answer for a target that is no longer
@@ -357,11 +343,7 @@ function CredentialsContent() {
 
   useEffect(() => { void loadProfiles() }, [loadProfiles])
 
-  const availableKinds = targetKind === 'network'
-    ? SSH_KINDS
-    : targetKind === 'device'
-      ? [...HTTP_KINDS, ...SSH_KINDS]
-      : HTTP_KINDS
+  const availableKinds = ['network','device'].includes(targetKind) ? [...HTTP_KINDS, ...SSH_KINDS] : HTTP_KINDS
 
   function openCreate() {
     const firstKind = availableKinds[0]?.value || 'bearer_token'
@@ -426,13 +408,11 @@ function CredentialsContent() {
 
   function changeTargetKind(kind: CredentialTargetKind) {
     if (kind === targetKind) return
-    // A target ID is meaningful only inside its kind. Clear it in the same
-    // event before the profile-loading effect can combine a new kind with the
-    // previous kind's ID and surface a misleading 404.
+    // Switching capability views preserves the asset identity and shared records.
     setProfiles([])
     setError(null)
     setMissingTarget(null)
-    setFilters({ target_kind: kind === 'web' ? undefined : kind, target_id: undefined, target: undefined })
+    setFilters({ target_kind: kind === 'web' ? undefined : kind, target: undefined })
   }
 
   async function saveProfile() {
@@ -521,7 +501,7 @@ function CredentialsContent() {
   }
 
   if (loading) return <div className="p-6 text-sm text-gray-400">Loading credential targets…</div>
-  if (error && !targets.length && !devices.length) return <ErrorState message={error} />
+  if (error && !assets.length) return <ErrorState message={error} />
 
   return (
     <div className="mx-auto max-w-6xl p-6">
@@ -601,7 +581,7 @@ function CredentialsContent() {
                       <button
                         type="button"
                         className="text-blue-300 hover:text-blue-200"
-                        onClick={() => setFilters({ target_kind: profile.target_kind === 'device' ? 'device' : undefined, target_id: profile.target_id })}
+                        onClick={() => setFilters({ target_kind: profile.target_kind === 'web' ? undefined : profile.target_kind, target_id: profile.target_id })}
                       >
                         {profile.home_target_name || profile.target_id}
                       </button>

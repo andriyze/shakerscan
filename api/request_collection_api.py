@@ -105,10 +105,11 @@ class RequestCollectionEnvironmentCreate(BaseModel):
 
 class RequestCollectionBindingUpsert(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    target_kind: Literal["web", "api", "device"]
+    target_kind: Literal["web", "api", "network", "device"]
     target_id: str
     allowed_origins: list[str] = Field(min_length=1, max_length=32)
     environment_id: Optional[str] = None
+    authorize_cross_asset: bool = False
 
 
 class RequestCollectionSelectionUpsert(BaseModel):
@@ -393,6 +394,10 @@ async def create_request_collection(request: RequestCollectionCreate):
         web_target = await conn.fetchrow(
             "SELECT id, url FROM targets WHERE id=$1 AND is_active=true", target_uuid,
         )
+        # Keep one canonical document at the target where the operator created it.
+        # Asset visibility is resolved through bindings; do not rewrite ownership to
+        # the host, which would erase exact service provenance and break idempotency.
+        owner_uuid = target_uuid
         device_target = None if web_target else await conn.fetchrow(
             """SELECT id, primary_locator FROM device_targets
                WHERE id=$1 AND is_active=true""",
@@ -410,8 +415,8 @@ async def create_request_collection(request: RequestCollectionCreate):
                                       ($3::uuid IS NOT NULL AND device_target_id=$3))
                    FOR UPDATE""",
                 collection_name,
-                target_uuid if web_target else None,
-                target_uuid if device_target else None,
+                owner_uuid,
+                None,
             )
             collection_id = existing["id"] if existing else uuid.uuid4()
             row = await conn.fetchrow(
@@ -428,8 +433,8 @@ async def create_request_collection(request: RequestCollectionCreate):
                        metadata_json=EXCLUDED.metadata_json, updated_at=NOW(), is_active=true
                    RETURNING *""",
                 collection_id,
-                target_uuid if web_target else None,
-                target_uuid if device_target else None,
+                owner_uuid,
+                None,
                 collection_name,
                 summary.get("format") or request.format,
                 encrypted_payload,
@@ -532,7 +537,7 @@ async def create_request_collection(request: RequestCollectionCreate):
             binding_row = None
             binding_origin = None
             binding_kind = "web"
-            if web_target:
+            if web_target and str(web_target["url"]).startswith(("http://", "https://")):
                 parsed_target = urllib.parse.urlsplit(str(web_target["url"] or ""))
                 binding_origin = canonical_collection_origin(
                     f"{parsed_target.scheme}://{parsed_target.netloc}"
@@ -542,8 +547,11 @@ async def create_request_collection(request: RequestCollectionCreate):
                 binding_origin = canonical_collection_origin(
                     f"{parsed_base.scheme}://{parsed_base.netloc}"
                 )
-                binding_kind = "device"
+                binding_kind = "network"
             if binding_origin:
+                from targets.asset_collections import asset_collection_binding
+                await asset_collection_binding(conn, dict(row), target_kind=binding_kind,
+                    target_id=target_uuid, allowed_origins=[binding_origin])
                 binding_row = await conn.fetchrow(
                     """INSERT INTO request_collection_bindings (
                            collection_id, target_kind, target_id, allowed_origins,
@@ -580,7 +588,7 @@ async def list_request_collections(
     async with _pool().acquire() as conn:
         rows = await conn.fetch(
             """SELECT * FROM request_collections
-               WHERE is_active=true AND (target_id=$1 OR device_target_id=$1)
+               WHERE is_active=true AND target_collection_visible(id,$1)
                ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
             target_uuid, limit, offset,
         )
@@ -854,11 +862,16 @@ async def upsert_request_collection_binding(
     )
     async with _pool().acquire() as conn:
         collection = await _request_collection_owner(conn, collection_uuid)
-        origins = _request_collection_owner_binding(
-            collection,
+        try:
+            from targets.asset_collections import asset_collection_binding
+        except ModuleNotFoundError:
+            from api.targets.asset_collections import asset_collection_binding
+        origins = await asset_collection_binding(
+            conn, collection,
             target_kind=request.target_kind,
             target_id=target_uuid,
             allowed_origins=request.allowed_origins,
+            authorize_cross_asset=request.authorize_cross_asset,
         )
         if environment_uuid and not await conn.fetchval(
             """SELECT EXISTS(

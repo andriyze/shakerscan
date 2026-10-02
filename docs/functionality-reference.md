@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 440 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 368 | `api/**/*.py` |
+| Public REST operations | 450 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 375 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1675,11 +1675,11 @@ for the profile contract, invocation, limits and acceptance gates.
 | Internal compatibility scanner flags | 161 | `scanner/scanner.py` |
 | Canonical scanner wrapper commands | 34 | `scanner.sh` |
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
-| Make targets | 19 | `Makefile` |
+| Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
 | Runtime environment keys | 394 | Python sources + Compose manifests |
-| Internal compatibility scanner modules | 124 | `scanner/scanner_tools/` |
-| UI pages | 39 | `ui/src/app/` |
+| Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
+| UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
 | Canonical slash commands | 14 | `.claude/commands/` |
 | Deprecated Scan-name slash shims | 0 | `.claude/commands/` |
@@ -2083,6 +2083,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets` | `create_target` |
 | `POST` | `/targets/dedupe` | `dedupe_targets` |
 | `GET` | `/targets/grouped` | `list_targets_grouped` |
+| `POST` | `/targets/hosts` | `create_host_target` |
+| `GET` | `/targets/inventory` | `target_inventory` |
 | `DELETE` | `/targets/{target_id}` | `delete_target` |
 | `GET` | `/targets/{target_id}` | `get_target` |
 | `PATCH` | `/targets/{target_id}` | `update_target` |
@@ -2098,6 +2100,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/asm/prune` | `asm_prune` |
 | `POST` | `/targets/{target_id}/asm/recon` | `asm_recon` |
 | `POST` | `/targets/{target_id}/asm/test` | `asm_test` |
+| `GET` | `/targets/{target_id}/asset` | `get_target_asset` |
 | `DELETE` | `/targets/{target_id}/authorization` | `revoke_target_authorization` |
 | `GET` | `/targets/{target_id}/authorization` | `get_target_authorization` |
 | `POST` | `/targets/{target_id}/authorization` | `authorize_target` |
@@ -2106,8 +2109,10 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/targets/{target_id}/credential-profiles/{profile_id}` | `delete_target_credential_profile` |
 | `PATCH` | `/targets/{target_id}/credential-profiles/{profile_id}` | `update_target_credential_profile` |
 | `POST` | `/targets/{target_id}/credential-profiles/{profile_id}/rotate` | `rotate_target_credential_profile` |
+| `POST` | `/targets/{target_id}/device-profile` | `enable_device_profile` |
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
+| `GET` | `/targets/{target_id}/history` | `get_asset_history` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |
@@ -2116,6 +2121,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/targets/{target_id}/invariants/{contract_id}/retire` | `retire_target_invariant_contract` |
 | `GET` | `/targets/{target_id}/invariants/{contract_id}/verification-plan` | `get_target_invariant_verification_plan` |
 | `POST` | `/targets/{target_id}/inventory/hypotheses` | `generate_endpoint_inventory_hypotheses` |
+| `POST` | `/targets/{target_id}/network-scans` | `start_target_network_scan` |
 | `GET` | `/targets/{target_id}/posture` | `get_target_posture` |
 | `GET` | `/targets/{target_id}/principal-matrix` | `list_target_principal_matrix` |
 | `POST` | `/targets/{target_id}/principal-matrix` | `upsert_target_principal_matrix` |
@@ -2126,6 +2132,10 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/targets/{target_id}/principals/{principal_id}` | `delete_target_principal` |
 | `PATCH` | `/targets/{target_id}/principals/{principal_id}` | `update_target_principal` |
 | `POST` | `/targets/{target_id}/scan` | `scan_target` |
+| `DELETE` | `/targets/{target_id}/skill` | `delete_target_skill` |
+| `GET` | `/targets/{target_id}/skill` | `get_target_skill` |
+| `POST` | `/targets/{target_id}/skill` | `create_target_skill` |
+| `PUT` | `/targets/{target_id}/skill` | `update_target_skill` |
 | `GET` | `/timeline` | `mission_timeline` |
 | `POST` | `/validate` | `validate` |
 | `GET` | `/workers` | `get_workers` |
@@ -2432,7 +2442,7 @@ opaque profile, and collection-reference fields.
 | Surface | Names |
 |---|---|
 | Canonical `scanner.sh` commands | `agent`, `ai`, `api`, `backup`, `build`, `collections`, `credentials`, `db-upgrade`, `devices`, `doctor`, `env`, `evidence`, `fleet`, `gungnir`, `help`, `hunt`, `install-deps`, `join`, `logs`, `mcp`, `model-intake-runner`, `rebuild`, `reload`, `report-rebuild`, `research`, `reset`, `restart`, `scale`, `scan`, `shell`, `start`, `status`, `stop`, `version` |
-| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
+| Make targets | `dependency-audit`, `dependency-lock`, `e2e`, `e2e-ai-gate`, `e2e-api-overlay`, `e2e-dast`, `e2e-hunt`, `e2e-hunt-ssh`, `e2e-model-intake`, `e2e-model-intake-fixture`, `e2e-platform`, `e2e-scan-parity`, `e2e-wire`, `fleet-acceptance`, `installed-stack-smoke`, `installer-smoke`, `installer-upgrade-smoke`, `release-gates`, `test`, `upgrade-smoke` |
 | Release gates | `test:evidence-provenance`, `test:fleet-current`, `test:hypothesis-proof-promotion`, `test:mcp-read-only`, `test:no-ai-verified`, `test:no-benchmark-fitting`, `test:no-phantom-tools`, `test:planner-no-shell`, `test:planner-risk`, `test:planner-scope`, `test:scanner-auth-quality`, `test:scanner-bounds`, `test:scanner-proof-truth`, `test:scanner-registry-coverage`, `test:v2-detection-parity`, `test:v2-fault-injection`, `test:v2-security-invariants` |
 
 ### Runtime Environment-Key Inventory
@@ -2875,6 +2885,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `/settings/arsenal` | `ui/src/app/settings/arsenal/page.tsx` |
 | `/settings` | `ui/src/app/settings/page.tsx` |
 | `/settings/policy-profiles` | `ui/src/app/settings/policy-profiles/page.tsx` |
+| `/targets/{id}/asset` | `ui/src/app/targets/[id]/asset/page.tsx` |
 | `/targets/{id}/graph` | `ui/src/app/targets/[id]/graph/page.tsx` |
 | `/targets` | `ui/src/app/targets/page.tsx` |
 | `/timeline` | `ui/src/app/timeline/page.tsx` |
@@ -2923,7 +2934,7 @@ Implementation modules below are inventory only. The immutable action graph and 
 capability registry define execution authority; module presence does not advertise a public
 Scan feature or a second orchestration engine.
 
-`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
+`access_control_checks.py`, `active_checks.py`, `active_enrichment_policy.py`, `active_prioritization.py`, `adaptive_throttle.py`, `ai_classifier.py`, `api_auth.py`, `api_security.py`, `approval_checks.py`, `asn_discovery.py`, `attack_chains.py`, `attempt_telemetry.py`, `auth_session.py`, `authz_replay_routing.py`, `benchmark_summary.py`, `bola_comparison.py`, `bounded_exec.py`, `brand_protection.py`, `breach_check.py`, `browser_profile.py`, `build_fingerprint.py`, `cancellation.py`, `client_side.py`, `common.py`, `completion_status.py`, `compliance_mapper.py`, `coverage_tracker.py`, `credential_check.py`, `critical_checks.py`, `ct_monitor.py`, `data_exposure.py`, `deduplication_engine.py`, `deserialization_tests.py`, `device_advisories.py`, `device_application.py`, `device_control_plane.py`, `device_evidence.py`, `device_postman.py`, `device_posture.py`, `device_probe.py`, `device_protocols.py`, `device_reachability.py`, `device_request_formats.py`, `device_safety.py`, `device_scan_scope.py`, `device_shell.py`, `device_web.py`, `discovery.py`, `discovery_policy.py`, `dns_enhanced.py`, `dom_xss_analyzer.py`, `domain_intel.py`, `exposure_markers.py`, `file_upload_tests.py`, `finding_correlator.py`, `finding_validator.py`, `focused_scope.py`, `form_login.py`, `github_recon.py`, `google_dorking.py`, `gopher_payloads.py`, `graphql_schema_recovery.py`, `grpc_discovery.py`, `gungnir.py`, `har_discovery.py`, `hash_routes.py`, `health_check.py`, `http_archive_capture.py`, `http_scanner.py`, `hunter_summary.py`, `infrastructure_checks.py`, `injection_extra_checks.py`, `ip_reputation.py`, `logging_checks.py`, `model_intake.py`, `model_intake_acquisition.py`, `model_intake_adapter_self_test.py`, `model_intake_admission.py`, `model_intake_archives.py`, `model_intake_attestation.py`, `model_intake_evaluation.py`, `model_intake_licenses.py`, `model_intake_providers.py`, `model_intake_registry.py`, `model_intake_retention.py`, `model_intake_runtime.py`, `model_intake_safetensors_runtime.py`, `model_intake_safetensors_selftest.py`, `model_intake_sandbox.py`, `model_intake_scanners.py`, `network_services.py`, `nmap.py`, `nuclei.py`, `oauth_auth.py`, `oauth_tests.py`, `phase4_checks.py`, `process_memory.py`, `proof_of_exploit.py`, `race_condition_tests.py`, `remediation_kb.py`, `remediation_kb_findings.py`, `report_gating.py`, `request_collections.py`, `request_meter.py`, `request_replay.py`, `resource_propagation.py`, `sarif_output.py`, `scan_delta.py`, `signal_types.py`, `smtp_scanner.py`, `ssh_scanner.py`, `subdomain_discovery.py`, `subfinder.py`, `tech_discovery.py`, `tls_scanner.py`, `url_redaction.py`, `v2_fingerprint_hardening.py`, `v2_request_replay_hardening.py`, `vendor_risk.py`, `verification_engine.py`, `verification_phase.py`, `wayback_discovery.py`, `webhook_checks.py`, `websocket_security.py`, `xss_evidence.py`
 
 ### Durable Storage Inventory
 

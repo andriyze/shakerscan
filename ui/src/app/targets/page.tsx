@@ -1,6 +1,8 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { TargetInventory } from '@/components/targets/TargetInventory'
 import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
+import { TargetSkillEditor } from '@/components/targets/TargetSkillEditor'
 
 import { useEffect, useState, useRef, useCallback, Suspense } from 'react'
 import Link from '@/components/WorkspaceLink'
@@ -849,6 +851,7 @@ function TargetsContent() {
                         Restore
                       </Button>
                     )}
+                    <TargetSkillEditor compact targetId={domain.root_target!.id} targetName={domain.root_target!.url} />
                     <DeleteRecordsButton selection={{ kind: 'target', target_id: domain.root_target!.id }} archived={!domain.root_target!.is_active}
                       subject={domain.root_target!.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                     {/* Scan Menu */}
@@ -1080,6 +1083,7 @@ function TargetsContent() {
                           Restore
                         </Button>
                       )}
+                      <TargetSkillEditor compact targetId={subdomain.id} targetName={subdomain.url} />
                       <DeleteRecordsButton selection={{ kind: 'target', target_id: subdomain.id }} archived={!subdomain.is_active}
                         subject={subdomain.url} onDeleted={() => { void fetchTargets() }} onArchived={() => { void fetchTargets() }} />
                       {/* Scan Menu for Subdomain */}
@@ -1189,7 +1193,7 @@ function TargetsContent() {
 export default function TargetsPage() {
   return (
     <Suspense fallback={<CardSkeleton count={4} />}>
-      <TargetsContent />
+      <TargetInventory domainView={<TargetsContent />} />
     </Suspense>
   )
 }

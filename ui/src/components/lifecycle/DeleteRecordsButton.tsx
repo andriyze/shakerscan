@@ -84,6 +84,7 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
     confirmLabel={archiveMode ? 'Archive target' : 'Approve and delete records'} onConfirm={archiveMode ? archive : remove} onCancel={onClose}
     message={preview && (archiveMode ? <div className="space-y-3">
       <p>Hide this target and pause its future automatic schedules. All records, evidence, holds, and original ownership remain intact.</p>
+      <p>For a host asset, its currently linked application services are archived and their schedules are paused together.</p>
       <p>Already-admitted or running work is not cancelled. Use its cancellation controls separately.</p>
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div> : <div className="max-h-[60vh] space-y-3 overflow-y-auto">

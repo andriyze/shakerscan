@@ -47,7 +47,7 @@ def fixture(*, observations=None, capability="service.fingerprint", status="comp
         "state_json": terminal.canonical_dict(), "receipt_json": receipt.public_dict(),
         "reservation_status": terminal.status, "capability_name": capability,
         "action_status": status, "action_receipt_id": RECEIPT_ID,
-        "hunt_id": HUNT_ID, "target_id": TARGET_ID if kind != "device" else None,
+        "hunt_id": HUNT_ID, "target_id": TARGET_ID,
         "device_target_id": TARGET_ID if kind == "device" else None, "target_kind": kind,
         "hunt_created_at": NOW, "finished_at": terminal.finished_at,
         "target_context": {"url": TARGET["locator"]} if kind != "device" else {"locator": "192.0.2.1"},

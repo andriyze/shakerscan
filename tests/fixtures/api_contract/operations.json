@@ -1920,6 +1920,16 @@
     "operation_id": "list_targets_grouped_targets_grouped_get"
   },
   {
+    "path": "/targets/hosts",
+    "method": "post",
+    "operation_id": "create_host_target_targets_hosts_post"
+  },
+  {
+    "path": "/targets/inventory",
+    "method": "get",
+    "operation_id": "target_inventory_targets_inventory_get"
+  },
+  {
     "path": "/targets/{target_id}",
     "method": "delete",
     "operation_id": "delete_target_targets__target_id__delete"
@@ -1995,6 +2005,11 @@
     "operation_id": "asm_test_targets__target_id__asm_test_post"
   },
   {
+    "path": "/targets/{target_id}/asset",
+    "method": "get",
+    "operation_id": "get_target_asset_targets__target_id__asset_get"
+  },
+  {
     "path": "/targets/{target_id}/authorization",
     "method": "delete",
     "operation_id": "revoke_target_authorization_targets__target_id__authorization_delete"
@@ -2035,6 +2050,11 @@
     "operation_id": "rotate_target_credential_profile_targets__target_id__credential_profiles__profile_id__rotate_post"
   },
   {
+    "path": "/targets/{target_id}/device-profile",
+    "method": "post",
+    "operation_id": "enable_device_profile_targets__target_id__device_profile_post"
+  },
+  {
     "path": "/targets/{target_id}/graph",
     "method": "get",
     "operation_id": "get_application_graph_targets__target_id__graph_get"
@@ -2043,6 +2063,11 @@
     "path": "/targets/{target_id}/graph/hypotheses",
     "method": "post",
     "operation_id": "generate_application_graph_hypotheses_targets__target_id__graph_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/history",
+    "method": "get",
+    "operation_id": "get_asset_history_targets__target_id__history_get"
   },
   {
     "path": "/targets/{target_id}/invariants",
@@ -2083,6 +2108,11 @@
     "path": "/targets/{target_id}/inventory/hypotheses",
     "method": "post",
     "operation_id": "generate_endpoint_inventory_hypotheses_targets__target_id__inventory_hypotheses_post"
+  },
+  {
+    "path": "/targets/{target_id}/network-scans",
+    "method": "post",
+    "operation_id": "start_target_network_scan_targets__target_id__network_scans_post"
   },
   {
     "path": "/targets/{target_id}/posture",
@@ -2133,6 +2163,26 @@
     "path": "/targets/{target_id}/scan",
     "method": "post",
     "operation_id": "scan_target_targets__target_id__scan_post"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "delete",
+    "operation_id": "delete_target_skill_targets__target_id__skill_delete"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "get",
+    "operation_id": "get_target_skill_targets__target_id__skill_get"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "post",
+    "operation_id": "create_target_skill_targets__target_id__skill_post"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "method": "put",
+    "operation_id": "update_target_skill_targets__target_id__skill_put"
   },
   {
     "path": "/timeline",

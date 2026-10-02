@@ -504,6 +504,8 @@ class HuntSkillLibrary:
         if not selected:
             # A broad objective still benefits from an explicit baseline. Never silently bind it.
             baseline_order = (
+                *(("skill.network.discovery-and-service-assessment",)
+                  if target_kind in {"device", "network"} else ()),
                 "skill.network.service-protocol-and-device-investigation",
                 "skill.web.http-baselining-replay-and-differential-analysis",
                 "skill.web.stateful-crawling-content-and-parameter-discovery",

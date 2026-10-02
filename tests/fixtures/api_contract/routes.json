@@ -2727,6 +2727,20 @@
     "name": "list_targets_grouped"
   },
   {
+    "path": "/targets/hosts",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_host_target"
+  },
+  {
+    "path": "/targets/inventory",
+    "methods": [
+      "GET"
+    ],
+    "name": "target_inventory"
+  },
+  {
     "path": "/targets/{target_id}",
     "methods": [
       "DELETE"
@@ -2832,6 +2846,13 @@
     "name": "asm_test"
   },
   {
+    "path": "/targets/{target_id}/asset",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_asset"
+  },
+  {
     "path": "/targets/{target_id}/authorization",
     "methods": [
       "DELETE"
@@ -2888,6 +2909,13 @@
     "name": "rotate_target_credential_profile"
   },
   {
+    "path": "/targets/{target_id}/device-profile",
+    "methods": [
+      "POST"
+    ],
+    "name": "enable_device_profile"
+  },
+  {
     "path": "/targets/{target_id}/graph",
     "methods": [
       "GET"
@@ -2900,6 +2928,13 @@
       "POST"
     ],
     "name": "generate_application_graph_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/history",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_asset_history"
   },
   {
     "path": "/targets/{target_id}/invariants",
@@ -2956,6 +2991,13 @@
       "POST"
     ],
     "name": "generate_endpoint_inventory_hypotheses"
+  },
+  {
+    "path": "/targets/{target_id}/network-scans",
+    "methods": [
+      "POST"
+    ],
+    "name": "start_target_network_scan"
   },
   {
     "path": "/targets/{target_id}/posture",
@@ -3026,6 +3068,34 @@
       "POST"
     ],
     "name": "scan_target"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "GET"
+    ],
+    "name": "get_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_skill"
+  },
+  {
+    "path": "/targets/{target_id}/skill",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_target_skill"
   },
   {
     "path": "/timeline",

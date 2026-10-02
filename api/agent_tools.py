@@ -362,6 +362,8 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
         # The reviewed IDs include info/medium templates, so an independently
         # supplied severity filter would silently select an empty intersection.
         args += ["-id", template_ids, "-omit-raw", "-omit-template"]
+        if opts.get("filter_template_severity") is True:
+            args += ["-severity", severity]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
@@ -757,7 +759,8 @@ def canonical_hunt_scanner_options(
         return options
     return {
         **options,
-        "severity": "critical,high,medium,low,info",
+        "severity": options.get("severity") or "critical,high,medium,low,info",
+        **({"filter_template_severity": True} if options.get("severity") else {}),
         "template_ids": _CANONICAL_PASSIVE_NUCLEI_IDS,
         "template_pack_digest": canonical_passive_nuclei_template_pack_digest(),
         "template_request_cost_upper_bound": (

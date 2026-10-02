@@ -1063,17 +1063,18 @@ async def _migrate_evidence_scan_identity(conn) -> None:
     )
 
 
-async def run_schema_migrations(pool) -> None:
-    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock.
+async def _run_unified_schema_migrations_once(pool) -> None:
+    from targets.asset_migration import run_unified_startup
+    await run_unified_startup(pool, _run_schema_migrations_once)
 
-    The advisory lock serializes new ShakerScan processes, but during a rolling
-    rebuild an older API can still be using a relation while the first new
-    worker applies idempotent DDL. PostgreSQL may choose the migrator as the
-    deadlock victim. Retry in-process so a healthy worker does not crash-loop.
-    """
+
+async def run_schema_migrations(pool) -> None:
+    """Run startup DDL, retrying PostgreSQL's transient DDL deadlock."""
+    async with pool.acquire() as conn:
+        await assert_base_schema(conn)
     for attempt in range(3):
         try:
-            await _run_schema_migrations_once(pool)
+            await _run_unified_schema_migrations_once(pool)
             return
         except Exception as exc:
             if exc.__class__.__name__ != "DeadlockDetectedError" or attempt >= 2:
@@ -3180,7 +3181,8 @@ async def _run_schema_migrations_once(pool) -> None:
                        COALESCE((summary_json->>'request_count')::int, 0),
                        COALESCE((summary_json->>'safe_request_count')::int, 0),
                        COALESCE((summary_json->>'state_changing_request_count')::int, 0),
-                       summary_json, is_active, created_at, updated_at
+                       summary_json || jsonb_build_object('legacy_source','device_request_collections'),
+                       is_active, created_at, updated_at
                 FROM device_request_collections
                 ON CONFLICT (id) DO NOTHING
             """)
@@ -5019,6 +5021,14 @@ async def _run_schema_migrations_once(pool) -> None:
             # a failed collision repair cannot leave a half-migrated database.
             async with conn.transaction():
                 await _ensure_target_canonical_key_invariant(conn)
+
+            # Convert the inventory atomically after the baseline schema is current.
+            # Compatibility names become views. Downgrade restores a pre-upgrade backup.
+            async with conn.transaction():
+                from targets.asset_migration import migrate_target_assets
+                from targets.asset_inputs_migration import migrate_asset_inputs
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")
 

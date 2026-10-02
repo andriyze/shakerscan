@@ -248,9 +248,12 @@ def _credential_capabilities(
                 status_code=422,
                 detail=f"capability {name} does not support target kind {target_kind}",
             )
+        ssh_capability = spec.placement_requirements.get('credential_binding') == 'ssh' or spec.name.startswith('device.ssh.')
+        if auth_kind.startswith('ssh_') != ssh_capability:
+            raise HTTPException(status_code=422,detail=f"capability {name} cannot consume {auth_kind} credentials")
         requires_active_elevation = (
             spec.risk_tier in {"active", "mutation"}
-            or spec.required_approval == "active_testing"
+            or spec.required_approval in {"active_testing","network_discovery"}
         )
         if requires_active_elevation and not allow_active:
             raise HTTPException(
@@ -273,6 +276,9 @@ async def credential_capability_catalog(
     ))
     capabilities = []
     for spec in CAPABILITY_REGISTRY.list(target_kind=target_kind):
+        ssh_capability = spec.placement_requirements.get('credential_binding') == 'ssh' or spec.name.startswith('device.ssh.')
+        if auth_kind.startswith('ssh_') != ssh_capability:
+            continue
         if not spec.placement_requirements.get("credentials_resolved_server_side") and not (
             auth_kind.startswith("ssh_") and spec.name.startswith("device.ssh.")
         ):
@@ -283,7 +289,7 @@ async def credential_capability_catalog(
             "risk_tier": spec.risk_tier,
             "requires_active_approval": (
                 spec.risk_tier in {"active", "mutation"}
-                or spec.required_approval == "active_testing"
+                or spec.required_approval in {"active_testing","network_discovery"}
             ),
             "default": spec.name in defaults,
         })
@@ -354,7 +360,10 @@ def _pool(request: Request) -> Any:
 async def _require_target(conn: Any, *, target_kind: str, target_id: uuid.UUID) -> None:
     if target_kind == "device":
         row = await conn.fetchrow(
-            "SELECT id FROM device_targets WHERE id=$1 AND is_active=true", target_id
+            """SELECT id FROM targets WHERE id=$1 AND is_active=true
+               UNION ALL
+               SELECT id FROM device_targets WHERE id=$1 AND is_active=true
+               LIMIT 1""", target_id,
         )
     else:
         row = await conn.fetchrow(
@@ -512,6 +521,13 @@ async def _legacy_device_profile(
     conn: Any, profile: CredentialProfileMetadata,
 ) -> dict[str, Any] | None:
     if profile.target_kind != "device":
+        return None
+    # After conversion this name is a read-only projection of the canonical
+    # profile, so there is no legacy copy to synchronize.
+    if await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        "unified_target_asset_inputs_v1",
+    ):
         return None
     row = await conn.fetchrow(
         """SELECT id, device_target_id, auth_kind, name

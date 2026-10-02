@@ -4,7 +4,7 @@ Use this reference for a deep assessment of a smart TV, connected display, set-t
 
 ## Workflow
 
-1. Read `capability_pack` from the session context or call `inspect_capabilities`.
+1. Read the canonical Hunt manifest and retained target/service context; use `device.capabilities.inspect` when available.
 2. Prefer completed evidence and ready deterministic capabilities.
 3. Explain blocked, planned, sensor-required, lab-only, and not-applicable coverage explicitly.
 4. Select the smallest executable capability that can answer the objective.
@@ -29,7 +29,7 @@ Load detailed guidance only for the selected surface:
 
 ## Executable depth
 
-`ssh-authenticated-host-review` is the first deep capability. Request it through `queue_device_scan.capability_ids` only when the session is `authenticated_active` and an SSH credential profile is already bound. It collects server-owned read-only bundles for:
+`ssh-authenticated-host-review` is the fixed host-review bundle. Request it through `device.scan` with `capability_ids: ["ssh-authenticated-host-review"]` only when the saved Hunt policy, selected SSH credentials and device executor admit it. It collects server-owned read-only bundles for:
 
 - Identity and runtime.
 - Interfaces, routes, and listening sockets.
@@ -43,7 +43,7 @@ The fixed host-review capability never accepts model commands. Outputs are bound
 
 ## User-confirmed SSH shell
 
-`agent-confirmed-ssh-shell` permits model-authored remote-device commands only through `propose_ssh_shell`. ShakerScan binds the immutable plan to the registered device, address generation, SSH port, credential profile, pinned host key, commands, timeout, and expiry. The user must review the exact commands and separately confirm the digest in the UI. Confirmation is single-use; output is bounded, redacted, hashed, and returned without a PTY or forwarded stdin. This authority never applies to the ShakerScan host.
+`device.ssh.propose` creates an immutable remote-device command plan. ShakerScan binds it to the registered device, address generation, SSH port, credential profile, pinned host key, commands, timeout, and expiry. The user reviews the exact commands and separately confirms the digest in the UI before execution. Confirmation is single-use; output is bounded, redacted, hashed, and returned without a PTY or forwarded stdin. This authority never applies to the ShakerScan host.
 
 ## Safety interpretation
 

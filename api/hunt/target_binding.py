@@ -37,6 +37,15 @@ def web_hunt_target(
                 else f"http://{locator}"
             )
     parsed = urllib.parse.urlsplit(target_url)
+    host_asset = parsed.scheme.lower() == "host"
+    if host_asset:
+        if not parsed.hostname or parsed.username or parsed.password or parsed.port or parsed.path or parsed.query or parsed.fragment:
+            raise CapabilityInputError("persisted Hunt host locator is invalid")
+        # The placeholder supplies a parser base, not an observed HTTP service.
+        # HTTP actions still select and validate their same-host service origin.
+        authority = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        target_url = f"http://{authority}"
+        parsed = urllib.parse.urlsplit(target_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise CapabilityInputError("persisted Hunt target URL is invalid")
     root_domain = str(
@@ -47,7 +56,7 @@ def web_hunt_target(
         target_kind=kind,
         canonical_host=parsed.hostname,
         allowed_origins=tuple(target_context.get("origins") or (
-            (f"{parsed.scheme}://{parsed.netloc}",)
+            () if host_asset else (f"{parsed.scheme}://{parsed.netloc}",)
         )),
         allowed_addresses=tuple(
             str(item)

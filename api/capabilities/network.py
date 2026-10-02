@@ -30,12 +30,18 @@ NETWORK_CAPABILITY_ADAPTERS = {
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
     "service.nse_check": lambda: _nse_check_adapter(),
     "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
+    "ssh.connect": lambda: _ssh_connect_adapter(),
 }
 
 
 def _nse_check_adapter():
     from .nse import NseCheckAdapter
     return NseCheckAdapter()
+
+
+def _ssh_connect_adapter():
+    from .ssh import SshConnectAdapter
+    return SshConnectAdapter()
 
 
 def network_capability_adapter(name: str) -> Any:

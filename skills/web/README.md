@@ -1,4 +1,4 @@
-# Hunt web-security skill library
+# Hunt investigation skill library
 
 Testing methodology a Hunt can bind, served by `GET /hunt/skills` and delivered to the planner in
 the run's context pack.
@@ -24,6 +24,20 @@ Skill 31 is the local edge/origin methodology. Skill 32 adds native service/devi
 through the existing library and capabilities; arbitrary protocol exchanges remain an explicit gap.
 The historical `skills/web` installation location now includes this native service methodology;
 its declared target kinds and ID distinguish it from web-interface knowledge.
+
+Skills 33–36 add the executable network baseline and focused smart-TV, camera and router
+assessments. The baseline runs installed Naabu and Nmap through canonical Hunt capabilities;
+the specialist skills reuse it and add management-interface investigation. Their deferred
+techniques describe deeper native protocol, state-changing, sensor or lab work that needs
+additional executors. They do not label ordinary port discovery as an implementation gap.
+
+| Methodology | Use it for |
+|---|---|
+| [33. Network discovery and service assessment](33-network-discovery-and-service-assessment.md) | Hostname/IP listener discovery, fingerprints, TLS and HTTP pivots |
+| [34. Smart TV assessment](34-smart-tv-network-and-application-assessment.md) | TV and media-appliance services, descriptors and management interfaces |
+| [35. Camera assessment](35-camera-network-and-management-assessment.md) | IP cameras, NVRs/DVRs, management authentication and streaming-service evidence |
+| [36. Router assessment](36-router-network-and-management-assessment.md) | Routers, gateways, firewalls and access-point management exposure |
+| [37. Managed SSH assessment](37-managed-ssh-authentication-and-host-review.md) | Stored SSH identities, port 22/custom ports, host-key checks and optional host review |
 
 Frontmatter declares real planner-visible capabilities, missing implementations and advisory
 budget hints. Server-enforced labels describe responsibilities, not planner-callable operations.

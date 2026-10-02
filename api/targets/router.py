@@ -128,7 +128,11 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
 
 
+from .asset_router import router as asset_router, configure_asset_router
+from .skill import router as target_skill_router
 router = APIRouter()
+router.include_router(asset_router)
+router.include_router(target_skill_router)
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -140,6 +144,7 @@ def configure_targets_router(
     """Bind the pool and the collaborators this domain needs."""
     global _pool_provider
     _pool_provider = pool_provider
+    configure_asset_router(pool_provider)
     _deps.update(collaborators)
 
 
@@ -315,7 +320,7 @@ async def list_targets(
                     LIMIT 32
                 ) item
             ) origins ON true
-            WHERE COALESCE(t.discovery_source, 'manual') <> 'model-intake'
+            WHERE COALESCE(t.discovery_source, 'manual') NOT IN ('model-intake','host')
         """
         params = []
         param_idx = 1
@@ -328,7 +333,7 @@ async def list_targets(
 
         rows = await conn.fetch(query, *params)
         total = await conn.fetchval(
-            "SELECT COUNT(*) FROM targets WHERE COALESCE(discovery_source, 'manual') <> 'model-intake'"
+            "SELECT COUNT(*) FROM targets WHERE COALESCE(discovery_source, 'manual') NOT IN ('model-intake','host')"
             + ("" if include_inactive else " AND is_active = true")
         )
 
@@ -433,7 +438,7 @@ async def list_targets_grouped(
         # web targets. Keep the explicit legacy source filter for API clients
         # that need to inspect historical rows during migration.
         if discovery_source != "model-intake":
-            query += " AND COALESCE(t.discovery_source, 'manual') <> 'model-intake'"
+            query += " AND COALESCE(t.discovery_source, 'manual') NOT IN ('model-intake','host')"
 
         if search:
             query += f" AND (t.url ILIKE '%' || ${param_idx} || '%' OR t.name ILIKE '%' || ${param_idx} || '%' OR t.root_domain ILIKE '%' || ${param_idx} || '%')"
@@ -643,7 +648,7 @@ async def list_domains():
             FROM targets
             WHERE root_domain IS NOT NULL AND is_active = true
               AND char_length(btrim(root_domain)) BETWEEN 1 AND 253
-              AND COALESCE(discovery_source, 'manual') <> 'model-intake'
+              AND COALESCE(discovery_source, 'manual') NOT IN ('model-intake','host')
             ORDER BY root_domain
         """)
         ai_rows = await conn.fetch("""
@@ -3238,6 +3243,8 @@ class TargetUpdate(BaseModel):
     def metadata_cannot_bypass_cohort_validation(cls, value: Optional[dict]) -> Optional[dict]:
         if value and "cohort" in value:
             raise ValueError("set cohort through the validated cohort field")
+        if value and "target_skill" in value:
+            raise ValueError("edit target instructions through /targets/{id}/skill with a revision check")
         return value
 
 
@@ -6015,6 +6022,16 @@ def normalize_target_url(target: str) -> tuple[str, str | None]:
 
     # Lowercase host for consistent canonicalization
     host = host.lower()
+    if len(host.rstrip('.')) > 253:
+        raise TargetNormalizationError("Invalid target URL: hostname exceeds 253 characters")
+    try:
+        import ipaddress
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            host = host.encode('idna').decode('ascii')
+        except UnicodeError as exc:
+            raise TargetNormalizationError("Invalid target URL: hostname is not a valid IDN") from exc
     # DNS names are bounded to 253 visible characters. Apart from producing an
     # unusable target, accepting an unbounded host lets one historical row turn
     # lightweight domain-filter responses into multi-megabyte UI payloads.

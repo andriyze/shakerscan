@@ -41,6 +41,7 @@ def test_worker_network_capability_set_is_explicit():
         "service.fingerprint",
         "service.nse_check",
         "subdomains.discover",
+        "ssh.connect",
     }
 
 

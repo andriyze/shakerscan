@@ -567,6 +567,11 @@ def public_hunt_run(
     # needs to see which methodology a hunt was run under without parsing the whole pack.
     bound_skills = (context.get("skills") or {}).get("bound")
     result["skills"] = list(bound_skills) if isinstance(bound_skills, list) else []
+    result["target_skill"] = context.get("target_skill")
+    if not include_context and result["target_skill"] and result["target_skill"].get("skill"):
+        result["target_skill"] = {**result["target_skill"], "skill": {
+            key: value for key, value in result["target_skill"]["skill"].items() if key != "methodology"
+        }}
     # Surface actual normalization beside the effective policy, even without the context pack.
     # Unauthorized privileged work never reaches persistence as a downgraded success.
     started = context.get("hunt_start_contract")

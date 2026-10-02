@@ -58,6 +58,8 @@ def test_inline_hunt_capability_set_is_explicit_and_bounded():
         "findings.update",
         "findings.delete",
         "tls.inspect",
+        "targets.create", "targets.update", "credentials.grant", "collections.bind",
+        "targets.skill.read", "targets.skill.create", "targets.skill.update", "targets.skill.delete",
     }
     assert hunt_capability_lease_seconds({"tool_wall_seconds": 10}) == 90
     assert hunt_capability_lease_seconds({"tool_wall_seconds": 4_000}) == 3_600

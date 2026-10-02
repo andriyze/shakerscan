@@ -52,7 +52,7 @@ export function Modal({
         className={cn('flex max-h-[90vh] w-full flex-col rounded-lg border border-gray-800 bg-gray-900 shadow-xl focus:outline-hidden', SIZES[size])}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-gray-800 p-4">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-gray-800 p-4">
           <h2 id={titleId} className="text-lg font-semibold text-white">{title}</h2>
           <button
             type="button"
@@ -64,7 +64,7 @@ export function Modal({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
-        {footer && <div className="flex justify-end gap-3 border-t border-gray-800 p-4">{footer}</div>}
+        {footer && <div className="flex shrink-0 justify-end gap-3 border-t border-gray-800 p-4">{footer}</div>}
       </div>
     </div>,
     document.body

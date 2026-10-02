@@ -20,6 +20,15 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
     const path = new URL(request.url()).pathname
     const body = request.method() === 'POST' && request.postData() ? request.postDataJSON() : {}
     if (request.method() !== 'GET' && request.method() !== 'OPTIONS') writes.push({ path, body })
+    if (path === '/targets/inventory') return route.fulfill({ json: {
+      targets: deleted ? [] : [{
+        id: targetId, asset_id: targetId, name: null, url: targetUrl, locator: 'target.example.invalid',
+        is_active: true, environment: 'production', connected_device: false, origin_count: 1,
+        service_count: 0, active_findings_count: 1, created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }],
+      total: deleted ? 0 : 1, offset: 0, limit: 50,
+    } })
     if (path === '/targets/grouped') return route.fulfill({ json: {
       domains: deleted ? [] : [{ root_domain: 'example.invalid', root_target: { id: targetId, url: targetUrl,
         root_domain: 'example.invalid', is_root: true, is_active: true, total_scans: 0, active_findings_count: 1 },

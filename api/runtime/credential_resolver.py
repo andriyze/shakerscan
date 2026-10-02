@@ -153,7 +153,15 @@ async def validate_worker_credential_authority(
     if str(item.get("scope_receipt_id") or "") != scope_id:
         raise CredentialResolutionError("credential approval scope changed")
     if str(item.get("target_id") or "") != target.target_id:
-        raise CredentialResolutionError("credential approval target changed")
+        try:
+            from targets.asset_authority import standing_authorization_matches_target
+        except ModuleNotFoundError:
+            from ..targets.asset_authority import standing_authorization_matches_target
+        inherited = standing and await standing_authorization_matches_target(conn,
+            target_id=target.target_id,scope_target_id=item.get("target_id"),
+            approval_receipt_id=approval_uuid)
+        if not inherited:
+            raise CredentialResolutionError("credential approval target changed")
     receipt_action = str(item.get("action_name") or "").strip()
     expected_action = str(action_name or "").strip()
     if not expected_action:

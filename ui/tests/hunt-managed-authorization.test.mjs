@@ -17,7 +17,9 @@ test('a managed deployment that authorizes targets itself is named, not guessed'
 })
 
 test('Hunt reuses stored target authorization for selected credentials too', () => {
-  assert.match(hunt, /target\.authorized_for_active_testing === true/)
+  assert.match(hunt, /getTargetAuthorization\(selectedChoice.id\)/)
+  assert.match(hunt, /authorization\?\.standing/)
+  assert.match(hunt, /authorizedTargetId === selectedChoice.id/)
   assert.match(hunt, /const effectiveAuthorization = authorizationConfirmed \|\| standingAuthorized/)
   assert.match(hunt, /const receiptRequired = privileged && !standingAuthorized/)
   assert.match(hunt, /privileged && !effectiveAuthorization/)

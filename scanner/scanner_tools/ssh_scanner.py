@@ -312,6 +312,7 @@ async def ssh_auth_methods(
     host_review_bundles: list[str] | tuple[str, ...] | None = None,
     expected_host_key_fingerprint: str | None = None,
     shell_plan: dict[str, Any] | None = None,
+    cancel_check: Any = None,
 ) -> dict[str, Any]:
     """
     Check SSH authentication methods using Paramiko.
@@ -377,6 +378,9 @@ async def ssh_auth_methods(
 
         transport = None
         try:
+            if cancel_check and cancel_check():
+                check_result['authentication_error'] = 'cancelled'
+                return check_result
             # Create transport with timeout
             # create_connection supports IPv4, IPv6, and hostnames without
             # forcing the caller to guess an address family.
@@ -385,9 +389,13 @@ async def ssh_auth_methods(
             transport = paramiko.Transport(sock)
             transport.banner_timeout = timeout
             transport.handshake_timeout = timeout
+            transport.auth_timeout = timeout
 
             # Start the transport (performs key exchange)
             transport.connect()
+            if cancel_check and cancel_check():
+                check_result['authentication_error'] = 'cancelled'
+                return check_result
 
             # Get the banner
             check_result["banner"] = transport.remote_version
@@ -448,6 +456,7 @@ async def ssh_auth_methods(
                     enum_transport = paramiko.Transport(enum_sock)
                     enum_transport.banner_timeout = timeout
                     enum_transport.handshake_timeout = timeout
+                    enum_transport.auth_timeout = timeout
                     enum_transport.connect()
                     methods, complete = _enumerate_methods(enum_transport, username)
                     check_result["auth_methods"] = methods
@@ -463,6 +472,10 @@ async def ssh_auth_methods(
                             pass
                 check_result["authentication_attempted"] = True
                 check_result["authentication_method"] = auth_kind
+                if cancel_check and cancel_check():
+                    check_result['authentication_attempted'] = False
+                    check_result['authentication_error'] = 'cancelled'
+                    return check_result
                 try:
                     if auth_kind == "ssh_password":
                         transport.auth_password(username, secret, fallback=False)
