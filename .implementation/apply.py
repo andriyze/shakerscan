@@ -123,3 +123,9 @@ async def start_target_network_scan(target_id: str, request: DeviceScanRequest):
     return await scan_device(str(owner),request)
 '''
     p.write_text(s)
+
+
+# Keep generated release inventories synchronized with the materialized source.
+import subprocess
+subprocess.run(["python3", "scripts/generate_capability_inventory.py"], check=True)
+subprocess.run(["python3", "scripts/generate_install_manifest.py"], check=True)
