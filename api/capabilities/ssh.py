@@ -158,5 +158,6 @@ class SshExecutionAdapter:
         return CapabilityAdapterResult(status=status,observations=tuple(observations),errors=errors,
             actual_budget={'hosts_attempted':int(traffic),'tcp_ports_attempted':int(traffic),
                 'tool_wall_seconds':math.ceil(time.monotonic()-started),
-                'device_fragility_points':values['device_fragility_points'] if traffic else 0},execution_started=traffic,
+                **({'device_fragility_points':values['device_fragility_points'] if traffic else 0}
+                   if values['device_fragility_points'] else {})},execution_started=traffic,
             parser_version='ssh-authentication/v1',redacted_execution=values)

@@ -93,8 +93,11 @@ def test_zero_device_fragility_still_withholds_ssh_for_devices():
 
 @pytest.mark.parametrize('port',[22,2222])
 @pytest.mark.parametrize('kind',['ssh_password','ssh_private_key','ssh_private_key_with_passphrase'])
-def test_worker_uses_encrypted_identity_and_real_shared_paramiko_driver(monkeypatch,port,kind):
+@pytest.mark.parametrize('target_kind',['web','api','network','device'])
+def test_worker_uses_encrypted_identity_and_real_shared_paramiko_driver(monkeypatch,port,kind,target_kind):
     from api.capabilities import ssh as adapter_module
+    from api.hunt.capability_executor import CapabilityExecutionContext, CapabilityExecutor
+    from api.runtime.capability_registry import CAPABILITY_REGISTRY
     calls,events = [],[]
     fake = _fake_paramiko(offered=['password','publickey'])
     monkeypatch.setattr(ssh_scanner,'paramiko',fake,raising=False)
@@ -112,15 +115,24 @@ def test_worker_uses_encrypted_identity_and_real_shared_paramiko_driver(monkeypa
     monkeypatch.setattr(adapter_module,'parse_credential_secret',lambda *_: {'username':'operator','secret':'hidden','secondary_secret':'passphrase'})
     async def revalidate(*args,**kwargs): events.append(('authority',None))
     async def heartbeat(): pass
-    prepared,target,policy = prepare(port)
+    prepared,target,policy = prepare(port,kind=target_kind)
     adapter = SshExecutionAdapter(prepared=prepared,pool=SimpleNamespace(acquire=acquire),
         run={'target_id':TARGET,'device_target_id':None},target=target,policy=policy,
         target_url='host://fixture.test',revalidate=revalidate)
-    result = asyncio.run(adapter.execute(heartbeat=heartbeat,cancelled=lambda: False))
+    result = asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(specification=CAPABILITY_REGISTRY.require('ssh.connect'),
+            target=target,requested_budget={**prepared.estimated_budget,'agent_actions':1,'active_actions':1}),
+        adapter,heartbeat=heartbeat,cancelled=lambda: False))
     assert result.status == 'success', result.errors
+    assert result.actual_budget['active_actions'] == 1
+    assert result.actual_budget['tcp_ports_attempted'] == 1
+    if target_kind == 'device':
+        assert result.actual_budget['device_fragility_points'] == 3
+    else:
+        assert 'device_fragility_points' not in result.actual_budget
     assert calls and all(item == ('192.0.2.10',port) for item in calls)
     assert [e[0] for e in events] == ['authority','authority','load','decrypt']
-    assert events[2][1] == {'profile_id':PROFILE,'target_kind':'network','target_id':str(TARGET),'capability':'ssh.connect'}
+    assert events[2][1] == {'profile_id':PROFILE,'target_kind':target_kind,'target_id':str(TARGET),'capability':'ssh.connect'}
     assert result.observations[0]['authentication_succeeded'] is True
     assert result.observations[0]['connection_closed'] is True
     assert result.observations[0]['commands_executed'] is False
