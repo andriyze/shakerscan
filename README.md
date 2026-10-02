@@ -33,8 +33,9 @@ pulls digest-pinned images. To read it first:
 
 Targets groups root domains with expandable subdomains and keeps discovery on each domain.
 Use **Web** and **IP / network** filters to focus the inventory; an IP with a web service can appear
-in both views while retaining one target identity. Target detail includes **Hunt permissions** to
-delegate metadata work, approve specific shared inputs, and save SSH host trust once.
+in both views while retaining one target identity. Hunt can manage target metadata and instructions
+by default. Target detail includes **Hunt permissions** to disable these edits, approve specific
+shared inputs, and save SSH host trust once.
 
 Then open:
 

@@ -145,6 +145,10 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
             monkeypatch.setattr(asset_actions.request_collection_api,'_pool_provider',lambda:pool)
             run = {'id':uuid.uuid4(),'target_id':home,'device_target_id':home,
                    'target_kind':'device','policy_json':{'active_testing':False}}
+            from targets.hunt_authority import authority_row, save_authority, record_collection_share
+            # An explicit operator opt-out must override both the default and planner flags.
+            await save_authority(conn,await authority_row(conn,home),
+                {'revision':0,'metadata_changes':False},recorded_by='operator:fixture')
             for name in asset_actions.NAMES:
                 assert CAPABILITY_REGISTRY.require(name).target_kinds == frozenset({'web','api','network','device'})
                 if name == 'targets.skill.read':
@@ -152,7 +156,6 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                 expected = 'metadata changes' if name.startswith('targets.') else 'no active'
                 with pytest.raises(HTTPException,match=expected):
                     await asset_actions.execute_asset_action(pool,run,name,{})
-            from targets.hunt_authority import authority_row, save_authority, record_collection_share
             await save_authority(conn,await authority_row(conn,home),
                 {'revision':1,'metadata_changes':True},recorded_by='operator:fixture')
             created = await asset_actions.execute_asset_action(pool,run,'targets.create',

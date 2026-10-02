@@ -23,9 +23,9 @@ operator remedy. Target pages refresh readiness automatically and keep diagnosti
 
 ## Product boundary
 
-Target detail includes **Hunt permissions**. Delegate metadata work once to allow Hunt to create
-targets, rename this asset, and manage its instructions without network-testing permission or
-repeated prompts. Planner confirmation flags cannot create this authority. Instruction edits retain
+Hunt can create targets, rename its asset, and manage its instructions by default, without
+network-testing permission or repeated prompts. Target detail includes **Hunt permissions** to
+disable these edits. Planner confirmation flags cannot override that opt-out or grant sharing. Instruction edits retain
 their author and the previous 20 revisions; each running Hunt keeps its admission snapshot.
 
 Select exact credential profile IDs for one-time sharing and exact collection IDs for revocable

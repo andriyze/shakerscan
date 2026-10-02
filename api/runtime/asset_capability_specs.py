@@ -3,7 +3,7 @@
 MAX_TARGET_SKILL_CHARACTERS = 12_000
 
 def asset_capability_specs(spec, schema, kinds):
-    confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Saved target Hunt permissions govern changes.'}
+    confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; sharing needs saved grants.'}
     identifier = {'type':'string','format':'uuid'}
     revision = {'type':'integer','minimum':0}
     skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
@@ -19,7 +19,7 @@ def asset_capability_specs(spec, schema, kinds):
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
-          'environment':{'type':'string','enum':['production','staging','development','lab']},
+          'environment':{'type':'string','enum':['production','staging','lab','demo','calibration','internal']},
           'port_hints':{'type':'array','maxItems':128,'items':{'type':'integer','minimum':1,'maximum':65535}}},('locator',)),
         ('targets.update','Rename this target or a current service view without changing frozen scope.',
          {'target_id':identifier,'name':{'type':'string','minLength':1,'maxLength':255}},('name',)),
@@ -35,8 +35,8 @@ def asset_capability_specs(spec, schema, kinds):
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
     return (read,) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
-        'operator_intent' if name.startswith('targets.') else 'active_testing',
-        {'tool_wall_seconds':5},{'control_plane':True,'user_confirmation':True},
+        None if name.startswith('targets.') else 'active_testing',
+        {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith('targets.') else {'user_confirmation':True})},
         schema({**properties,'operator_confirmed':confirmed},required=required),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
         for name,description,properties,required in definitions)

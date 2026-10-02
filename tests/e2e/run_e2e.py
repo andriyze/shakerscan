@@ -28,11 +28,13 @@ import urllib.parse
 try:
     from . import harness as H
     from .fixtures import fixtures_server as FX
+    from .network_readiness import wait_network_readiness
 except ImportError:  # run as a plain script: python tests/e2e/run_e2e.py
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import harness as H
     from fixtures import fixtures_server as FX
+    from network_readiness import wait_network_readiness
 
 
 # Full-artifact LFS digest of nex-agi/Nex-N2-mini shard 1 (the artifact that
@@ -480,11 +482,14 @@ def run_platform() -> H.Scorecard:
 
     try:
         devices = H.get("/devices?limit=1")
-        readiness = H.get("/devices/readiness")
+        readiness = wait_network_readiness(lambda: H.get("/devices/readiness"))
+        require_network = os.getenv('SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER', '').lower() == 'true'
         sc.check(
             "P-3 Connected Devices inventory and readiness remain explicit",
             isinstance(devices.get("devices"), list)
             and readiness.get("status") in {"ready", "not_ready", "disabled"}
+            and (not require_network or readiness.get("status") == "ready"
+                 and readiness.get("capable_worker_count", 0) > 0)
             and isinstance(readiness.get("required_worker_tools"), list),
             f"status={readiness.get('status')} total={devices.get('total')}",
         )
@@ -497,24 +502,25 @@ def run_platform() -> H.Scorecard:
         while _time.monotonic() < readiness_deadline:
             workers = H.get("/workers")
             pools = workers.get("pools") or {}
-            # Web DAST, agent-tool, and Model Intake are the always-on execution pools. The device
-            # pool is opt-in capacity behind a Compose profile, so a default stack legitimately
-            # reports it not_ready; enabling or omitting devices must never gate Web DAST readiness.
-            required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+            # The launcher starts a dedicated network pool by default. CI requires it;
+            # an explicitly opted-out installation can still examine the other pools.
+            pool_names = ['web_dast', 'agent_tool', 'model_intake']
+            if os.getenv('SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER', '').lower() == 'true':
+                pool_names.append('device')
+            required_pools = [pools.get(name) or {} for name in pool_names]
             if all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools):
                 break
             _time.sleep(2)
         fleet = health.get("fleet") or H.get("/health").get("fleet") or {}
         pools = workers.get("pools") or {}
-        required_pools = [pools.get(name) or {} for name in ("web_dast", "agent_tool", "model_intake")]
+        required_pools = [pools.get(name) or {} for name in pool_names]
         device_pool = pools.get("device") or {}
         sc.check(
             "P-4 worker pools and Fleet state remain explicit",
             isinstance(workers.get("workers"), list)
             and isinstance(workers.get("stale_count"), int)
             and all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)
-            # The device pool is opt-in capacity; it must be reported with a status but is not
-            # required to be running, so an absent device worker never fails this Web DAST gate.
+            # Report a device-pool state even on an explicitly opted-out installation.
             and isinstance(device_pool.get("status"), str)
             and fleet.get("status") in {
                 "enabled", "ready", "configured", "disabled", "unsupported", "not_ready",

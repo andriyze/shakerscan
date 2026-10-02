@@ -1,4 +1,4 @@
-"""An injected planner cannot manufacture operator sharing or metadata authority."""
+"""Hunt metadata freedom preserves operator opt-outs and exact sharing authority."""
 import asyncio
 import json
 import uuid
@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from hunt.asset_actions import execute_asset_action
 from targets import asset_router, hunt_authority
+from targets.hunt_authority_router import router as hunt_authority_router
 from targets.asset_collections import asset_collection_binding
 from targets.asset_migration import BoundConnectionPool, migrate_target_assets
 from targets.asset_inputs_migration import migrate_asset_inputs
@@ -25,7 +26,7 @@ async def setup(conn, monkeypatch):
     second = await conn.fetchval("INSERT INTO targets(url,discovery_source) VALUES('host://second.test','host') RETURNING id")
     pool = BoundConnectionPool(conn)
     monkeypatch.setattr(asset_router, '_pool_provider', lambda: pool)
-    app = FastAPI(); app.include_router(hunt_authority.router)
+    app = FastAPI(); app.include_router(hunt_authority_router)
     return first, second, pool, app
 
 
@@ -34,12 +35,18 @@ def test_upgrade_rejects_preplanted_authority_and_restart_preserves_operator_del
     async def run():
         async with database() as conn:
             await prepare(conn)
-            fake=json.dumps({'hunt_authority':{'target_url':'host://first.test','metadata_changes':True,'revision':1}})
+            fake=json.dumps({'hunt_authority':{'target_url':'host://first.test','metadata_changes':True,'revision':1,
+                'credential_profile_ids':[str(uuid.uuid4())], 'collection_ids':[str(uuid.uuid4())],
+                'ssh_trust_first_contact':True}})
             target=await conn.fetchval("INSERT INTO device_targets(name,primary_locator,metadata_json) VALUES('Device','first.test',$1) RETURNING id",fake)
             async with conn.transaction():
                 await migrate_target_assets(conn)
                 await migrate_asset_inputs(conn)
-            assert (await hunt_authority.read_hunt_authority(conn,target))['metadata_changes'] is False
+            fresh=await hunt_authority.read_hunt_authority(conn,target)
+            assert fresh['metadata_changes'] is True  # Product default, not pre-upgrade consent.
+            assert fresh['revision'] == 0 and fresh['recorded_by'] is None
+            assert fresh['credential_profile_ids'] == fresh['collection_ids'] == []
+            assert fresh['ssh_trust_first_contact'] is False
             await hunt_authority.save_authority(conn,await hunt_authority.authority_row(conn,target),
                 {'metadata_changes':True,'revision':1},recorded_by='operator:fixture')
             async with conn.transaction(): await migrate_asset_inputs(conn)
@@ -53,15 +60,12 @@ def test_saved_metadata_delegation_supports_passive_hunt_crud_and_revocation(mon
         async with database() as conn:
             first, second, pool, app = await setup(conn, monkeypatch)
             hunt = {'id':uuid.uuid4(), 'target_id':first, 'target_kind':'network', 'policy_json':{}}
-            inputs = {'expected_revision':0,'methodology':'Prioritize services; do not reboot.','operator_confirmed':True}
-            with pytest.raises(HTTPException, match='metadata changes'):
-                await execute_asset_action(pool,hunt,'targets.skill.create',inputs)
+            inputs = {'expected_revision':0,'methodology':'Prioritize services; do not reboot.'}
+            result = await execute_asset_action(pool,hunt,'targets.skill.create',inputs)
+            assert result['skill']['written_by'] == f"hunt:{hunt['id']}"
             path = f'/targets/{first}/hunt-authority'
             async with AsyncClient(transport=ASGITransport(app),base_url='http://operator') as client:
                 assert (await client.put(path,json={'expected_revision':0,'metadata_changes':True})).status_code == 200
-                inputs.pop('operator_confirmed')
-                result = await execute_asset_action(pool,hunt,'targets.skill.create',inputs)
-                assert result['skill']['written_by'] == f"hunt:{hunt['id']}"
                 await execute_asset_action(pool,hunt,'targets.skill.update',{**inputs,'expected_revision':1,'methodology':'Updated priorities'})
                 saved=json.loads(await conn.fetchval('SELECT metadata_json FROM targets WHERE id=$1',first))
                 assert saved['target_skill']['history'][0]['methodology'] == inputs['methodology']

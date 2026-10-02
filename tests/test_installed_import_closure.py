@@ -48,6 +48,7 @@ def test_the_modules_the_audit_named_are_shipped():
     installed = checker.installed_paths()
     assert "api/runtime/json_fields.py" in installed
     assert "api/model_intake_runner_storage.py" in installed
+    assert "api/targets/hunt_authority.py" in installed
 
 
 def test_relative_imports_are_followed():

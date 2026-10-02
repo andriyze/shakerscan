@@ -235,7 +235,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.",
       "name": "targets.skill.create",
-      "required_approval": "operator_intent",
+      "required_approval": null,
       "target_kinds": [
         "api",
         "device",
@@ -256,7 +256,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.",
       "name": "targets.skill.update",
-      "required_approval": "operator_intent",
+      "required_approval": null,
       "target_kinds": [
         "api",
         "device",
@@ -277,7 +277,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.",
       "name": "targets.skill.delete",
-      "required_approval": "operator_intent",
+      "required_approval": null,
       "target_kinds": [
         "api",
         "device",
@@ -298,7 +298,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Register a hostname or IP as a canonical target without testing it.",
       "name": "targets.create",
-      "required_approval": "operator_intent",
+      "required_approval": null,
       "target_kinds": [
         "api",
         "device",
@@ -319,7 +319,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Rename this target or a current service view without changing frozen scope.",
       "name": "targets.update",
-      "required_approval": "operator_intent",
+      "required_approval": null,
       "target_kinds": [
         "api",
         "device",

@@ -20,7 +20,8 @@ def test_passive_hunt_has_all_target_skill_operations_without_network_authority(
         assert not spec.requires_active_approval
         assert spec.hunt_executor == 'inline'
         assert set(spec.budget_cost) == {'tool_wall_seconds'}
-        assert spec.required_approval == (None if operation == 'read' else 'operator_intent')
+        assert spec.required_approval is None
+        assert not spec.placement_requirements.get('user_confirmation')
     assert 'ports.discover' not in names
 
 

@@ -130,7 +130,7 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 from .asset_router import router as asset_router, configure_asset_router
 from .skill import router as target_skill_router
-from .hunt_authority import router as hunt_authority_router
+from .hunt_authority_router import router as hunt_authority_router
 router = APIRouter()
 router.include_router(asset_router)
 router.include_router(target_skill_router)
