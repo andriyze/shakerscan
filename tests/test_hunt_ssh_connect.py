@@ -54,6 +54,37 @@ def test_profile_grant_and_frozen_selection_are_required():
             SshConnectAdapter().prepare(target=target,args={key:'arbitrary'},policy=policy,context={})
 
 
+@pytest.mark.parametrize('kind', ['web', 'api', 'network', 'device'])
+def test_authorized_hunt_manifest_admits_ssh_with_target_appropriate_budget(kind):
+    from api.hunt.contracts import capability_manifest
+    from api.hunt.start_contract import normalize_hunt_start_payload
+    contract = normalize_hunt_start_payload({
+        'schema_version': 'hunt-start/v2', 'target_id': str(TARGET), 'target_kind': kind,
+        'goal': 'Connect with the operator-selected stored SSH identity.', 'budget_profile': 'balanced',
+        'policy': {'network_discovery': True, 'authorization_confirmed': True,
+                   'approval_receipt_id': 'approval'},
+        'credential_refs': {'ssh_credential_profile_id': PROFILE},
+    })
+    manifest = capability_manifest(contract, credentials_available=True)
+    ssh = next(item for item in manifest if item['name'] == 'ssh.connect')
+    assert ssh['budget_cost'].get('device_fragility_points', 0) == (3 if kind == 'device' else 0)
+    assert ssh['budget_cost']['tcp_ports_attempted'] == 1
+
+
+def test_zero_device_fragility_still_withholds_ssh_for_devices():
+    from api.hunt.contracts import capability_manifest
+    from api.hunt.start_contract import normalize_hunt_start_payload
+    contract = normalize_hunt_start_payload({
+        'schema_version': 'hunt-start/v2', 'target_id': str(TARGET), 'target_kind': 'device',
+        'goal': 'No device traffic.', 'budget_profile': 'balanced',
+        'budgets': {'max_device_fragility_points': 0},
+        'policy': {'network_discovery': True, 'authorization_confirmed': True,
+                   'approval_receipt_id': 'approval'},
+        'credential_refs': {'ssh_credential_profile_id': PROFILE},
+    })
+    assert 'ssh.connect' not in {item['name'] for item in capability_manifest(contract, credentials_available=True)}
+
+
 @pytest.mark.parametrize('port',[22,2222])
 @pytest.mark.parametrize('kind',['ssh_password','ssh_private_key','ssh_private_key_with_passphrase'])
 def test_worker_uses_encrypted_identity_and_real_shared_paramiko_driver(monkeypatch,port,kind):

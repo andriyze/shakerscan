@@ -1,14 +1,16 @@
 import { expect, test } from '@playwright/test'
+import { MOCK_API_ORIGIN, pinMockApiOrigin } from './mock-api-origin'
 
 const targetId = '11111111-1111-4111-8111-111111111111'
 const credentialId = '22222222-2222-4222-8222-222222222222'
 
 test('reviewed metadata stays separate from secrets and failed saves preserve input', async ({ page }, testInfo) => {
-  await page.route('http://localhost:8080/**', route => route.fulfill({ json: {} }))
-  await page.route('**/targets?*', route => route.fulfill({ json: { targets: [{
-    id: targetId, url: 'https://fixture.example.test', name: 'Fixture', is_active: true, total_scans: 0,
-  }] } }))
-  await page.route('**/devices?*', route => route.fulfill({ json: { devices: [] } }))
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, route => route.fulfill({ json: {} }))
+  await page.route('**/targets/inventory?*', route => route.fulfill({ json: { targets: [{
+    id: targetId, asset_id: targetId, locator: 'fixture.example.test',
+    url: 'https://fixture.example.test', name: 'Fixture', is_active: true, total_scans: 0,
+  }], total: 1, offset: 0, limit: 500 } }))
   await page.route('**/credential-profiles?*', route => route.fulfill({ json: { profiles: [{
     id: credentialId, target_kind: 'web', target_id: targetId, name: 'Test identity',
     auth_kind: 'bearer_token', principal_slot: 'primary', configuration: {}, is_active: true,
@@ -61,10 +63,12 @@ test('identity validation requires review and reports uncertainty after completi
   let finished = false
   let submitted: any = null
   let approval: any = null
-  await page.route('http://localhost:8080/**', route => route.fulfill({ json: {} }))
-  await page.route('**/targets?*', route => route.fulfill({ json: { targets: [{ id: targetId,
-    url: 'http://fixture.example.test', name: 'Fixture', is_active: true, total_scans: 0 }] } }))
-  await page.route('**/devices?*', route => route.fulfill({ json: { devices: [] } }))
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`, route => route.fulfill({ json: {} }))
+  await page.route('**/targets/inventory?*', route => route.fulfill({ json: { targets: [{ id: targetId,
+    asset_id: targetId, locator: 'fixture.example.test',
+    url: 'http://fixture.example.test', name: 'Fixture', is_active: true, total_scans: 0,
+  }], total: 1, offset: 0, limit: 500 } }))
   await page.route('**/credential-profiles?*', route => route.fulfill({ json: { profiles: [{
     id: credentialId, target_kind: 'web', target_id: targetId, name: 'Test identity',
     auth_kind: 'bearer_token', principal_slot: 'primary', configuration: {}, is_active: true,

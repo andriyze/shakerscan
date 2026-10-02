@@ -26,6 +26,14 @@ _APPROVAL_POLICIES = frozenset({
 })
 
 
+def _target_budget_cost(spec: CapabilitySpec, target_kind: str) -> dict[str, int]:
+    """Device fragility applies to device traffic, not other views of an asset."""
+    return {
+        dimension: int(amount) for dimension, amount in spec.budget_cost.items()
+        if dimension != "device_fragility_points" or target_kind == "device"
+    }
+
+
 def capability_is_allowed(
     spec: CapabilitySpec,
     contract: HuntStartContract,
@@ -71,7 +79,7 @@ def capability_is_allowed(
         return False
     if any(
         int(amount) > 0 and int(ledger_limits.get(dimension, 0)) == 0
-        for dimension, amount in spec.budget_cost.items()
+        for dimension, amount in _target_budget_cost(spec, contract.target_kind).items()
     ):
         return False
     return True
@@ -121,7 +129,7 @@ def capability_manifest(
         credentials_available=credentials_available,
     ))
     return [
-        spec.planner_contract()
+        {**spec.planner_contract(), "budget_cost": _target_budget_cost(spec, contract.target_kind)}
         for spec in CAPABILITY_REGISTRY.list(
             target_kind=contract.target_kind,
             include_active=True,
