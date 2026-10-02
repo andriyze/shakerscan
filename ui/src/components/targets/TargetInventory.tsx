@@ -20,6 +20,7 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
   const [assets, setAssets] = useState<TargetAsset[]>([])
   const [groups, setGroups] = useState<TargetAssetGroup[]>([])
   const [totalGroups, setTotalGroups] = useState(0)
+  const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set())
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -77,7 +78,15 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
       <span className="ml-auto text-sm text-gray-400">{loading ? 'Loading…' : `${total} target${total === 1 ? '' : 's'} · ${totalGroups} domain / host group${totalGroups === 1 ? '' : 's'}`}</span>
     </Card>
     {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
-    {loading ? <CardSkeleton count={3} /> : assets.length === 0 ? <EmptyState message="No targets" hint="Add a domain, hostname, IP address, or application URL." /> : <TargetHierarchy groups={groups} searching={Boolean(search.trim())} renderAsset={(asset) => <tr key={asset.id} data-testid="target-asset-row">
+    {loading && assets.length === 0 ? <CardSkeleton count={3} /> : assets.length === 0 ? <EmptyState message="No targets" hint="Add a domain, hostname, IP address, or application URL." /> : <TargetHierarchy groups={groups} searching={Boolean(search.trim())} expanded={expandedDomains} onToggle={domain => setExpandedDomains(current => {
+      const next = new Set(current)
+      if (next.has(domain)) next.delete(domain)
+      else next.add(domain)
+      return next
+    })} onDiscoverySettled={domain => {
+      setExpandedDomains(current => new Set(current).add(domain))
+      setRefreshVersion(value => value + 1)
+    }} renderAsset={(asset) => <tr key={asset.id} data-testid="target-asset-row">
         <td className="px-4 py-4"><Link href={`/targets/${asset.id}/asset`} className="font-medium text-white hover:text-blue-300">{asset.name || asset.locator}</Link><div className="mt-1 break-all font-mono text-xs text-gray-500">{asset.locator}</div><div className="mt-1 text-xs text-gray-500">{asset.environment}{asset.is_active ? '' : ' · retired'}{asset.connected_device ? ` · ${asset.device_class || 'connected device'}` : ''}</div></td>
         <td className="px-4 py-4 text-gray-300">{asset.origin_count ?? 0}</td>
         <td className="px-4 py-4 text-gray-300">{asset.service_count ?? 0}</td>

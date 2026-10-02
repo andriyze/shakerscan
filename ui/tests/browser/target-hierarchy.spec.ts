@@ -25,6 +25,8 @@ test('HIERARCHY-001 root domains expand to subdomains while IPv4 and IPv6 stay i
   })
   await page.goto('/targets')
   await expect(page.getByTestId('target-domain-group')).toHaveCount(3)
+  await expect(page.getByRole('button',{name:'Discover subdomains of example.test',exact:true})).toBeVisible()
+  await expect(page.getByRole('button',{name:/Discover subdomains of (192|2001)/})).toHaveCount(0)
   const domain = page.getByRole('button',{name:'Subdomains of example.test',exact:true})
   await expect(domain).toHaveAttribute('aria-expanded','false')
   await expect(page.getByRole('link',{name:'api.example.test',exact:true})).toHaveCount(0)
@@ -67,3 +69,50 @@ for (const locator of ['new.example.test','192.0.2.40','2001:db8::40']) {
     expect(submitted).toMatchObject({locator,port_hints:[22,8443]})
   })
 }
+
+test('HIERARCHY-003 root-domain discovery tracks completion and reveals new canonical targets', async ({page}) => {
+  await pinMockApiOrigin(page)
+  let completed = false
+  const submitted: string[] = []
+  const found = {...targets[1],id:'00000000-0000-4000-8000-000000000499',locator:'new.example.test',name:'new.example.test'}
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
+    const request=route.request(),url=new URL(request.url())
+    if (url.pathname === '/discovery' && request.method() === 'POST') {
+      submitted.push(url.searchParams.get('root_domain') || '')
+      return route.fulfill({json:{discovery_id:'discovery-fixture',status:'pending'}})
+    }
+    if (url.pathname === '/discovery/discovery-fixture') {
+      completed=true
+      return route.fulfill({json:{id:'discovery-fixture',root_domain:'example.test',status:'completed',subdomains_found:1,new_subdomains:1,resolution:{added:1,unresolved_count:0}}})
+    }
+    if (url.pathname === '/targets/inventory') {
+      const members = completed ? [targets[0],targets[1],found] : [targets[0],targets[1]]
+      return route.fulfill({json:{targets:members,groups:[{root_domain:'example.test',targets:members}],total:members.length,total_groups:1}})
+    }
+    return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
+  })
+  await page.goto('/targets')
+  const discover=page.getByRole('button',{name:'Discover subdomains of example.test',exact:true})
+  await discover.click()
+  await expect(discover).toBeDisabled()
+  await expect(page.getByText(/Subdomain discovery started for example.test/)).toBeVisible()
+  await expect(page.getByRole('link',{name:'new.example.test',exact:true})).toBeVisible({timeout:10_000})
+  await expect(page.getByText(/1 new target added/)).toBeVisible()
+  await expect(discover).toBeEnabled()
+  expect(submitted).toEqual(['example.test'])
+})
+
+test('HIERARCHY-004 discovery refusal reports the server reason and re-enables the root action', async ({page}) => {
+  await pinMockApiOrigin(page)
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route => {
+    const url=new URL(route.request().url())
+    if (url.pathname === '/discovery') return route.fulfill({status:403,json:{detail:'Discovery is disabled by the operator'}})
+    if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[targets[0]],groups:[{root_domain:'example.test',targets:[targets[0]]}],total:1,total_groups:1}})
+    return route.fulfill({json:{status:'healthy',skill:null,revision:0,targets:[],total:0}})
+  })
+  await page.goto('/targets')
+  const discover=page.getByRole('button',{name:'Discover subdomains of example.test',exact:true})
+  await discover.click()
+  await expect(page.getByText('Discovery is disabled by the operator',{exact:true})).toBeVisible()
+  await expect(discover).toBeEnabled()
+})
