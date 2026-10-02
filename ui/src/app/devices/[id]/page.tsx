@@ -2,12 +2,13 @@
 
 import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
+import { DevicePortCoverage } from '@/components/DevicePortCoverage'
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useRouter } from 'next/navigation'
 import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJson, Globe, KeyRound, MapPin, Pencil, Router, Trash2, Upload, Wifi, WifiOff } from 'lucide-react'
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
-import { deviceReachabilityServiceSummary, deviceScorePresentation, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { devicePortCoverage, deviceReachabilityServiceSummary, deviceScorePresentation, deviceServiceDetails, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -49,6 +50,8 @@ function scanServices(scan: Scan | null, collection: 'services' | 'inconclusive_
       service_name: String(row.service_name || 'unknown'),
       product: row.product ? String(row.product) : null,
       version: row.version ? String(row.version) : null,
+      extra_info: row.extra_info ? String(row.extra_info) : null,
+      tunnel: row.tunnel ? String(row.tunnel) : null,
       cpe: row.cpe ? String(row.cpe) : null,
       encrypted: typeof row.encrypted === 'boolean' ? row.encrypted : null,
       web_origin: row.web_origin ? String(row.web_origin) : null,
@@ -330,6 +333,7 @@ function DeviceDetailContent() {
       ? `${storedPosturePresentation.grade} · ${storedPosturePresentation.score ?? '—'}`
       : 'Not scanned'
   const exactScanServices = selectedScanId ? scanServices(selectedScan, 'services', 'open') : []
+  const portCoverage = selectedScanId ? devicePortCoverage(selectedScan) : null
   const visibleServices = selectedScanId ? exactScanServices : services
   const visibleServiceKeys = new Set(visibleServices.map(serviceKey))
   const previouslyObservedServices = selectedScan
@@ -458,6 +462,8 @@ function DeviceDetailContent() {
         )}
       </Card>
 
+      {portCoverage && <DevicePortCoverage coverage={portCoverage} />}
+
       {selectedScanId && (
         <section className="mb-6">
           <div className="mb-3 flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-lg font-semibold text-white">Device API surface</h2><p className="text-sm text-gray-500">Protocol-aware checks selected from confirmed ports and device evidence—not a generic web wordlist.</p></div>{applicationSurface && <span className="rounded-sm bg-violet-500/10 px-2.5 py-1 text-xs text-violet-200">Catalog {String(applicationSurface.catalog_version || 'built in')}</span>}</div>
@@ -494,8 +500,16 @@ function DeviceDetailContent() {
         <h2 className="mb-1 text-lg font-semibold text-white">{selectedScanId ? 'Open-port details for this scan' : 'Known open-port details'}</h2>
         <p className="mb-3 text-sm text-gray-500">Confirmed responses only. Silent or ambiguous probes are never shown as open.</p>
         {visibleServices.length === 0 ? <EmptyState message="No confirmed open ports" hint={selectedScanId ? 'This scan has not confirmed a listening service.' : 'Run a device scan to inventory listening TCP and UDP services.'} /> : (
-          <div className="overflow-hidden rounded-lg border border-gray-800"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Open port</th><th className="px-4 py-3">Service</th><th className="px-4 py-3">Product</th><th className="px-4 py-3">Policy</th><th className="px-4 py-3">Web interface</th><th className="px-4 py-3">Confirmed</th></tr></thead><tbody className="divide-y divide-gray-800 bg-gray-950/50">{visibleServices.map((service) => (
-            <tr key={service.id}><td className="px-4 py-3 font-mono text-gray-200">{service.port}/{service.transport}</td><td className="px-4 py-3 text-white">{service.service_name}</td><td className="px-4 py-3 text-gray-400">{[service.product, service.version].filter(Boolean).join(' ') || '—'}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ${policyBadgeClass[service.policy_disposition || ''] || 'bg-gray-700 text-gray-300'}`}>{service.policy_disposition || 'unreviewed'}</span></td><td className="px-4 py-3">{service.web_origin ? <a href={service.web_origin} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-300 hover:text-blue-200"><Globe className="h-3.5 w-3.5" /> {service.web_origin}</a> : <span className="text-gray-600">—</span>}</td><td className="px-4 py-3 text-xs text-gray-500">{formatDate(service.last_seen_at)}</td></tr>
+          <div className="overflow-hidden rounded-lg border border-gray-800"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-900 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">Open port</th><th className="px-4 py-3">Service</th><th className="px-4 py-3">Product and version</th><th className="px-4 py-3">Policy</th><th className="px-4 py-3">Web interface</th><th className="px-4 py-3">Confirmed</th></tr></thead><tbody className="divide-y divide-gray-800 bg-gray-950/50">{visibleServices.map((service) => (
+            <tr key={service.id}><td className="px-4 py-3 font-mono text-gray-200">{service.port}/{service.transport}</td><td className="px-4 py-3 text-white">{service.service_name}</td><td className="px-4 py-3">{(() => {
+              const details = deviceServiceDetails(service)
+              return <>
+                <span className={details.productVersion ? 'text-gray-200' : 'text-gray-500'}>{details.productVersion || (details.unidentified ? 'Not identified' : '—')}</span>
+                {details.tls && <span className="ml-2 rounded-sm bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-200">TLS</span>}
+                {details.extraInfo && <span className="block text-xs text-gray-500">{details.extraInfo}</span>}
+                {details.cpe && <span className="block font-mono text-xs text-gray-600">{details.cpe}</span>}
+              </>
+            })()}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ${policyBadgeClass[service.policy_disposition || ''] || 'bg-gray-700 text-gray-300'}`}>{service.policy_disposition || 'unreviewed'}</span></td><td className="px-4 py-3">{service.web_origin ? <a href={service.web_origin} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-300 hover:text-blue-200"><Globe className="h-3.5 w-3.5" /> {service.web_origin}</a> : <span className="text-gray-600">—</span>}</td><td className="px-4 py-3 text-xs text-gray-500">{formatDate(service.last_seen_at)}</td></tr>
           ))}</tbody></table></div></div>
         )}
       </section>

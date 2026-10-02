@@ -194,3 +194,5 @@ export function deviceReachabilityServiceSummary({ serviceAccessible, selectedSc
   }
   return 'latest check found no currently responding TCP service with complete visibility'
 }
+
+export { devicePortCoverage, deviceServiceDetails } from './networkScanCoverage.mjs'
