@@ -480,8 +480,11 @@ def _http_principal_schema(
     return _schema(merged, required=required)
 
 
+from .asset_capability_specs import asset_capability_specs
+
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
+        *asset_capability_specs(CapabilitySpec, _schema, _HTTP_TARGETS),
         CapabilitySpec(
             "scan.finalize",
             "Build one deterministic report from immutable action receipts and manifests.",
@@ -1109,7 +1112,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             arsenal_status="gated", hunt_executor="worker_network",
         ),
         CapabilitySpec(
-            "ports.discover", "Bounded connection-based TCP port discovery.",
+            "ports.discover", "Run built-in Naabu for bounded connection-based TCP port discovery.",
             "network_tcp", "active", _NETWORK_TARGETS, "naabu", "1",
             "network_discovery", {
                 "hosts_attempted": _NETWORK_ADDRESS_GRANT,
@@ -1533,7 +1536,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.inspect", "Inspect redacted request collections bound to this Hunt.",
-            "internal", "read_only", frozenset({"web", "api", "device"}),
+            "internal", "read_only", _HTTP_TARGETS,
             "collections.inspect", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True}, _schema(),
             "request-collection-index/v2", ("request_collection_observation",),
             hunt_executor="inline",
@@ -1541,7 +1544,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.create",
             "Create one evidence-linked, explicitly unverified finding owned by this Hunt.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.create", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1576,7 +1579,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.update",
             "Update metadata or triage state on a finding created by this Hunt without changing proof state.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.update", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1612,7 +1615,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "findings.delete",
             "Delete one finding created by this Hunt after an explicit confirmation flag.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "findings.delete", "1", "active_testing",
             {"tool_wall_seconds": 5},
             {
@@ -1638,7 +1641,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         CapabilitySpec(
             "candidate.verify",
             "Run one server-owned deterministic verifier for a candidate produced by this Hunt.",
-            "internal", "active", frozenset({"web", "api", "device"}),
+            "internal", "active", _HTTP_TARGETS,
             "candidate.deterministic_verifier", "1", "active_testing",
             {"tool_wall_seconds": 180},
             {
@@ -1660,7 +1663,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "collections.select", "Select a bounded redacted request subset from a bound collection.",
-            "internal", "read_only", frozenset({"web", "api", "device"}),
+            "internal", "read_only", _HTTP_TARGETS,
             "collections.select", "1", None, {"tool_wall_seconds": 5}, {"control_plane": True},
             _schema({"collection_id": {"type": "string"}, "request_ids": {"type": "array"},
                      "methods": {"type": "array"}, "path_regex": {"type": "string"},

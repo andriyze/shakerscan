@@ -6,20 +6,12 @@ INPUTS_SCHEMA_SQL = r"""
 ALTER TABLE credential_profiles ADD COLUMN IF NOT EXISTS service_port INTEGER
     CHECK (service_port BETWEEN 1 AND 65535);
 
--- Prefer an explicit consumer grant, including a revoked grant, over inheritance.
--- Inheritance uses recorded, current asset membership, never DNS/IP coincidence.
+-- Visibility uses the same exact consumer grant as worker secret resolution.
 CREATE OR REPLACE FUNCTION target_credential_grant(profile uuid, consumer uuid)
 RETURNS SETOF credential_profile_bindings LANGUAGE sql STABLE AS $$
     SELECT b.* FROM credential_profiles p JOIN credential_profile_bindings b
       ON b.profile_id=p.id AND b.binding_kind='target'
-    WHERE p.id=profile AND (
-        b.binding_id=consumer::text
-        OR b.binding_id=target_asset_access_owner(consumer)::text
-        OR (target_asset_access_owner(p.target_id)=target_asset_access_owner(consumer)
-            AND b.binding_id=p.target_id::text)
-    )
-    ORDER BY CASE WHEN b.binding_id=consumer::text THEN 0
-                  WHEN b.binding_id=target_asset_access_owner(consumer)::text THEN 1 ELSE 2 END
+    WHERE p.id=profile AND b.binding_id=consumer::text
     LIMIT 1
 $$;
 

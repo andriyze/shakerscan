@@ -81,6 +81,10 @@ def test_device_input_migration_keeps_ids_and_one_ciphertext_source(monkeypatch)
             assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,origin) is True
             assert await conn.fetchval('SELECT port FROM device_credential_profiles WHERE id=$1 AND device_target_id=$2',credential,device) == 2222
             store = PostgresCredentialProfileStore()
+            with pytest.raises(CredentialStoreError):
+                await store.load_for_worker(conn,profile_id=credential,target_kind='network',target_id=origin,capability='device.ssh.propose')
+            await store.grant_profile(conn,profile_id=credential,target_kind='network',target_id=origin,
+                                      granted_by='fixture operator',now=datetime.now(timezone.utc))
             resolved = await store.load_for_worker(conn,profile_id=credential,target_kind='network',target_id=origin,capability='device.ssh.propose')
             material = parse_credential_secret(resolved.metadata.auth_kind,secret_store.decrypt_secret(resolved.encrypted_secret))
             assert material['secret'] == 'fixture-secret'
@@ -105,7 +109,7 @@ def test_device_input_migration_keeps_ids_and_one_ciphertext_source(monkeypatch)
     asyncio.run(run())
 
 
-def test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries(monkeypatch):
+def test_exact_grants_do_not_inherit_or_override_revocation(monkeypatch):
     secret_store = encryption(monkeypatch)
     async def run():
         async with database() as conn:
@@ -123,12 +127,15 @@ def test_inherited_grants_do_not_override_revocation_or_cross_asset_boundaries(m
                     principal_slot='primary',principal_label=None,configuration=public_credential_configuration(json.loads(encoded)),
                     encrypted_secret=secret_store.encrypt_secret(encoded),encrypted_metadata=secret_store.encrypt_secret('{}'),
                     expires_at=None,allowed_capabilities=['http.request'],now=datetime.now(timezone.utc))
-            assert await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
+            assert not await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
+            assert await conn.fetchval('SELECT count(*) FROM target_credential_grant($1,$2)',uuid.UUID(profile.profile_id),origin) == 0
             assert not await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=other)
             with pytest.raises(CredentialStoreError):
                 await store.load_for_worker(conn,profile_id=profile.profile_id,target_kind='web',target_id=other,capability='http.request')
-            await conn.execute("""INSERT INTO credential_profile_bindings(id,profile_id,binding_kind,binding_id,is_active,revoked_at,created_at,updated_at)
-                VALUES($1,$2,'target',$3,false,NOW(),NOW(),NOW())""",uuid.uuid4(),uuid.UUID(profile.profile_id),str(origin))
+            await store.grant_profile(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin,
+                                      granted_by='fixture operator',now=datetime.now(timezone.utc))
+            assert await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
+            await store.revoke_grant(conn,profile_id=profile.profile_id,target_id=origin,now=datetime.now(timezone.utc))
             assert not await store.has_active_grant(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin)
             assert await store.list_profiles(conn,target_kind='web',target_id=origin) == []
             with pytest.raises(CredentialStoreError):

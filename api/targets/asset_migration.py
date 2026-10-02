@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import ipaddress
+import json
 import re
 from typing import Any
 import urllib.parse
@@ -148,10 +149,15 @@ async def migrate_target_assets(conn: Any) -> None:
         locator = locator_from_url(host_url(str(device["primary_locator"])))
         if locator is None:
             raise RuntimeError("stored device locator is invalid; migration rolled back")
+        metadata = device["metadata_json"] or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        metadata = {**metadata, "environment": device["environment"],
+                    "cohort": metadata.get("cohort") or device["environment"]}
         await conn.execute("""
             INSERT INTO targets(id,url,name,discovery_source,metadata_json,is_active,created_at,updated_at)
             VALUES($1,$2,$3,'host',$4,$5,$6,$7)
-        """, device["id"], host_url(locator), device["name"], device["metadata_json"],
+        """, device["id"], host_url(locator), device["name"], json.dumps(metadata),
             device["is_active"], device["created_at"], device["updated_at"])
     await conn.execute("""
         INSERT INTO target_device_profiles (

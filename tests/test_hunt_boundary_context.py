@@ -256,11 +256,12 @@ async def test_reference_cap_is_visible_not_a_silent_complete_result():
 
 
 @pytest.mark.asyncio
-async def test_device_candidate_remains_bound_to_device_identity():
+@pytest.mark.parametrize('canonical', [None, TARGET])
+async def test_device_candidate_remains_bound_to_device_identity(canonical):
     db = DB()
-    db.db.execute("UPDATE investigation_candidates SET plane='device',target_id=NULL,device_target_id=?", (TARGET,))
-    db.db.execute("UPDATE http_transactions SET target_id=NULL,device_target_id=?", (TARGET,))
-    result = await inspect(db, run={**RUN, "target_id": None, "device_target_id": TARGET})
+    db.db.execute("UPDATE investigation_candidates SET plane='device',target_id=?,device_target_id=?", (canonical, TARGET))
+    db.db.execute("UPDATE http_transactions SET target_id=?,device_target_id=?", (canonical, TARGET))
+    result = await inspect(db, run={**RUN, "target_id": canonical, "device_target_id": TARGET})
     assert result["evidence"]["complete_for_inspected_references"] is True
     with pytest.raises(BoundaryContextError, match="candidate_not_found"):
         await inspect(db, run=RUN)

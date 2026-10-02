@@ -10,7 +10,7 @@ import uuid
 
 from .service_actions import canonical_registry
 from .service_intel import load_service_intelligence
-from .service_store import service_page
+from .asset_service_page import service_page
 
 
 async def query_service_knowledge(conn: Any, *, target_id: Any, device: bool,

@@ -11,11 +11,12 @@ import urllib.parse
 
 
 WEB_ASSET_KINDS = frozenset({"web", "api", "network"})
+PHYSICAL_ASSET_KINDS = WEB_ASSET_KINDS | {"device"}
 
 
 def target_kinds_share_asset(left: str, right: str) -> bool:
-    """Web/API/network share execution semantics; device credentials remain protocol-specific."""
-    return left == right or (left in WEB_ASSET_KINDS and right in WEB_ASSET_KINDS)
+    """Physical target views share explicitly granted inputs; protocol checks remain separate."""
+    return left == right or (left in PHYSICAL_ASSET_KINDS and right in PHYSICAL_ASSET_KINDS)
 
 
 @dataclass(frozen=True)

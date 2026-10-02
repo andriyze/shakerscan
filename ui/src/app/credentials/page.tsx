@@ -263,7 +263,7 @@ function CredentialsContent() {
 
   useEffect(() => {
     let cancelled = false
-    getAllTargetAssets()
+    getAllTargetAssets(undefined, true)
       .then((items) => {
         if (!cancelled) setAssets(items)
       })

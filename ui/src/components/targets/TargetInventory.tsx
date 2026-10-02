@@ -21,7 +21,7 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
   const [error, setError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
-  const [draft, setDraft] = useState({locator:'',name:'',environment:'production',authorized:false,approvedBy:'operator'})
+  const [draft, setDraft] = useState({locator:'',name:'',ports:'',environment:'production',authorized:false,approvedBy:'operator'})
   const [formError, setFormError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
 
@@ -41,8 +41,11 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
   async function add(event: FormEvent) {
     event.preventDefault(); setBusy('add'); setFormError(null)
     try {
+      const parts = draft.ports.trim() ? draft.ports.split(',').map(value => value.trim()) : []
+      if (parts.length > 128 || parts.some(value => !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535)) throw new Error('Enter up to 128 TCP ports, from 1 to 65535, separated by commas')
       const id = await registerTargetAsset({locator:draft.locator,name:draft.name.trim() || undefined,
-        environment:draft.environment,approvedBy:draft.authorized ? draft.approvedBy.trim() : undefined})
+        environment:draft.environment,approvedBy:draft.authorized ? draft.approvedBy.trim() : undefined,
+        portHints:[...new Set(parts.map(Number))]})
       router.push(`/targets/${id}/asset`)
     } catch (cause) { setFormError(cause instanceof Error ? cause.message : 'Could not add target') }
     finally { setBusy(null) }
@@ -79,6 +82,7 @@ export function TargetInventory({ domainView }: {domainView: ReactNode}) {
     <Modal open={adding} title="Add target asset" onClose={() => {if (busy !== 'add') setAdding(false)}}><form onSubmit={(event) => void add(event)} className="space-y-4">
       <Field label="Hostname, IP address, or application URL"><Input required value={draft.locator} onChange={(event) => setDraft({...draft,locator:event.target.value})} placeholder="device.local or https://app.example.com:8443" /></Field>
       <Field label="Name"><Input value={draft.name} onChange={(event) => setDraft({...draft,name:event.target.value})} /></Field>
+      {!/^https?:\/\//i.test(draft.locator.trim()) && <Field label="Known TCP ports (optional)" hint="Ports to include in network scans; these are hints, not discovered services."><Input value={draft.ports} onChange={(event) => setDraft({...draft,ports:event.target.value})} placeholder="8008, 8009, 8060" /></Field>}
       <Field label="Environment"><Select value={draft.environment} onChange={(event) => setDraft({...draft,environment:event.target.value})}><option value="production">Production</option><option value="staging">Staging</option><option value="lab">Lab</option></Select></Field>
       <label className="flex items-start gap-2 text-sm text-gray-300"><input className="mt-1" type="checkbox" checked={draft.authorized} onChange={(event) => setDraft({...draft,authorized:event.target.checked})} /><span>I am authorized to test this asset and its services. Record one standing authorization for subsequent scans and Hunts.</span></label>
       {draft.authorized && <Field label="Approved by"><Input required value={draft.approvedBy} onChange={(event) => setDraft({...draft,approvedBy:event.target.value})} /></Field>}

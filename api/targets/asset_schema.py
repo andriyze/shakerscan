@@ -68,10 +68,11 @@ $$;
 """
 
 ASSET_VIEW_SQL = r"""
-CREATE VIEW device_targets AS
+CREATE OR REPLACE VIEW device_targets AS
 SELECT t.id, t.name, target_asset_locator(t.url) AS primary_locator,
        p.device_class, p.manufacturer, p.model, p.firmware_version,
-       p.stable_identity, p.identity_confidence, p.environment, p.policy_id,
+       p.stable_identity, p.identity_confidence,
+       COALESCE(t.metadata_json->>'environment',t.metadata_json->>'cohort',p.environment) AS environment, p.policy_id,
        p.sensor_affinity, t.metadata_json, p.last_scanned_at, p.last_scan_id,
        p.last_score, p.last_grade, p.active_findings_count, p.locator_generation,
        t.is_active, t.created_at, GREATEST(t.updated_at, p.updated_at) AS updated_at
@@ -94,7 +95,10 @@ BEGIN
         END IF;
         INSERT INTO targets (id,url,name,discovery_source,metadata_json,is_active,created_at,updated_at)
         VALUES (COALESCE(owner_id,NEW.id,gen_random_uuid()),target_asset_url(locator),COALESCE(NEW.name,locator),
-                'host',COALESCE(NEW.metadata_json,'{}'::jsonb),COALESCE(NEW.is_active,true),NOW(),NOW())
+                'host',COALESCE(NEW.metadata_json,'{}'::jsonb) || jsonb_build_object(
+                    'environment',COALESCE(NEW.environment,'production'),
+                    'cohort',COALESCE(NEW.metadata_json->>'cohort',NEW.environment,'production')),
+                COALESCE(NEW.is_active,true),NOW(),NOW())
         ON CONFLICT (canonical_key) DO UPDATE SET
             name=EXCLUDED.name, metadata_json=targets.metadata_json || EXCLUDED.metadata_json,
             is_active=EXCLUDED.is_active,updated_at=NOW()
@@ -109,7 +113,8 @@ BEGIN
             COALESCE(NEW.locator_generation,1));
     ELSE
         IF NEW.id <> OLD.id THEN RAISE EXCEPTION 'target identity is immutable' USING ERRCODE='22023'; END IF;
-        UPDATE targets SET name=NEW.name,url=target_asset_url(locator),metadata_json=NEW.metadata_json,
+        UPDATE targets SET name=NEW.name,url=target_asset_url(locator),
+            metadata_json=COALESCE(NEW.metadata_json,'{}'::jsonb) || jsonb_build_object('environment',NEW.environment),
             is_active=NEW.is_active,updated_at=NOW() WHERE id=OLD.id RETURNING * INTO saved;
         UPDATE target_device_profiles SET device_class=NEW.device_class,manufacturer=NEW.manufacturer,
             model=NEW.model,firmware_version=NEW.firmware_version,stable_identity=NEW.stable_identity,
@@ -121,7 +126,7 @@ BEGIN
     SELECT * INTO NEW FROM device_targets WHERE id=saved.id;
     RETURN NEW;
 END $$;
-CREATE TRIGGER device_target_compatibility_write
+CREATE OR REPLACE TRIGGER device_target_compatibility_write
 INSTEAD OF INSERT OR UPDATE OR DELETE ON device_targets
 FOR EACH ROW EXECUTE FUNCTION write_device_target_view();
 
@@ -140,7 +145,7 @@ BEGIN
     UPDATE targets SET asset_owner_id=owner_id WHERE id=NEW.id AND asset_owner_id IS DISTINCT FROM owner_id;
     RETURN NEW;
 END $$;
-CREATE TRIGGER target_asset_membership
+CREATE OR REPLACE TRIGGER target_asset_membership
 AFTER INSERT OR UPDATE OF url ON targets
 FOR EACH ROW EXECUTE FUNCTION attach_target_asset_owner();
 
@@ -170,7 +175,7 @@ BEGIN
     ON CONFLICT(canonical_key) DO NOTHING;
     RETURN NEW;
 END $$;
-CREATE TRIGGER device_service_asset_origin
+CREATE OR REPLACE TRIGGER device_service_asset_origin
 AFTER INSERT OR UPDATE OF web_origin ON device_services
 FOR EACH ROW EXECUTE FUNCTION link_device_service_origin();
 """

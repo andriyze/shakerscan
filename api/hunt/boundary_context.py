@@ -51,7 +51,7 @@ SELECT c.id, c.family, c.status, c.canonical_locus
 FROM investigation_candidates c
 WHERE c.id=$1::uuid
   AND ((c.target_id=$3::uuid AND c.device_target_id IS NULL AND c.plane='web')
-    OR (c.device_target_id=$4::uuid AND c.target_id IS NULL AND c.plane='device'))
+    OR (c.device_target_id=$4::uuid AND (c.target_id IS NULL OR c.target_id=$4::uuid) AND c.plane='device'))
   AND EXISTS (
     SELECT 1 FROM investigation_candidate_observations o
     WHERE o.candidate_id=c.id AND o.hunt_run_id=$2::uuid
@@ -77,7 +77,7 @@ FROM http_transactions t
 WHERE t.id=ANY($1::uuid[]) AND t.hunt_run_id=$2::uuid
   AND t.plane='hunt' AND t.scan_id IS NULL
   AND ((t.target_id=$3::uuid AND t.device_target_id IS NULL)
-    OR (t.device_target_id=$4::uuid AND t.target_id IS NULL))
+    OR (t.device_target_id=$4::uuid AND (t.target_id IS NULL OR t.target_id=$4::uuid)))
 """
 
 
@@ -152,7 +152,7 @@ async def inspect_candidate_boundary_context(
     hunt_id, candidate_id = _uuid(run.get("id")), _uuid(candidate_id)
     target_id = _uuid(run["target_id"]) if run.get("target_id") else None
     device_id = _uuid(run["device_target_id"]) if run.get("device_target_id") else None
-    if (target_id is None) == (device_id is None):
+    if (target_id is None and device_id is None) or (device_id is not None and target_id not in (None, device_id)):
         raise BoundaryContextError("candidate_not_found")
     candidate = await conn.fetchrow(CANDIDATE_QUERY, candidate_id, hunt_id, target_id, device_id)
     if candidate is None:

@@ -104,9 +104,9 @@ def test_a_profile_serves_its_home_target_and_only_targets_it_was_granted_to():
         own = await STORE.list_profiles(conn, target_kind="api", target_id=HOME)
         assert [(item.profile_id, item.shared) for item in own] == [(pid, False)]
 
-        with pytest.raises(CredentialStoreError, match="cannot be shared with a device target"):
-            await STORE.grant_profile(conn, profile_id=pid, target_kind="device", target_id=DEVICE,
-                                      granted_by="operator", now=NOW)
+        await STORE.grant_profile(conn, profile_id=pid, target_kind="device", target_id=DEVICE,
+                                  granted_by="operator", now=NOW)
+        assert await STORE.has_active_grant(conn, profile_id=pid, target_kind="device", target_id=DEVICE)
         with pytest.raises(CredentialStoreError, match="already belongs to this target"):
             await STORE.grant_profile(conn, profile_id=pid, target_kind="api", target_id=HOME,
                                       granted_by="operator", now=NOW)

@@ -516,6 +516,13 @@ async def _legacy_device_profile(
 ) -> dict[str, Any] | None:
     if profile.target_kind != "device":
         return None
+    # After conversion this name is a read-only projection of the canonical
+    # profile, so there is no legacy copy to synchronize.
+    if await conn.fetchval(
+        "SELECT 1 FROM app_schema_migrations WHERE name=$1",
+        "unified_target_asset_inputs_v1",
+    ):
+        return None
     row = await conn.fetchrow(
         """SELECT id, device_target_id, auth_kind, name
            FROM device_credential_profiles WHERE id=$1""",

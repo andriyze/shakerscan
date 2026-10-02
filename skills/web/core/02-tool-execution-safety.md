@@ -33,11 +33,23 @@ not an authority grant or proof that execution will succeed on a particular targ
 | SQL/XSS proof | `sqli.verify`, `xss.verify` | Use the specific live verifier contract; a scanner signal alone is not proof |
 | Candidate verification | `candidate.verify` | Only candidate families/contracts actually supported by the server |
 | Service discovery | `ports.discover`, `service.fingerprint`, `service.nse_check`, `tls.inspect` | Registered/frozen asset and selected operation; NSE observations are not vulnerability proof |
+| Target and reusable input management | `targets.create`, `targets.update`, `credentials.grant`, `collections.bind` | Explicit operator intent; exact receiving target and origins; encrypted profiles remain opaque. Changes do not alter the running Hunt's frozen target or selected inputs. |
 | Device tasks | `device.inspect`, `device.capabilities.inspect`, `device.service.verify`, `device.ssh.propose` | Device-only schemas; SSH proposal is not execution or approval of a changed plan |
 
 This table is a description, not an execution schema. Read the live contract for the exact fields,
 selected principal support, admitted service and resource costs. An operation may require additional
 implemented transport/worker prerequisites even when its capability name is present.
+
+For “scan my home smart TV's ports with Naabu”, resolve the existing target, start the shared
+Hunt with network-discovery permission, and invoke `ports.discover` with the desired port set.
+ShakerScan builds the installed Naabu invocation, pins destinations, meters execution, and retains
+the receipt. Never submit a command string or argv. Query `service_intelligence` before spending
+new traffic; target and Connected Devices views show the same retained service evidence.
+
+When the operator requests sharing a profile or collection from another target, use the registered
+grant/binding capability with opaque IDs and explicit receiving origins. Select the saved inputs
+when admitting the Hunt that will consume them; a management call does not silently add credentials
+or collections to an already admitted run. Granting inputs never authorizes testing another target.
 
 ## Gaps and recovery
 

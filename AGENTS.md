@@ -141,7 +141,7 @@ Reusable secrets belong only in encrypted credential profiles or request collect
   operator grant (`POST /credential-profiles/{id}/grants`), recorded and revocable per target.
   A grant makes the profile selectable on that target; it never authorizes testing it, which
   still needs that target's own standing authorization. Grants stay within one asset kind (web,
-  api and network share; device does not), and active capabilities need the receiving target's
+  api, network and connected-device views share), and active capabilities need the receiving target's
   own approval. Never share a profile an operator did not ask to share.
 - Scan and Hunt requests carry opaque profile/selection IDs, never tokens, cookies, passwords,
   private keys, client secrets, secret headers, or raw environment values.

@@ -6,13 +6,10 @@ import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { Compass, ShieldCheck } from 'lucide-react'
 import {
-  getDevices,
   getDeviceAgentSession,
-  getTargets,
+  getTargetAuthorization,
   type DeviceAgentShellPlan,
   type DeviceAgentSession,
-  type DeviceTarget,
-  type Target,
 } from '@/lib/api'
 import {
   listCredentialProfiles,
@@ -44,11 +41,11 @@ import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
 import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
-import { usableWebTargets } from '@/lib/targetChoices'
+import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
 
 type TargetChoice = {
   id: string
-  sourceKind: 'web' | 'device'
+  sourceKind: 'web' | 'network' | 'device'
   label: string
   detail: string
   authorized?: boolean
@@ -153,8 +150,8 @@ const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
 function HuntContent() {
   const searchParams = useSearchParams()
   const toast = useToast()
-  const [webTargets, setWebTargets] = useState<Target[]>([])
-  const [devices, setDevices] = useState<DeviceTarget[]>([])
+  const [assets, setAssets] = useState<TargetAsset[]>([])
+  const [authorizedTargetId, setAuthorizedTargetId] = useState<string | null>(null)
   const [targetId, setTargetId] = useState('')
   const [webTargetKind, setWebTargetKind] = useState<Exclude<HuntTargetKind, 'device'>>('web')
   const [objective, setObjective] = useState(
@@ -200,19 +197,10 @@ function HuntContent() {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([
-      getTargets(),
-      getDevices({ limit: 200 }).catch(() => ({ devices: [] as DeviceTarget[] })),
-    ])
-      .then(([targetRows, deviceRows]) => {
+    getAllTargetAssets(undefined, true)
+      .then((targets) => {
         if (cancelled) return
-        const targets = Array.isArray(targetRows?.targets)
-          ? targetRows.targets
-          : Array.isArray(targetRows)
-            ? targetRows
-            : []
-        setWebTargets(usableWebTargets(targets))
-        setDevices(deviceRows.devices || [])
+        setAssets(targets.filter(target => target.is_active && /^(https?|host):\/\//i.test(target.url)))
         const requested = searchParams.get('target') || searchParams.get('target_id')
         if (requested) setTargetId(requested)
         const requestedObjective = searchParams.get('objective')
@@ -285,25 +273,25 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [hunt?.hunt_id, hunt?.skills?.length])
 
-  const choices = useMemo<TargetChoice[]>(() => [
-    ...webTargets.map((target) => ({
+  const choices = useMemo<TargetChoice[]>(() => assets.map((target) => ({
       id: target.id,
-      sourceKind: 'web' as const,
+      sourceKind: target.connected_device ? 'device' : target.url.startsWith('host://') ? 'network' : 'web',
       label: target.name || target.url,
       detail: target.url,
-      authorized: target.authorized_for_active_testing === true,
-    })),
-    ...devices.filter((device) => device.is_active).map((device) => ({
-      id: device.id,
-      sourceKind: 'device' as const,
-      label: device.name,
-      detail: device.primary_locator,
-    })),
-  ], [webTargets, devices])
+    })), [assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
   const targetKind: HuntTargetKind = selectedChoice?.sourceKind === 'device'
     ? 'device'
-    : webTargetKind
+    : selectedChoice?.sourceKind === 'network' ? 'network' : webTargetKind
+
+  useEffect(() => {
+    let cancelled = false
+    setAuthorizedTargetId(null)
+    if (selectedChoice) getTargetAuthorization(selectedChoice.id)
+      .then(authorization => {if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id)})
+      .catch(() => undefined)
+    return () => {cancelled = true}
+  }, [selectedChoice?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -387,7 +375,7 @@ function HuntContent() {
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
   // Revalidated server-side at submission and before worker decryption.
-  const standingAuthorized = selectedChoice?.authorized === true
+  const standingAuthorized = Boolean(selectedChoice && authorizedTargetId === selectedChoice.id)
     || (targetKind !== 'device' && managedTargetAuthorizationIsAutomatic())
   const effectiveAuthorization = authorizationConfirmed || standingAuthorized
   const receiptRequired = privileged && !standingAuthorized
@@ -536,7 +524,7 @@ function HuntContent() {
         <>
           <Card className="space-y-5 p-5">
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
-            <EmptyState message="No targets available" hint="Add a web or connected-device target first." />
+            <EmptyState message="No targets available" hint="Add a hostname, IP address, or application target first." />
           ) : (
             <>
               <Field label="Target">
@@ -544,7 +532,7 @@ function HuntContent() {
                   <option value="">Choose a target</option>
                   {choices.map((choice) => (
                     <option key={`${choice.sourceKind}:${choice.id}`} value={choice.id}>
-                      {choice.sourceKind === 'device' ? 'Device' : 'Web asset'} · {choice.label} · {choice.detail}
+                      {choice.label} · {choice.detail.replace(/^host:\/\//, '')}
                     </option>
                   ))}
                 </Select>

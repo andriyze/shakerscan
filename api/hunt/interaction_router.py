@@ -2277,6 +2277,21 @@ async def _execute_hunt_capability_lifecycle(
             result = candidate_adapter.result
             if candidate_adapter.blocked_exception is not None:
                 raise candidate_adapter.blocked_exception
+        elif name in {"targets.create", "targets.update", "credentials.grant", "collections.bind"}:
+            from .asset_actions import execute_asset_action
+            asset_adapter = ControlPlaneExecutionAdapter(
+                specification=spec,
+                operation=lambda: execute_asset_action(_pool(), run, name, request.input),
+                requested_budget=durable_reservation.record.requested,
+                redacted_execution=_hunt_redacted_capability_input(name, request.input),
+                blocked_exceptions=(HTTPException,),
+                conservative_full_budget=True,
+            )
+            capability_execution = await dispatch_registered_adapter(asset_adapter,
+                target=inline_hunt_target_binding(), requested_budget=durable_reservation.record.requested)
+            result = asset_adapter.result
+            if asset_adapter.blocked_exception is not None:
+                raise asset_adapter.blocked_exception
         elif name == "collections.inspect":
             collection_adapter = ControlPlaneExecutionAdapter(
                 specification=spec,
@@ -4052,6 +4067,25 @@ async def _hunt_bound_collection(
     actual_collection_uuid = _uuid_or_400(
         str(ref.get("collection_id") or ""), "bound request collection id",
     )
+    if ref.get('binding_id'):
+        binding = await conn.fetchrow("""SELECT allowed_origins,environment_id FROM request_collection_bindings
+            WHERE id=$1 AND collection_id=$2 AND target_id=$3 AND is_active=true""",
+            _uuid_or_400(str(ref['binding_id']), 'collection binding id'),actual_collection_uuid,
+            run['device_target_id'] or run['target_id'])
+        if not binding:
+            raise HTTPException(403,'Request collection execution binding was revoked or changed')
+        origins = binding['allowed_origins']
+        if isinstance(origins,str):
+            origins = json.loads(origins)
+        if (list(origins) != list(ref.get('allowed_origins') or []) or
+                str(binding['environment_id'] or '') != str(ref.get('environment_id') or '')):
+            raise HTTPException(409,'Request collection execution binding changed after Hunt admission')
+        row = await conn.fetchrow('SELECT * FROM request_collections WHERE id=$1 AND is_active=true',actual_collection_uuid)
+        if not row:
+            raise HTTPException(404,'Bound request collection is unavailable')
+        if str(row.get('payload_sha256') or '') != str(ref.get('payload_sha256') or ''):
+            raise HTTPException(409,'Bound request collection changed after Hunt admission')
+        return row,ref
     row = await conn.fetchrow(
         """SELECT * FROM request_collections WHERE id=$1 AND is_active=true
            AND (($2::uuid IS NOT NULL AND target_id=$2) OR

@@ -1485,6 +1485,7 @@ export interface DeviceScanActivity {
 }
 
 export interface DeviceDetailResponse {
+  service_intelligence?: import('@/components/targets/SharedServicePorts').SharedServiceKnowledge
   authorization?: { approved_by: string; approval_receipt_id: string } | null
   device: DeviceTarget
   reachability?: DeviceReachability | null

@@ -1,5 +1,6 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import type { CredentialProfile } from './credentialApi'
+import type { SharedServiceKnowledge } from '@/components/targets/SharedServicePorts'
 
 export interface TargetAsset {
   id: string
@@ -9,6 +10,7 @@ export interface TargetAsset {
   locator: string
   is_active: boolean
   environment: string
+  port_hints?: number[]
   connected_device: boolean
   device_class?: string | null
   manufacturer?: string | null
@@ -59,6 +61,7 @@ export interface AssetHistory {
   offset: number
 }
 export interface AssetDetail {
+  service_intelligence?: SharedServiceKnowledge
   target: TargetAsset
   requested_target_id: string
   origins: AssetOrigin[]
@@ -77,7 +80,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
 
-export function getTargetAssets(params: {search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean} = {}, signal?: AbortSignal): Promise<{targets: TargetAsset[]; total: number; offset: number; limit: number}> {
+export function getTargetAssets(params: {search?: string; offset?: number; limit?: number; connected_only?: boolean; include_inactive?: boolean; include_services?: boolean} = {}, signal?: AbortSignal): Promise<{targets: TargetAsset[]; total: number; offset: number; limit: number}> {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) if (value !== undefined) search.set(key, String(value))
   return request(`/targets/inventory?${search}`, { signal })
@@ -88,12 +91,12 @@ export const enableTargetNetworkView = (id: string, deviceClass = 'generic') => 
 export const renameTargetAsset = (id: string, name: string) => request(`/targets/${encodeURIComponent(id)}`, json('PATCH', {name}))
 export const authorizeTargetAsset = (id: string, approvedBy: string, environment?: string) => request(`/targets/${encodeURIComponent(id)}/authorization`, json('POST', {approved_by: approvedBy, environment, risk_tier:'active'}))
 
-export async function registerTargetAsset(input: {locator: string; name?: string; environment: string; approvedBy?: string}): Promise<string> {
+export async function registerTargetAsset(input: {locator: string; name?: string; environment: string; approvedBy?: string; portHints?: number[]}): Promise<string> {
   const value = input.locator.trim()
   const isOrigin = /^https?:\/\//i.test(value)
   const created = isOrigin
     ? await request<{id: string}>('/targets', json('POST', {url:value,name:input.name,cohort:input.environment}))
-    : await request<{id: string}>('/targets/hosts', json('POST', {locator:value,name:input.name,environment:input.environment}))
+    : await request<{id: string}>('/targets/hosts', json('POST', {locator:value,name:input.name,environment:input.environment,port_hints:input.portHints || []}))
   const detail = await getTargetAsset(created.id)
   if (input.approvedBy) {
     try { await authorizeTargetAsset(detail.target.id,input.approvedBy,input.environment) }
@@ -103,11 +106,11 @@ export async function registerTargetAsset(input: {locator: string; name?: string
 }
 
 /** Fetch every metadata page; selectors must not silently lose assets after the first page. */
-export async function getAllTargetAssets(signal?: AbortSignal): Promise<TargetAsset[]> {
+export async function getAllTargetAssets(signal?: AbortSignal, includeServices = false): Promise<TargetAsset[]> {
   const assets = new Map<string, TargetAsset>()
   let offset = 0
   for (;;) {
-    const page = await getTargetAssets({limit:500,offset},signal)
+    const page = await getTargetAssets({limit:500,offset,include_services:includeServices},signal)
     for (const asset of page.targets) assets.set(asset.id,asset)
     offset += page.targets.length
     if (offset >= page.total) return [...assets.values()]

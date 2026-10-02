@@ -40,6 +40,9 @@ def test_inventory_groups_origins_and_profile_addition_reuses_the_asset(monkeypa
             assert history['total'] == 3 and len(history['items']) == 2
             assert len((await asset_history(conn,asset,limit=2,offset=2))['items']) == 1
             assert (await list_assets(conn,search=':3000'))['total'] == 1
+            service_choices = await list_assets(conn,include_services=True)
+            assert {item['id'] for item in service_choices['targets']} == {asset,first,second}
+            assert all(item['asset_id'] == asset for item in service_choices['targets'])
             assert (await list_assets(conn,search='not-present'))['total'] == 0
             await conn.execute("UPDATE targets SET name='One shared name' WHERE id=$1",asset)
             assert await conn.fetchval('SELECT name FROM device_targets WHERE id=$1',asset) == 'One shared name'

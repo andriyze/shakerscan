@@ -47,4 +47,12 @@ def test_real_startup_upgrade_and_restart_preserve_new_writes():
             assert await conn.fetchval('SELECT count(*) FROM targets') == total
             assert await conn.fetchval('SELECT name FROM targets WHERE id=$1',after) == 'After upgrade'
             assert await conn.fetchval("SELECT count(*) FROM app_schema_migrations WHERE name IN ('unified_target_assets_v1','unified_target_asset_inputs_v1')") == 2
+            import asyncpg
+            pool = await asyncpg.create_pool(os.environ['TARGET_ASSET_TEST_DATABASE_URL'],
+                database=await conn.fetchval('SELECT current_database()'),min_size=2,max_size=2)
+            try:
+                await asyncio.gather(module.run_schema_migrations(pool),module.run_schema_migrations(pool))
+                assert await conn.fetchval('SELECT count(*) FROM targets') == total
+            finally:
+                await pool.close()
     asyncio.run(run())

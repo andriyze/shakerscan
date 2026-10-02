@@ -1231,10 +1231,16 @@ async def get_device(
         )
     async with _pool().acquire() as conn:
         standing = await network_authorization_snapshot(conn, device_uuid)
+        try:
+            from targets.asset_services import asset_service_knowledge
+        except ModuleNotFoundError:
+            from ..targets.asset_services import asset_service_knowledge
+        shared_services = await asset_service_knowledge(conn,device_uuid)
     device_payload = _decode_device_row(row)
     return {
         "device": device_payload,
         "authorization": standing,
+        "service_intelligence": shared_services,
         "reachability": device_payload.get("last_reachability"),
         "interfaces": [_decode_device_row(item) for item in interfaces],
         "locator_history": [_decode_device_row(item) for item in locator_history],

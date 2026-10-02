@@ -50,9 +50,9 @@ def setup(monkeypatch):
 
 @pytest.mark.parametrize("change", [
     {"is_active": False}, {"current_version": 4}, {"record_version": 6},
-    # A revoked share and a protocol-incompatible device profile remain invalid.
+    # A revoked share and a nonphysical asset kind remain invalid.
     {"allowed_capabilities": ()}, {"granted": False},
-    {"target_kind": "device"}, {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
+    {"target_kind": "model"}, {"principal_slot": "secondary"}, {"auth_kind": "cookie"},
     {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)},
 ])
 def test_rechecks_metadata_before_each_action(monkeypatch, change):

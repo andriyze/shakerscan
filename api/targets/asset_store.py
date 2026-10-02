@@ -13,7 +13,7 @@ except ModuleNotFoundError:
     from ..runtime.credential_store import PostgresCredentialProfileStore
 
 
-ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,
+ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,t.asset_owner_id,
     target_asset_locator(t.url) AS locator,t.metadata_json,
     (p.target_id IS NOT NULL) AS connected_device,
     p.device_class,p.manufacturer,p.model,p.firmware_version,
@@ -29,8 +29,11 @@ def public_asset(row: Any) -> dict[str, Any]:
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     result['environment'] = str(metadata.get('environment') or metadata.get('cohort') or 'production')
-    result['asset_id'] = result['id']
-    result['inventory_kind'] = 'asset'
+    hints = metadata.get('port_hints')
+    result['port_hints'] = [port for port in (hints if isinstance(hints,list) else [])
+                            if type(port) is int and 1 <= port <= 65535][:128]
+    result['asset_id'] = result.get('asset_owner_id') or result['id']
+    result['inventory_kind'] = 'service' if result.get('asset_owner_id') else 'asset'
     return result
 
 
@@ -46,8 +49,10 @@ async def resolve_asset_id(conn: Any, target_id: Any) -> uuid.UUID:
 
 
 async def list_assets(conn: Any, *, search: str = '', connected_only: bool = False,
-                      include_inactive: bool = False, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-    where = ROOT_WHERE + """
+                      include_inactive: bool = False, include_services: bool = False,
+                      limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    base = "COALESCE(t.discovery_source,'manual') <> 'model-intake'" if include_services else ROOT_WHERE
+    where = base + """
         AND ($1::boolean OR t.is_active)
         AND (NOT $2::boolean OR p.target_id IS NOT NULL)
         AND ($3::text='' OR t.name ILIKE '%' || $3 || '%' OR t.url ILIKE '%' || $3 || '%'
@@ -89,6 +94,7 @@ async def asset_history(conn: Any, target_id: Any, *, kind: str = 'scans', limit
 
 
 async def asset_detail(conn: Any, target_id: Any) -> dict[str, Any]:
+    from .asset_services import asset_service_knowledge
     owner = await resolve_asset_id(conn, target_id)
     row = await conn.fetchrow(f'SELECT {ROOT_COLUMNS} FROM {ROOT_FROM} WHERE t.id=$1', owner)
     origins = await conn.fetch("""SELECT id,url,name,is_active,last_scanned_at,last_score,last_grade,
@@ -114,6 +120,7 @@ async def asset_detail(conn: Any, target_id: Any) -> dict[str, Any]:
         'authorization': await current_target_authorization(conn,owner),
         'target': public_asset(row), 'requested_target_id': str(target_id),
         'origins': [dict(item) for item in origins], 'services': [dict(item) for item in services],
+        'service_intelligence': await asset_service_knowledge(conn,owner),
         'services_limit': 1000,
         'credentials': [profile.public_dict() for profile in profiles],
         'request_collections': [dict(item) for item in collections],

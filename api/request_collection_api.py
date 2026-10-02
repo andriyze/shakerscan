@@ -109,6 +109,7 @@ class RequestCollectionBindingUpsert(BaseModel):
     target_id: str
     allowed_origins: list[str] = Field(min_length=1, max_length=32)
     environment_id: Optional[str] = None
+    authorize_cross_asset: bool = False
 
 
 class RequestCollectionSelectionUpsert(BaseModel):
@@ -870,6 +871,7 @@ async def upsert_request_collection_binding(
             target_kind=request.target_kind,
             target_id=target_uuid,
             allowed_origins=request.allowed_origins,
+            authorize_cross_asset=request.authorize_cross_asset,
         )
         if environment_uuid and not await conn.fetchval(
             """SELECT EXISTS(

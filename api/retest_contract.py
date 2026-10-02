@@ -1064,7 +1064,8 @@ async def _migrate_evidence_scan_identity(conn) -> None:
 
 
 async def _run_unified_schema_migrations_once(pool) -> None:
-    await _run_schema_migrations_once(pool)
+    from targets.asset_migration import run_unified_startup
+    await run_unified_startup(pool, _run_schema_migrations_once)
 
 
 async def run_schema_migrations(pool) -> None:

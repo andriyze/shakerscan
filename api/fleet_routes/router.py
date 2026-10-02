@@ -3549,7 +3549,8 @@ async def _broker_private_replay_plan(
              ON e.id=b.environment_id AND e.collection_id=c.id
             AND e.is_active=true
            WHERE c.id=$1 AND target_collection_visible(c.id,$4) AND c.is_active=true
-             AND b.target_id=$4 AND b.target_kind=$5
+             AND b.target_id=$4 AND (b.target_kind=$5 OR
+                  (b.target_kind IN ('web','api','network','device') AND $5 IN ('web','api','network','device')))
            FOR UPDATE OF c, b, s""",
         collection_id, binding_id, selection_id, target_id, target.target_kind,
     )

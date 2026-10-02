@@ -46,7 +46,7 @@ async def test_settled_hunt_observations_are_reusable_and_owner_deletion_removes
                           locator_changed_at=NOW - timedelta(seconds=1))
         context = {"target": row["target_context"], "authorized_target_addresses": row["authorized_addresses"]}
         await conn.execute("INSERT INTO hunt_runs VALUES ($1,$2,$3,$4,$5,$6::jsonb)", uuid.UUID(HUNT_ID),
-                           uuid.UUID(TARGET_ID) if kind != "device" else None,
+                           uuid.UUID(TARGET_ID),
                            uuid.UUID(TARGET_ID) if kind == "device" else None, kind, NOW, json.dumps(context))
         await conn.execute("INSERT INTO hunt_actions VALUES ($1,$2,$3,'running',NULL)",
                            uuid.UUID(ACTION_ID), uuid.UUID(HUNT_ID), receipt.capability_name)

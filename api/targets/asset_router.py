@@ -6,7 +6,7 @@ from typing import Any, Literal
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .asset_migration import host_url
 from .asset_store import asset_detail, asset_history, list_assets, resolve_asset_id
@@ -33,6 +33,14 @@ class HostTargetCreate(BaseModel):
     name: str | None = Field(default=None, max_length=255)
     environment: Literal['production', 'staging', 'development', 'lab'] = 'production'
     approved_by: str | None = Field(default=None, min_length=1, max_length=120)
+    port_hints: list[int] = Field(default_factory=list,max_length=128)
+
+    @field_validator('port_hints', mode='before')
+    @classmethod
+    def ports(cls, values):
+        if not isinstance(values,list) or any(type(port) is not int or not 1 <= port <= 65535 for port in values):
+            raise ValueError('Port hints must be integers between 1 and 65535')
+        return list(dict.fromkeys(values))
 
 
 class DeviceProfileCreate(BaseModel):
@@ -45,11 +53,13 @@ class DeviceProfileCreate(BaseModel):
 
 @router.get('/targets/inventory')
 async def target_inventory(search: str = Query('', max_length=500), connected_only: bool = False,
-                           include_inactive: bool = False, limit: int = Query(100, ge=1, le=500),
+                           include_inactive: bool = False, include_services: bool = False,
+                           limit: int = Query(100, ge=1, le=500),
                            offset: int = Query(0, ge=0)):
     async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
-                                 include_inactive=include_inactive, limit=limit, offset=offset)
+                                 include_inactive=include_inactive, include_services=include_services,
+                                 limit=limit, offset=offset)
 
 
 @router.post('/targets/hosts')
@@ -64,9 +74,11 @@ async def create_host_target(request: HostTargetCreate):
         raise HTTPException(422, str(exc)) from exc
     async with pool().acquire() as conn, conn.transaction():
         row = await conn.fetchrow("""INSERT INTO targets(url,name,discovery_source,metadata_json)
-            VALUES($1,$2,'host',$3) ON CONFLICT(canonical_key) DO UPDATE SET url=targets.url
+            VALUES($1,$2,'host',$3) ON CONFLICT(canonical_key) DO UPDATE SET
+                metadata_json=CASE WHEN $4::boolean THEN targets.metadata_json || jsonb_build_object('port_hints',$3::jsonb->'port_hints') ELSE targets.metadata_json END
             RETURNING id,url,name,(xmax=0) AS created""",host_url(locator),request.name or locator,
-            json.dumps({'environment':request.environment,'cohort':request.environment}))
+            json.dumps({'environment':request.environment,'cohort':request.environment,
+                        'port_hints':request.port_hints}),bool(request.port_hints))
         result = {'id':str(row['id']), 'asset_id':str(row['id']), 'url':row['url'],
                   'status':'created' if row['created'] else 'already_exists'}
         if request.approved_by:
@@ -133,4 +145,9 @@ async def start_target_network_scan(target_id: str, request: DeviceScanRequest):
         from ..devices.router import scan_device
     async with pool().acquire() as conn, conn.transaction():
         owner = await ensure_device_profile(conn,target_id,DeviceProfileCreate())
+        metadata = await conn.fetchval('SELECT metadata_json FROM targets WHERE id=$1',owner)
+        if isinstance(metadata,str):
+            metadata = json.loads(metadata)
+        if not request.port_hints and (metadata or {}).get('port_hints'):
+            request = request.model_copy(update={'port_hints':HostTargetCreate.ports(metadata['port_hints'])})
     return await scan_device(str(owner),request)
