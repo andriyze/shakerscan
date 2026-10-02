@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from .asset_inputs_schema import INPUTS_MIGRATION, INPUTS_SCHEMA_SQL, INPUTS_VIEW_SQL
-from .asset_migration import _retarget_foreign_keys
+from .asset_fk import retarget_foreign_keys
 
 
 def object_value(value: Any) -> dict[str, Any]:
@@ -55,7 +55,7 @@ async def migrate_asset_inputs(conn: Any) -> None:
     await conn.execute(INPUTS_SCHEMA_SQL)
     await conn.execute("""UPDATE credential_profiles p SET service_port=d.port
         FROM device_credential_profiles d WHERE p.id=d.id""")
-    await _retarget_foreign_keys(conn, "device_credential_profiles", "credential_profiles")
+    await retarget_foreign_keys(conn, "device_credential_profiles", "credential_profiles")
     collections = await conn.fetch("SELECT * FROM device_request_collections ORDER BY created_at,id")
     for legacy in collections:
         summary = object_value(legacy["summary_json"])
@@ -92,7 +92,7 @@ async def migrate_asset_inputs(conn: Any) -> None:
                 row.get("content_type"),json.dumps(row.get("body_field_names") or []),
                 bool(row.get("safe_method")),row.get("supported") is not False,
             ) for row in index])
-    await _retarget_foreign_keys(conn, "device_request_collections", "request_collections")
+    await retarget_foreign_keys(conn, "device_request_collections", "request_collections")
     await conn.execute("DROP TABLE device_credential_profiles; DROP TABLE device_request_collections")
     await conn.execute(INPUTS_VIEW_SQL)
     await conn.reload_schema_state()
