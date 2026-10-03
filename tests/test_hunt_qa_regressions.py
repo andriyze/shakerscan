@@ -162,7 +162,7 @@ def test_worker_failure_preserves_cause_and_atomically_settles_lease(monkeypatch
     class Connection:
         @asynccontextmanager
         async def transaction(self): yield self
-        async def fetchrow(self, query, *args): return {"id": uuid.UUID(owner), "budget_used_json": held}
+        async def fetchrow(self, query, *args): return {"id": uuid.UUID(owner), "budget_used_json": {**held, "candidates": 17, "verifications": 5}}
         async def execute(self, query, *args): writes.append((query,args)); return "UPDATE 1"
     class Pool:
         @asynccontextmanager
@@ -183,3 +183,5 @@ def test_worker_failure_preserves_cause_and_atomically_settles_lease(monkeypatch
     assert result["budget_consumed"]["http_requests"] == int(started)
     assert result["budget_consumed"]["active_actions"] == int(started)
     assert any("UPDATE hunt_actions" in query for query,_ in writes)
+    saved = next(json.loads(args[1]) for query, args in writes if query.startswith("UPDATE hunt_runs"))
+    assert saved["candidates"] == 17 and saved["verifications"] == 5

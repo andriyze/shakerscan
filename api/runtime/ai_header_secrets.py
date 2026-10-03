@@ -61,7 +61,10 @@ async def encrypt_stored_secrets(conn: Any) -> int:
         headers = row['headers_template']
         headers = json.loads(headers) if isinstance(headers, str) else dict(headers or {})
         clean = {str(k): v for k, v in headers.items() if isinstance(v, str)}
-        protected = {**headers, **protect(clean)}
+        # Migration reads literal stored values, including "***". Only an editor
+        # update uses that sentinel to keep a previously stored secret.
+        protected = {**headers, **{name: encrypt_secret(value) if is_secret_header(name) else value
+                                  for name, value in clean.items()}}
         if protected != headers:
             await conn.execute('UPDATE ai_targets SET headers_template=$2::jsonb WHERE id=$1',
                                row['id'], json.dumps(protected))

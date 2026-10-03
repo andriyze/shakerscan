@@ -100,3 +100,10 @@ def test_without_a_key_the_backfill_waits_for_the_next_start(monkeypatch):
     conn = _Connection({'a': {'X-Api-Key': 'sk-live-123'}})
     assert asyncio.run(encrypt_stored_secrets(conn)) == 0
     assert not conn.markers and not conn.updates
+
+
+def test_header_backfill_encrypts_a_literal_editor_mask(key):
+    from runtime.ai_header_secrets import encrypt_stored_secrets
+    conn = _Connection({'fixture': {'X-Api-Key': '***'}})
+    assert asyncio.run(encrypt_stored_secrets(conn)) == 1
+    assert key.decrypt_secret(conn.updates['fixture']['X-Api-Key']) == '***'

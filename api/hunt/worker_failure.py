@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import uuid
 from typing import Any
+from runtime.budgets import BUDGET_DIMENSIONS
 
 from .capability_reservations import terminalize_hunt_capability
 from .device_traffic import settle_device_traffic
@@ -50,7 +51,8 @@ async def settle_worker_failure(pool: Any, store: Any, persisted: Any, *, result
                 scope_receipt_id=target.scope_receipt_id, approval_receipt_id=policy.approval_receipt_id,
                 result={"ok": False, "error": result.get("error"), "execution_started": execution_started})
             used = _object(run["budget_used_json"])
-            reconciled = terminal.reconcile_consumed(used)
+            ledger = {name: int(used.get(name) or 0) for name in BUDGET_DIMENSIONS}
+            reconciled = terminal.reconcile_consumed(ledger)
             await settle_device_traffic(conn, run, record.requested, actual, status="failed")
             await store.persist_terminal(conn, previous=latest, terminal=terminal,
                 ledger_after_settlement=reconciled, receipt=receipt)

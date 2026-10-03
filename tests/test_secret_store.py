@@ -1,6 +1,5 @@
 """Encryption-at-rest for target credential secrets."""
 
-import importlib
 import os
 import sys
 
@@ -11,7 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 def _reload_secret_store():
     import secret_store
-    return importlib.reload(secret_store)
+    secret_store._loaded = False
+    secret_store._fernet = None
+    return secret_store
 
 
 def test_unavailable_key_store_fails_closed(monkeypatch, tmp_path):
@@ -79,7 +80,8 @@ def test_initializer_creates_private_api_owned_key_before_worker_start(monkeypat
     assert _reload_secret_store().decrypt_secret(ciphertext) == "fixture-canary"
 
 
-def teardown_module(module):
-    os.environ.pop("AI_CREDENTIAL_ENC_KEY", None)
-    os.environ.pop("AI_CREDENTIAL_ENC_KEY_FILE", None)
-    _reload_secret_store()
+@pytest.fixture(autouse=True)
+def reset_key_cache(monkeypatch):
+    import secret_store
+    monkeypatch.setattr(secret_store, "_loaded", False)
+    monkeypatch.setattr(secret_store, "_fernet", None)

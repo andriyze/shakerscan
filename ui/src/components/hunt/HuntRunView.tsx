@@ -131,7 +131,7 @@ export function HuntRunView({ hunt, onChange, target }: {
     }
   }
 
-  const findingCount = hunt.outcome_summary?.finding_ids.length ?? 0
+  const findingCount = hunt.outcome_summary?.finding_count ?? hunt.outcome_summary?.finding_ids.length ?? 0
   const candidateCount = hunt.outcome_summary?.candidate_ids.length ?? hunt.budget_used.candidates ?? 0
   const stoppable = !hunt.completed_at && ['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status)
 

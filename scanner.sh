@@ -2659,6 +2659,7 @@ scan_worker_containers() {
     docker ps -a \
         --filter "label=com.docker.compose.project=$project" \
         --filter "label=com.docker.compose.service=worker" \
+        --filter "label=com.docker.compose.oneoff=False" \
         --format '{{.Names}}' 2>/dev/null | sort
 }
 
@@ -2667,6 +2668,7 @@ running_scan_worker_containers() {
     docker ps \
         --filter "label=com.docker.compose.project=$project" \
         --filter "label=com.docker.compose.service=worker" \
+        --filter "label=com.docker.compose.oneoff=False" \
         --format '{{.Names}}' 2>/dev/null | sort
 }
 

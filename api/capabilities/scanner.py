@@ -219,7 +219,7 @@ class ScannerExecutionAdapter:
                 "accounting_mode": (
                     "exact"
                     if str(settlement.get("mode") or "") == "exact" and not process_result.get("execution_uncertain")
-                    else str(enforcement.get("accounting_mode") or "conservative")
+                    else "conservative"
                 ),
                 "actual_http_requests": (
                     max(0, int(settlement.get("actual") or 0))

@@ -640,12 +640,14 @@ class HuntRunService:
                 hunt_uuid,
             )
             live_findings = await connection.fetch(
-                "SELECT id FROM findings WHERE hunt_run_id=$1", hunt_uuid,
+                "SELECT id, COUNT(*) OVER() AS total_count FROM findings WHERE hunt_run_id=$1 ORDER BY id LIMIT 500", hunt_uuid,
             )
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
         result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)
+        count = int(live_findings[0]["total_count"]) if live_findings else 0
+        result["outcome_summary"].update(finding_count=count, finding_ids_truncated=count > len(live_findings))
         result["skill_activity"] = [
             public_hunt_skill_event(event) for event in skill_events
         ]

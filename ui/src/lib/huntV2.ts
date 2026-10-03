@@ -83,6 +83,8 @@ export interface HuntV2 {
     action_statuses: Record<string, number>
     observation_count: number
     finding_ids: string[]
+    finding_count?: number
+    finding_ids_truncated?: boolean
     candidate_ids: string[]
     evidence_ids: string[]
   }
