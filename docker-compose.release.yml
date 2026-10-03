@@ -129,6 +129,10 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - FOWNER
+      # chmod g+s on a directory whose group is the API's, not root's, needs FSETID; without it
+      # the kernel silently drops the setgid bit, worker-created directories stay root:root and
+      # the API cannot erase files in them.
+      - FSETID
     security_opt:
       - no-new-privileges:true
     restart: "no"

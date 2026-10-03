@@ -3459,11 +3459,46 @@ list_backups() {
     while IFS= read -r dir; do
         state="complete"
         [ ! -e "$dir/.incomplete" ] || state="incomplete"
-        key="key excluded"
-        grep -q '^encryption_key_included=true' "$dir/manifest.txt" 2>/dev/null && key="KEY INCLUDED"
+        key="$(backup_key_state "$dir")"
         case "$(basename "$dir")" in postgres-*) key="PostgreSQL upgrade copy" ;; esac
         printf '%-44s %-11s %-24s %s\n' "$(basename "$dir")" "$state" "$key" "$(du -sh "$dir" 2>/dev/null | cut -f1)"
     done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d | sort)
+}
+
+# Whether a backup holds the encryption key. Backups made before the key was left out (2.5.x and
+# earlier) record nothing about it and include the key, so those are read, not assumed.
+backup_key_state() {
+    local dir="$1" listing
+    if grep -q '^encryption_key_included=true' "$dir/manifest.txt" 2>/dev/null; then
+        echo "KEY INCLUDED"
+        return 0
+    elif grep -q '^encryption_key_included=' "$dir/manifest.txt" 2>/dev/null; then
+        echo "key excluded"
+        return 0
+    fi
+    listing="$(tar -tzf "$dir/results.tar.gz" 2>/dev/null || true)"
+    if grep -q '/\.credential_enc\.key$' <<< "$listing" \
+        || grep -q '^AI_CREDENTIAL_ENC_KEY=' "$dir/runtime.env" 2>/dev/null; then
+        echo "KEY INCLUDED"
+    else
+        echo "key excluded"
+    fi
+}
+
+# The launcher's global -y/--yes sets ASSUME_YES and is not passed on, so honour both. When no
+# answer can be read (no terminal, closed input), say so instead of exiting silently.
+confirm_backup_delete() {
+    local prompt="$1" confirm="$2" answer
+    if [ "$confirm" = "--yes" ] || [ "${ASSUME_YES:-0}" = 1 ]; then
+        return 0
+    fi
+    if ! read -r -p "$prompt (yes/no): " answer; then
+        echo "Cancelled: no confirmation was received. Pass --yes to delete without a prompt."
+        return 1
+    fi
+    [ "$answer" = yes ] && return 0
+    echo "Cancelled"
+    return 1
 }
 
 # Delete one backup by name, or every backup with `all`. Backups hold copies of deleted records,
@@ -3476,10 +3511,7 @@ delete_backups() {
     fi
     if [ "$name" = all ]; then
         [ -d "$backup_root" ] || { echo "No backups in $backup_root"; return 0; }
-        if [ "$confirm" != "--yes" ]; then
-            read -r -p "Permanently delete every backup in $backup_root? (yes/no): " confirm
-            [ "$confirm" = yes ] || { echo "Cancelled"; return 1; }
-        fi
+        confirm_backup_delete "Permanently delete every backup in $backup_root?" "$confirm" || return 1
         find "$backup_root" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +
         echo -e "${GREEN}Every backup in $backup_root was deleted.${NC}"
         return 0
@@ -3487,10 +3519,7 @@ delete_backups() {
     case "$name" in */*|.|..|'') echo -e "${RED}Give a backup name from 'backup list'.${NC}"; return 1 ;; esac
     target="$backup_root/$name"
     [ -d "$target" ] || { echo -e "${RED}No backup named $name in $backup_root${NC}"; return 1; }
-    if [ "$confirm" != "--yes" ]; then
-        read -r -p "Permanently delete backup $name? (yes/no): " confirm
-        [ "$confirm" = yes ] || { echo "Cancelled"; return 1; }
-    fi
+    confirm_backup_delete "Permanently delete backup $name?" "$confirm" || return 1
     rm -rf -- "$target"
     echo -e "${GREEN}Deleted backup $name.${NC}"
 }

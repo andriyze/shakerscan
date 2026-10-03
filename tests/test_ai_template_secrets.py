@@ -69,3 +69,36 @@ def test_report_contains_a_readable_redacted_template(key):
     report = _target_snapshot_for_manifest({"request_template": stored})
     assert report["request_template"] == {"input": "{{prompt}}", "max_tokens": 64, "api_key": "***"}
     assert "ciphertext" not in json.dumps(report) and "report-canary" not in json.dumps(report)
+
+
+class _PersistingRedis:
+    """Records persistence compaction; ``aof`` mirrors Redis's aof_enabled."""
+    def __init__(self, values, *, aof=True, swap=1):
+        self.values, self.aof, self.swap, self.compacted = values, aof, swap, []
+    def hgetall(self, name): return dict(self.values)
+    def eval(self, *args): return self.swap
+    def info(self, section): return {"aof_enabled": 1 if self.aof else 0}
+    def bgrewriteaof(self): self.compacted.append("aof")
+    def bgsave(self): self.compacted.append("rdb")
+
+
+def test_encrypting_a_legacy_provider_key_compacts_persisted_history(key):
+    redis = _PersistingRedis({"ai_api_key": "legacy-canary"})
+    assert ai_settings_secrets.load_settings(redis, "settings:ai")["ai_api_key"] == "legacy-canary"
+    assert redis.compacted == ["aof"]
+    # Another reader already swapped it: nothing to compact again.
+    lost_race = _PersistingRedis({"ai_api_key": "legacy-canary"}, swap=0)
+    ai_settings_secrets.load_settings(lost_race, "settings:ai")
+    assert lost_race.compacted == []
+    snapshot_only = _PersistingRedis({}, aof=False)
+    ai_settings_secrets.compact_history(snapshot_only)
+    assert snapshot_only.compacted == ["rdb"]
+
+
+def test_compaction_failure_never_fails_the_caller(caplog):
+    class Restricted(_PersistingRedis):
+        def bgrewriteaof(self):
+            from redis.exceptions import ResponseError
+            raise ResponseError("Background append only file rewriting already in progress")
+    ai_settings_secrets.compact_history(Restricted({}))
+    assert "Could not compact Redis persistence" in caplog.text

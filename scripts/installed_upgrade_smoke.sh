@@ -197,6 +197,9 @@ else
     grep -q "Upgrading PostgreSQL" "$LOG_DIR/upgrade.log" && fail "a same-major upgrade migrated"
 fi
 [ "$(psql_scanner "SELECT current_setting('server_version_num')::int / 10000")" = "$CANDIDATE_MAJOR" ] || fail "not on PostgreSQL $CANDIDATE_MAJOR"
+# Storage preparation must leave results/ setgid to the API group, or files workers write after
+# start stay root-owned and the API cannot erase them when records are deleted.
+[ -g "$INSTALL_DIR/results" ] || fail "results/ lost its setgid bit; the API cannot erase worker-written files"
 api_preserved "$BEFORE" "$(api_view "$TARGET_ID")" || fail "the upgrade lost data the API showed before it"
 authenticated_scan "$PROFILE_ID" "upgraded authenticated" > /dev/null
 
