@@ -6,6 +6,8 @@ import { useUrlFilters } from '@/lib/useUrlFilters'
 import { UploadAttempt } from '@/lib/uploadAttempt'
 import { Braces, ChevronLeft, ChevronRight, Copy, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { getAllTargetAssets, getTargetAsset, type TargetAsset, type AssetOrigin } from '@/lib/targetAssetApi'
+import { targetOptions } from '@/lib/pickerOptions'
+import { CollectionLibrary } from '@/components/collections/CollectionLibrary'
 import {
   createRequestCollection,
   deactivateRequestCollection,
@@ -36,6 +38,7 @@ import {
   Select,
   Textarea,
   useToast,
+  Combobox,
 } from '@/components/ui'
 
 type Choice = {
@@ -90,12 +93,13 @@ function RequestCollectionsContent() {
   const toast = useToast()
   const [assets, setAssets] = useState<TargetAsset[]>([])
   // The collection owner lives in the URL, so reload, Back and links keep it.
-  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string }>()
+  // collection preselects a document and upload=1 opens the uploader, so other pages can deep-link here.
+  const { filters, setFilters } = useUrlFilters<{ target_kind?: string; target_id?: string; collection?: string; upload?: string }>()
   const targetKind: RequestCollectionTargetKind = COLLECTION_TARGET_KINDS.includes(filters.target_kind as RequestCollectionTargetKind)
     ? filters.target_kind as RequestCollectionTargetKind
     : 'network'
   const targetId = filters.target_id || ''
-  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined }), [setFilters])
+  const setTargetId = useCallback((id: string) => setFilters({ target_id: id || undefined, collection: undefined }), [setFilters])
   const setTargetKind = useCallback((kind: RequestCollectionTargetKind) => setFilters({
     target_kind: kind,
   }), [setFilters])
@@ -155,6 +159,7 @@ function RequestCollectionsContent() {
     id:asset.id,label:(asset.name || asset.locator).slice(0, 240),detail:asset.locator,locator:asset.url,ownerKind:'network',
   })),[assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
+  const ownerOptions = useMemo(() => targetOptions(assets), [assets])
   useEffect(() => {
     setExecutionTargetId(targetId); setAssetOrigins([]); setBindingOrigins('')
     if (!targetId) return
@@ -191,11 +196,11 @@ function RequestCollectionsContent() {
       const result = await listRequestCollections(targetId)
       if (request !== latestCollectionsRequest.current) return
       setCollections(result.collections || [])
-      setSelectedId((current) => (
-        result.collections.some((item) => item.id === current)
-          ? current
-          : result.collections[0]?.id || ''
-      ))
+      setSelectedId((current) => {
+        const requested = typeof filters.collection === 'string' ? filters.collection : ''
+        if (requested && result.collections.some((item) => item.id === requested)) return requested
+        return result.collections.some((item) => item.id === current) ? current : result.collections[0]?.id || ''
+      })
       setError(null)
     } catch (cause) {
       if (request !== latestCollectionsRequest.current) return
@@ -204,7 +209,7 @@ function RequestCollectionsContent() {
       setSelectedId('')
       setError(cause instanceof Error ? cause.message : 'Failed to load request collections')
     }
-  }, [targetId])
+  }, [targetId, filters.collection])
 
   useEffect(() => { void loadCollections() }, [loadCollections])
 
@@ -259,6 +264,16 @@ function RequestCollectionsContent() {
     setUploadErrors({})
     setUploaderOpen(true)
   }
+
+  // upload=1 (from a target's page) opens the uploader once its owner is known.
+  const uploadRequested = filters.upload === '1'
+  useEffect(() => {
+    if (!uploadRequested || !targetId || loading) return
+    openUploader()
+    setFilters({ upload: undefined })
+    // openUploader only resets the form; running once per request is the intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadRequested, targetId, loading])
 
   async function uploadCollection() {
     if (!targetId || !documentText.trim()) return
@@ -450,18 +465,16 @@ function RequestCollectionsContent() {
           </Select>
         </Field>
         <Field label="Collection owner">
-          <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-            <option value="">{choices.length ? 'Choose a target…' : 'No active targets'}</option>
-            {choices.map((choice) => (
-              <option key={choice.id} value={choice.id}>{choice.label} · {choice.detail}</option>
-            ))}
-          </Select>
+          <Combobox value={targetId} onChange={setTargetId} options={ownerOptions} noneLabel="All collections"
+            placeholder={choices.length ? 'All collections' : 'No active targets'} searchPlaceholder="Search targets by name, host or environment…" />
         </Field>
       </Card>
 
       {error && <p className="rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-200">{error}</p>}
 
-      {!collections.length ? (
+      {!targetId ? (
+        <CollectionLibrary onManage={(collection) => setFilters({ target_id: collection.target_id || undefined, collection: collection.id })} />
+      ) : !collections.length ? (
         <EmptyState
           message={targetId ? 'No shared request collections for this target' : 'Choose a collection owner'}
           hint={targetId

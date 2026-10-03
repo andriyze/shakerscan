@@ -3,7 +3,8 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyRound, Plus, RefreshCw, RotateCw, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { KeyRound, Plus, RefreshCw, RotateCw, Search, Share2, ShieldCheck, Trash2, X } from 'lucide-react'
+import { targetOptions } from '@/lib/pickerOptions'
 import { ShareCredentialDialog, type ShareTargetChoice } from '@/components/credentials/ShareCredentialDialog'
 import {
   createTargetPolicyApprovalReceipt,
@@ -34,6 +35,7 @@ import {
   Modal,
   PageHeader,
   Select,
+  Combobox,
   Textarea,
   useToast,
 } from '@/components/ui'
@@ -277,6 +279,27 @@ function CredentialsContent() {
   const choices = useMemo(() => assets.map((asset) => ({
     id: asset.id, label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
   })), [assets])
+  const targetOptionList = useMemo(() => targetOptions(assets), [assets])
+  // Narrow the loaded list without another request: text, principal slot and status.
+  const [search, setSearch] = useState('')
+  const [slotFilter, setSlotFilter] = useState<'' | CredentialProfile['principal_slot']>('')
+  const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'expiring' | 'expired' | 'inactive'>('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const visibleProfiles = useMemo(() => {
+    const words = search.toLowerCase().split(/\s+/).filter(Boolean)
+    return profiles.filter((profile) => {
+      if (slotFilter && profile.principal_slot !== slotFilter) return false
+      if (statusFilter === 'expiring' && !(profile.refresh_required && profile.status === 'active')) return false
+      if (statusFilter && statusFilter !== 'expiring' && profile.status !== statusFilter) return false
+      const text = [profile.name, profile.principal_label, profile.auth_kind, profile.principal_slot,
+        profile.home_target_name, profile.home_target_locator].filter(Boolean).join(' ').toLowerCase()
+      return words.every((word) => text.includes(word))
+    })
+  }, [profiles, search, slotFilter, statusFilter])
+  const slotCounts = useMemo(() => profiles.reduce<Record<string, number>>((counts, profile) => {
+    counts[profile.principal_slot] = (counts[profile.principal_slot] || 0) + 1
+    return counts
+  }, {}), [profiles])
   const shareTargets = useMemo<ShareTargetChoice[]>(() => assets.map((asset) => ({
     id: asset.id, kind: 'network', label: asset.name || asset.locator, detail: /^https?:\/\//i.test(asset.url) ? asset.url : asset.locator,
   })), [assets])
@@ -523,15 +546,38 @@ function CredentialsContent() {
             </Select>
           </Field>
           <Field label="Target">
-            <Select value={choices.some((item) => item.id === targetId) ? targetId : ''} onChange={(event) => { setMissingTarget(null); setTargetId(event.target.value) }}>
-              <option value="">All targets</option>
-              {choices.map((item) => <option key={item.id} value={item.id}>{item.label} — {item.detail}</option>)}
-            </Select>
+            <Combobox value={choices.some((item) => item.id === targetId) ? targetId : ''} options={targetOptionList} noneLabel="All targets"
+              searchPlaceholder="Search targets by name, host or environment…"
+              onChange={(value) => { setMissingTarget(null); setTargetId(value) }} />
           </Field>
           <label className="flex h-10 items-center gap-2 text-sm text-gray-400">
             <input type="checkbox" checked={includeInactive} onChange={(event) => setIncludeInactive(event.target.checked)} />
             Show inactive
           </label>
+        </div>
+        <div className="mt-4 flex flex-col gap-3 border-t border-gray-800 pt-4 lg:flex-row lg:items-center">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-500" aria-hidden="true" />
+            <input aria-label="Search credentials" value={search} onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search by name, principal, authentication type or owner…"
+              className="h-9 w-full rounded-lg border border-gray-700 bg-gray-800 pl-9 pr-8 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
+            {search && <button type="button" aria-label="Clear credential search" onClick={() => setSearch('')} className="absolute right-2 top-2.5 text-gray-500 hover:text-gray-200"><X className="h-4 w-4" /></button>}
+          </div>
+          <div role="group" aria-label="Filter by slot" className="flex flex-wrap gap-1">
+            {(['', 'primary', 'secondary', 'service', 'ssh'] as const).map((slot) => (
+              <button key={slot || 'all'} type="button" aria-pressed={slotFilter === slot} onClick={() => setSlotFilter(slot)}
+                className={`rounded-lg px-2.5 py-1.5 text-xs ${slotFilter === slot ? 'bg-blue-500/15 text-blue-200 ring-1 ring-inset ring-blue-400/30' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'}`}>
+                {slot ? `${slot === 'ssh' ? 'SSH' : slot.charAt(0).toUpperCase() + slot.slice(1)} ${slotCounts[slot] || 0}` : `All ${profiles.length}`}
+              </button>
+            ))}
+          </div>
+          <Select fullWidth={false} aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} className="h-9 py-1.5">
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="expiring">Expiring soon</option>
+            <option value="expired">Expired</option>
+            {includeInactive && <option value="inactive">Inactive</option>}
+          </Select>
         </div>
       </Card>
 
@@ -554,7 +600,8 @@ function CredentialsContent() {
         />
       ) : (
         <div className="space-y-3">
-          {profiles.map((profile) => (
+          {!visibleProfiles.length && <Card className="p-6 text-center text-sm text-gray-500">No credentials match these filters.</Card>}
+          {visibleProfiles.map((profile) => (
             <Card key={profile.id} className="p-5">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
@@ -595,7 +642,16 @@ function CredentialsContent() {
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
                     {profile.allowed_capabilities.length
-                      ? profile.allowed_capabilities.map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)
+                      ? <>
+                          {(expanded.has(profile.id) ? profile.allowed_capabilities : profile.allowed_capabilities.slice(0, 6)).map((item) => <span key={item} className="rounded-sm bg-gray-900 px-2 py-1">{item}</span>)}
+                          {profile.allowed_capabilities.length > 6 && (
+                            <button type="button" className="rounded-sm px-2 py-1 text-blue-300 hover:bg-blue-500/10"
+                              aria-expanded={expanded.has(profile.id)}
+                              onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(profile.id)) next.delete(profile.id); else next.add(profile.id); return next })}>
+                              {expanded.has(profile.id) ? 'Show fewer' : `+${profile.allowed_capabilities.length - 6} more capabilities`}
+                            </button>
+                          )}
+                        </>
                       : <span className="rounded-sm bg-amber-500/10 px-2 py-1 text-amber-300">no capabilities · legacy profile is unusable until narrowed explicitly</span>}
                     {profile.expires_at && <span>expires {new Date(profile.expires_at).toLocaleString()}</span>}
                   </div>

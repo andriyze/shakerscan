@@ -4,9 +4,10 @@ import { Suspense, useEffect, useMemo, useState } from 'react'
 import { HUNT_SESSION_NON_AUTONOMOUS_NOTICE, huntStatusLabel } from '@/lib/labels'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Compass, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, Compass, Plus, ShieldCheck } from 'lucide-react'
 import {
   getDeviceAgentSession,
+  getTarget,
   getTargetAuthorization,
   type DeviceAgentShellPlan,
   type DeviceAgentSession,
@@ -21,7 +22,6 @@ import {
   cancelHuntV2,
   confirmHuntShellPlan,
   getHuntV2,
-  listHuntsV2,
   suggestHuntSkills,
   startHuntV2Native,
   type HuntBudgetProfile,
@@ -34,13 +34,19 @@ import {
   HUNT_BUDGET_PROFILES,
   type HuntZeroableBudgetDimension,
 } from '@/lib/huntContract.generated'
-import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { credentialOptions, targetOptions } from '@/lib/pickerOptions'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
 import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
+import { huntStatusClass } from '@/components/hunt/HuntRunList'
+import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
+import { HuntRequestsPanel } from '@/components/hunt/HuntRequestsPanel'
+import InvestigationReviewPanel from '@/components/hunt/InvestigationReviewPanel'
+import { cleanTargetLocator, huntTargetTitle } from '@/lib/huntListModel.mjs'
 import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
 import { TargetSkillEditor, TargetSkillPreview } from '@/components/targets/TargetSkillEditor'
 
@@ -92,60 +98,6 @@ function formatHuntDuration(startedAt?: string, completedAt?: string | null): st
   return `${hours}h ${minutes % 60}m`
 }
 
-function HuntHistory({
-  targetId,
-  runs,
-  loading,
-  total,
-  error,
-}: {
-  targetId: string
-  runs: HuntV2[]
-  loading: boolean
-  total: number
-  error: string | null
-}) {
-  return (
-    <Card className="p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-medium text-white">Recent Hunts for this target</h2>
-          <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
-        </div>
-        <Link href={`/hunts?target_id=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
-          {total > runs.length ? `View all ${total}` : 'View all hunts'}
-        </Link>
-      </div>
-      {loading ? (
-        <p className="mt-4 text-sm text-gray-500">Loading Hunt history…</p>
-      ) : error ? (
-        <p role="alert" className="mt-4 text-sm text-amber-300">{error}</p>
-      ) : runs.length === 0 ? (
-        <p className="mt-4 text-sm text-gray-500">No canonical Hunts have been recorded for this target.</p>
-      ) : (
-        <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {runs.map((run) => (
-            <Link
-              key={run.hunt_id}
-              href={`/hunt?target=${encodeURIComponent(targetId)}&run=${encodeURIComponent(run.hunt_id)}`}
-              className="block px-4 py-3 hover:bg-gray-800/60"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm font-medium text-gray-200">{run.objective}</span>
-                <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{huntStatusLabel(run.status)}</span>
-              </div>
-              <p className="mt-1 text-xs text-gray-500">
-                {run.target_kind} · {run.budget_profile} · {run.budget_used.agent_actions || 0} capability calls
-                {run.created_at ? ` · ${new Date(run.created_at).toLocaleString()}` : ''}
-              </p>
-            </Link>
-          ))}
-        </div>
-      )}
-    </Card>
-  )
-}
-
 const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
 
 function HuntContent() {
@@ -183,12 +135,11 @@ function HuntContent() {
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
+  const [objectiveOpen, setObjectiveOpen] = useState(false)
+  // The launcher opens from New Hunt, or straight away when a target was preselected by a link.
+  const [launcherOpen, setLauncherOpen] = useState(() => Boolean(searchParams.get('target') && !searchParams.get('run')))
   const [skillSuggestions, setSkillSuggestions] = useState<HuntSkillSuggestion[]>([])
   const [skillSuggestionsError, setSkillSuggestionsError] = useState<string | null>(null)
-  const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
-  const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
-  const [huntHistoryTotal, setHuntHistoryTotal] = useState(0)
-  const [huntHistoryError, setHuntHistoryError] = useState<string | null>(null)
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -281,6 +232,22 @@ function HuntContent() {
       detail: target.url,
     })), [assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
+  // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
+  const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
+  const runTargetId = hunt?.target_id
+  const runTargetKnown = Boolean(runTargetId && assets.some((target) => target.id === runTargetId))
+  useEffect(() => {
+    if (!runTargetId || runTargetKnown) return
+    let cancelled = false
+    getTarget(runTargetId).then((target) => { if (!cancelled) setRunTargetRecord({ id: target.id, name: target.name, url: target.url }) }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [runTargetId, runTargetKnown])
+  const runTarget = hunt ? (() => {
+    const known = assets.find((target) => target.id === hunt.target_id) || (runTargetRecord?.id === hunt.target_id ? runTargetRecord : undefined)
+    const named = { target_name: hunt.target_name || known?.name, target_url: hunt.target_url || known?.url, target_id: hunt.target_id }
+    return { title: huntTargetTitle(named), locator: cleanTargetLocator(named.target_url) }
+  })() : null
+  const targetOptionList = useMemo(() => targetOptions(assets), [assets])
   const targetKind: HuntTargetKind = selectedChoice?.sourceKind === 'device'
     ? 'device'
     : selectedChoice?.sourceKind === 'network' ? 'network' : webTargetKind
@@ -292,34 +259,6 @@ function HuntContent() {
       .then(authorization => {if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id)})
       .catch(() => undefined)
     return () => {cancelled = true}
-  }, [selectedChoice?.id])
-
-  useEffect(() => {
-    let cancelled = false
-    setHuntHistory([])
-    if (!selectedChoice) {
-      setHuntHistoryLoading(false)
-      return () => { cancelled = true }
-    }
-    setHuntHistoryLoading(true)
-    listHuntsV2({ targetId: selectedChoice.id, limit: 12 })
-      .then(({ hunts, total }) => {
-        if (cancelled) return
-        setHuntHistory(hunts)
-        setHuntHistoryTotal(total)
-        setHuntHistoryError(null)
-      })
-      // A swallowed failure rendered as "no hunts recorded", which is a different and
-      // reassuring claim than "we could not load them".
-      .catch((cause) => {
-        if (cancelled) return
-        setHuntHistory([])
-        setHuntHistoryError(
-          cause instanceof Error ? cause.message : 'Failed to load Hunt history',
-        )
-      })
-      .finally(() => { if (!cancelled) setHuntHistoryLoading(false) })
-    return () => { cancelled = true }
   }, [selectedChoice?.id])
 
   useEffect(() => {
@@ -503,17 +442,51 @@ function HuntContent() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300">
-          <Compass className="h-6 w-6" />
+      {hunt ? (
+        <div className="space-y-3">
+          <Link href="/hunt" className="inline-flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-200"><ArrowLeft className="h-4 w-4" aria-hidden="true" />Hunts</Link>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h1 className={`text-xl font-semibold leading-snug text-white sm:text-2xl ${objectiveOpen ? '' : 'line-clamp-2'}`}>{hunt.objective || 'Hunt'}</h1>
+              {(hunt.objective || '').length > 160 && (
+                <button type="button" onClick={() => setObjectiveOpen((open) => !open)} aria-expanded={objectiveOpen} className="mt-1 text-xs text-blue-300 hover:text-blue-200">
+                  {objectiveOpen ? 'Show less' : 'Show full objective'}
+                </button>
+              )}
+              <p className="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-gray-400">
+                <Link href={`/targets/${encodeURIComponent(hunt.target_id)}/asset`} className="text-blue-300 hover:text-blue-200">{runTarget?.title}</Link>
+                {runTarget?.locator && runTarget.locator !== runTarget.title && <span className="font-mono text-xs text-gray-500">{runTarget.locator}</span>}
+                <span className="text-gray-600">·</span><span>{hunt.target_kind} · {hunt.budget_profile}</span>
+              </p>
+            </div>
+            <span className={`shrink-0 rounded-md px-2.5 py-1 text-sm font-medium ring-1 ring-inset ${huntStatusClass(hunt.status)}`}>{huntStatusLabel(hunt.status)}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              { label: 'HTTP requests', value: hunt.budget_used.http_requests || 0, href: '#requests' },
+              { label: 'Capability calls', value: `${hunt.budget_used.agent_actions || 0} / ${hunt.budget.max_capability_calls || 0}` },
+              { label: 'Findings · candidates', value: `${hunt.outcome_summary?.finding_ids.length ?? 0} · ${hunt.outcome_summary?.candidate_ids.length ?? hunt.budget_used.candidates ?? 0}` },
+              { label: hunt.completed_at ? 'Duration' : 'Running for', value: formatHuntDuration(hunt.created_at, hunt.completed_at) || '—' },
+            ].map(item => <div key={item.label} className="rounded-xl border border-gray-800 bg-gray-900/60 p-3">
+              <p className="text-xs text-gray-500">{item.label}</p>
+              {item.href ? <a href={item.href} className="text-lg font-semibold text-blue-200 hover:text-blue-100">{item.value}</a> : <p className="text-lg font-semibold text-white">{item.value}</p>}
+            </div>)}
+          </div>
         </div>
-        <div>
-          <h1 className="text-2xl font-semibold text-white">Agent Hunt Session</h1>
-          <p className="mt-1 text-sm text-gray-400">
-            An evidence-driven capability session your coding agent drives for web, API, network, and connected-device targets. It does not investigate on its own — the agent proposes each permitted capability call and the runtime executes and proves it.
-          </p>
+      ) : (
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300"><Compass className="h-6 w-6" /></div>
+            <div>
+              <h1 className="text-2xl font-semibold text-white">Hunts</h1>
+              <p className="mt-1 max-w-2xl text-sm text-gray-400">
+                Evidence-driven sessions your coding agent drives for web, API, network and device targets. The agent proposes each permitted capability call; the runtime executes and proves it.
+              </p>
+            </div>
+          </div>
+          {!launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
         </div>
-      </div>
+      )}
 
       {legacyRunLoading ? (
         <Card className="p-5 text-sm text-gray-400">Loading historical device investigation…</Card>
@@ -521,20 +494,18 @@ function HuntContent() {
         <LegacyDeviceInvestigation run={legacyDeviceRun} />
       ) : !hunt ? (
         <>
-          <Card className="space-y-5 p-5">
+          {launcherOpen && <Card className="space-y-5 p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-medium text-white">New Hunt</h2>
+            <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>
+          </div>
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
             <EmptyState message="No targets available" hint="Add a hostname, IP address, or application target first." />
           ) : (
             <>
               <Field label="Target">
-                <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-                  <option value="">Choose a target</option>
-                  {choices.map((choice) => (
-                    <option key={`${choice.sourceKind}:${choice.id}`} value={choice.id}>
-                      {choice.label} · {choice.detail.replace(/^host:\/\//, '')}
-                    </option>
-                  ))}
-                </Select>
+                <Combobox value={targetId} onChange={setTargetId} options={targetOptionList}
+                  placeholder="Choose a target" searchPlaceholder="Search targets by name, host or environment…" />
               </Field>
 
               {selectedChoice?.sourceKind === 'web' && (
@@ -724,20 +695,14 @@ function HuntContent() {
                       const candidates = credentialProfiles.filter((profile) => profile.principal_slot === slot)
                       return (
                         <Field key={slot} label={`${CREDENTIAL_SLOT_LABELS[slot]} (optional)`}>
-                          <Select
+                          <Combobox
                             value={credentialIds[slot]}
-                            onChange={(event) => setCredentialIds((current) => ({
-                              ...current,
-                              [slot]: event.target.value,
-                            }))}
-                          >
-                            <option value="">{slot === 'ssh' ? 'No SSH identity' : `No ${slot} identity`}</option>
-                            {candidates.map((profile) => (
-                              <option key={profile.id} value={profile.id}>
-                                {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}
-                              </option>
-                            ))}
-                          </Select>
+                            onChange={(value) => setCredentialIds((current) => ({ ...current, [slot]: value }))}
+                            options={credentialOptions(candidates)}
+                            noneLabel={slot === 'ssh' ? 'No SSH identity' : `No ${slot} identity`}
+                            searchPlaceholder="Search credentials…"
+                            emptyMessage={candidates.length ? 'No matching credentials' : 'No credentials in this slot for this target'}
+                          />
                         </Field>
                       )
                     })}
@@ -786,28 +751,16 @@ function HuntContent() {
               </div>
             </>
           )}
-          </Card>
-          {selectedChoice && (
-            <HuntHistory
-              targetId={selectedChoice.id}
-              runs={huntHistory}
-              loading={huntHistoryLoading}
-              total={huntHistoryTotal}
-              error={huntHistoryError}
-            />
-          )}
+          </Card>}
+          <HuntHistoryList />
         </>
       ) : (
+        <>
+        <HuntRequestsPanel huntId={hunt.hunt_id} />
         <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
           <div className="space-y-5">
             <Card className="space-y-4 p-5">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
-                  <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
-                </div>
-                <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{huntStatusLabel(hunt.status)}</span>
-              </div>
+              <h2 className="font-medium text-white">Run details</h2>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-sm bg-gray-950 p-3">
                   <span className="block text-xs text-gray-500">Budget</span>
@@ -844,8 +797,8 @@ function HuntContent() {
                   {hunt.policy_adjustments?.map((message) => <p key={message} className="mt-1">{message}</p>)}
                 </div>
               )}
-              {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
-              <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact />
+              {hunt.stop_reason && !['completed', 'operator_completed'].includes(hunt.stop_reason) && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
+              <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact browse={false} />
               {hunt.queued_scan?.scan_id && (
                 <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">
                   Open queued Scan {hunt.queued_scan.scan_id.slice(0, 8)} · {hunt.queued_scan.status}
@@ -892,9 +845,6 @@ function HuntContent() {
               {['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at && (
                 <Button variant="danger" onClick={cancel}>Cancel session</Button>
               )}
-              <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
-                Back to launcher and history
-              </Link>
             </Card>
 
             <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
@@ -1007,7 +957,7 @@ function HuntContent() {
               {(hunt.actions || []).length === 0 ? (
                 <p className="mt-4 text-sm text-gray-500">No capability actions were recorded.</p>
               ) : (
-                <div className="mt-4 space-y-3">
+                <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800 bg-gray-950/60">
                   {(hunt.actions || []).map((action) => {
                     const references = action.result.reference_ids
                     const accounting = action.result.budget_accounting
@@ -1019,29 +969,19 @@ function HuntContent() {
                       .map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`)
                       .join(' · ')
                     return (
-                      <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div key={action.action_id} className="px-3 py-2.5">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                           <code className="text-sm text-blue-300">{action.capability_name}</code>
-                          <span className={`rounded-sm px-2 py-1 text-xs ${huntActionStatusClass(action.status)}`}>
+                          <span className={`rounded-sm px-1.5 py-0.5 text-[11px] ${huntActionStatusClass(action.status)}`}>
                             {action.status.replaceAll('_', ' ')}
                           </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
-                          <span>{action.result.observation_count} observations</span>
-                          {action.started_at && <span>Started {new Date(action.started_at).toLocaleString()}</span>}
-                          {action.completed_at && <span>Finished {new Date(action.completed_at).toLocaleString()}</span>}
+                          <span className="ml-auto text-xs text-gray-500">
+                            {action.result.observation_count} observations
+                            {action.started_at && action.completed_at ? ` · ${formatHuntDuration(action.started_at, action.completed_at) || '0s'}` : ''}
+                          </span>
                         </div>
                         {accounting.basis === 'exact_settlement' && (
-                          <div className="mt-2 space-y-1 text-xs text-gray-500">
-                            <p>Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
-                            <p>
-                              Charge basis: {accounting.charge_basis === 'conservative_full_reservation'
-                                ? 'conservative upper bound; measured consumption was unavailable'
-                                : 'capability-reported settlement'}
-                            </p>
-                            {reservedBudget.length > 0 && <p>Temporarily reserved: {formatBudget(reservedBudget)}</p>}
-                            {releasedBudget.length > 0 && <p>Released after settlement: {formatBudget(releasedBudget)}</p>}
-                          </div>
+                          <p className="mt-1 text-xs text-gray-500">Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
                         )}
                         {accounting.basis === 'legacy_reported_charge' && legacyBudget.length > 0 && (
                           <p className="mt-2 text-xs text-amber-300/80">
@@ -1068,8 +1008,20 @@ function HuntContent() {
                             ))}
                           </div>
                         )}
-                        <details className="mt-3 text-xs text-gray-500">
-                          <summary className="cursor-pointer text-gray-400 hover:text-gray-300">Audit identifiers</summary>
+                        <details className="mt-1.5 text-xs text-gray-500">
+                          <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Audit identifiers and budget settlement</summary>
+                          {accounting.basis === 'exact_settlement' && (
+                            <div className="mt-2 space-y-1">
+                              <p>
+                                Charge basis: {accounting.charge_basis === 'conservative_full_reservation'
+                                  ? 'conservative upper bound; measured consumption was unavailable'
+                                  : 'capability-reported settlement'}
+                              </p>
+                              {reservedBudget.length > 0 && <p>Temporarily reserved: {formatBudget(reservedBudget)}</p>}
+                              {releasedBudget.length > 0 && <p>Released after settlement: {formatBudget(releasedBudget)}</p>}
+                              {action.started_at && <p>Started {new Date(action.started_at).toLocaleString()}{action.completed_at ? ` · finished ${new Date(action.completed_at).toLocaleString()}` : ''}</p>}
+                            </div>
+                          )}
                           <dl className="mt-2 space-y-1">
                             <div><dt className="inline">Action: </dt><dd className="inline break-all font-mono">{action.action_id}</dd></div>
                             <div><dt className="inline">Receipt: </dt><dd className="inline break-all font-mono">{action.receipt_id || 'not recorded'}</dd></div>
@@ -1084,10 +1036,14 @@ function HuntContent() {
             </Card>
 
             <Card className="p-5">
-              <h2 className="font-medium text-white">Available capabilities</h2>
-              <p className="mt-1 text-xs text-gray-500">
-                Your coding agent can query context and call only this persisted allowlist.
-              </p>
+              <details>
+              <summary className="cursor-pointer list-none">
+                <span className="flex items-center justify-between gap-3">
+                  <span className="font-medium text-white">Available capabilities</span>
+                  <span className="text-xs text-gray-500">{(hunt.capabilities || []).length} · show</span>
+                </span>
+                <span className="mt-1 block text-xs text-gray-500">Your coding agent can query context and call only this persisted allowlist.</span>
+              </summary>
               <div className="mt-4 space-y-2">
                 {(hunt.capabilities || []).map((capability) => (
                   <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
@@ -1099,9 +1055,12 @@ function HuntContent() {
                   </div>
                 ))}
               </div>
+              </details>
             </Card>
           </div>
         </div>
+        <InvestigationReviewPanel />
+        </>
       )}
     </div>
   )

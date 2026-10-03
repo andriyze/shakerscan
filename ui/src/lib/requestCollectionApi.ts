@@ -107,6 +107,26 @@ export async function listRequestCollections(
   return response.json()
 }
 
+/** A library row: every active collection with its owner and how widely it is bound. */
+export interface LibraryRequestCollection extends SharedRequestCollection {
+  owner_name?: string | null
+  owner_url?: string | null
+  owner_locator?: string | null
+  binding_count: number
+  selection_count: number
+}
+
+/** Every collection across targets, newest first; search matches name, format and owner. */
+export async function listRequestCollectionLibrary(params: { search?: string; limit?: number; offset?: number } = {}): Promise<{
+  collections: LibraryRequestCollection[]; count: number; total: number; limit: number; offset: number
+}> {
+  const search = new URLSearchParams({ limit: String(params.limit ?? 100), offset: String(params.offset ?? 0) })
+  if (params.search?.trim()) search.set('search', params.search.trim())
+  const response = await fetch(`${API_URL}/request-collections?${search}`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Failed to load request collections'))
+  return response.json()
+}
+
 export async function getRequestCollection(collectionId: string): Promise<RequestCollectionDetail> {
   const response = await fetch(
     `${API_URL}/request-collections/${encodeURIComponent(collectionId)}`,

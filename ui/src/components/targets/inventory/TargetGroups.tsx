@@ -28,8 +28,11 @@ function GroupCheckbox({ targets, selection, label }: { targets: TargetAsset[]; 
     className="h-4 w-4 cursor-pointer rounded border-gray-600 bg-gray-900 accent-blue-500" />
 }
 
+/** Each top-level group (a domain, or the IP and local-host group) is its own card. */
+const GROUP_CARD = 'overflow-hidden rounded-xl border border-gray-800 bg-gray-900/40 shadow-sm shadow-black/20'
+
 export function ColumnHeader() {
-  return <div role="row" className={`hidden border-b border-gray-800/80 bg-gray-900/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-gray-500 ${ROW_GRID}`}>
+  return <div role="row" className={`hidden px-[17px] pb-1 text-[11px] font-medium uppercase tracking-wider text-gray-500 ${ROW_GRID}`}>
     <span role="columnheader"><span className="sr-only">Select</span></span>
     <span role="columnheader">Target</span>
     <span role="columnheader">Web apps &amp; services</span>
@@ -53,12 +56,12 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, selection, ac
   const batch = [...new Set(group.targets.filter(asset => asset.is_active).flatMap(asset => scanUrls(asset)))]
   // A domain with nothing beneath it reads as one row, with discovery in its menu.
   if (root && !children.length) {
-    return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className="border-b border-gray-800/80 last:border-b-0">
+    return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className={GROUP_CARD}>
       <div role="rowgroup"><TargetRow asset={root} selected={selection.selected.has(root.id)} onSelect={value => selection.toggle([root.id], value)}
         actions={actions} busy={busy === root.id} discoverDomain={group.root_domain} /></div>
     </section>
   }
-  return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className="border-b border-gray-800/80 last:border-b-0">
+  return <section data-testid="target-domain-group" aria-label={`Targets in ${domain}`} className={GROUP_CARD}>
     <div className="flex flex-wrap items-center gap-3 bg-gray-900/70 px-4 py-2.5">
       <GroupCheckbox targets={group.targets} selection={selection} label={`Select all targets in ${domain}`} />
       {children.length > 0
@@ -91,7 +94,7 @@ export function NetworkGroup({ targets, selection, actions, busy }: {
   targets: TargetAsset[]; selection: Selection; actions: RowActions; busy: string | null
 }) {
   if (!targets.length) return null
-  return <section data-testid="target-network-group" aria-label="IP addresses and local hosts" className="border-b border-gray-800/80 last:border-b-0">
+  return <section data-testid="target-network-group" aria-label="IP addresses and local hosts" className={GROUP_CARD}>
     <div className="flex flex-wrap items-center gap-3 bg-gray-900/70 px-4 py-2.5">
       <GroupCheckbox targets={targets} selection={selection} label="Select all IP addresses and local hosts" />
       <span className="flex items-center gap-2 text-sm font-semibold text-white"><Server className="h-4 w-4 text-cyan-300/80" aria-hidden="true" />IP addresses &amp; local hosts</span>
