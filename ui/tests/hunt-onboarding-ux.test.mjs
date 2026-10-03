@@ -16,7 +16,8 @@ test('Hunt exposes a real label and description for capability filtering', () =>
 test('Hunt explains why it cannot start before privileged prerequisites are ready', () => {
   assert.match(hunt, /const startBlockedReason =/)
   assert.match(hunt, /Confirm that you are authorized to use the selected capabilities/)
-  assert.match(hunt, /Create or paste a target-bound approval receipt/)
+  assert.match(hunt, /Target authorization could not be read\. Retry before starting/)
+  assert.doesNotMatch(hunt, /Create or paste a target-bound approval receipt/)
   assert.match(hunt, /disabled=\{Boolean\(startBlockedReason\)\}/)
   assert.match(hunt, /aria-describedby="hunt-start-guidance"/)
   assert.match(hunt, /<p role="alert"/)

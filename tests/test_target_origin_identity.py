@@ -52,3 +52,25 @@ def test_a_missing_or_unparseable_side_does_not_silently_pass():
     assert matches("", "http://host.test:3001") is False
     assert matches("http://host.test:3001", "") is False
     assert matches("not a url", "http://host.test:3001") is False
+
+
+def test_host_asset_scope_accepts_its_services_without_inventing_a_web_origin():
+    from api.action_scope import scope_origin_matches_target as matches
+
+    for scope in ("http://192.168.1.187", "https://192.168.1.187:8443/login"):
+        assert matches(scope, "host://192.168.1.187") is True
+    assert matches("http://[fd00::187]:8080/", "host://[fd00::187]") is True
+    assert matches("https://tv.test:443", "host://TV.TEST.") is True
+    assert matches("https://other.test:8443", "host://tv.test") is False
+    assert matches("http://192.168.1.188", "host://192.168.1.187") is False
+    assert matches("host://192.168.1.187", "host://192.168.1.187") is False
+    assert matches("http://tv.test", "host://tv.test:invalid") is False
+    assert matches("http://tv.test", "host://operator@tv.test") is False
+
+
+def test_host_membership_does_not_admit_a_blocked_destination():
+    from api.action_scope import evaluate_scope, scope_origin_matches_target
+
+    url = "http://169.254.169.254"
+    assert scope_origin_matches_target(url, "host://169.254.169.254") is True
+    assert evaluate_scope(url, allowed_hosts=["169.254.169.254"], environment="lab").verdict == "blocked"

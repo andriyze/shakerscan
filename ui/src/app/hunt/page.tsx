@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { Compass, Plus } from 'lucide-react'
 import {
+  authorizeTarget,
   getDeviceAgentSession,
   getTarget,
   getTargetAuthorization,
@@ -32,7 +33,6 @@ import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast }
 import { credentialOptions, targetOptions } from '@/lib/pickerOptions'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
-import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
 import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
 import { HuntRunView } from '@/components/hunt/HuntRunView'
@@ -73,6 +73,9 @@ function HuntContent() {
   const toast = useToast()
   const [assets, setAssets] = useState<TargetAsset[]>([])
   const [authorizedTargetId, setAuthorizedTargetId] = useState<string | null>(null)
+  const [authorizationLoading, setAuthorizationLoading] = useState(false)
+  const [authorizationError, setAuthorizationError] = useState<string | null>(null)
+  const [authorizationRetry, setAuthorizationRetry] = useState(0)
   const [targetId, setTargetId] = useState('')
   const [webTargetKind, setWebTargetKind] = useState<Exclude<HuntTargetKind, 'device'>>('web')
   const [objective, setObjective] = useState(
@@ -197,11 +200,17 @@ function HuntContent() {
   useEffect(() => {
     let cancelled = false
     setAuthorizedTargetId(null)
+    setAuthorizationConfirmed(false)
+    setApprovalReceipt('')
+    setScopeReceipt('')
+    setAuthorizationError(null)
+    setAuthorizationLoading(Boolean(selectedChoice))
     if (selectedChoice) getTargetAuthorization(selectedChoice.id)
-      .then(authorization => {if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id)})
-      .catch(() => undefined)
+      .then(authorization => { if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id) })
+      .catch(cause => { if (!cancelled) setAuthorizationError(cause instanceof Error ? cause.message : 'Failed to read target authorization') })
+      .finally(() => { if (!cancelled) setAuthorizationLoading(false) })
     return () => {cancelled = true}
-  }, [selectedChoice?.id])
+  }, [selectedChoice?.id, authorizationRetry])
 
   useEffect(() => {
     let cancelled = false
@@ -236,21 +245,23 @@ function HuntContent() {
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
   // Revalidated server-side at submission and before worker decryption.
+  const automaticAuthorization = targetKind !== 'device' && managedTargetAuthorizationIsAutomatic()
   const standingAuthorized = Boolean(selectedChoice && authorizedTargetId === selectedChoice.id)
-    || (targetKind !== 'device' && managedTargetAuthorizationIsAutomatic())
+    || automaticAuthorization
   const effectiveAuthorization = authorizationConfirmed || standingAuthorized
-  const receiptRequired = privileged && !standingAuthorized
-  const configuredDuration = positiveInteger(maxDurationSeconds)
-  const approvalTtlMinutes = Math.ceil((configuredDuration ?? HUNT_BUDGET_PROFILES[budget].max_duration_seconds) / 60) + 15
   const startBlockedReason = !targetId
     ? 'Choose a target to continue.'
     : !objective.trim()
       ? 'Describe what the Hunt should investigate.'
-      : privileged && !effectiveAuthorization
-        ? 'Confirm that you are authorized to use the selected capabilities.'
-        : receiptRequired && !approvalReceipt.trim()
-          ? 'Create or paste a target-bound approval receipt.'
-          : null
+      : credentialsLoading
+        ? 'Loading this target’s saved identities…'
+        : privileged && !automaticAuthorization && authorizationLoading
+          ? 'Checking this target’s saved authorization…'
+          : privileged && !automaticAuthorization && authorizationError
+            ? 'Target authorization could not be read. Retry before starting.'
+            : privileged && !effectiveAuthorization
+              ? 'Confirm that you are authorized to use the selected capabilities.'
+              : null
   const visibleCredentialSlots: CredentialPrincipalSlot[] = ['primary', 'secondary', 'service', 'ssh']
 
   async function start() {
@@ -260,9 +271,6 @@ function HuntContent() {
     try {
       if (privileged && !effectiveAuthorization) {
         throw new Error('Confirm that you own or are authorized to test this target.')
-      }
-      if (receiptRequired && !approvalReceipt.trim()) {
-        throw new Error('Privileged Hunt capabilities require a target-bound approval receipt.')
       }
 
       const duration = positiveInteger(maxDurationSeconds)
@@ -302,6 +310,22 @@ function HuntContent() {
         ...(credentialIds.ssh
           ? { ssh_credential_profile_id: credentialIds.ssh }
           : {}),
+      }
+      // Reuse the current standing authorization. The ownership confirmation records it once;
+      // the server resolves and revalidates it for every Hunt, including selected identities.
+      if (privileged && !automaticAuthorization && !approvalReceipt.trim()) {
+        let authorization = await getTargetAuthorization(selectedChoice.id)
+        if (!authorization?.standing) {
+          if (!authorizationConfirmed) {
+            setAuthorizedTargetId(null)
+            throw new Error('This target’s authorization changed. Confirm authorization again before starting.')
+          }
+          authorization = await authorizeTarget(selectedChoice.id, 'interactive-ui')
+        }
+        if (!authorization?.standing || !authorization.approval_receipt_id) {
+          throw new Error('Target authorization could not be saved. Try again before starting.')
+        }
+        setAuthorizedTargetId(selectedChoice.id)
       }
       const created = await startHuntV2Native({
         targetId,
@@ -459,7 +483,7 @@ function HuntContent() {
                   />
                   <span>Allow bounded out-of-band callbacks when a registered verifier requires them</span>
                 </label>
-                {privileged && !standingAuthorized && (
+                {privileged && !standingAuthorized && !authorizationLoading && !authorizationError && (
                   <label className="flex items-start gap-3 rounded-lg border border-amber-800/70 bg-amber-950/20 p-3 text-sm text-amber-100">
                     <input
                       className="mt-1"
@@ -467,24 +491,17 @@ function HuntContent() {
                       checked={authorizationConfirmed}
                       onChange={(event) => setAuthorizationConfirmed(event.target.checked)}
                     />
-                    <span>I own or have explicit authorization to test this target with the selected capabilities.</span>
+                    <span>I own or have explicit authorization to test this target with the selected capabilities.
+                      <span className="mt-1 block text-xs text-gray-400">Saved once when you start. Future Hunts and scans reuse this authorization until you revoke it.</span>
+                    </span>
                   </label>
                 )}
+                {standingAuthorized && <p role="status" className="text-xs text-emerald-300">Testing is authorized for this target. Hunts and scans reuse its saved authorization.</p>}
+                {!automaticAuthorization && authorizationError && <div role="alert" className="space-y-2 text-sm text-red-300">
+                  <p>{authorizationError}</p>
+                  <Button variant="secondary" size="sm" onClick={() => setAuthorizationRetry(value => value + 1)}>Retry authorization check</Button>
+                </div>}
               </div>
-
-              {(receiptRequired || approvalReceipt) && (
-                <ApprovalReceiptField
-                  targetId={selectedChoice?.id}
-                  targetUrl={selectedChoice?.detail || ''}
-                  authorizationConfirmed={effectiveAuthorization}
-                  receiptId={approvalReceipt}
-                  onReceiptIdChange={setApprovalReceipt}
-                  onScopeReceiptIdChange={setScopeReceipt}
-                  ttlMinutes={approvalTtlMinutes}
-                  riskTier={selectedCredentialCount > 0 ? 'credential' : 'active'}
-                  required={receiptRequired}
-                />
-              )}
 
               <div className="space-y-4 rounded-lg border border-gray-800 bg-gray-950 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -521,7 +538,7 @@ function HuntContent() {
                 )}
                 {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}
                 <p className="text-xs text-gray-500">
-                  This target&apos;s credentials start selected; clear any you do not want. Existing target authorization also covers selected credentials. HTTP, untrusted HTTPS, and SSH authentication are supported. No SSH command runs until you separately confirm the exact immutable plan.
+                  This target&apos;s credentials start selected; clear any you do not want. Saved target authorization covers the identities you select. HTTP, untrusted HTTPS, and SSH are supported. Remote SSH commands use the target&apos;s saved SSH permission.
                 </p>
               </div>
 
@@ -585,6 +602,14 @@ function HuntContent() {
                   </div>
                 </details>
                 <div className="grid gap-4 md:grid-cols-2">
+                  <label className="text-sm text-gray-300">
+                    Approval receipt ID (optional override)
+                    <input
+                      value={approvalReceipt}
+                      onChange={(event) => setApprovalReceipt(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                    />
+                  </label>
                   <label className="text-sm text-gray-300">
                     Scope receipt ID (optional)
                     <input

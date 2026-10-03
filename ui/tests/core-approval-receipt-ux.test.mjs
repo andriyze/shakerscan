@@ -7,9 +7,12 @@ const scan = fs.readFileSync(new URL('../src/app/scan/new/page.tsx', import.meta
 const hunt = fs.readFileSync(new URL('../src/app/hunt/page.tsx', import.meta.url), 'utf8')
 const api = fs.readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8')
 
-test('core privileged workflows create target-bound approval receipts in place', () => {
+test('privileged Hunt records standing authorization without a manual receipt workflow', () => {
   assert.doesNotMatch(scan, /<ApprovalReceiptField/)
-  assert.match(hunt, /<ApprovalReceiptField/)
+  assert.doesNotMatch(hunt, /<ApprovalReceiptField|approvalTtlMinutes/)
+  assert.match(hunt, /await authorizeTarget\(selectedChoice.id, 'interactive-ui'\)/)
+  assert.match(hunt, /Saved once when you start/)
+  assert.match(hunt, /authorization\.approval_receipt_id/)
   assert.match(component, /Create approval for this target/)
   assert.match(component, /Confirm that you are authorized to test this target first/)
   assert.match(component, /Approval scope environment/)
@@ -21,9 +24,9 @@ test('core privileged workflows create target-bound approval receipts in place',
   assert.match(api, /confirm_authorized/)
 })
 
-test('receipt creation carries the scope binding into Hunt and stays duration-bounded', () => {
-  assert.match(hunt, /onScopeReceiptIdChange=\{setScopeReceipt\}/)
-  assert.match(hunt, /approvalTtlMinutes/)
+test('explicit bounded receipts remain an advanced override', () => {
+  assert.match(hunt, /Approval receipt ID \(optional override\)/)
+  assert.match(hunt, /approvalReceiptId: approvalReceipt.trim\(\) \|\| undefined/)
   assert.match(component, /Valid for about/)
 })
 

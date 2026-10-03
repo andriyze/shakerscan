@@ -19,7 +19,7 @@ test('unified Hunt binds generic principal profiles without treating SSH proposa
   assert.match(page, /service_credential_profile_id:/)
   assert.match(page, /ssh_credential_profile_id:/)
   assert.match(page, /ssh: 'SSH identity'/)
-  assert.match(page, /No SSH command runs until you separately confirm/)
+  assert.match(page, /Remote SSH commands use the target&apos;s saved SSH permission/)
   assert.match(api, /ssh_credential_profile_id\?: string/)
 })
 
