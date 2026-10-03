@@ -1949,6 +1949,10 @@ async def _execute_hunt_capability_lifecycle(
                         status_code=409,
                         detail="An SSH proposal is already in flight for this Hunt",
                     )
+            if name in {"ssh.exec", "ssh.close"} and request.input.get("session_id"):
+                from .ssh_stream import require_ssh_session_available
+                require_ssh_session_available(get_redis(), base_queue=_get("AGENT_TOOL_QUEUE_NAME"),
+                    hunt_id=hunt_id, session_id=request.input["session_id"])
             if durable_budget:
                 durable_action_digest = hunt_capability_action_digest(
                     hunt_id=run["id"],
