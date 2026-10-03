@@ -8,6 +8,7 @@ on:
       - 'scripts/**'
       - 'tests/**'
       - '.github/pr297-ssh-integration.patch'
+      - '.github/pr297-ssh-stream-fix.patch'
       - '.github/workflows/pr297-ssh-reconcile.yml'
 
 permissions:
@@ -60,6 +61,7 @@ jobs:
           import subprocess, re
           patch = Path('.github/pr297-ssh-integration.patch').read_text()
           patch = patch.replace('\n diff --git', '\ndiff --git')
+          patch += '\n' + Path('.github/pr297-ssh-stream-fix.patch').read_text()
           Path('/tmp/ssh-integration.patch').write_text(patch)
           subprocess.run(['git','apply','--check','--index','--unidiff-zero','/tmp/ssh-integration.patch'],check=True)
           subprocess.run(['git','apply','--index','--unidiff-zero','/tmp/ssh-integration.patch'],check=True)
@@ -76,11 +78,11 @@ jobs:
       - name: Run actual SSH commands through API, database, queue, worker and TLS gateway
         run: |
           mkdir -p artifacts
-          python -m pytest -q tests/test_hunt_ssh_commands.py tests/test_api_stream.py tests/test_target_asset_ssh_runtime_postgres.py tests/test_hunt_network_reservations.py --junitxml=artifacts/ssh-runtime.xml
+          python -m pytest -q tests/test_hunt_stream_body_limit.py tests/test_hunt_ssh_commands.py tests/test_api_stream.py tests/test_target_asset_ssh_runtime_postgres.py tests/test_hunt_network_reservations.py --junitxml=artifacts/ssh-runtime.xml
           python - <<'PY'
           import xml.etree.ElementTree as ET
           suites=ET.parse('artifacts/ssh-runtime.xml').findall('testsuite')
-          assert sum(int(s.get('tests','0')) for s in suites)>=35
+          assert sum(int(s.get('tests','0')) for s in suites)>=39
           assert sum(int(s.get('skipped','0')) for s in suites)==0
           PY
       - name: Check installation, generated sources and implementation limits
@@ -110,7 +112,7 @@ jobs:
               mode=subprocess.check_output(['git','ls-files','-s',name],text=True).split()[0]
               index['files'][name]={'sha':blob,'sha256':hashlib.sha256(content).hexdigest(),'mode':mode}
           subprocess.run(['git','add','--',*files],check=True)
-          subprocess.run(['git','rm','--cached','.github/pr297-ssh-integration.patch','.github/workflows/pr297-ssh-reconcile.yml'],check=True)
+          subprocess.run(['git','rm','--cached','.github/pr297-ssh-integration.patch','.github/pr297-ssh-stream-fix.patch','.github/workflows/pr297-ssh-reconcile.yml','.github/workflows/pr297-ssh-diagnostic.yml'],check=True)
           index['final_tree_sha']=subprocess.check_output(['git','write-tree'],text=True).strip()
           (root/'index.json').write_text(json.dumps(index,indent=2)+'\n')
           subprocess.run(['git','archive','--format=tar',index['final_tree_sha'],'-o','artifacts/ssh-candidate-source.tar'],check=True)
