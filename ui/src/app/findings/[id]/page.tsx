@@ -1357,8 +1357,8 @@ function FindingDetailContent() {
             <section aria-labelledby="manage-record-heading" className="border-t border-gray-800 pt-4">
               <h3 id="manage-record-heading" className="text-xs font-semibold uppercase tracking-wider text-gray-500">Manage record</h3>
               <p className="mt-1 max-w-2xl text-sm text-gray-500">
-                Deleting removes this finding&apos;s database record permanently after a preview and approval.
-                Historical scans and evidence files are retained. To close a finding, change its status instead.
+                Deleting removes this finding and erases its evidence permanently after a preview and approval.
+                The scan it came from stays. To close a finding, change its status instead.
               </p>
               <div className="mt-3">
                 <DeleteRecordsButton

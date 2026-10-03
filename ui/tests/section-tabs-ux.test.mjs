@@ -38,5 +38,6 @@ test('the scan report shows each report block in exactly one tab', () => {
   // repeated on the scan page: the verdict card and the Findings tab replace them.
   assert.match(report, /!isModelIntakeScan && section === 'all' && <div/)
   assert.match(report, /\{section === 'all' && <details open=\{!isModelIntakeScan\}/)
-  assert.match(detail, /actions=\{<ReportDownloads scan=\{scan\} isAuthenticated=\{true\} \/>\}/)
+  // Downloads stay in the page header, beside deleting the scan.
+  assert.match(detail, /actions=\{<div[^>]*><ReportDownloads scan=\{scan\} isAuthenticated=\{true\} \/>\{deleteScan\}<\/div>\}/)
 })

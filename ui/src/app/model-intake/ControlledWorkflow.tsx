@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from '@/components/WorkspaceLink'
 import { Activity, Bot, CheckCircle2, Clipboard, Download, FileText, LockKeyhole, RefreshCw, Server, ShieldAlert } from 'lucide-react'
 import { Card, useToast } from '@/components/ui'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { createRandomUUID } from '@/lib/clientRandom'
 import {
   attachModelIntakeStaticRun,
@@ -973,6 +974,15 @@ export function ControlledModelIntakeWorkflow({
               <div className="rounded-sm border border-gray-800 p-3 text-xs"><div className="text-gray-500">Artifact</div><div className="mt-1 font-mono text-gray-200">{shortDigest(subjectDigest(detail, 'artifact'))}</div></div>
               <div className="rounded-sm border border-gray-800 p-3 text-xs"><div className="text-gray-500">Snapshot</div><div className="mt-1 font-mono text-gray-200">{shortDigest(subjectDigest(detail, 'repository_snapshot'))}</div></div>
               <div className="rounded-sm border border-gray-800 p-3 text-xs"><div className="text-gray-500">Evidence records</div><div className="mt-1 text-gray-200">{detail.evidence.length}</div></div>
+            </div>
+          )}
+          {detail && (
+            <div className="mt-3 flex justify-end">
+              <DeleteRecordsButton
+                selection={{ kind: 'model_intake_submission', id: detail.submission.id }} label="Delete submission"
+                subject="this submission" variant="secondary"
+                onDeleted={() => { setSelectedId(''); setDetail(null); void loadSubmissions() }}
+              />
             </div>
           )}
         </div>

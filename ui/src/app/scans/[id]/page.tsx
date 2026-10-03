@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState, Suspense, useRef } from 'react'
-import { useParams, useSearchParams } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { API_URL, getScan, getScanLogs, getDeviceScanActivity, getHealth, getFindings, getScanDeploymentDecision, getTargetPosture, replayAiScan, getAiScanCampaignHistory, formatDuration, formatDate, type AiScanCampaignHistory, type DeploymentDecision, type Finding, type TargetPosture } from '@/lib/api'
 import { TargetPostureCard } from '@/components/TargetPostureCard'
@@ -11,6 +11,7 @@ import ReportView, { ReportDownloads } from '@/components/ReportView'
 import FindingCard from '@/components/FindingCard'
 import { SectionTabPanel, SectionTabs, useSectionTab, type SectionTab } from '@/components/ui/SectionTabs'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { buildAiGateCampaignReview, type AiGateCampaignReview } from '@/lib/aiGateCampaign'
 import { deviceActivityLogLines, deviceScorePresentation } from '@/lib/deviceScanPresentation.mjs'
 import { assuranceClass, scanAssurance } from '@/lib/assurance.mjs'
@@ -1899,6 +1900,7 @@ function ExecutionPlanCard({ scan }: { scan: any }) {
 
 function ScanDetailContent() {
   const params = useParams()
+  const router = useRouter()
   const searchParams = useSearchParams()
   const scanId = params.id as string
   const [scan, setScan] = useState<any | null>(null)
@@ -1943,6 +1945,11 @@ function ScanDetailContent() {
   }
 
   const backUrl = buildBackUrl()
+  // A running scan blocks its own deletion; the preview names it, so the control can always show.
+  const deleteScan = scan && <DeleteRecordsButton
+    selection={{ kind: 'scan', id: scan.id }} label="Delete scan" subject="this scan" variant="secondary"
+    onDeleted={() => router.push(backUrl)}
+  />
 
   async function refreshDeploymentDecision() {
     setDeploymentDecisionLoading(true)
@@ -2341,7 +2348,7 @@ function ScanDetailContent() {
     if (hasPartialResults) {
       return (
         <div>
-          <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+          <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" actions={deleteScan} />
           <ShardContextBanner scan={scan} />
           <FailedScanPanel scan={scan} hasPartialResults={true} />
           <ParallelShardRollup scan={scan} />
@@ -2368,7 +2375,7 @@ function ScanDetailContent() {
     // No partial results - show error only
     return (
       <div className="space-y-6">
-        <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" />
+        <PageHeader title={scan.target_url} backHref={backUrl} backLabel="Back to scans" actions={deleteScan} />
         <ShardContextBanner scan={scan} />
         <FailedScanPanel scan={scan} hasPartialResults={false} />
         <ParallelShardRollup scan={scan} />
@@ -2384,7 +2391,7 @@ function ScanDetailContent() {
   if (isModelIntake) {
     return (
       <div>
-        <PageHeader title="Model Intake report" backHref={backUrl} backLabel="Back to scans" />
+        <PageHeader title="Model Intake report" backHref={backUrl} backLabel="Back to scans" actions={deleteScan} />
         <ReportView
           scan={scan}
           isAuthenticated={true}
@@ -2437,7 +2444,7 @@ function ScanDetailContent() {
         title={scan.target_url}
         backHref={backUrl}
         backLabel="Back to scans"
-        actions={<ReportDownloads scan={scan} isAuthenticated={true} />}
+        actions={<div className="flex flex-wrap items-center gap-2"><ReportDownloads scan={scan} isAuthenticated={true} />{deleteScan}</div>}
       />
       <ShardContextBanner scan={scan} />
       {targetWarning && (
