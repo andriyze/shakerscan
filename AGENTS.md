@@ -312,8 +312,8 @@ priorities, exclusions and target knowledge, using opaque credential/collection 
 of secrets. A Hunt automatically snapshots this bounded document at startup and exposes it as
 `target_skill`; later edits or deletion affect future Hunts only. Use `targets.skill.read` and
 explicitly requested `targets.skill.create|update|delete` through the shared capability runtime,
-with revision checks. These are target metadata actions, independent of active testing; they grant
-no network authority and cannot address another target UUID. The current operator objective takes
+with revision checks; metadata edits default on and obey saved operator opt-outs. Planner flags grant
+no sharing or network authority, and metadata permission grants no edits to another UUID. The operator objective takes
 precedence over saved preferences; server scope, policy, approval and budgets remain authoritative.
 
 Web and native service methodologies live under `skills/web/`; `skills/web/README.md` describes
@@ -378,8 +378,9 @@ SSH plans are immutable and inert until the user separately confirms exact comma
 may authenticate through `ssh.connect` using its selected stored SSH identity on the operator's
 port, the saved profile port, or port 22. It pins the host key, reports authentication evidence, and
 closes the connection without executing commands.
-Device Hunt uses the shared runtime; do not revive retired device-agent writes. Capacity is opt-in through
-`./scanner.sh devices start|stop|status|logs` and must not consume ordinary DAST slots silently.
+Device Hunt uses the shared runtime; do not revive retired device-agent writes. Startup supplies one
+dedicated network worker, separate from DAST slots. Opt out with `SHAKERSCAN_NETWORK_WORKER_ENABLED=false`
+or `shakerscan devices stop`; `shakerscan devices start` re-enables it. Use `./scanner.sh` only in source instructions.
 
 ### Continuous ASM
 

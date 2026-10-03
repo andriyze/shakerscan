@@ -5230,12 +5230,13 @@ export async function routeAiOps(payload: {
   return res.json()
 }
 
-// Connected devices — deliberately separate from Web DAST targets.
+// Connected devices — a network-oriented view of canonical targets.
 export async function getDeviceReadiness(): Promise<{
   enabled: boolean
   status: string
+  message?: string | null
   reason?: string | null
-  /** The one command that resolves `reason`, so a not-ready page is not a dead end. */
+  /** Operator troubleshooting for unavailable capacity. */
   remedy?: string | null
   worker_count: number
   capable_worker_count: number

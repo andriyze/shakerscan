@@ -860,8 +860,15 @@ async def upsert_request_collection_binding(
             request.environment_id, "request collection environment id",
         ) if request.environment_id else None
     )
-    async with _pool().acquire() as conn:
+    async with _pool().acquire() as conn, conn.transaction():
         collection = await _request_collection_owner(conn, collection_uuid)
+        if request.authorize_cross_asset:
+            try:
+                from targets.hunt_authority import record_collection_share
+            except ModuleNotFoundError:
+                from api.targets.hunt_authority import record_collection_share
+            await record_collection_share(conn, target_uuid, collection_uuid,
+                                          recorded_by='operator:collection-binding-api')
         try:
             from targets.asset_collections import asset_collection_binding
         except ModuleNotFoundError:

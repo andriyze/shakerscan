@@ -36,7 +36,7 @@ def test_request_collection_picker_reports_exact_replay_policy_to_scan_form():
 
 def test_primary_rescan_and_schedule_surfaces_use_v2_budget_not_type_picker():
     scans = (ROOT / "ui" / "src" / "app" / "scans" / "page.tsx").read_text()
-    targets = (ROOT / "ui" / "src" / "app" / "targets" / "page.tsx").read_text()
+    targets = (ROOT / "ui" / "src" / "components" / "targets" / "TargetInventory.tsx").read_text()
     schedules = (ROOT / "ui" / "src" / "app" / "schedules" / "page.tsx").read_text()
 
     assert "submitScanV2" in scans and "SCAN_TYPES" not in scans

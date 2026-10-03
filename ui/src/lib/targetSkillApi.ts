@@ -9,6 +9,7 @@ export interface TargetSkill {
   version: string
   body_sha256: string
   updated_at: string
+  written_by?: string | null
 }
 export interface TargetSkillState {
   target_id: string

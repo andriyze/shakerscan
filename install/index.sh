@@ -694,6 +694,7 @@ download "$REPO_RAW_BASE/api/deployment_policy.py" "$INSTALL_DIR/api/deployment_
 download "$REPO_RAW_BASE/api/target_authorization.py" "$INSTALL_DIR/api/target_authorization.py"
 download "$REPO_RAW_BASE/api/targets/__init__.py" "$INSTALL_DIR/api/targets/__init__.py"
 download "$REPO_RAW_BASE/api/targets/asset_authority.py" "$INSTALL_DIR/api/targets/asset_authority.py"
+download "$REPO_RAW_BASE/api/targets/hunt_authority.py" "$INSTALL_DIR/api/targets/hunt_authority.py"
 download "$REPO_RAW_BASE/api/capabilities/http.py" "$INSTALL_DIR/api/capabilities/http.py"
 download "$REPO_RAW_BASE/api/capabilities/auth.py" "$INSTALL_DIR/api/capabilities/auth.py"
 download "$REPO_RAW_BASE/api/capabilities/browser_login.py" "$INSTALL_DIR/api/capabilities/browser_login.py"

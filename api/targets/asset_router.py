@@ -31,7 +31,8 @@ class HostTargetCreate(BaseModel):
     model_config = ConfigDict(extra='forbid')
     locator: str = Field(min_length=1, max_length=253)
     name: str | None = Field(default=None, max_length=255)
-    environment: Literal['production', 'staging', 'development', 'lab'] = 'production'
+    # The operator cohorts web targets accept, plus the historical 'development' value.
+    environment: Literal['production', 'staging', 'development', 'lab', 'demo', 'calibration', 'internal'] = 'production'
     approved_by: str | None = Field(default=None, min_length=1, max_length=120)
     port_hints: list[int] = Field(default_factory=list,max_length=128)
 
@@ -54,16 +55,31 @@ class DeviceProfileCreate(BaseModel):
 @router.get('/targets/inventory')
 async def target_inventory(search: str = Query('', max_length=500), connected_only: bool = False,
                            include_inactive: bool = False, include_services: bool = False,
+                           group_by: Literal['domain'] | None = None,
+                           asset_type: Literal['web','network'] | None = None,
+                           environment: str | None = Query(None, max_length=40),
+                           authorization: Literal['authorized','unauthorized'] | None = None,
+                           findings: Literal['any','critical_high','none'] | None = None,
+                           activity: Literal['never','scanned','scanning'] | None = None,
+                           sort: Literal['name','risk','recent','created'] = 'name',
+                           include_facets: bool = False,
                            limit: int = Query(100, ge=1, le=500),
                            offset: int = Query(0, ge=0)):
     async with pool().acquire() as conn:
         return await list_assets(conn, search=search, connected_only=connected_only,
                                  include_inactive=include_inactive, include_services=include_services,
-                                 limit=limit, offset=offset)
+                                 limit=limit, offset=offset, group_by=group_by, asset_type=asset_type,
+                                 environment=environment, authorization=authorization, findings=findings,
+                                 activity=activity, sort=sort, include_facets=include_facets)
 
 
 @router.post('/targets/hosts')
 async def create_host_target(request: HostTargetCreate):
+    async with pool().acquire() as conn:
+        return await persist_host_target(conn, request)
+
+
+async def persist_host_target(conn, request: HostTargetCreate):
     try:
         from scanner_tools.device_posture import normalize_device_locator
     except ModuleNotFoundError:
@@ -72,7 +88,7 @@ async def create_host_target(request: HostTargetCreate):
         locator = normalize_device_locator(request.locator)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    async with pool().acquire() as conn, conn.transaction():
+    async with conn.transaction():
         row = await conn.fetchrow("""INSERT INTO targets(url,name,discovery_source,metadata_json)
             VALUES($1,$2,'host',$3) ON CONFLICT(canonical_key) DO UPDATE SET
                 metadata_json=CASE WHEN $4::boolean THEN targets.metadata_json || jsonb_build_object('port_hints',(

@@ -20,20 +20,23 @@ def test_passive_hunt_has_all_target_skill_operations_without_network_authority(
         assert not spec.requires_active_approval
         assert spec.hunt_executor == 'inline'
         assert set(spec.budget_cost) == {'tool_wall_seconds'}
-        assert spec.required_approval == (None if operation == 'read' else 'operator_intent')
+        assert spec.required_approval is None
+        assert not spec.placement_requirements.get('user_confirmation')
     assert 'ports.discover' not in names
 
 
 def test_skill_input_cannot_select_other_targets_or_skip_revision_confirmation():
     valid = {'operator_confirmed':True,'methodology':'Use the saved profile','expected_revision':0}
     assert CAPABILITY_REGISTRY.validate_hunt_input('targets.skill.create',valid) == valid
-    for changes in [{'target_id':'another-target'}, {'argv':['unsafe']}, {'operator_confirmed':False},
+    for changes in [{'target_id':'another-target'}, {'argv':['unsafe']},
                     {'expected_revision':-1}, {'methodology':'x'*(MAX_TARGET_SKILL_CHARACTERS+1)}]:
         with pytest.raises(CapabilityInputContractError):
             CAPABILITY_REGISTRY.validate_hunt_input('targets.skill.create',{**valid,**changes})
     with pytest.raises(CapabilityInputContractError):
         CAPABILITY_REGISTRY.validate_hunt_input('targets.skill.update',{'methodology':'Missing revision and intent'})
     assert CAPABILITY_REGISTRY.validate_hunt_input('targets.skill.read',{}) == {}
+    assert CAPABILITY_REGISTRY.validate_hunt_input('targets.skill.create',
+        {'methodology':'Use saved inputs','expected_revision':0})['expected_revision'] == 0
 
 
 @pytest.mark.parametrize('body',[{'methodology':' '}, {'title':' '}, {'methodology':'\x00'},
@@ -60,6 +63,8 @@ def test_generic_metadata_writes_cannot_bypass_skill_revision_checks(model):
     values = {'primary_locator':'tv.test'} if model == 'device_create' else {}
     with pytest.raises(ValidationError, match='revision check'):
         cls(**values,metadata_json={'target_skill':{'methodology':'Bypass','revision':0}})
+    with pytest.raises(ValidationError, match='Hunt permissions'):
+        cls(**values,metadata_json={'hunt_authority':{'metadata_changes':True}})
     assert cls(**values,metadata_json={'notes':'Ordinary notes'}).metadata_json == {'notes':'Ordinary notes'}
 
 

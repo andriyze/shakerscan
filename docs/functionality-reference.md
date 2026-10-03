@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 450 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 375 | `api/**/*.py` |
+| Public REST operations | 452 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 376 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1677,7 +1677,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 394 | Python sources + Compose manifests |
+| Runtime environment keys | 395 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2113,6 +2113,8 @@ for the profile contract, invocation, limits and acceptance gates.
 | `GET` | `/targets/{target_id}/graph` | `get_application_graph` |
 | `POST` | `/targets/{target_id}/graph/hypotheses` | `generate_application_graph_hypotheses` |
 | `GET` | `/targets/{target_id}/history` | `get_asset_history` |
+| `GET` | `/targets/{target_id}/hunt-authority` | `get_hunt_authority` |
+| `PUT` | `/targets/{target_id}/hunt-authority` | `put_hunt_authority` |
 | `GET` | `/targets/{target_id}/invariants` | `list_target_invariant_contracts` |
 | `POST` | `/targets/{target_id}/invariants` | `create_target_invariant_contract` |
 | `POST` | `/targets/{target_id}/invariants/compile` | `compile_target_invariant_rule` |
@@ -2790,6 +2792,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_MCP_TIMEOUT_SECONDS` | `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_MODEL_INTAKE_ADAPTER_SELF_TEST` | `scanner/scanner_tools/model_intake_scanners.py` |
 | `SHAKERSCAN_MODEL_INTAKE_RUNTIME_LOCK` | `scanner/scanner_tools/model_intake_scanners.py` |
+| `SHAKERSCAN_NETWORK_WORKER_ENABLED` | `api/devices/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_NODE_ID` | `api/artifact_storage.py`, `api/broker_worker.py`, `api/fleet_worker_entrypoint.py`, `api/worker.py` |
 | `SHAKERSCAN_NODE_LABELS_JSON` | `api/worker.py` |
 | `SHAKERSCAN_PAYLOAD_PACK_MAX` | `scanner/scanner_tools/active_checks.py` |

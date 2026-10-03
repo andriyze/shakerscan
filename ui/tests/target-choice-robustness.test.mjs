@@ -9,7 +9,8 @@ const collectionsPage = fs.readFileSync(new URL('../src/app/request-collections/
 const evidencePanel = fs.readFileSync(new URL('../src/components/EvidenceRetentionPanel.tsx', import.meta.url), 'utf8')
 const timelinePage = fs.readFileSync(new URL('../src/app/timeline/page.tsx', import.meta.url), 'utf8')
 const schedulesPage = fs.readFileSync(new URL('../src/app/schedules/page.tsx', import.meta.url), 'utf8')
-const targetsPage = fs.readFileSync(new URL('../src/app/targets/page.tsx', import.meta.url), 'utf8')
+const targetsPage = fs.readFileSync(new URL('../src/components/targets/inventory/TargetRow.tsx', import.meta.url), 'utf8')
+const targetGroups = fs.readFileSync(new URL('../src/components/targets/inventory/TargetGroups.tsx', import.meta.url), 'utf8')
 
 test('target-bound forms hide inactive and unnamed web targets', () => {
   const usable = usableWebTargets([
@@ -49,5 +50,5 @@ test('historical malformed target labels stay bounded in read-only selectors', (
   for (const surface of [evidencePanel, timelinePage, schedulesPage, targetsPage]) {
     assert.match(surface, /boundedTargetDisplay/)
   }
-  assert.match(targetsPage, /boundedDisplayText\(domain\.root_domain/)
+  assert.match(targetGroups, /boundedDisplayText\(group\.root_domain/)
 })

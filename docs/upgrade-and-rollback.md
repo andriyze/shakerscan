@@ -98,7 +98,7 @@ the pre-upgrade backup before retrying.
 ### "Resource is still in use" or a container name already in use
 
 `shakerscan stop` removes every ShakerScan container, including the ones a plain
-`docker compose down` leaves attached: the opt-in connected-device worker and Gungnir CT monitor,
+`docker compose down` leaves attached: the dedicated network worker and opt-in Gungnir CT monitor,
 workers added from the UI or `/workers` scaler (the API creates them through the Docker socket, so
 Compose cannot see them), and one-off `docker compose run` containers. Releases before this change
 left them running, which produced these symptoms:
@@ -127,7 +127,8 @@ Use the runtime's Compose project name if `COMPOSE_PROJECT_NAME` changed it. If 
 still reports active endpoints, detach a listed non-ShakerScan container with
 `docker network disconnect -f shakerscan_default <name>`; a name that matches no container is a stale
 endpoint, which `sudo systemctl restart docker` clears (common after a Docker or OS package upgrade).
-Afterwards re-enable any opt-in lane you used (`shakerscan devices start`, `shakerscan gungnir start`).
+Afterwards network scanning starts automatically unless `SHAKERSCAN_NETWORK_WORKER_ENABLED=false`.
+Re-enable the opt-in CT monitor with `shakerscan gungnir start` if you used it.
 Never use `docker compose down -v`, `shakerscan reset`, `docker system prune --volumes`, or
 `scripts/clean-shakerscan.sh` for this: each deletes the database.
 

@@ -78,7 +78,10 @@ def test_device_input_migration_keeps_ids_and_one_ciphertext_source(monkeypatch)
             assert await conn.fetchval('SELECT count(*) FROM credential_profiles WHERE id=$1',credential) == 1
             assert await conn.fetchval('SELECT encrypted_payload FROM request_collections WHERE id=$1',collection) == ciphertext
             assert await conn.fetchval('SELECT count(*) FROM request_collection_requests WHERE collection_id=$1',collection) == 1
-            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,origin) is False
+            # The web service and device are views of one canonical asset.
+            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,origin) is True
+            unrelated = await conn.fetchval("INSERT INTO targets(url) VALUES('https://unrelated.example.test') RETURNING id")
+            assert await conn.fetchval('SELECT target_collection_visible($1,$2)',collection,unrelated) is False
             assert await conn.fetchval('SELECT port FROM device_credential_profiles WHERE id=$1 AND device_target_id=$2',credential,device) == 2222
             store = PostgresCredentialProfileStore()
             with pytest.raises(CredentialStoreError):
@@ -140,4 +143,30 @@ def test_exact_grants_do_not_inherit_or_override_revocation(monkeypatch):
             assert await store.list_profiles(conn,target_kind='web',target_id=origin) == []
             with pytest.raises(CredentialStoreError):
                 await store.load_for_worker(conn,profile_id=profile.profile_id,target_kind='web',target_id=origin,capability='http.request')
+    asyncio.run(run())
+
+
+def test_upgrade_keeps_device_collections_uploaded_through_the_shared_api(monkeypatch):
+    secret_store = encryption(monkeypatch)
+    async def run():
+        async with database() as conn:
+            await prepare(conn)
+            device = await conn.fetchval("INSERT INTO device_targets(name,primary_locator) VALUES('Fixture','shared-upload.example.test') RETURNING id")
+            ciphertext = secret_store.encrypt_secret('{}')
+            # 2.6 POST /request-collections stored device documents directly, with no legacy row
+            # and with the request list stripped from the summary metadata.
+            uploaded = await conn.fetchval("""INSERT INTO request_collections(device_target_id,name,format,encrypted_payload,
+                payload_sha256,request_count,safe_request_count,potentially_mutating_request_count,metadata_json)
+                VALUES($1,'Uploaded',$2,$3,$4,1,1,0,$5) RETURNING id""",
+                device, 'postman_v2.1', ciphertext, 'a' * 64, json.dumps({'name': 'Uploaded', 'request_count': 1}))
+            # A 2.6 baseline mirror whose legacy document no longer exists carries the copied list.
+            stale = await conn.fetchval("""INSERT INTO request_collections(device_target_id,name,format,encrypted_payload,
+                payload_sha256,request_count,safe_request_count,potentially_mutating_request_count,metadata_json)
+                VALUES($1,'Stale mirror',$2,$3,$4,1,1,0,$5) RETURNING id""",
+                device, 'postman_v2.1', ciphertext, 'b' * 64, json.dumps({'name': 'Stale mirror', 'requests': [{'method': 'GET'}]}))
+            async with conn.transaction():
+                await migrate_target_assets(conn)
+                await migrate_asset_inputs(conn)
+            assert await conn.fetchval('SELECT is_active FROM request_collections WHERE id=$1', uploaded) is True
+            assert await conn.fetchval('SELECT is_active FROM request_collections WHERE id=$1', stale) is False
     asyncio.run(run())

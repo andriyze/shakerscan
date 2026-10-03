@@ -31,6 +31,12 @@ The installer downloads a tagged release, verifies every file against the releas
 pulls digest-pinned images. To read it first:
 `curl -fsSL https://install.shakerscan.com -o install.sh`.
 
+Targets groups root domains with expandable subdomains and keeps discovery on each domain.
+Use **Web** and **IP / network** filters to focus the inventory; an IP with a web service can appear
+in both views while retaining one target identity. Hunt can manage target metadata and instructions
+by default. Target detail includes **Hunt permissions** to disable these edits, approve specific
+shared inputs, and save SSH host trust once.
+
 Then open:
 
 - UI: http://localhost:3000
@@ -77,7 +83,11 @@ commands explicitly and Pi drives the instance through `shakerscan api`, `scan`,
 
 - **Scan** — reproducible web/API assessment with `fast`, `balanced`, and `thorough` ceilings.
 - **Hunt** — adaptive investigation of an authorized web, API, network, or device target.
-- **Connected Devices** — inventory and assess network-connected devices.
+- **Connected Devices** — inventory and assess network targets with dedicated scanning capacity started automatically. Use `shakerscan devices stop` to disable that capacity on smaller installations, and `shakerscan devices start` to re-enable it.
+
+The Targets inventory groups root domains with their subdomains and keeps IP addresses and internal
+hosts independently selectable. Add a bare domain or IP with optional port hints, or an application
+URL. Domain grouping is navigation only; it does not share authorization or credentials across hosts.
 - **AI Gate** — test chat, RAG, agent, and MCP application surfaces.
 - **Model Intake** — inspect model artifacts before deployment.
 - **ASM** — maintain attack-surface inventory and coverage.

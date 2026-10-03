@@ -120,6 +120,9 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             assert before['target_skill']['skill'] is None
             run_row = dict(await conn.fetchrow('SELECT * FROM hunt_runs WHERE id=$1',uuid.UUID(before['hunt_id'])))
             original_context = run_row['context_pack']
+            from targets.hunt_authority import authority_row, save_authority
+            owner = await authority_row(conn,identifier)
+            await save_authority(conn,owner,{'revision':1,'metadata_changes':True},recorded_by='operator:test')
             values = {'operator_confirmed':True,'methodology':'Login with the TV profile; never reboot.', 'expected_revision':0}
             spec = CAPABILITY_REGISTRY.require('targets.skill.create')
             adapter = ControlPlaneExecutionAdapter(specification=spec,
@@ -158,8 +161,10 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
                         assert (await skill.read_target_skill(conn,identifier))['skill']['methodology'] == values['methodology']
                     blocked = await client.patch(f'/devices/{device}',json={'metadata_json':{'target_skill':None}})
                     assert blocked.status_code == 422
-            with pytest.raises(HTTPException, match='Explicit operator'):
+            await save_authority(conn,owner,{'revision':2,'metadata_changes':False},recorded_by='operator:test')
+            with pytest.raises(HTTPException, match='metadata changes'):
                 await asset_actions.execute_asset_action(pool,admitted,'targets.skill.delete',{'expected_revision':1})
+            await save_authority(conn,owner,{'revision':3,'metadata_changes':True},recorded_by='operator:test')
             await asset_actions.execute_asset_action(pool,admitted,'targets.skill.update',
                 {**values,'methodology':'New priorities','expected_revision':1})
             await asset_actions.execute_asset_action(pool,admitted,'targets.skill.delete',

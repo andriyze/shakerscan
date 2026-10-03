@@ -89,7 +89,8 @@ def test_pr_smoke_keeps_full_backend_acceptance_and_scopes_ui_only_changes():
     areas_step = smoke[smoke.index("Run selected E2E areas on the built stack"):]
     assert "github.event_name == 'pull_request' && steps.changes.outputs.backend == 'true'" in areas_step[:200]
     assert 'python3 tests/e2e/run_e2e.py --area "$E2E_AREA" --scorecard artifacts/e2e-scorecard.json' in smoke
-    assert "docker compose --profile e2e up -d" in smoke
+    assert "COMPOSE_PROFILES=e2e ./scanner.sh start" in smoke
+    assert 'SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER: "true"' in smoke
     assert "SHAKERSCAN_E2E_DAST_TARGET: http://juice-shop:3000" in smoke
     assert "SHAKERSCAN_E2E_HUNT_TARGET: http://juice-shop:3000" in smoke
     assert "SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_TOKEN" in smoke
@@ -230,19 +231,18 @@ def test_release_candidate_requires_candidate_image_external_wire_acceptance():
     assert 'test "$(jq -r \'.tool_count\' artifacts/release-external-wire.json)" = 9' in text
 
 
-def test_platform_pool_gate_requires_always_on_pools_but_not_opt_in_devices():
-    """P-4 gates on the three always-on execution pools and never on opt-in device capacity.
+def test_platform_pool_gate_requires_default_network_capacity_in_ci():
+    """Launcher startup provides network capacity; CI requires that pool to be ready.
 
-    Web DAST, agent-tool, and Model Intake workers start with every stack, so the platform smoke
-    requires each of them current and ready. The device worker is opt-in behind a Compose profile,
-    so a default `docker compose up -d` legitimately reports the device pool not_ready; requiring it
-    ready or disabled failed the pre-merge smoke on exactly that expected state. The device pool must
-    be reported with a status but must never gate Web DAST readiness.
+    Explicitly opted-out installations can still gate their remaining pools, while CI
+    checks the default launcher startup including its dedicated network worker.
     """
     e2e = (ROOT / "tests" / "e2e" / "run_e2e.py").read_text(encoding="utf-8")
     gate = e2e[e2e.index("readiness_deadline = _time.monotonic()"):]
     gate = gate[:gate.index("P-4 Fleet and workers surfaces")]
-    assert '"web_dast", "agent_tool", "model_intake"' in gate
+    assert "['web_dast', 'agent_tool', 'model_intake']" in gate
+    assert "SHAKERSCAN_E2E_REQUIRE_NETWORK_WORKER" in gate
+    assert "pool_names.append('device')" in gate
     assert 'all(pool.get("current", 0) > 0 and pool.get("status") == "ready" for pool in required_pools)' in gate
     assert 'isinstance(device_pool.get("status"), str)' in gate
     assert 'device_pool.get("status") in {"ready", "disabled"}' not in gate

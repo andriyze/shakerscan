@@ -7,15 +7,19 @@ from fastapi import HTTPException
 
 try:
     from runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
-    from targets.asset_router import create_host_target, HostTargetCreate
+    from targets.asset_router import persist_host_target, HostTargetCreate
     from targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
     import credential_api
     import request_collection_api
 except ModuleNotFoundError:
     from ..runtime.credential_store import PostgresCredentialProfileStore, CredentialStoreError
-    from ..targets.asset_router import create_host_target, HostTargetCreate
+    from ..targets.asset_router import persist_host_target, HostTargetCreate
     from ..targets.skill import read_target_skill, write_target_skill, TargetSkillWrite
     from .. import credential_api, request_collection_api
+try:
+    from targets.hunt_authority import require_hunt_delegation, save_authority
+except ModuleNotFoundError:
+    from ..targets.hunt_authority import require_hunt_delegation, save_authority
 
 NAMES = frozenset({'targets.create','targets.update','credentials.grant','collections.bind',
                    'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete'})
@@ -38,36 +42,39 @@ async def execute_asset_action(pool, run, name, values):
 
 
 async def _perform_asset_action(pool, run, name, values):
-    if name != 'targets.skill.read' and values.get('operator_confirmed') is not True:
-        raise HTTPException(422,'Explicit operator intent is required for target/input changes')
     target_id = uuid.UUID(str(run.get('device_target_id') or run['target_id']))
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
     if name.startswith('targets.skill.'):
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
             if name == 'targets.skill.read':
                 return {'ok':True, **await read_target_skill(conn, target_id)}
+            await require_hunt_delegation(conn, run, name, values)
             request = TargetSkillWrite(**{key:value for key,value in values.items()
                 if key in {'title','methodology','expected_revision'}}) if name != 'targets.skill.delete' else None
             return {'ok':True, **await write_target_skill(conn, target_id, name.rsplit('.',1)[-1],
-                expected_revision=values['expected_revision'], request=request), 'hunt_snapshot_unchanged':True}
+                expected_revision=values['expected_revision'], request=request,
+                source=f"hunt:{run['id']}"), 'hunt_snapshot_unchanged':True}
     if name not in {'targets.create', 'targets.update'} and not policy.get('active_testing'):
         raise HTTPException(403,'The Hunt has no active target-management authority')
     if name == 'targets.create':
-        result = await create_host_target(HostTargetCreate(**{
-            key:value for key,value in values.items() if key in {'locator','name','environment','port_hints'}
-        }))
+        async with pool.acquire() as conn, conn.transaction():
+            await require_hunt_delegation(conn, run, name, values)
+            result = await persist_host_target(conn, HostTargetCreate(**{
+                key:value for key,value in values.items() if key in {'locator','name','environment','port_hints'}
+            }))
         return {'ok':True,**result,'testing_authorized':False,'hunt_target_unchanged':True}
     if name == 'collections.bind':
         request = request_collection_api.RequestCollectionBindingUpsert(
             target_kind=str(run['target_kind']),target_id=str(target_id),
             allowed_origins=values['allowed_origins'],environment_id=values.get('environment_id'),
-            authorize_cross_asset=True,
+            authorize_cross_asset=False,
         )
         return {'ok':True,**await request_collection_api.upsert_request_collection_binding(
             str(values['collection_id']),request), 'hunt_selection_unchanged':True}
     async with pool.acquire() as conn, conn.transaction():
+        authority_row, authority = await require_hunt_delegation(conn, run, name, values)
         if name == 'targets.update':
             recipient = uuid.UUID(str(values.get('target_id') or target_id))
             same = await conn.fetchval('SELECT target_asset_access_owner($1)=target_asset_access_owner($2)',target_id,recipient)
@@ -86,6 +93,11 @@ async def _perform_asset_action(pool, run, name, values):
             grant = await store.grant_profile(conn,profile_id=values['profile_id'],
                 target_kind=str(run['target_kind']),target_id=target_id,
                 granted_by=f"hunt:{run['id']}",now=datetime.now(timezone.utc))
+            # Sharing consent is consumed once. Revoking the resulting canonical grant
+            # cannot be undone by another Hunt using an old delegation.
+            authority['credential_profile_ids'].remove(str(values['profile_id']))
+            authority['revision'] += 1
+            await save_authority(conn, authority_row, authority, recorded_by=authority['recorded_by'])
         except CredentialStoreError as exc:
             raise HTTPException(422,str(exc)) from exc
         return {'ok':True,'grant':grant,'secret_values_visible':False,'hunt_selection_unchanged':True}

@@ -2070,6 +2070,16 @@
     "operation_id": "get_asset_history_targets__target_id__history_get"
   },
   {
+    "path": "/targets/{target_id}/hunt-authority",
+    "method": "get",
+    "operation_id": "get_hunt_authority_targets__target_id__hunt_authority_get"
+  },
+  {
+    "path": "/targets/{target_id}/hunt-authority",
+    "method": "put",
+    "operation_id": "put_hunt_authority_targets__target_id__hunt_authority_put"
+  },
+  {
     "path": "/targets/{target_id}/invariants",
     "method": "get",
     "operation_id": "list_target_invariant_contracts_targets__target_id__invariants_get"

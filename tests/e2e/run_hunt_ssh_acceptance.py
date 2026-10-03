@@ -67,6 +67,11 @@ def main():
             'environment': 'lab', 'approved_by': 'hunt-ssh-acceptance', 'port_hints': [22, 2222]})
         target_id = target['id']
         approval = H.get(f'/targets/{target_id}/authorization')['authorization']['approval_receipt_id']
+        code, trusted = H.put(f'/targets/{target_id}/hunt-authority', {
+            'expected_revision':0,
+            'ssh_host_keys':[{'port':port,'fingerprint':baseline['host_key_fingerprint']} for port in (22,2222)],
+        })
+        assert code < 300, trusted
         # Revocation applies to a shared grant; the profile's home binding is permanent.
         home = accepted('/targets/hosts', {
             'locator': f'127.76.{uuid.uuid4().int % 254 + 1}.{uuid.uuid4().int % 254 + 1}',
@@ -102,7 +107,8 @@ def main():
             assert response['action_result']['status'] == 'success', response['action_result']
             result = response['result']
             assert result['budget_reservation_state'] == 'committed' and result['receipt_id']
-            observation = result['typed_output']['records'][0]
+            observation = next(item for item in result['typed_output']['records']
+                               if item['kind'] == 'ssh_authentication_observation')
             assert observation['authentication_succeeded'] and observation['connection_closed']
             assert observation['commands_executed'] is False
             assert 'fixture-only-password' not in json.dumps(response)

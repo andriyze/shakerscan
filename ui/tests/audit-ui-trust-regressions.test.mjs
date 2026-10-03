@@ -35,13 +35,18 @@ test('exposure filters drive metrics, map, and priorities with one asset set', (
   assert.doesNotMatch(paths, /smart or full scans/i)
 })
 
-test('target groups distinguish domains from hosts and internal identities', () => {
-  const page = read('src/app/targets/page.tsx')
-  assert.match(page, /registrable_domain/)
-  assert.match(page, /internal_service/)
-  assert.match(page, /identity\.canDiscoverSubdomains/)
-  assert.match(page, /runtime destination policy is checked before execution/)
-  assert.doesNotMatch(page, /always show for root domains/)
+test('target groups distinguish domains from hosts and internal identities', async () => {
+  // Only registrable domains form groups and offer subdomain discovery; addresses and internal
+  // names gather in one network group that states where destination policy is enforced.
+  const { isDomainGroup } = await import('../src/lib/targetInventoryModel.mjs')
+  assert.equal(isDomainGroup('example.co.uk'), true)
+  for (const value of ['192.0.2.1', '2001:db8::1', 'printer.local', 'service.internal', 'nas']) {
+    assert.equal(isDomainGroup(value), false)
+  }
+  const groups = read('src/components/targets/inventory/TargetGroups.tsx')
+  assert.match(groups, /runtime destination policy is checked before execution/)
+  assert.match(groups, /TargetDomainDiscovery domain=\{group\.root_domain\}/)
+  assert.doesNotMatch(read('src/components/targets/inventory/TargetGroups.tsx'), /NetworkGroup[\s\S]*TargetDomainDiscovery/)
 })
 
 test('finding copy failures and empty presentation have visible fallbacks', () => {
@@ -76,7 +81,7 @@ test('docs and mobile operations expose truthful accessible labels', () => {
 
 test('executive posture defaults to an explicit operational cohort scope', () => {
   const dashboard = read('src/app/page.tsx')
-  const targets = read('src/app/targets/page.tsx')
+  const targets = read('src/components/targets/inventory/AddTargetsDialog.tsx')
   const triage = read('src/app/exposure/TriageTable.tsx')
   assert.match(dashboard, /useState<CohortView>\('operational'\)/)
   assert.match(dashboard, /Lab data is never silently mixed into it/)
@@ -99,15 +104,15 @@ test('scan submission titles follow the live execution status', () => {
 
 test('scoped dashboard keeps global activity visible without attributing it to a cohort', () => {
   const dashboard = read('src/app/page.tsx')
-  const targets = read('src/app/targets/page.tsx')
+  const targets = read('src/components/targets/inventory/TargetRow.tsx')
   assert.match(dashboard, /rowMatchesCohort\(scan\.target_id, scan\.target_url/)
   assert.match(dashboard, /isGlobalActivity\(event\.target_id, event\.target_url\)/)
   assert.match(dashboard, /return !targetId && !targetUrl/)
   assert.match(dashboard, /Recent changes are shown per cohort/)
   assert.match(dashboard, /Observed posture \{scan\.grade\}/)
   assert.match(dashboard, /assurance\.label.*assurance\.score/)
-  assert.match(targets, /gradeTextColor\(domain\.root_target\.last_grade\)/)
-  assert.match(targets, /gradeTextColor\(subdomain\.last_grade\)/)
+  assert.match(targets, /gradeTextColor\(grade\)/)
+  assert.match(targets, /gradeTextColor\(origin\.last_grade\)/)
   assert.match(targets, /· review coverage/)
   const scans = read('src/app/scans/page.tsx')
   assert.match(scans, />Observed posture</)

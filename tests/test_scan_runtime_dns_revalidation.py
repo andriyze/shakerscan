@@ -13,6 +13,7 @@ All DNS here is supplied by the test; nothing touches the network.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import socket
 import sys
@@ -153,7 +154,7 @@ def test_a_rebinding_answer_fails_closed_under_a_refusing_deployment(
     message = str(excinfo.value)
     assert "runtime DNS" in message
     assert "rebinding" in message
-    assert refused in message
+    assert str(ipaddress.ip_address(refused)) in message
     assert "loopback_or_private_range" in message
 
 

@@ -9,6 +9,7 @@
 /** @param {{status: string, count: number}} pool @param {boolean} [optIn] */
 export function poolBadge(pool, optIn = false) {
   if (pool.status === 'ready') return { text: 'ready', className: 'bg-emerald-500/15 text-emerald-300' }
+  if (pool.status === 'starting') return { text: 'starting', className: 'bg-blue-500/15 text-blue-300' }
   if (pool.status === 'disabled') return { text: 'disabled', className: 'bg-gray-700 text-gray-300' }
   if (optIn && Number(pool.count) === 0) return { text: 'not started', className: 'bg-gray-700 text-gray-300' }
   return { text: 'not ready', className: 'bg-amber-500/15 text-amber-300' }

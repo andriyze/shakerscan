@@ -2,6 +2,7 @@
 
 import Link from '@/components/WorkspaceLink'
 import { RetireDeviceButton } from '@/components/RetireDeviceButton'
+import { NetworkScanReadiness, type NetworkReadiness } from '@/components/NetworkScanReadiness'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Router, ShieldCheck } from 'lucide-react'
 import {
@@ -42,8 +43,7 @@ export default function DevicesPage() {
   const [failed, setFailed] = useState(false)
   const [enabled, setEnabled] = useState(true)
   const [workerReady, setWorkerReady] = useState(false)
-  const [readinessReason, setReadinessReason] = useState<string | null>(null)
-  const [readinessRemedy, setReadinessRemedy] = useState<string | null>(null)
+  const [readinessState, setReadinessState] = useState<NetworkReadiness | null>(null)
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [scanTarget, setScanTarget] = useState<DeviceTarget | null>(null)
@@ -66,11 +66,14 @@ export default function DevicesPage() {
       setPolicies(policyData.policies || [])
       setEnabled(readiness.enabled)
       setWorkerReady(readiness.status === 'ready')
-      setReadinessReason(readiness.reason || null)
-      setReadinessRemedy(readiness.remedy || null)
+      setReadinessState(readiness)
       setFailed(false)
     } catch {
-      if (sequence === loadSequence.current) setFailed(true)
+      if (sequence === loadSequence.current) {
+        setFailed(true)
+        setWorkerReady(false)
+        setReadinessState({status:'not_ready',message:'Network scanning availability could not be checked. Try refreshing the page.'})
+      }
     } finally {
       if (sequence === loadSequence.current) setLoading(false)
     }
@@ -78,6 +81,24 @@ export default function DevicesPage() {
 
   useEffect(() => { const timer = setTimeout(load, 250); return () => clearTimeout(timer) }, [load])
   useEffect(() => { setPage(0) }, [search])
+  useEffect(() => {
+    let stopped = false
+    const timer = setInterval(async () => {
+      try {
+        const readiness = await getDeviceReadiness()
+        if (stopped) return
+        setEnabled(readiness.enabled)
+        setWorkerReady(readiness.enabled && readiness.status === 'ready')
+        setReadinessState(readiness)
+      } catch {
+        if (!stopped) {
+          setWorkerReady(false)
+          setReadinessState({status:'not_ready',message:'Network scanning availability could not be checked. Try refreshing the page.'})
+        }
+      }
+    }, 3_000)
+    return () => { stopped = true; clearInterval(timer) }
+  }, [])
 
   async function addDevice() {
     if (!form.primary_locator.trim()) return
@@ -129,7 +150,7 @@ export default function DevicesPage() {
     <div className="mx-auto max-w-7xl">
       <PageHeader
         title="Connected Devices"
-        description="Inventory listening services on TVs, cameras, routers, appliances, and other network-connected systems without mixing them into Web DAST targets."
+        description="Discover services on TVs, cameras, routers, and other network targets. Ports and results are shared with the target inventory and Hunt."
         icon={<Router className="h-6 w-6" />}
         actions={<>
           <Link href="/devices/policies" className="inline-flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"><ShieldCheck className="h-4 w-4" /> Service policies</Link>
@@ -137,14 +158,13 @@ export default function DevicesPage() {
         </>}
       />
 
-      {!enabled && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">Connected-device scanning is disabled by the operator.</Card>}
-      {enabled && !workerReady && <Card className="mb-4 border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200" role="alert">Device inventory is available, but scans are paused until a current device worker with Nmap is ready{readinessReason ? ` (${readinessReason.replace(/_/g, ' ')})` : ''}.{readinessRemedy && <span className="mt-2 block text-amber-100">{readinessRemedy}</span>}</Card>}
+      <NetworkScanReadiness readiness={readinessState} />
 
       <div className="mb-4 max-w-md"><Input value={search} onChange={(event) => { setPage(0); setSearch(event.target.value) }} placeholder="Search name, address, or manufacturer" aria-label="Search connected devices" /></div>
 
       {loading ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3"><CardSkeleton /><CardSkeleton /><CardSkeleton /></div>
         : failed ? <ErrorState message="Could not load connected devices" onRetry={load} />
-        : devices.length === 0 ? <EmptyState message="No connected devices yet" hint="Add one hostname or IP address. Device scans remain separate from Web DAST targets." action={{ label: 'Add device', onClick: () => setAddOpen(true) }} />
+        : devices.length === 0 ? <EmptyState message="No connected devices yet" hint="Add a hostname or IP address to your target inventory." action={{ label: 'Add device', onClick: () => setAddOpen(true) }} />
         : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{devices.map((device) => {
           const posture = deviceTargetScorePresentation(device)
           return <Card key={device.id} className="p-4">

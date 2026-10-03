@@ -42,11 +42,12 @@ An operator-specified nonstandard port is an ordinary same-asset SSH destination
 the profile or request another authorization solely because the port differs.
 
 The worker binds the connection to a frozen asset address, checks current authority and the exact
-credential grant/version, and decrypts only in worker memory. It uses a retained host key when
-available; otherwise it observes the service key without credentials and pins it for the login.
+credential grant/version, and decrypts only in worker memory. It uses an operator-saved host key.
+Without one, it reports the observed key and does not log in. The operator may instead authorize
+first-contact trust in target Hunt permissions; the first observed key is then saved atomically.
 A changed key fails before the identity is sent. Never silently accept a mismatch as a successful
 login or disable host-key checks to make it work. Record first-observed trust separately from an
-operator-provided fingerprint.
+operator-saved fingerprint. A planner-supplied fingerprint is only a hint, never trust authority.
 
 `ssh.connect` attempts the selected identity once, reports whether authentication actually
 succeeded, and closes the connection. It accepts no hostname override, password, key, shell or

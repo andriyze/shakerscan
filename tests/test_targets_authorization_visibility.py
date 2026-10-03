@@ -35,11 +35,14 @@ def test_both_target_listings_expose_the_authorization_state():
 
 
 def test_the_ui_renders_the_authorized_state_from_that_field():
-    """The page's conditional must read the field the API sends, not a different name."""
-    page = (Path(__file__).resolve().parents[1] / "ui" / "src" / "app" / "targets" / "page.tsx").read_text()
-    assert "root_target.authorized_for_active_testing" in page
-    assert "Authorize for active testing (once)" in page
-    assert "Revoke" in page
+    """The Targets row must read the field the inventory API sends, not a different name."""
+    root = Path(__file__).resolve().parents[1]
+    inventory = (root / "api" / "targets" / "asset_inventory.py").read_text()
+    row = (root / "ui" / "src" / "components" / "targets" / "inventory" / "TargetRow.tsx").read_text()
+    assert "{AUTHORIZED} AS authorized" in inventory
+    assert "asset.authorized" in row
+    assert "Authorize testing…" in row
+    assert "Revoke authorization" in row
 
 
 def _render_predicate():

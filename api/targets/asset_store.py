@@ -1,7 +1,6 @@
 """Read models over one target inventory, with service-level attribution preserved."""
 from __future__ import annotations
 
-import json
 from typing import Any
 import uuid
 
@@ -13,30 +12,10 @@ except ModuleNotFoundError:
     from ..runtime.credential_store import PostgresCredentialProfileStore
 
 
-ROOT_COLUMNS = """t.id,t.name,t.url,t.is_active,t.created_at,t.updated_at,t.asset_owner_id,
-    target_asset_locator(t.url) AS locator,t.metadata_json,
-    (p.target_id IS NOT NULL) AS connected_device,
-    p.device_class,p.manufacturer,p.model,p.firmware_version,
-    p.last_scanned_at AS network_last_scanned_at,p.last_scan_id AS network_last_scan_id,
-    p.last_score AS network_score,p.last_grade AS network_grade"""
-ROOT_FROM = "targets t LEFT JOIN target_device_profiles p ON p.target_id=t.id"
-ROOT_WHERE = "t.asset_owner_id IS NULL AND COALESCE(t.discovery_source,'manual') <> 'model-intake'"
-
-
-def public_asset(row: Any) -> dict[str, Any]:
-    result = dict(row)
-    metadata = result.pop('metadata_json', None) or {}
-    if isinstance(metadata, str):
-        metadata = json.loads(metadata)
-    result['environment'] = str(metadata.get('environment') or metadata.get('cohort') or 'production')
-    saved_skill = metadata.get('target_skill')
-    result['has_target_skill'] = bool(isinstance(saved_skill, dict) and saved_skill.get('methodology'))
-    hints = metadata.get('port_hints')
-    result['port_hints'] = [port for port in (hints if isinstance(hints,list) else [])
-                            if type(port) is int and 1 <= port <= 65535][:128]
-    result['asset_id'] = result.get('asset_owner_id') or result['id']
-    result['inventory_kind'] = 'service' if result.get('asset_owner_id') else 'asset'
-    return result
+# The inventory listing lives in asset_inventory; this module keeps detail and history.
+from .asset_inventory import (  # noqa: F401  (re-exported for existing callers)
+    ROOT_COLUMNS, ROOT_FROM, ROOT_WHERE, list_assets, public_asset,
+)
 
 
 async def resolve_asset_id(conn: Any, target_id: Any) -> uuid.UUID:
@@ -48,32 +27,6 @@ async def resolve_asset_id(conn: Any, target_id: Any) -> uuid.UUID:
     if asset is None:
         raise HTTPException(404, 'Target not found')
     return asset
-
-
-async def list_assets(conn: Any, *, search: str = '', connected_only: bool = False,
-                      include_inactive: bool = False, include_services: bool = False,
-                      limit: int = 100, offset: int = 0) -> dict[str, Any]:
-    base = "COALESCE(t.discovery_source,'manual') <> 'model-intake'" if include_services else ROOT_WHERE
-    where = base + """
-        AND ($1::boolean OR t.is_active)
-        AND (NOT $2::boolean OR p.target_id IS NOT NULL)
-        AND ($3::text='' OR t.name ILIKE '%' || $3 || '%' OR t.url ILIKE '%' || $3 || '%'
-             OR EXISTS (SELECT 1 FROM targets member WHERE member.asset_owner_id=t.id
-                        AND (member.name ILIKE '%' || $3 || '%' OR member.url ILIKE '%' || $3 || '%')))
-    """
-    parameters = [include_inactive, connected_only, search]
-    total = await conn.fetchval(f'SELECT count(*) FROM {ROOT_FROM} WHERE {where}', *parameters)
-    rows = await conn.fetch(f"""
-        SELECT {ROOT_COLUMNS},
-            (SELECT count(*) FROM targets member WHERE member.asset_owner_id=t.id AND member.is_active) AS origin_count,
-            (SELECT count(*) FROM device_services service WHERE service.target_id=t.id AND service.state='open') AS service_count,
-            (SELECT count(*) FROM findings f WHERE f.status='active'
-                AND f.target_id IN (SELECT id FROM targets member WHERE member.id=t.id OR member.asset_owner_id=t.id)) AS active_findings_count
-        FROM {ROOT_FROM} WHERE {where}
-        ORDER BY lower(COALESCE(t.name,t.url)),t.id LIMIT $4 OFFSET $5
-    """, *parameters, limit, offset)
-    return {'targets': [public_asset(row) for row in rows], 'total': int(total),
-            'limit': limit, 'offset': offset, 'inventory_kind': 'assets'}
 
 
 HISTORY = {
