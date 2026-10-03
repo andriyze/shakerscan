@@ -14,13 +14,19 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
-from .asset_router import pool
+from .skill_trust import instruction_trust, planner_snapshot
 
 try:
     from runtime.asset_capability_specs import MAX_TARGET_SKILL_CHARACTERS
 except ModuleNotFoundError:
     from ..runtime.asset_capability_specs import MAX_TARGET_SKILL_CHARACTERS
 router = APIRouter(tags=['targets'])
+
+
+def pool():
+    # Keep instruction validation/projection importable without API composition.
+    from .asset_router import pool as configured_pool
+    return configured_pool()
 
 
 class TargetSkillDocument(BaseModel):
@@ -42,6 +48,8 @@ class TargetSkillResponse(BaseModel):
     revision: int
     skill: TargetSkillDocument | None
     max_characters: int
+    operator_skill: TargetSkillDocument | None = None
+    trust: Literal['none', 'operator', 'hunt_advisory', 'unknown_advisory'] = 'none'
 
 
 class TargetSkillWrite(BaseModel):
@@ -92,6 +100,28 @@ def _saved(row: Any) -> dict[str, Any]:
     return dict(saved)
 
 
+def _operator_skill(row: Any, saved: dict, current: dict | None) -> dict | None:
+    # Once the snapshot key exists, explicit null is a tombstone. Never resurrect
+    # a deleted operator instruction by mining the revision history.
+    if 'operator_snapshot' not in saved:
+        return current if instruction_trust(current) == 'operator' else None
+    value = saved.get('operator_snapshot')
+    if not isinstance(value, dict) or instruction_trust(value) != 'operator':
+        return None
+    try:
+        parsed = TargetSkillDocument.model_validate(value)
+        revision = int(parsed.version)
+        text = TargetSkillWrite(title=parsed.title, methodology=parsed.methodology,
+                               expected_revision=revision)
+    except (ValidationError, TypeError, ValueError):
+        return None
+    if (parsed.target_id != str(row['id']) or parsed.skill_id != f"skill.target.{row['id']}"
+            or revision > int(saved.get('revision') or 0)
+            or parsed.body_sha256 != hashlib.sha256(text.methodology.encode('utf-8')).hexdigest()):
+        return None
+    return parsed.model_dump()
+
+
 def _public(row: Any) -> dict[str, Any]:
     saved = _saved(row)
     revision = int(saved.get('revision') or 0)
@@ -106,7 +136,8 @@ def _public(row: Any) -> dict[str, Any]:
             'written_by': saved.get('written_by'),
         }
     return {'target_id': str(row['id']), 'revision': revision, 'skill': skill,
-            'max_characters': MAX_TARGET_SKILL_CHARACTERS}
+            'max_characters': MAX_TARGET_SKILL_CHARACTERS,
+            'operator_skill': _operator_skill(row, saved, skill), 'trust': instruction_trust(skill)}
 
 
 async def read_target_skill(conn: Any, target_id: Any) -> dict[str, Any]:
@@ -123,7 +154,9 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
             raise HTTPException(409, 'Target instructions changed. Reload before saving your edits.')
         if operation == 'create' and current['skill'] is not None:
             raise HTTPException(409, 'This target already has instructions. Read and update them instead.')
-        if operation in {'update', 'delete'} and current['skill'] is None:
+        operator = instruction_trust({'written_by': source}) == 'operator'
+        if (operation in {'update', 'delete'} and current['skill'] is None
+                and not (operator and operation == 'delete' and current['operator_skill'])):
             raise HTTPException(404, 'Target instructions not found')
         if operation not in {'create', 'update', 'delete'}:
             raise HTTPException(422, 'Unsupported target skill operation')
@@ -138,6 +171,13 @@ async def write_target_skill(conn: Any, target_id: Any, operation: str,
                 raise HTTPException(422, 'Target instructions are required')
             saved.update(title=request.title, methodology=request.methodology,
                          body_sha256=hashlib.sha256(request.methodology.encode('utf-8')).hexdigest())
+        # A Hunt can edit/delete the current draft, but cannot erase or promote
+        # the operator's instruction snapshot. Only the operator API can do so.
+        next_row = {'id': row['id'], 'metadata_json': {'target_skill': saved}}
+        if operator:
+            saved['operator_snapshot'] = _public(next_row)['skill'] if operation != 'delete' else None
+        else:
+            saved['operator_snapshot'] = current['operator_skill']
         row = await conn.fetchrow("""UPDATE targets SET
             metadata_json=jsonb_set(COALESCE(metadata_json,'{}'::jsonb),'{target_skill}',$2::jsonb),
             updated_at=NOW() WHERE id=$1 RETURNING id,metadata_json""", row['id'], json.dumps(saved))
@@ -151,11 +191,7 @@ async def attach_target_skill_snapshot(conn: Any, target_id: Any, context: dict,
     from .hunt_authority import read_hunt_authority
     context['hunt_authority'] = await read_hunt_authority(conn, target_id)
     saved = await read_target_skill(conn, target_id)
-    context['target_skill'] = {
-        **saved, 'loaded_at_start': True, 'authority_granted': False,
-        'editing_affects': 'future_hunts',
-        'instruction_precedence': 'Current operator objective, then target instructions; server scope, policy, approval and budgets always apply.',
-    }
+    context['target_skill'] = planner_snapshot(saved)
     return context
 
 

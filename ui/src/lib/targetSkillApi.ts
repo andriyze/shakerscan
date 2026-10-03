@@ -16,6 +16,8 @@ export interface TargetSkillState {
   revision: number
   skill: TargetSkill | null
   max_characters: number
+  operator_skill?: TargetSkill | null
+  trust?: 'none' | 'operator' | 'hunt_advisory' | 'unknown_advisory'
 }
 export interface TargetSkillSnapshot extends TargetSkillState {
   loaded_at_start: boolean
@@ -26,7 +28,7 @@ async function request(id: string, init?: RequestInit, query = ''): Promise<Targ
   const response = await fetch(`${API_URL}/targets/${encodeURIComponent(id)}/skill${query}`, {cache:'no-store', ...init})
   if (!response.ok) throw new Error(await getApiErrorMessage(response, 'Could not update target instructions'))
   const value: TargetSkillState = await response.json()
-  if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string')) {
+  if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.max_characters) || value.max_characters <= 0 || (value.skill !== null && typeof value.skill?.methodology !== 'string') || (value.operator_skill != null && typeof value.operator_skill.methodology !== 'string') || (value.trust !== undefined && !['none', 'operator', 'hunt_advisory', 'unknown_advisory'].includes(value.trust))) {
     throw new Error('The server returned an invalid target instructions record. Reload and try again.')
   }
   return value
