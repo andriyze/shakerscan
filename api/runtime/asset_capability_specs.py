@@ -6,16 +6,18 @@ def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; sharing needs saved grants.'}
     identifier = {'type':'string','format':'uuid'}
     revision = {'type':'integer','minimum':0}
+    purpose = {'type':'string','enum':['instructions','knowledge'],'default':'instructions',
+               'description':'instructions applies delegated CRUD immediately to future Hunts; knowledge is automatically loaded advisory learning. Neither grants execution authority.'}
     skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
                   'methodology':{'type':'string','minLength':1,'maxLength':MAX_TARGET_SKILL_CHARACTERS},
-                  'expected_revision':revision}
+                  'expected_revision':revision, 'purpose':purpose}
     definitions = (
         ('targets.skill.create','Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.',
          skill_text,('methodology','expected_revision')),
         ('targets.skill.update','Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.',
          skill_text,('methodology','expected_revision')),
         ('targets.skill.delete','Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.',
-         {'expected_revision':revision},('expected_revision',)),
+         {'expected_revision':revision,'purpose':purpose},('expected_revision',)),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
