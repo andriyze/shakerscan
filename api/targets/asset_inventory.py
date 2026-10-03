@@ -112,7 +112,8 @@ def public_asset(row: Any) -> dict[str, Any]:
         metadata = json.loads(metadata)
     result['environment'] = str(metadata.get('environment') or metadata.get('cohort') or 'production')
     saved_skill = metadata.get('target_skill')
-    result['has_target_skill'] = bool(isinstance(saved_skill, dict) and saved_skill.get('methodology'))
+    result['has_target_skill'] = bool(isinstance(saved_skill, dict) and (saved_skill.get('methodology')
+        or isinstance(saved_skill.get('operator_snapshot'), dict) and saved_skill['operator_snapshot'].get('methodology')))
     hints = metadata.get('port_hints')
     result['port_hints'] = [port for port in (hints if isinstance(hints,list) else [])
                             if type(port) is int and 1 <= port <= 65535][:128]

@@ -138,10 +138,9 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             read = await asset_actions.execute_asset_action(pool,run_row,'targets.skill.read',{})
             assert read['revision'] == 1 and read['skill']['methodology'] == values['methodology']
             started = await app_module._start_hunt_v2(contract)
-            assert started['target_skill']['skill'] is None
-            assert started['target_skill']['advisory']['source_hunt_id'] == str(run_row['id'])
-            assert started['target_skill']['advisory']['body_included'] is False
-            assert values['methodology'] not in json.dumps(started['target_skill'])
+            assert started['target_skill']['skill']['methodology'] == values['methodology']
+            assert started['target_skill']['skill']['instruction_authority'] == 'target_metadata_delegation'
+            assert started['target_skill']['advisory'] is None
             assert started['target_skill']['authority_granted'] is False
             assert not started['policy']['active_testing']
             admitted = dict(await conn.fetchrow('SELECT * FROM hunt_runs WHERE id=$1',uuid.UUID(started['hunt_id'])))
@@ -175,8 +174,8 @@ def test_hunt_starts_with_snapshot_and_crud_changes_only_future_hunts(monkeypatc
             retained = dict(await conn.fetchrow('SELECT * FROM hunt_runs WHERE id=$1',uuid.UUID(started['hunt_id'])))
             assert retained['context_pack'] == admitted['context_pack']
             assert public_hunt_run(retained)['target_skill'] == started['target_skill']
-            assert public_hunt_run(retained,include_context=False)['target_skill']['advisory']['body_included'] is False
-            assert values['methodology'] not in json.dumps(public_hunt_run(retained)['target_skill'])
+            assert 'methodology' not in public_hunt_run(retained,include_context=False)['target_skill']['skill']
+            assert public_hunt_run(retained)['target_skill']['skill']['methodology'] == values['methodology']
             assert (await app_module._start_hunt_v2(contract))['target_skill']['skill'] is None
             assert await conn.fetchval('SELECT context_pack FROM hunt_runs WHERE id=$1',uuid.UUID(before['hunt_id'])) == original_context
             # A selected target never confers edit access to a different UUID, even on the same host.

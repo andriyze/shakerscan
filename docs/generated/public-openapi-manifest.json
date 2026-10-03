@@ -190,9 +190,9 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
-    "TargetSkillDocument": "cc9bfe24c2d8060ee9a3f670d9f75233bff437823fd055bdae566f9e55d391cc",
-    "TargetSkillResponse": "1d850676f57ebc94913c4fd6c54b5f6c8ec984f056a4320b3480c15634b1ccdb",
-    "TargetSkillWrite": "da423b66daafebea01c8fa2f52bf3d60c0de8ef0c26ea427efafa5234206adfb",
+    "TargetSkillDocument": "540961583ea3969ab5bc32099dab213ea357de6e33bed7488a7be97492724559",
+    "TargetSkillResponse": "6f764cdd46f3e92da38d23f102995ab46848d77c6389356840821eba36fdabf1",
+    "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
@@ -200,7 +200,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "26447d39d25bd10d970d560fb0ab30a91b43bc10004474424fb518e43b3884a9",
+  "contract_sha256": "bcbdd0bef15c02117ec7968a44630ffb19a56b2d92aae731136c97ff1993ceff",
   "openapi": "3.1.0",
   "operation_count": 442,
   "operations": {
@@ -587,7 +587,7 @@
     "DELETE /targets/{target_id}/skill": {
       "deprecated": false,
       "operation_id": "delete_target_skill_targets__target_id__skill_delete",
-      "parameters_sha256": "9563f8356e65cfaf8c1a4fd168ab9d1606819cd82feda485e18e92dc4e580cb5",
+      "parameters_sha256": "4944f77fa5fc1a342075c1cf3c538984814cb346f6330968b961051b4e196465",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",

@@ -37,7 +37,7 @@ async function mock(page: Page, existing = false, conflict = false, advisory = f
         saved = request.method() === 'DELETE' ? null : {...skillDocument(String(body.methodology),String(revision)),title:String(body.title)}
         operatorSaved = saved; advisory = false
       }
-      return route.fulfill({json:{target_id:id,revision,skill:saved,operator_skill:operatorSaved,trust:advisory ? 'hunt_advisory' : saved ? 'operator' : 'none',max_characters:12000}})
+      return route.fulfill({json:{target_id:id,revision,skill:saved,operator_skill:operatorSaved,knowledge:advisory ? saved : null,trust:advisory ? 'hunt_advisory' : saved ? 'operator' : 'none',max_characters:12000}})
     }
     if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[target],total:1,offset:0,limit:50}})
     if (url.pathname === `/targets/${id}/asset`) return route.fulfill({json:{target,origins:[],services:[],credentials:[],request_collections:[],active_findings:{},authorization:null}})
@@ -72,7 +72,7 @@ test('SKILL-001 create, preview, update and delete instructions from the target 
   expect(writes[1]).toMatchObject({method:'PUT',body:{expected_revision:1}})
   await openInstructions(page,'Edit')
   await dialog.getByRole('button',{name:'Delete',exact:true}).click()
-  await expect(dialog.getByText(/Existing Hunts keep their snapshot/)).toBeVisible()
+  await expect(dialog.getByText(/existing Hunt snapshots are retained/)).toBeVisible()
   await dialog.getByRole('button',{name:'Delete instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes[2]).toMatchObject({method:'DELETE',revision:'2'})
@@ -151,21 +151,20 @@ test('SKILL-006 Hunt review retains its startup snapshot while editing future in
 })
 
 
-test('SKILL-007 unchanged Hunt draft requires an explicit operator save, while baseline stays visible', async ({page}) => {
+test('SKILL-007 learning loads separately without blocking effective instruction edits', async ({page}) => {
   const writes = await mock(page,true,false,true)
   await page.goto(`/targets/${id}/asset`)
   await openInstructions(page,'Edit')
   const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
-  await expect(dialog.getByTestId('target-instruction-trust')).toContainText('advisory draft')
-  await dialog.getByText('Current operator instructions (still used by new Hunts)').click()
-  await expect(dialog.getByText('Never reboot the device.',{exact:true})).toBeVisible()
-  const save = dialog.getByRole('button',{name:'Save as operator instructions',exact:true})
-  await expect(save).toBeEnabled()
-  await save.click()
+  await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue('Never reboot the device.')
+  const knowledge = dialog.getByTestId('target-learned-knowledge')
+  await knowledge.getByText('Automatically loaded learned knowledge · advisory').click()
+  await expect(knowledge).toContainText('Inspect port 8443.')
+  await expect(dialog.getByRole('button',{name:'Save as operator instructions',exact:true})).toHaveCount(0)
+  await expect(dialog.getByRole('button',{name:'Save instructions',exact:true})).toBeDisabled()
+  await dialog.getByLabel('Instructions',{exact:true}).fill('Inspect port 8443 instead; do not reboot.')
+  await dialog.getByRole('button',{name:'Save instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes).toHaveLength(1)
-  expect(writes[0]).toMatchObject({method:'PUT',body:{expected_revision:1,methodology:text}})
-  await openInstructions(page,'Edit')
-  await expect(dialog.getByTestId('target-instruction-trust')).toHaveCount(0)
-  await expect(dialog.getByRole('button',{name:'Save instructions',exact:true})).toBeDisabled()
+  expect(writes[0]).toMatchObject({method:'PUT',body:{expected_revision:1,methodology:'Inspect port 8443 instead; do not reboot.'}})
 })

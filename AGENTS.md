@@ -309,8 +309,8 @@ origins. The exception does not apply to credentialed HTTP/session replay or to 
 
 Each target may have one saved custom skill at `/targets/{id}/skill`: instructions about login,
 priorities, exclusions and target knowledge, using opaque credential/collection references instead
-of secrets. Startup loads operator instructions only; Hunt/unknown drafts remain advisory references.
-`targets.skill.read` retrieves drafts; Hunt edits cannot replace operator intent. See `docs/hunt-aisvs-boundaries.md`. Use `targets.skill.read` and
+of secrets. Startup loads effective instructions and bounded advisory learning automatically.
+Use `purpose: knowledge` to retain observations; delegated instruction CRUD takes effect for future Hunts. Use `targets.skill.read` and
 explicitly requested `targets.skill.create|update|delete` through the shared capability runtime,
 with revision checks; metadata edits default on and obey saved operator opt-outs. Planner flags grant
 no sharing or network authority, and metadata permission grants no edits to another UUID. The operator objective takes
