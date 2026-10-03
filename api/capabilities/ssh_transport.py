@@ -5,18 +5,17 @@ import base64
 from dataclasses import dataclass, field
 import hashlib
 import io
-import errno
-import select
-import socket
 import threading
 import time
 from typing import Any
 from uuid import uuid4
 
 try:
+    from runtime.target_bound_socket import FrozenTargetSocketFactory
     from runtime.ssh_command_contract import (SSH_CONNECT_SECONDS, SSH_MAX_SESSIONS,
         SSH_SESSION_IDLE_SECONDS, SSH_SESSION_LIFETIME_SECONDS)
 except ModuleNotFoundError:
+    from ..runtime.target_bound_socket import FrozenTargetSocketFactory
     from ..runtime.ssh_command_contract import (SSH_CONNECT_SECONDS, SSH_MAX_SESSIONS,
         SSH_SESSION_IDLE_SECONDS, SSH_SESSION_LIFETIME_SECONDS)
 
@@ -44,28 +43,12 @@ class SshTransport:
 
     def connect(self, address, port, cancelled):
         import paramiko
-        sock = socket.socket(socket.AF_INET6 if ':' in address else socket.AF_INET, socket.SOCK_STREAM)
-        with self.lock:
-            self.sock = sock
-            if self.closed or cancelled():
-                sock.close()
-                raise InterruptedError('cancelled')
-        sock.setblocking(False)
-        error = sock.connect_ex((address, port))
-        if error not in {0, errno.EINPROGRESS, errno.EWOULDBLOCK}:
-            raise OSError(error, 'SSH connection failed')
-        deadline = time.monotonic() + SSH_CONNECT_SECONDS
-        while error:
-            if self.closed or cancelled():
-                raise InterruptedError('cancelled')
-            if time.monotonic() >= deadline:
-                raise TimeoutError('SSH connection timeout')
-            _, writable, _ = select.select([], [sock], [], 0.1)
-            if writable:
-                error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                if error:
-                    raise OSError(error, 'SSH connection failed')
-        sock.settimeout(SSH_CONNECT_SECONDS)
+        def own_socket(sock):
+            with self.lock:
+                self.sock = sock
+        factory = FrozenTargetSocketFactory(hostname=address, port=port, frozen_addresses=(address,))
+        sock = factory.connect_cancellable(timeout=SSH_CONNECT_SECONDS,
+            cancelled=lambda: self.closed or cancelled(), on_socket=own_socket)
         with self.lock:
             if self.closed or cancelled():
                 raise InterruptedError('cancelled')

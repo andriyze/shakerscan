@@ -148,7 +148,7 @@ def worker(conn):
         '_worker_runtime_identity': lambda: 'worker:fixture', '_worker_hunt_web_target': web_hunt_target,
         '_AGENT_TOOL_RESULT_TTL_SECONDS': 60, 'RESULTS_DIR': '/unused',
         'agent_tools': SimpleNamespace(CAPABILITY_REGISTRY=CAPABILITY_REGISTRY),
-        'require_worker_device_policy': lambda _: None, 'settle_device_traffic': noop,
+        'require_worker_device_policy': lambda _, capability=None: None, 'settle_device_traffic': noop,
         '_dispatch_registered_hunt_adapter': dispatch, '_redact_receipt_value': lambda v: v,
         '_record_hunt_network_tool_receipt': noop, 'materialize_verified_hunt_findings': findings,
         'http_archive': SimpleNamespace(hunt_run_call_recorder=lambda *_, **__: (rows := [], rows.append),

@@ -74,6 +74,52 @@ def test_redaction_handles_split_known_credential_and_terminal_truncation():
     assert capture.truncated and capture.public()['output_bytes'] == 1024
 
 
+def test_failed_cwd_prevents_every_part_of_a_compound_command(tmp_path):
+    import subprocess
+    from api.capabilities.ssh_channel import run_command
+    class Channel:
+        closed = False
+        def settimeout(self, value): pass
+        def shutdown_write(self): pass
+        def exec_command(self, command):
+            self.completed = subprocess.run(['/bin/sh','-c',command],capture_output=True,timeout=5)
+            self.stdout, self.stderr = self.completed.stdout, self.completed.stderr
+        def recv_ready(self): return bool(self.stdout)
+        def recv_stderr_ready(self): return bool(self.stderr)
+        def recv(self, size):
+            value,self.stdout = self.stdout[:size],self.stdout[size:];return value
+        def recv_stderr(self, size):
+            value,self.stderr = self.stderr[:size],self.stderr[size:];return value
+        def exit_status_ready(self): return True
+        def recv_exit_status(self): return self.completed.returncode
+        def close(self): self.closed = True
+    def execute(cwd):
+        channel = Channel()
+        session = SimpleNamespace(transport=SimpleNamespace(open_session=lambda **kwargs:channel,is_active=lambda:True))
+        capture = OutputCapture(1024)
+        result = run_command(session,{'timeout_seconds':5},command='printf first; printf second',
+            cwd=str(cwd),stopped=lambda:False,capture=capture,on_progress=lambda value:None)
+        return result,capture.public(final=True)
+    result,output = execute(tmp_path/'missing')
+    assert result['exit_status'] != 0 and output['stdout'] == ''
+    directory = tmp_path/"quoted ' directory";directory.mkdir()
+    result,output = execute(directory)
+    assert result['exit_status'] == 0 and output['stdout'] == 'firstsecond'
+
+
+def test_selected_ssh_identity_can_connect_without_discovery_permission():
+    from api.capabilities.network_inputs import CapabilityInputError
+    target = TargetBinding(str(uuid4()),'network','fixture.test',allowed_addresses=('192.0.2.1',))
+    ref = {'profile_id':str(uuid4()),'profile_version':1,'principal_slot':'ssh',
+           'source':'credential_profiles','auth_kind':'ssh_password','allowed_capabilities':['ssh.exec']}
+    policy = ScanPolicy(active_testing=True,network_discovery=False,approval_receipt_id='approval')
+    action = SshCommandAdapter('ssh.exec').prepare(target=target,args={'command':'uptime'},
+        policy=policy,context={'credential_refs':[ref]})
+    assert action.redacted_execution['port'] == 22
+    from api.capabilities.network import network_capability_adapter
+    with pytest.raises(CapabilityInputError):
+        network_capability_adapter('ports.discover').prepare(target=target,args={'profile':'top100'},policy=policy)
+
 def test_transport_is_owned_by_exact_run_target_identity_and_service():
     pool = SshTransportPool()
     binding = (str(uuid4()),'target-digest','192.0.2.1',2222,str(uuid4()),1)

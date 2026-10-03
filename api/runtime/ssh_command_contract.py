@@ -38,7 +38,7 @@ def ssh_command_specs(spec, schema, kinds):
         spec('ssh.exec', 'Execute an operator-delegated command directly on the bound SSH target. '
              'Requires an explicit ssh.exec credential grant; ssh.connect alone grants no commands. '
              'Returns an opaque reusable session and output; never launches device inventory.',
-             'network_tcp', 'credential', kinds, 'paramiko.exec', '1', 'network_discovery',
+             'network_tcp', 'credential', kinds, 'paramiko.exec', '1', 'active_testing',
              {'hosts_attempted': 1, 'tcp_ports_attempted': 1, 'tool_wall_seconds': 62,
               'device_fragility_points': 3}, placement,
              schema({**shared,

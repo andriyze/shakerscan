@@ -19,12 +19,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping
 
 
 SERVER_NAME = "shakerscan"
+_SSH_PROGRESS = ContextVar('ssh_progress',default=None)
 PUBLIC_API_URL = "https://pub.shakerscan.com"
 
 
@@ -418,6 +420,21 @@ HUNT_TOOLS: tuple[HuntMCPTool, ...] = (
     ),
 )
 HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
+_ssh_id = {"type":"string","format":"uuid"}
+_ssh_capability = HUNT_TOOL_BY_NAME["shakerscan_hunt_capability"]
+HUNT_TOOLS += (
+    HuntMCPTool("shakerscan_hunt_ssh_exec","POST","/hunts/{hunt_id}/ssh/exec",
+        "Execute a direct SSH command with incremental output via MCP progress. Uses the selected SSH identity and canonical ssh.exec authority; no inventory scan or automatic retry.",
+        {key:value for key,value in _ssh_capability.properties.items() if key != "capability_name"},
+        ("hunt_id","input"), open_world=True),
+    HuntMCPTool("shakerscan_hunt_ssh_output","GET","/hunts/{hunt_id}/ssh/actions/{action_id}/output",
+        "Read current bounded untrusted stdout/stderr and status for this Hunt's SSH action.",
+        {"hunt_id":_ssh_id,"action_id":_ssh_id},("hunt_id","action_id"),read_only=True,idempotent=True),
+    HuntMCPTool("shakerscan_hunt_ssh_cancel","POST","/hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
+        "Cancel this Hunt's SSH action. Remote termination may remain uncertain.",
+        {"hunt_id":_ssh_id,"action_id":_ssh_id},("hunt_id","action_id"),idempotent=True),
+)
+HUNT_TOOL_BY_NAME = {tool.name: tool for tool in HUNT_TOOLS}
 
 
 def _positive_int(value: Any, default: int) -> int:
@@ -809,6 +826,12 @@ class ArsenalClient:
         if name == "shakerscan_public_check":
             return _call_posture_check(self, "/public/check", arguments)
         hunt_tool = HUNT_TOOL_BY_NAME.get(name)
+        streaming_ssh = name == "shakerscan_hunt_ssh_exec"
+        if streaming_ssh:
+            # Use the generic manifest validation, with a fixed canonical capability.
+            name = "shakerscan_hunt_capability"
+            arguments = {**arguments,"capability_name":"ssh.exec"}
+            hunt_tool = _ssh_capability
         if hunt_tool:
             if name == "shakerscan_hunt_start":
                 hunt_tool = _hunt_start_tool(self.hunt_contract())
@@ -848,7 +871,7 @@ class ArsenalClient:
                 payload.setdefault("evidence_refs", [])
                 payload.setdefault("reason", "")
             path = hunt_tool.path_template
-            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id"):
+            for key in ("hunt_id", "capability_name", "candidate_id", "skill_id", "action_id"):
                 marker = "{" + key + "}"
                 if marker in path:
                     path = path.replace(marker, urllib.parse.quote(str(payload.pop(key)), safe=""))
@@ -892,19 +915,27 @@ class ArsenalClient:
                 }
             try:
                 try:
-                    result = self.request_json(hunt_tool.method, path, payload or None)
+                    if streaming_ssh:
+                        try:
+                            from mcp_ssh_stream import ssh_events
+                        except ModuleNotFoundError:
+                            from scripts.mcp_ssh_stream import ssh_events
+                        path = "/hunts/"+urllib.parse.quote(hunt_id,safe="")+"/ssh/exec"
+                        result = ssh_events(self,path,payload,_SSH_PROGRESS.get())
+                    else:
+                        result = self.request_json(hunt_tool.method, path, payload or None)
                 except MCPError as exc:
-                    if name != "shakerscan_hunt_capability" or not _unknown_outcome(exc):
+                    if streaming_ssh or name != "shakerscan_hunt_capability" or not _unknown_outcome(exc):
                         raise
                     result = self._settle_capability(path, payload, exc)
-                if name == "shakerscan_hunt_capability" and _in_flight(result):
+                if not streaming_ssh and name == "shakerscan_hunt_capability" and _in_flight(result):
                     result = self._settle_capability(path, payload, result)
-            except MCPError as exc:
+            except (MCPError, ValueError, urllib.error.URLError, OSError) as exc:
                 if name != "shakerscan_hunt_capability":
                     raise
                 # The POST may have been admitted before its response was lost.
                 # Preserve recovery identity, never raw upstream error bodies or inputs.
-                raise MCPError(exc.code, "Hunt capability response was not confirmed", {
+                raise MCPError(getattr(exc,"code",-32001), "Hunt capability response was not confirmed", {
                     "outcome": "unknown",
                     "hunt_id": hunt_id,
                     "capability_name": capability_name,
@@ -1024,6 +1055,7 @@ class PublicClient:
 class MCPServer:
     def __init__(self, client: ArsenalClient | PublicClient) -> None:
         self.client = client
+        self.notify = None
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         if request.get("jsonrpc") != "2.0":
@@ -1051,7 +1083,20 @@ class MCPServer:
             arguments = params.get("arguments") or {}
             if not isinstance(arguments, dict):
                 raise MCPError(-32602, "Tool arguments must be a JSON object")
-            result = self.client.call_tool(name, arguments)
+            token = (params.get("_meta") or {}).get("progressToken")
+            count = 0
+            def progress(event, value):
+                nonlocal count
+                count += 1
+                if self.notify and token is not None:
+                    self.notify({"jsonrpc":"2.0","method":"notifications/progress","params":{
+                        "progressToken":token,"progress":count,
+                        "message":json.dumps({"event":event,**value},separators=(',',':'))}})
+            progress_context = _SSH_PROGRESS.set(progress)
+            try:
+                result = self.client.call_tool(name, arguments)
+            finally:
+                _SSH_PROGRESS.reset(progress_context)
         else:
             raise MCPError(-32601, f"Method not found: {method}")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -1065,28 +1110,12 @@ def _error_response(request_id: Any, error: MCPError) -> dict[str, Any]:
 
 
 def serve(server: MCPServer, stdin: BinaryIO, stdout: BinaryIO) -> int:
-    while True:
-        line = stdin.readline(MAX_REQUEST_BYTES + 1)
-        if not line:
-            return 0
-        request_id = None
-        try:
-            if len(line) > MAX_REQUEST_BYTES or not line.endswith(b"\n"):
-                raise MCPError(-32700, "MCP request exceeded the input cap")
-            request = json.loads(line.decode("utf-8"))
-            if not isinstance(request, dict):
-                raise MCPError(-32600, "JSON-RPC request must be an object")
-            request_id = request.get("id")
-            response = server.handle(request)
-            if response is None:
-                continue
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            response = _error_response(request_id, MCPError(-32700, "Invalid JSON", str(exc)))
-        except MCPError as exc:
-            response = _error_response(request_id, exc)
-        encoded = json.dumps(response, separators=(",", ":"), default=str).encode("utf-8") + b"\n"
-        stdout.write(encoded)
-        stdout.flush()
+    try:
+        from mcp_stdio import serve as concurrent_serve
+    except ModuleNotFoundError:
+        from scripts.mcp_stdio import serve as concurrent_serve
+    return concurrent_serve(server,stdin,stdout,limit=MAX_REQUEST_BYTES,
+        error_type=MCPError,error_response=_error_response)
 
 
 def api_token_from_env(environ: Mapping[str, str]) -> str | None:

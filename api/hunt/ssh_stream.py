@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 from uuid import UUID, uuid5
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import StreamingResponse, JSONResponse
@@ -12,11 +13,18 @@ from starlette.responses import StreamingResponse, JSONResponse
 from .ssh_routing import output_key, cancel_key, OUTPUT_TTL
 
 router = APIRouter(tags=['hunts'])
+_configured_runtime = None
+
+
+def configure_ssh_stream(**collaborators):
+    global _configured_runtime
+    _configured_runtime = SimpleNamespace(**collaborators)
 
 
 def _runtime():
-    from . import interaction_router
-    return interaction_router
+    if _configured_runtime is None:
+        raise HTTPException(503, 'SSH runtime is not ready')
+    return _configured_runtime
 
 
 async def _action(hunt_id, action_id):

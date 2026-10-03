@@ -1630,7 +1630,7 @@ async def _execute_hunt_capability_lifecycle(
                 validated_device_input = dict(request.input)
             uses_session = bool(
                 (
-                    name in {"http.request", "browser.navigate", "browser.interact"}
+                    name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
                     and request.input.get("session_ref")
                 )
                 or (
@@ -1780,6 +1780,12 @@ async def _execute_hunt_capability_lifecycle(
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
                 }
+                if name == "authz.verify":
+                    from capabilities.authz_modes import authz_call_budget
+                    try:
+                        charges.update(authz_call_budget(request.input))
+                    except ValueError as exc:
+                        raise HTTPException(422,str(exc)) from exc
                 if name == "candidate.verify":
                     assert candidate_record is not None
                     if str(run["target_kind"]) == "device":
@@ -3835,6 +3841,10 @@ def _hunt_redacted_capability_input(
     if capability_name in {'targets.skill.create', 'targets.skill.update'} and 'methodology' in values:
         body = str(values.pop('methodology'))
         values.update(body_sha256=hashlib.sha256(body.encode('utf-8')).hexdigest(), characters=len(body))
+    if capability_name in {'targets.actions.create', 'targets.actions.update'}:
+        for key in ('steps','instructions','parameters'):
+            body = json.dumps(values.pop(key, None), sort_keys=True, default=str)
+            values[key + '_sha256'] = hashlib.sha256(body.encode()).hexdigest()
     if capability_name == "http.request":
         values = redact_http_request_body(values)
     redacted = _arsenal_routes._redact_agent_payload(values)
@@ -4139,5 +4149,8 @@ def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int, safe_method
     )
 
 
-from .ssh_stream import router as ssh_stream_router
+from .ssh_stream import router as ssh_stream_router, configure_ssh_stream
+configure_ssh_stream(_pool=_pool, _hunt_run_or_404=_hunt_run_or_404,
+    execute_hunt_capability=execute_hunt_capability,
+    HuntCapabilityRequest=HuntCapabilityRequest, get_redis=get_redis)
 router.include_router(ssh_stream_router)

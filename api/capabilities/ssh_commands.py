@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Mapping
 from uuid import UUID
 
-from .network_inputs import CapabilityInputError, _addresses, _require_network_policy
+from .network_inputs import CapabilityInputError, _addresses, require_service_policy
 try:
     from runtime.models import PreparedExecution
     from runtime.credentials import SSH_CREDENTIAL_KINDS
@@ -32,7 +32,7 @@ class SshCommandAdapter:
 
     def prepare(self, *, target, args, policy, context=None):
         if self.capability_name == 'ssh.exec':
-            _require_network_policy(policy)
+            require_service_policy(policy)
         if set(args) - {'command', 'cwd', 'port', 'session_id', 'timeout_seconds', 'max_output_bytes'}:
             raise CapabilityInputError('Unsupported SSH input')
         session_id = args.get('session_id')

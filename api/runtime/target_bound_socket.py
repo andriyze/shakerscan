@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import ipaddress
+import select
 import socket
+import time
 from typing import Any, Callable, Iterable
 
 try:
@@ -126,3 +129,36 @@ class FrozenTargetSocketFactory:
         raise FrozenTargetSocketError(
             "all frozen target addresses failed: " + ",".join(failures)
         )
+
+    def connect_cancellable(self, *, cancelled, timeout: float,
+                            on_socket=None, socket_factory=socket.socket):
+        """Connect one frozen endpoint without DNS, observing cancellation while waiting."""
+        endpoint = self.endpoints()[0]
+        candidate = socket_factory(endpoint.family, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        try:
+            if on_socket:
+                on_socket(candidate)
+            if cancelled():
+                raise InterruptedError('cancelled')
+            candidate.setblocking(False)
+            error = candidate.connect_ex(endpoint.sockaddr)
+            if error not in {0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY}:
+                raise OSError(error, 'Frozen target connection failed')
+            deadline = time.monotonic() + timeout
+            while error:
+                if cancelled():
+                    raise InterruptedError('cancelled')
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Frozen target connection timeout')
+                _, writable, _ = select.select([], [candidate], [], 0.1)
+                if writable:
+                    error = candidate.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if error:
+                        raise OSError(error, 'Frozen target connection failed')
+            if cancelled():
+                raise InterruptedError('cancelled')
+            candidate.settimeout(timeout)
+            return candidate
+        except BaseException:
+            candidate.close()
+            raise

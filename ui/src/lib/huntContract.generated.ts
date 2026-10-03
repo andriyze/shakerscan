@@ -164,9 +164,11 @@ export const HUNT_START_CONTRACT = {
       "max_state_changing_requests"
     ],
     "network_disabled": [
-      "max_hosts",
-      "max_tcp_ports",
       "max_udp_ports"
+    ],
+    "network_disabled_without_selected_ssh": [
+      "max_hosts",
+      "max_tcp_ports"
     ],
     "non_device_target": [
       "max_device_fragility_points"
@@ -191,6 +193,14 @@ export const HUNT_START_CONTRACT = {
   ],
   "schema_version": "hunt-start/v2",
   "skill_catalog": "/hunt/skills",
+  "target_actions": {
+    "auto_load_at_start": true,
+    "execution": "Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
+    "grants_authority": false,
+    "max_actions": 32,
+    "snapshot_context_path": "target_actions",
+    "url_template": "/targets/{target_id}/actions"
+  },
   "target_kinds": [
     "api",
     "device",
@@ -226,6 +236,90 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "targets.skill.read"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.read"
+      },
+      "description": "Read named saved actions. Optional action_id and typed parameters resolve steps; execute each through the Hunt capability runtime.",
+      "name": "targets.actions.read",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.actions.read",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.actions.read"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.create"
+      },
+      "description": "Save a named reusable action for this target using canonical capabilities and opaque references.",
+      "name": "targets.actions.create",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.actions.create",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.actions.create"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.update"
+      },
+      "description": "Edit a saved action on this exact target with a revision check. Future Hunts load the change.",
+      "name": "targets.actions.update",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.actions.update",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.actions.update"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/targets.actions.delete"
+      },
+      "description": "Delete a saved action on this exact target with a revision check.",
+      "name": "targets.actions.delete",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "targets.actions.delete",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "targets.actions.delete"
       }
     },
     {
@@ -382,7 +476,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Execute an operator-delegated command directly on the bound SSH target. Requires an explicit ssh.exec credential grant; ssh.connect alone grants no commands. Returns an opaque reusable session and output; never launches device inventory.",
       "name": "ssh.exec",
-      "required_approval": "network_discovery",
+      "required_approval": "active_testing",
       "target_kinds": [
         "api",
         "device",
@@ -415,6 +509,48 @@ export const HUNT_START_CONTRACT = {
         "alternate_adapters": [],
         "binary": null,
         "name": "paramiko.exec"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/browser.workflow"
+      },
+      "description": "Run an authorized sequence of non-secret fills and clicks, including forms and test-object cleanup, on one pinned HTTP service.",
+      "name": "browser.workflow",
+      "required_approval": "state_changing_http",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "playwright",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "playwright"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/service.snmp.inspect"
+      },
+      "description": "Inspect SNMPv3 engine information without community strings, credential guesses, OID walks or SET operations.",
+      "name": "service.snmp.inspect",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "nmap",
+        "alternate_adapters": [],
+        "binary": "nmap",
+        "name": "nmap"
       }
     },
     {
@@ -657,7 +793,7 @@ export const HUNT_START_CONTRACT = {
       },
       "description": "Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.",
       "name": "ssh.connect",
-      "required_approval": "network_discovery",
+      "required_approval": "active_testing",
       "target_kinds": [
         "api",
         "device",
@@ -802,7 +938,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/authz.verify"
       },
-      "description": "Verify one read-only cross-principal object-authorization differential.",
+      "description": "Compare object ownership or a repeated anonymous/primary/secondary function-access matrix using deterministic evidence.",
       "name": "authz.verify",
       "required_approval": "active_testing",
       "target_kinds": [

@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 from .skill_trust import instruction_trust, planner_snapshot
+from .metadata_row import target_metadata_row as _target
 
 try:
     from runtime.asset_capability_specs import MAX_TARGET_SKILL_CHARACTERS
@@ -69,18 +70,6 @@ class TargetSkillWrite(BaseModel):
         if not value.strip() or '\x00' in value:
             raise ValueError('Enter nonblank text without null characters')
         return value.strip()
-
-
-async def _target(conn: Any, target_id: Any, *, lock: bool = False):
-    try:
-        identifier = uuid.UUID(str(target_id))
-    except (TypeError, ValueError, AttributeError) as exc:
-        raise HTTPException(400, 'Invalid target id') from exc
-    row = await conn.fetchrow('SELECT id,metadata_json FROM targets WHERE id=$1' +
-                             (' FOR UPDATE' if lock else ''), identifier)
-    if row is None:
-        raise HTTPException(404, 'Target not found')
-    return row
 
 
 def _saved(row: Any) -> dict[str, Any]:
@@ -218,6 +207,19 @@ async def attach_target_skill_snapshot(conn: Any, target_id: Any, context: dict,
     context['hunt_authority'] = await read_hunt_authority(conn, target_id)
     saved = await read_target_skill(conn, target_id)
     context['target_skill'] = planner_snapshot(saved)
+    from .actions import read_target_actions
+    actions = await read_target_actions(conn, target_id)
+    context['target_actions'] = {**actions, 'actions':[{
+        key:item[key] for key in ('id','name','revision','body_sha256','written_by')
+        } | {'instructions':item['instructions'][:1000],
+             'capabilities':[step['capability'] for step in item['steps']]}
+        for item in actions['actions']], 'loaded_at_start':True,
+        'editing_affects':'future_hunts', 'execution':'canonical_hunt_capabilities'}
+    from hunt.continuation import prior_handoff
+    try:
+        context['continuation'] = await prior_handoff(conn,target_id)
+    except Exception as exc:
+        context['continuation'] = {'available':False,'reason':type(exc).__name__}
     return context
 
 

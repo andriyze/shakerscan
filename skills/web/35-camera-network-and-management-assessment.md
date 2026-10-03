@@ -3,7 +3,7 @@ id: skill.network.camera-assessment
 name: camera-network-and-management-assessment
 title: 35. Camera Network and Management Assessment
 description: Assess IP cameras, webcams, NVRs and DVRs through listener discovery, management-interface authentication, TLS and retained streaming or ONVIF descriptors.
-version: 1.0.0
+version: 1.1.0
 kind: specialist
 phase: discovery
 risk: medium
@@ -69,6 +69,12 @@ Use operator-approved synthetic fixtures if content access is the actual objecti
 recording deletion, alarm changes, firmware updates, reboot and account changes require their own
 admitted action contract and explicit intent. Unsupported native protocols remain coverage gaps;
 continue supported interface, TLS and service assessment.
+
+For a known RTSP listener, use `service.nse_check` with `scripts: [rtsp-methods]` and its actual
+port. This sends bounded OPTIONS discovery and reports advertised methods without acquiring
+video, opening a media stream or guessing credentials. A successful OPTIONS response establishes
+protocol reachability, not permission to view recordings. Native stream acquisition and multicast
+WS-Discovery remain deferred; documented ONVIF SOAP over HTTP can use selected request collections.
 
 ## Evidence and handoff
 

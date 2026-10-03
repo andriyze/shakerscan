@@ -11,13 +11,14 @@ import os
 from pathlib import Path
 import socket
 import ssl
+import platform
 import time
 from uuid import UUID, uuid4
 
 import pytest
 
 from tests.test_target_asset_startup_postgres import startup_database
-from tests.ssh_exec_fixture import CommandServer, PASSWORD, USERNAME, tls_material
+from tests.ssh_exec_fixture import CommandServer, HttpLogFixture, PASSWORD, USERNAME, tls_material
 
 
 @pytest.mark.parametrize(('kind','auth_kind'), [('network','ssh_password'),('device','ssh_password'),
@@ -34,6 +35,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
         from hunt.ssh_routing import worker_queue, session_key
         from capabilities.ssh_transport import SSH_TRANSPORTS
         from job_queue import lease_job, acknowledge_lease
+        from hunt import agent_job_concurrency
         dsn = os.environ.get('SSH_TEST_REDIS_URL')
         if not dsn:
             pytest.skip('SSH_TEST_REDIS_URL is not configured')
@@ -47,6 +49,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             app_module = importlib.import_module('api.api')
         worker = importlib.import_module('worker')
         fixture = CommandServer(tmp_path)
+        http_fixture=HttpLogFixture(tmp_path)
         credential_secret, passphrase = PASSWORD, None
         if auth_kind != 'ssh_password':
             import paramiko
@@ -56,7 +59,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             pem = io.StringIO();client_key.write_private_key(pem,password=passphrase)
             credential_secret=pem.getvalue()
         fixture.allow('id -un', 'uname -s', "printf 'out\\n'; printf 'err\\n' >&2; exit 7",
-            "printf 'first\\n'; sleep 2; printf 'last\\n'", 'sleep 20', "printf '%02048d' 0")
+            "printf 'first\\n'; sleep 2; printf 'last\\n'", 'sleep 20', "printf '%02048d' 0",'tail -n 0 -f web.log')
         owner = 'fixture-agent-worker-' + uuid4().hex
         recorded_queues = []
         worker_errors = []
@@ -78,26 +81,35 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             maintenance = asyncio.create_task(maintain_ssh_sessions(r,pool,owner))
             stopped = asyncio.Event()
 
+            async def execute_job(redis_client,lease,job):
+                try:
+                    if job['type']=='canonical_network_capability':
+                        await worker.process_canonical_network_capability_job(job)
+                    else:
+                        assert job['type']=='canonical_http_capability'
+                        await worker.process_canonical_http_capability_job(job)
+                except BaseException as exc:
+                    if not isinstance(exc,asyncio.CancelledError): worker_errors.append(repr(exc))
+                    raise
+            monkeypatch.setattr(worker,'process_job',lambda job:execute_job(r,None,job))
             async def consume():
                 while not stopped.is_set():
-                    lease = await asyncio.to_thread(lease_job,r,
+                    lease = await agent_job_concurrency.lease_when_ready(lambda:lease_job(r,
                         [worker_queue(base_queue,owner),base_queue],consumer_name=owner,
-                        block_ms=100,visibility_timeout_ms=600000)
+                        block_ms=100,visibility_timeout_ms=600000),enabled=True)
                     if lease is None:
                         continue
                     try:
                         job = json.loads(lease.payload)
-                        assert job['type'] == 'canonical_network_capability'
+                        assert job['type'] in {'canonical_network_capability','canonical_http_capability'}
                         recorded_queues.append(lease.queue_name)
                         if job['capability_name'] == 'ssh.exec':
                             assert set(job['capability_input']) == {'encrypted_ssh_input'}
                             assert 'id -un' not in json.dumps(job)
-                        await worker.process_canonical_network_capability_job(job)
+                        await agent_job_concurrency.dispatch(r,lease,job,execute=worker._run_job_under_lease,enabled=True)
                     except BaseException as exc:
                         worker_errors.append(repr(exc))
                         raise
-                    finally:
-                        acknowledge_lease(r,lease)
 
             consumer = asyncio.create_task(consume())
             sock = socket.socket();sock.bind(('127.0.0.1',0))
@@ -105,7 +117,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             server = uvicorn.Server(uvicorn.Config(app_module.app, lifespan='off',ws='none',
                 log_level='critical',access_log=False,timeout_graceful_shutdown=3))
             serving = asyncio.create_task(server.serve(sockets=[sock]))
-            gateway_server = gateway_serving = gateway_sock = planner = None
+            gateway_server = gateway_serving = gateway_sock = planner = watch = None
             try:
                 for _ in range(100):
                     if server.started: break
@@ -137,8 +149,8 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                         'target_id':target_id,'approval_receipt_id':approval,'granted_by':'ssh-runtime-fixture'})
                     hunt = await request('POST','/hunts',{'schema_version':'hunt-start/v2','target_id':target_id,
                         'target_kind':kind,'goal':'Run explicitly authorized SSH fixture commands directly',
-                        'budget_profile':'thorough','capabilities':['ssh.exec','ssh.close'],
-                        'policy':{'network_discovery':True,'authorization_confirmed':True},
+                        'budget_profile':'thorough','capabilities':['ssh.exec','ssh.close','http.request'],
+                        'policy':{'active_testing':True,'network_discovery':False,'authorization_confirmed':True},
                         'credential_refs':{'ssh_credential_profile_id':profile}})
                     hunt_id=hunt['hunt_id']
                     from hunt.planner_gateway import HuntPlannerGateway
@@ -183,7 +195,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     timing['reused_command_seconds']=time.monotonic()-started
                     two=observation(second)
                     assert second['action_result']['status']=='success',second
-                    assert two['stdout'].strip()=='Linux' and two['connection_reused'] is True
+                    assert two['stdout'].strip()==platform.system() and two['connection_reused'] is True
                     assert fixture.logins==1 and recorded_queues[-1]==worker_queue(base_queue,owner)
                     assert two['host_key_fingerprint']==fixture.fingerprint
                     assert (await conn.fetchval('SELECT status FROM hunt_actions WHERE id=$1',UUID(second['action_id'])))=='completed'
@@ -209,6 +221,27 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     assert first_output is not None and first_output < 1.8, timing
                     assert final['action_result']['status']=='success' and observation(final)['stdout']=='first\nlast\n',final
                     assert fixture.logins==1
+                    watch=asyncio.create_task(execute('tail -n 0 -f web.log',session_id=session,timeout_seconds=5,key='watch-external-001'))
+                    for _ in range(100):
+                        if fixture.commands[-1]=='tail -n 0 -f web.log': break
+                        await asyncio.sleep(0.05)
+                    assert fixture.commands[-1]=='tail -n 0 -f web.log'
+                    # Give the native tail process time to seek to the end before
+                    # the external check appends a line. SSH must remain running.
+                    await asyncio.sleep(0.2)
+                    external_started=time.monotonic()
+                    external=await planner.post(f'/hunts/{hunt_id}/capabilities/http.request',json={
+                        'idempotency_key':'external-with-ssh-001','input':{
+                            'method':'GET','origin':f'http://127.0.0.1:{http_fixture.port}','path':'/fixture-check'}})
+                    assert external.status_code==200,external.text
+                    assert external.json()['action_result']['status']=='success',external.text
+                    assert not watch.done(),'External check waited for SSH to finish'
+                    timing['external_check_during_ssh_seconds']=time.monotonic()-external_started
+                    watched=await watch
+                    assert 'external-request /fixture-check' in observation(watched)['stdout'],watched
+                    assert observation(watched)['connection_closed'] is True
+                    restored=await execute('id -un',port=fixture.port)
+                    session=observation(restored)['session_id']
                     long_key='cancel-command-001'
                     from uuid import uuid5
                     action_id=str(uuid5(UUID(hunt_id),'hunt-capability:'+long_key))
@@ -232,7 +265,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     assert observation(timed)['timed_out'] and observation(timed)['execution_uncertain']
                     capped=await execute("printf '%02048d' 0",port=fixture.port,max_output_bytes=1024)
                     assert capped['action_result']['status']=='partial',capped
-                    assert observation(capped)['output_bytes']==1024 and observation(capped)['output_truncated']
+                    assert observation(capped)['output_bytes']==1024 and observation(capped)['output_truncated'],observation(capped)
                     fresh=await execute('uname -s',port=fixture.port)
                     assert fresh['action_result']['status']=='success',fresh
                     fresh_session=observation(fresh)['session_id']
@@ -268,6 +301,8 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     dest.mkdir(parents=True,exist_ok=True)
                     (dest/f'ssh-{kind}-{auth_kind}-timings.json').write_text(json.dumps(timing,indent=2)+'\n')
             finally:
+                if watch is not None:
+                    watch.cancel();await asyncio.gather(watch,return_exceptions=True)
                 if planner:
                     await planner.aclose()
                 if gateway_server:
@@ -277,9 +312,11 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                 stopped.set()
                 consumer.cancel();maintenance.cancel();server.should_exit=True
                 await asyncio.gather(consumer,maintenance,return_exceptions=True)
+                await agent_job_concurrency.close()
                 await asyncio.wait_for(serving,10)
                 sock.close()
                 fixture.close()
+                http_fixture.close()
                 SSH_TRANSPORTS.close_all()
                 r.flushdb();r.close()
                 await pool.close()

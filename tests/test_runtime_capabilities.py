@@ -54,6 +54,8 @@ def test_registry_filters_target_kind_and_active_permission():
     }
 
     assert safe_web == {
+        "ssh.close",
+        "targets.actions.read", "targets.actions.create", "targets.actions.update", "targets.actions.delete",
         "targets.create", "targets.update",
         "targets.skill.read", "targets.skill.create", "targets.skill.update", "targets.skill.delete",
         "scan.finalize", "scan.execute", "scan.origin_select",
@@ -172,7 +174,7 @@ def test_authz_verification_is_read_only_proof_gated_and_worker_bound():
     assert specification.hunt_executor == "worker_http"
     assert set(
         specification.planner_contract()["input_schema"]["properties"]
-    ) == {"primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal", "routes", "origin"}
+    ) == {"primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal", "routes", "origin", "mode"}
 
 
 def test_ssh_proposal_registry_budget_is_control_plane_only():

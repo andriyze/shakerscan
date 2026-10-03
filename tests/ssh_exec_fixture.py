@@ -15,11 +15,37 @@ import socket
 import subprocess
 import threading
 import time
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 
 import paramiko
 
 USERNAME = 'fixture-operator'
 PASSWORD = 'fixture-only-password'
+
+
+class HttpLogFixture:
+    """Owned HTTP service whose real requests produce the SSH-watched log."""
+    def __init__(self,directory):
+        self.log=directory/'web.log'
+        self.log.write_text('')
+        log=self.log
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                with log.open('a') as output:
+                    output.write('external-request '+self.path+'\n')
+                    output.flush()
+                body=b'{"fixture":"external check completed"}'
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body)
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.port=self.server.server_port
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
+        self.thread.start()
+    def close(self):
+        self.server.shutdown();self.server.server_close();self.thread.join(2)
 
 
 class CommandServer:

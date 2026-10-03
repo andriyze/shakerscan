@@ -14,6 +14,19 @@ Select an encrypted SSH profile in the Hunt's SSH identity slot. Grant that prof
 `ssh.connect` permission is not silently upgraded. Reuse the target's standing
 network-testing authorization and save its host key or authorize first-contact trust.
 These are setup choices, not a confirmation prompt before every delegated command.
+Selected SSH access needs active authorization and the exact SSH grant, without
+requiring port discovery permission. Discovery tools keep their separate permission.
+
+The Live SSH tab streams stdout/stderr and supports cancellation and saving a
+command as a target action. Through MCP, `shakerscan_hunt_ssh_exec` emits progress
+notifications; `shakerscan_hunt_ssh_output` polls output and `shakerscan_hunt_ssh_cancel`
+cancels one action. Tool calls on the same MCP connection may overlap.
+
+For log correlation, run a bounded watch through SSH and issue the external check
+while it is running. The dedicated agent worker admits at most three leased jobs
+at once; Scan workers remain sequential. A device Hunt admits one SSH command and
+one external traffic action concurrently, retaining all health and budget checks.
+The planner must actively drive the investigation.
 
 ```bash
 shakerscan api POST /hunts/HUNT_ID/capabilities/ssh.exec \

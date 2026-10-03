@@ -37,6 +37,7 @@ def _running_network_reservation() -> DurableBudgetReservation:
 
 def test_worker_network_capability_set_is_explicit():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_network")} == {
+        "service.snmp.inspect",
         "ports.discover",
         "service.fingerprint",
         "service.nse_check",

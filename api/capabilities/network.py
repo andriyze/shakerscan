@@ -34,6 +34,7 @@ NETWORK_CAPABILITY_ADAPTERS = {
     "ports.discover": lambda: PortsDiscoverAdapter(),
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
     "service.nse_check": lambda: _nse_check_adapter(),
+    "service.snmp.inspect": lambda: _snmp_adapter(),
     "subdomains.discover": lambda: SubdomainsDiscoverAdapter(),
     "ssh.connect": lambda: _ssh_connect_adapter(),
 }
@@ -42,6 +43,11 @@ NETWORK_CAPABILITY_ADAPTERS = {
 def _nse_check_adapter():
     from .nse import NseCheckAdapter
     return NseCheckAdapter()
+
+
+def _snmp_adapter():
+    from .snmp import SnmpInspectAdapter
+    return SnmpInspectAdapter()
 
 
 def _ssh_connect_adapter():
@@ -187,7 +193,7 @@ class NetworkExecutionAdapter:
                 parse_kwargs["root_domain"] = str(
                     prepared.redacted_execution["root_domain"]
                 )
-            elif prepared.capability_name == "service.nse_check":
+            elif prepared.capability_name in {"service.nse_check","service.snmp.inspect"}:
                 parse_kwargs["expected_ports"] = tuple(
                     int(item) for item in prepared.redacted_execution.get("ports") or ()
                 )
@@ -196,7 +202,7 @@ class NetworkExecutionAdapter:
                 )
             parsed = self._parser.parse(streamed.stdout, **parse_kwargs)
             parsed_observations = parsed.observations
-            if prepared.capability_name == "service.nse_check":
+            if prepared.capability_name in {"service.nse_check","service.snmp.inspect"}:
                 coverage_gaps.extend(dict(gap) for gap in parsed.metadata.get("coverage_gaps", ()))
             bridge = getattr(streamed, "nse_http", None)
             if bridge is not None:

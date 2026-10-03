@@ -124,6 +124,14 @@ export function HuntDetails({ hunt, shellPlans, confirmingPlanId, onConfirmPlan,
             <dt className="text-gray-500">Methodologies used</dt>
             <dd className="min-w-0 text-right text-gray-200">{(hunt.skills || []).length ? (hunt.skills || []).map(skill => skill.title).join(', ') : <span className="text-gray-500">none</span>}</dd>
           </div>
+          {hunt.target_skill?.advisory?.methodology && <div className="rounded-lg border border-blue-500/20 p-3">
+            <dt className="text-blue-200">Learned knowledge · advisory</dt>
+            <dd className="mt-2 whitespace-pre-wrap text-xs leading-6 text-gray-400">{hunt.target_skill.advisory.methodology}</dd>
+          </div>}
+          {Boolean(hunt.context_pack?.target_actions) && <div className="flex justify-between gap-3">
+            <dt className="text-gray-500">Saved target actions</dt>
+            <dd><Link href={`/targets/${encodeURIComponent(hunt.target_id)}/asset`} className="text-blue-300">View and edit actions</Link></dd>
+          </div>}
         </dl>
         <details className="mt-4 text-xs">
           <summary className="cursor-pointer text-gray-400 hover:text-gray-200">{capabilities.length} capabilities allowed</summary>

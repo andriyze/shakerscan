@@ -16,6 +16,7 @@ import { HuntRequestsPanel, useHuntTransactions } from './HuntRequestsPanel'
 import { HuntResults } from './HuntResults'
 import { huntStatusClass } from './HuntRunList'
 import { HuntTimeline } from './HuntTimeline'
+import { HuntSshConsole } from './HuntSshConsole'
 import { formatHuntDuration } from './huntFormat'
 
 function AgentHandoff({ hunt, started }: { hunt: HuntV2; started: boolean }) {
@@ -197,11 +198,13 @@ export function HuntRunView({ hunt, onChange, target }: {
       { key: 'requests', label: 'Requests', badge: archive.total || undefined },
       { key: 'timeline', label: 'Timeline', badge: actions.length || undefined },
       { key: 'details', label: 'Details' },
+      ...(hunt.capabilities?.some(item=>item.name==='ssh.exec') ? [{key:'ssh',label:'SSH'}] : []),
     ]} />
 
     {tab === 'results' && <HuntResults hunt={hunt} />}
     {tab === 'requests' && <HuntRequestsPanel archive={archive} />}
     {tab === 'timeline' && <HuntTimeline hunt={hunt} archive={archive} />}
+    {tab === 'ssh' && <HuntSshConsole hunt={hunt} onChanged={onChange} />}
     {tab === 'details' && <HuntDetails hunt={hunt} shellPlans={shellPlans} confirmingPlanId={confirmingPlanId} onConfirmPlan={confirmShellPlan} onChanged={onChange} />}
 
     <ConfirmDialog open={confirmStop} danger busy={stopping} title="Stop this Hunt?" confirmLabel="Stop Hunt"

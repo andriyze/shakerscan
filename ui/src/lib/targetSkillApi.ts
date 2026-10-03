@@ -39,8 +39,8 @@ async function request(id: string, init?: RequestInit, query = ''): Promise<Targ
   return value
 }
 export const getTargetSkill = (id: string, signal?: AbortSignal) => request(id, {signal})
-export const saveTargetSkill = (id: string, state: TargetSkillState, title: string, methodology: string) => request(id, {
-  method: (state.operator_skill ?? (['operator','operator_delegated'].includes(state.trust || '') ? state.skill : null)) ? 'PUT' : 'POST', headers: {'Content-Type':'application/json'},
-  body: JSON.stringify({title,methodology,expected_revision:state.revision}),
+export const saveTargetSkill = (id: string, state: TargetSkillState, title: string, methodology: string, purpose:'instructions'|'knowledge'='instructions') => request(id, {
+  method: (purpose==='knowledge' ? state.knowledge : state.operator_skill ?? (['operator','operator_delegated'].includes(state.trust || '') ? state.skill : null)) ? 'PUT' : 'POST', headers: {'Content-Type':'application/json'},
+  body: JSON.stringify({title,methodology,expected_revision:state.revision,purpose}),
 })
-export const deleteTargetSkill = (id: string, revision: number) => request(id, {method:'DELETE'}, `?expected_revision=${revision}`)
+export const deleteTargetSkill = (id: string, revision: number, purpose:'instructions'|'knowledge'='instructions') => request(id, {method:'DELETE'}, `?expected_revision=${revision}&purpose=${purpose}`)

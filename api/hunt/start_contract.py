@@ -184,6 +184,12 @@ def hunt_start_public_contract() -> dict[str, Any]:
             "max_characters": CAPABILITY_REGISTRY.require("targets.skill.create").input_schema["properties"]["methodology"]["maxLength"],
             "grants_authority": False,
         },
+        "target_actions": {
+            "url_template":"/targets/{target_id}/actions","max_actions":32,
+            "auto_load_at_start":True,"snapshot_context_path":"target_actions",
+            "execution":"Read a recipe, then invoke each canonical step through the saved Hunt manifest.",
+            "grants_authority":False,
+        },
         "tool_calls": [
             {"name": spec.name, "description": spec.description,
              "tool": spec.planner_contract()["tool"],
@@ -213,7 +219,8 @@ def hunt_start_public_contract() -> dict[str, Any]:
         ],
         "policy_derived_zeros": {
             "mutation_disabled": ["max_state_changing_requests"],
-            "network_disabled": ["max_hosts", "max_tcp_ports", "max_udp_ports"],
+            "network_disabled": ["max_udp_ports"],
+            "network_disabled_without_selected_ssh": ["max_hosts", "max_tcp_ports"],
             "oob_disabled": ["max_oob_interactions"],
             "non_device_target": ["max_device_fragility_points"],
             "passive_without_credentials": ["max_active_actions"],
@@ -405,13 +412,18 @@ class HuntStartPolicy:
             )
 
     def forbidden_budget_dimensions(
-        self, *, target_kind: str, credentials_requested: bool,
+        self, *, target_kind: str, credentials_requested: bool, ssh_selected: bool = False,
     ) -> frozenset[str]:
         forbidden: set[str] = set()
         if not self.allow_state_changing_http:
             forbidden.add("max_state_changing_requests")
         if not self.network_discovery:
-            forbidden.update({"max_tcp_ports", "max_udp_ports", "max_hosts"})
+            forbidden.add("max_udp_ports")
+            # Only a selected SSH slot may reserve a known service connection.
+            # Profile kind/grant/approval are validated before the Hunt is persisted.
+            # Discovery capabilities retain their independent network_discovery gate.
+            if not (self.active_testing and ssh_selected):
+                forbidden.update({"max_tcp_ports", "max_hosts"})
         if not self.allow_oob_interactions:
             forbidden.add("max_oob_interactions")
         if target_kind != "device":
@@ -489,6 +501,7 @@ class HuntStartContract:
         for key in self.policy.forbidden_budget_dimensions(
             target_kind=self.target_kind,
             credentials_requested=bool(self.credential_refs),
+            ssh_selected=bool(self.credential_refs.get("ssh_credential_profile_id")),
         ):
             result[key] = 0
         return result
@@ -714,6 +727,7 @@ def normalize_hunt_start_payload(value: Mapping[str, Any]) -> HuntStartContract:
         for key in policy.forbidden_budget_dimensions(
             target_kind=target_kind,
             credentials_requested=bool(credential_refs),
+            ssh_selected=bool(credential_refs.get("ssh_credential_profile_id")),
         )
         if int(budget_overrides.get(key, 0)) > 0
     )

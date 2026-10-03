@@ -44,6 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
       postgres:
         image: postgres:18
         env:
@@ -57,6 +63,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/api:${{ github.workspace }}/scanner
       TARGET_ASSET_TEST_DATABASE_URL: postgresql://postgres:target-assets-ci-only@127.0.0.1:5432/target_assets_test
+      SSH_TEST_REDIS_URL: redis://127.0.0.1:6379/15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:

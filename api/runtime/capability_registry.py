@@ -502,11 +502,13 @@ def _http_principal_schema(
 
 from .asset_capability_specs import asset_capability_specs
 from .ssh_command_contract import ssh_command_specs
+from .investigation_specs import investigation_specs
 
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
         *asset_capability_specs(CapabilitySpec, _schema, _HTTP_TARGETS),
         *ssh_command_specs(CapabilitySpec, _schema, _NETWORK_TARGETS),
+        *investigation_specs(CapabilitySpec, _schema, _NETWORK_TARGETS),
         CapabilitySpec(
             "scan.finalize",
             "Build one deterministic report from immutable action receipts and manifests.",
@@ -1137,6 +1139,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                           "minItems": 1, "maxItems": 4},
                 "scripts": {"type": "array", "items": {"type": "string", "enum": [
                     "ssl-enum-ciphers", "http-security-headers", "http-methods", "http-trace",
+                    "rtsp-methods", "ssh2-enum-algos", "ssh-hostkey",
                 ]}, "minItems": 1, "maxItems": 3},
             }, required=("ports", "scripts")),
             "nmap-nse-observation/v1", ("nse_observation", "tool_receipt"),
@@ -1173,7 +1176,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             'ssh.connect', 'Authenticate once to a target-bound SSH service with the Hunt-selected stored identity, then close the connection. No commands are executed.',
-            'network_tcp','credential',_NETWORK_TARGETS,'paramiko','1','network_discovery',
+            'network_tcp','credential',_NETWORK_TARGETS,'paramiko','1','active_testing',
             {'hosts_attempted':1,'tcp_ports_attempted':1,'tool_wall_seconds':120,'device_fragility_points':3},
             {'network_reachability':True,'credentials_resolved_server_side':True,'credential_binding':'ssh'},
             _schema({'port':{'type':'integer','minimum':1,'maximum':65535},
@@ -1351,7 +1354,7 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "authz.verify",
-            "Verify one read-only cross-principal object-authorization differential.",
+            "Compare object ownership or a repeated anonymous/primary/secondary function-access matrix using deterministic evidence.",
             "http", "active", _HTTP_TARGETS, "authz.differential", "1",
             "active_testing", {"http_requests": 4, "tool_wall_seconds": 60},
             {
@@ -1378,10 +1381,11 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
                 "route_inventory_digest", "route_count",
             )),
             "authz-differential/v1",
-            ("cross_principal_ownership_differential", "tool_receipt"),
+            ("cross_principal_ownership_differential", "authorization_matrix_observation", "tool_receipt"),
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
+                "mode":{"type":"string","enum":["object","function"],"default":"object"},
                 "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_principal": {"type": "string", "enum": ["primary"]},
                 "secondary_principal": {"type": "string", "enum": ["secondary"]},

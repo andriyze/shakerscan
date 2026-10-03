@@ -3,7 +3,7 @@ id: skill.network.managed-ssh-assessment
 name: managed-ssh-authentication-and-host-review
 title: 37. Managed SSH Authentication and Host Review
 description: Authenticate to SSH using the Hunt-selected encrypted password or private key on port 22, a saved service port, or an operator-specified port; distinguish login from host review and confirmed commands.
-version: 1.1.0
+version: 1.2.0
 kind: specialist
 phase: active_testing
 risk: medium
@@ -33,7 +33,8 @@ source: Authored for the shared ShakerScan Hunt runtime
 When the operator asks to connect using stored SSH credentials, use `ssh.connect` rather than
 asking them to run ssh or paste a password/key. Select an encrypted SSH profile through
 `credential_refs.ssh_credential_profile_id` when starting Hunt. The exact target must have an
-active profile grant including `ssh.connect`, and the run must admit active network work. Read
+active profile grant including `ssh.connect`, and the run must admit active testing. Port discovery
+permission is unnecessary for a selected SSH service; it remains necessary for discovery tools. Read
 the saved manifest and target instructions; the target's standing authorization is reused.
 
 The input accepts a service `port` and optional OpenSSH SHA256 `host_key_fingerprint`. An explicit
@@ -79,6 +80,20 @@ the existing result. An unavailable session requires an explicit new connection,
 
 Legacy exact-command `device.ssh.propose` remains useful when that is the operator's chosen policy,
 not a prerequisite for delegated direct commands. No SSH result alone proves a vulnerability.
+
+For MCP, use `shakerscan_hunt_ssh_exec` with a progress token to receive incremental output;
+`shakerscan_hunt_ssh_output` reads a command's current output and `shakerscan_hunt_ssh_cancel`
+cancels that action. The same MCP connection can carry other tool calls while SSH is running.
+Use bounded log watches (for example with `timeout_seconds`) alongside external `http.request`,
+`templates.scan` or authorization checks. Device Hunts permit one SSH execution and one external
+traffic action at once; both retain their own reservations and obey the shared device health pause.
+Do not present an idle external planner as an autonomous background investigation.
+
+At startup read the `target_actions` index and any advisory `continuation`. Use
+`targets.actions.read` with an action ID and typed parameter values to get its canonical steps.
+Invoke each step separately through this Hunt's manifest, with a distinct idempotency key.
+Hunt may create, update or delete saved actions through the matching metadata capabilities with
+revision checks when target metadata edits are enabled. Never put credentials into recipe inputs.
 
 Report target/address, actual SSH port, credential profile/version, host-key provenance,
 authentication result, connection closure, evidence references and any unperformed host review.

@@ -54,7 +54,7 @@ def test_planner_sees_only_opaque_session_and_principal_inputs():
         "authz.verify"
     ).planner_contract()["input_schema"]
     assert set(authz["properties"]) == {
-        "primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal", "routes", "origin",
+        "primary_session_ref", "secondary_session_ref", "primary_principal", "secondary_principal", "routes", "origin", "mode",
     }
     assert authz["required"] == ["routes"]
 
@@ -102,7 +102,7 @@ def test_worker_reloads_every_authority_before_session_or_http_execution():
         "WorkerCredentialResolver().resolve(",
         "session_store.load_for_worker(",
         "authorization proof requires distinct primary and secondary profiles",
-        "verify_target_bound_object_authorization(",
+        "else verify_target_bound_object_authorization)(",
         "prepare_http_operation(",
         "terminalize_hunt_capability(",
         "reservation_store.persist_terminal(",

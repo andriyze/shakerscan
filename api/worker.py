@@ -21571,7 +21571,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     )
                 }
                 await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status,
-                                            health_observed=False if capability_name in {"service.nse_check", "ssh.exec", "ssh.close"} else None)
+                                            health_observed=False if capability_name in {"service.nse_check", "service.snmp.inspect", "ssh.exec", "ssh.close"} else None, capability_name=capability_name)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -22210,7 +22210,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     "authorization proof requires distinct primary and secondary profiles"
                 )
             async def execute_authz() -> dict[str, Any]:
-                return await verify_target_bound_object_authorization(
+                from capabilities.authz_modes import verify_function_authorization
+                return await (verify_function_authorization if capability_input.get("mode") == "function" else verify_target_bound_object_authorization)(
                     authz_base,
                     routes,
                     target=target,
@@ -23115,6 +23116,7 @@ async def async_main():
         model_intake_queue=MODEL_INTAKE_QUEUE_NAME,
     )
     from hunt.ssh_worker_lifecycle import start_ssh_sessions
+    from hunt import agent_job_concurrency
     ssh_task = start_ssh_sessions(r, db_pool, _worker_runtime_identity(),
         base_queue_keys, AGENT_TOOL_QUEUE_NAME, AGENT_TOOL_ONLY_WORKER)
     queue_keys = list(base_queue_keys)
@@ -23177,8 +23179,7 @@ async def async_main():
                     ),
                 ]
                 consumer_name = _worker_runtime_identity()
-                lease = await loop.run_in_executor(
-                    None,
+                lease = await agent_job_concurrency.lease_when_ready(
                     lambda: lease_job(
                         r,
                         queue_keys,
@@ -23186,6 +23187,7 @@ async def async_main():
                         block_ms=WORKER_QUEUE_BLOCK_SECONDS * 1000,
                         visibility_timeout_ms=QUEUE_VISIBILITY_TIMEOUT_SECONDS * 1000,
                     ),
+                    enabled=AGENT_TOOL_ONLY_WORKER,
                 )
                 if lease is None:
                     continue  # Timeout, continue polling
@@ -23206,7 +23208,7 @@ async def async_main():
                     # This marker is recovery metadata, never authority to run.
                     # The durable DB claim in each handler remains authoritative.
                     print(f"[worker] processing lease metadata error: {lease_err}", flush=True)
-                await _run_job_under_lease(r, lease, job_data)
+                await agent_job_concurrency.dispatch(r, lease, job_data, execute=_run_job_under_lease, enabled=AGENT_TOOL_ONLY_WORKER)
             except asyncio.CancelledError:
                 # Graceful shutdown requested (SIGTERM/SIGINT)
                 print("Worker received shutdown signal, exiting...", flush=True)
@@ -23220,6 +23222,7 @@ async def async_main():
         pass
     finally:
         if ssh_task is not None:
+            await agent_job_concurrency.close()
             ssh_task.cancel()
             await worker_queue_policy_module.finish_cancelled_task(ssh_task)
         build_report_task.cancel()

@@ -70,6 +70,14 @@ def run_command(session, values, *, command, cwd, stopped, capture, on_progress,
     result.update({'command_dispatched': False, 'exit_status': None, 'timed_out': False,
               'cancelled': False, 'execution_uncertain': False,
               'remote_termination_confirmed': None})
+    def drain():
+        for name,ready,receive in (('stdout',channel.recv_ready,channel.recv),
+                                   ('stderr',channel.recv_stderr_ready,channel.recv_stderr)):
+            for _ in range(16):
+                if not ready(): break
+                data=receive(4096)
+                if not data: break
+                capture.append(name,data)
     try:
         if stopped():
             result['cancelled'] = True
@@ -79,23 +87,13 @@ def run_command(session, values, *, command, cwd, stopped, capture, on_progress,
         if stopped():
             result['cancelled'] = True
             return result
-        wire_command = command if cwd is None else 'cd -- ' + shlex.quote(cwd) + ' && ' + command
+        wire_command = command if cwd is None else 'cd -- ' + shlex.quote(cwd) + ' && (\n' + command + '\n)'
         # Mark before the request: loss of its acknowledgement must not trigger a retry.
         result['command_dispatched'] = True
         channel.exec_command(wire_command)
         channel.shutdown_write()
         while True:
-            for name, ready, receive in (
-                ('stdout', channel.recv_ready, channel.recv),
-                ('stderr', channel.recv_stderr_ready, channel.recv_stderr),
-            ):
-                for _ in range(16):
-                    if not ready():
-                        break
-                    data = receive(4096)
-                    if not data:
-                        break
-                    capture.append(name, data)
+            drain()
             on_progress(capture.public())
             if stopped():
                 result['cancelled'] = True
@@ -114,6 +112,11 @@ def run_command(session, values, *, command, cwd, stopped, capture, on_progress,
                 break
             time.sleep(0.01)
     except Exception as exc:
+        # A fast server may close while exec acknowledgement is being handled.
+        # Buffered output is still trustworthy partial evidence; never replay.
+        if channel is not None:
+            try: drain()
+            except Exception: pass
         result['error'] = 'ssh_channel:' + type(exc).__name__
         result['execution_uncertain'] = result['command_dispatched']
         result['cancelled'] = bool(stopped())

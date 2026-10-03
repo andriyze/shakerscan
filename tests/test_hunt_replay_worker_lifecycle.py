@@ -205,7 +205,7 @@ def worker(conn):
         "_AGENT_TOOL_RESULT_TTL_SECONDS": 60,
         "agent_tools": SimpleNamespace(CAPABILITY_REGISTRY=CAPABILITY_REGISTRY),
         "require_device_admission": noop, "record_device_traffic": noop,
-        "require_worker_device_policy": lambda _: None,
+        "require_worker_device_policy": lambda _, capability=None: None,
         "_dispatch_registered_hunt_adapter": dispatch,
     }
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),

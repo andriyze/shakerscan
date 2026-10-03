@@ -49,6 +49,7 @@ def _target(
 def test_browser_registry_and_durable_set_are_explicit_and_bounded():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_browser")} == {
         "browser.interact", "browser.navigate", "browser.login_check",
+        "browser.workflow",
     }
     spec = CAPABILITY_REGISTRY.require("browser.navigate")
     assert spec.execution_kind == "browser"
@@ -274,7 +275,8 @@ def test_browser_interaction_rejects_cross_origin_mutating_or_secret_elements(el
         _validate_read_only_interaction(prepared, element)
 
 
-def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypatch):
+@pytest.mark.parametrize("mutation",[False,True])
+def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypatch,mutation):
     class FakePinnedProxy:
         def __init__(self, **_kwargs):
             self.socket_factory = types.SimpleNamespace(policy_receipt={
@@ -410,7 +412,9 @@ def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypat
     monkeypatch.setitem(sys.modules, "playwright", package)
     monkeypatch.setitem(sys.modules, "playwright.async_api", async_api)
 
-    prepared = BrowserInteractAdapter.prepare(
+    from api.capabilities.browser import BrowserWorkflowAdapter
+    adapter = BrowserWorkflowAdapter if mutation else BrowserInteractAdapter
+    prepared = adapter.prepare(
         target=_target(),
         base_url="https://app.example.test",
         args={
@@ -425,15 +429,16 @@ def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypat
     async def heartbeat():
         heartbeats.append(True)
 
-    result = asyncio.run(BrowserInteractAdapter(prepared).execute(
+    result = asyncio.run(adapter(prepared).execute(
         heartbeat=heartbeat, cancelled=lambda: False,
     ))
 
     assert result.status == "partial"
     assert result.actual_budget["browser_actions"] == 2
-    assert result.actual_budget["http_requests"] == 2
+    assert result.actual_budget["http_requests"] == (3 if mutation else 2)
+    assert result.actual_budget.get("state_changing_requests",0) == int(mutation)
     assert heartbeats == [True]
-    assert {item[0] for item in blocked_routes} == {"GET", "POST"}
+    assert {item[0] for item in blocked_routes} == ({"GET"} if mutation else {"GET", "POST"})
     serialized = str(result.observations) + str(result.redacted_execution)
     for content in (
         "private-label", "view=summary", "view=public", "hidden", "outside",
@@ -444,7 +449,7 @@ def test_browser_interaction_click_is_context_guarded_and_content_free(monkeypat
         item for item in result.observations
         if item.get("kind") == "browser_interaction"
     )
-    assert interaction["element_kind"] == "same_origin_link"
+    assert interaction["element_kind"] == ("workflow_control" if mutation else "same_origin_link")
     assert interaction["selector_sha256"] == prepared.selector_digest
 
 

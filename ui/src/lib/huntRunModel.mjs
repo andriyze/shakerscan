@@ -1,7 +1,7 @@
 // Pure presentation logic for one Hunt run: tabs, decisions waiting on the operator,
 // budget use against limits, requests grouped under the action that sent them.
 
-export const RUN_TABS = ['results', 'requests', 'timeline', 'details']
+export const RUN_TABS = ['results', 'requests', 'timeline', 'details', 'ssh']
 
 const LIVE = new Set(['active', 'awaiting_planner'])
 
