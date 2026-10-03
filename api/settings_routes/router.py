@@ -324,6 +324,9 @@ async def update_ai_settings(request: AISettingsUpdate):
             raise HTTPException(503, "Credential encryption is unavailable; provider key cannot be saved") from None
     if deletes:
         r.hdel(AI_SETTINGS_KEY, *deletes)
+    if "ai_api_key" in updates or "ai_api_key" in deletes:
+        from runtime.ai_settings_secrets import compact_history
+        compact_history(r)
 
     persisted_to_env = False
     persist_message = "Runtime settings updated"

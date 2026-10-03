@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -191,6 +192,28 @@ def _scan_files(base: Path, scans: list[dict[str, Any]]) -> tuple[list[Path], li
     return files, unverified
 
 
+def _prune_artifact_dirs(base: Path, scans: list[dict[str, Any]]) -> None:
+    """Remove a deleted scan's now-empty artifact directories, whose names are its ID.
+
+    Only empty directories are removed, deepest first; a file that could not be erased keeps its
+    directory and is already reported by the caller.
+    """
+    root = base / 'scan-artifacts'
+    for scan in scans:
+        try:
+            scan_dir = root / str(uuid.UUID(str(scan['id'])))
+        except (KeyError, ValueError):
+            continue
+        if not scan_dir.is_dir() or scan_dir.is_symlink():
+            continue
+        nested = [p for p in scan_dir.rglob('*') if p.is_dir() and not p.is_symlink()]
+        for directory in sorted(nested, key=lambda p: len(p.parts), reverse=True) + [scan_dir]:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+
+
 async def erase_files(conn, captured: dict[str, Any], evidence_uris: list[str]) -> dict[str, Any]:
     """Erase files only deleted rows named. Runs after commit; never raises."""
     from artifact_storage import delete_object as delete_artifact
@@ -221,6 +244,7 @@ async def erase_files(conn, captured: dict[str, Any], evidence_uris: list[str]) 
             (erased if await asyncio.to_thread(delete_artifact, uri, results_dir=base) else missing).append(uri)
         except Exception as exc:  # storage errors are reported, not raised after commit
             errors.append({'uri': uri, 'error': type(exc).__name__})
+    await asyncio.to_thread(_prune_artifact_dirs, base, captured['scans'])
     files, unverified = await asyncio.to_thread(_scan_files, base, captured['scans'])
     for path in files:
         try:

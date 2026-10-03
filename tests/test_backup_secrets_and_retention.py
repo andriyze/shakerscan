@@ -16,7 +16,7 @@ def _fn(name: str) -> str:
 
 FUNCTIONS = "\n".join(_fn(name) for name in (
     "backup_key_file", "backup_sha256", "backup_key_fingerprint", "create_backup",
-    "prune_backups", "list_backups", "delete_backups", "backup_cmd",
+    "prune_backups", "list_backups", "backup_key_state", "confirm_backup_delete", "delete_backups", "backup_cmd",
 ))
 
 
@@ -113,3 +113,37 @@ def test_a_backup_can_be_deleted_by_name_or_all_of_them(tmp_path):
     assert not (root / "shakerscan-20261001T000000Z").exists()
     assert _run(tmp_path, "backup_cmd delete all", stdin="yes\n").returncode == 0
     assert list(root.iterdir()) == []
+
+
+def _legacy_backup(root: Path, name: str, *, with_key: bool) -> None:
+    """A backup made before the key was left out: its manifest says nothing about the key."""
+    staging = root / f".{name}-staging" / "results"
+    staging.mkdir(parents=True)
+    (staging / "scan.json").write_text("{}")
+    if with_key:
+        (staging / ".credential_enc.key").write_text("fernet-key-fixture\n")
+    (root / name).mkdir(parents=True)
+    with tarfile.open(root / name / "results.tar.gz", "w:gz") as archive:
+        archive.add(staging, arcname="results")
+    (root / name / "manifest.txt").write_text("created_at=20261003T213901Z\nrelease_version=2.5.6\n")
+
+
+def test_list_reads_older_backups_that_never_recorded_the_key(tmp_path):
+    root = tmp_path / "backups"
+    _legacy_backup(root, "shakerscan-20261001T000000Z", with_key=True)
+    _legacy_backup(root, "shakerscan-20261002T000000Z", with_key=False)
+    rows = {line.split()[0]: line for line in _run(tmp_path, "backup_cmd list").stdout.splitlines()}
+    assert "KEY INCLUDED" in rows["shakerscan-20261001T000000Z"]
+    assert "key excluded" in rows["shakerscan-20261002T000000Z"]
+
+
+def test_delete_honours_the_launchers_global_yes_and_reports_a_missing_answer(tmp_path):
+    root = tmp_path / "backups"
+    _fake_backups(root, ["shakerscan-20261001T000000Z", "shakerscan-20261002T000000Z"])
+    # `scanner.sh backup delete NAME --yes`: the global parser keeps --yes for itself.
+    assert _run(tmp_path, "ASSUME_YES=1; backup_cmd delete shakerscan-20261001T000000Z").returncode == 0
+    assert not (root / "shakerscan-20261001T000000Z").exists()
+    # No terminal and no --yes: cancelled with a reason instead of a silent exit.
+    missing = _run(tmp_path, "backup_cmd delete shakerscan-20261002T000000Z")
+    assert missing.returncode == 1 and "Pass --yes" in missing.stdout
+    assert (root / "shakerscan-20261002T000000Z").exists()

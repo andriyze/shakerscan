@@ -112,6 +112,10 @@ def test_release_api_storage_init_preserves_private_sandbox_and_shares_worker_di
     assert "condition: service_completed_successfully" in compose
     assert "-path /results/model-intake-sandbox -prune" in compose
     assert "chmod g+rws" in compose
+    # Without FSETID the kernel silently drops the setgid bit chmod g+s asks for (see the
+    # installed upgrade smoke, which checks the bit on a real install).
+    init = compose.split("api-storage-init:", 1)[1].split("\n  api:", 1)[0]
+    assert "- FSETID" in init
     assert "network_mode: none" in compose
     worker_entrypoint = (ROOT / "scanner" / "entrypoint.sh").read_text(encoding="utf-8")
     api_entrypoint = (ROOT / "scanner" / "api-entrypoint.sh").read_text(encoding="utf-8")

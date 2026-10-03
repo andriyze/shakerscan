@@ -12,6 +12,23 @@ _CAS = """if redis.call('HGET',KEYS[1],ARGV[1]) == ARGV[2] then
 _LOG = logging.getLogger(__name__)
 
 
+def compact_history(redis) -> None:
+    """Rewrite Redis persistence after the provider key changed.
+
+    Redis keeps every earlier write in its append-only file until it is rewritten, so a replaced,
+    cleared or once-plaintext key would otherwise stay on disk. Best effort: a rewrite already in
+    progress or a restricted command is logged, never raised.
+    """
+    try:
+        persistence = redis.info("persistence") or {}
+        if int(persistence.get("aof_enabled") or 0):
+            redis.bgrewriteaof()
+        else:
+            redis.bgsave()
+    except Exception as exc:  # noqa: BLE001 - persistence compaction must not fail the request
+        _LOG.warning("Could not compact Redis persistence after a provider key change: %s", type(exc).__name__)
+
+
 def protect_settings(values: dict) -> dict:
     return {key: encrypt_secret(value) if key == "ai_api_key" else value for key, value in values.items()}
 
@@ -25,7 +42,8 @@ def load_settings(redis, name: str) -> dict[str, str]:
         if not value.startswith("enc:fernet:"):
             try:
                 encrypted = encrypt_secret(value)
-                redis.eval(_CAS, 1, name, "ai_api_key", value, encrypted)
+                if redis.eval(_CAS, 1, name, "ai_api_key", value, encrypted):
+                    compact_history(redis)
             except (SecretStoreUnavailable, RedisError):
                 pass  # legacy reads survive; new writes always require encryption
         try:
