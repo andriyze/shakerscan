@@ -633,7 +633,26 @@ compose_up() {
     # release mode pulls the pinned set, while source mode builds the exact
     # checkout through build_local_images. Never let `up` independently choose
     # to pull or rebuild an application image.
-    compose up --no-build "$@"
+    local status=0
+    compose up --no-build "$@" || status=$?
+    [ "$status" -eq 0 ] || explain_storage_init_failure
+    return "$status"
+}
+
+# A release stack starts no service until api-storage-init has prepared results/ and the credential
+# encryption key. When that step fails, `compose up` reports only a failed dependency.
+explain_storage_init_failure() {
+    local container exit_code
+    container="$(compose ps -a -q api-storage-init 2>/dev/null | head -1)" || return 0
+    [ -n "$container" ] || return 0
+    exit_code="$(docker_cli inspect -f '{{.State.ExitCode}}' "$container" 2>/dev/null)" || return 0
+    [ -n "$exit_code" ] && [ "$exit_code" != "0" ] || return 0
+    echo -e "${RED}Storage preparation (api-storage-init) failed, so no service was started:${NC}"
+    compose logs --no-color --tail 20 api-storage-init 2>/dev/null | sed 's/^/  /'
+    echo "The credential encryption key $(backup_key_file) must exist, be valid and be readable."
+    echo "If it is empty or damaged, restore it from your safe copy or from a backup made with"
+    echo "'shakerscan backup --include-key'. Removing it lets the stack start with a new key, but stored"
+    echo "credentials, request collections and sessions can then no longer be decrypted."
 }
 
 pull_prebuilt_images() {

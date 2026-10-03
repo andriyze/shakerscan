@@ -166,7 +166,9 @@ shakerscan doctor          # connectivity and configuration checks
 ```
 
 A scan that fails is best diagnosed from `shakerscan api GET /scans/<id>/actions` and the worker
-logs. Open an [issue](https://github.com/andriyze/shakerscan/issues/new/choose) if you are stuck.
+logs. If start reports that storage preparation (`api-storage-init`) failed, the credential encryption
+key `results/.credential_enc.key` is unreadable, empty or damaged: restore it from your safe copy.
+Removing it starts the engine with a new key, and stored credentials can no longer be decrypted. Open an [issue](https://github.com/andriyze/shakerscan/issues/new/choose) if you are stuck.
 
 ## Documentation
 
