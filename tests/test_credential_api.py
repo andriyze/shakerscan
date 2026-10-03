@@ -27,7 +27,7 @@ class ApiCredentialConn(MemoryCredentialConn):
     async def fetchval(self, query, *args):
         if "app_schema_migrations" in query:
             return None  # This fixture exercises the pre-conversion compatibility writer.
-        raise AssertionError(query)
+        return await super().fetchval(query, *args)
 
     def transaction(self):
         @asynccontextmanager

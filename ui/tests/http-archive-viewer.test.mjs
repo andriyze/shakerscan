@@ -19,7 +19,10 @@ test('archive browser supports server-side search, method, status and pagination
   assert.match(source, /params\.set\('method'/)
   assert.match(source, /params\.set\('status_code'/)
   assert.match(source, /void load\(offset \+ PAGE_SIZE\)/)
-  assert.match(source, /fetch\(archiveUrl\(format, 0\)\)/)
+  assert.match(source, /fetch\(archiveUrl\(raw \? 'har' : format, 0, raw \? 'raw' : 'redacted'\)\)/)
+  // The masked HAR asks for masking; only the verbatim option asks for raw.
+  assert.match(source, /HAR 1\.2 \(masked\)/)
+  assert.match(source, /masked\.har/)
 })
 
 test('HAR export is explicitly raw, sensitive, and confirmation-gated', () => {

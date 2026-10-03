@@ -19,6 +19,7 @@ set -e
 source "$1"
 compose() {
     case "$*" in
+        *"/proc/1/comm"*) printf 'postgres\\n' ;;
         *"SELECT relkind"*) printf '%s\\n' "$KIND" ;;
         *"SELECT to_regclass"*) printf '%s\\n' "$INITIALIZED" ;;
     esac
@@ -34,3 +35,33 @@ echo launch
     events = '\n'.join(line for line in result.stdout.splitlines() if line in {'backup','launch'})
     assert events == expected
     assert result.returncode == (7 if backup_status and kind == 'r' and initialized == 't' else 0)
+
+
+def test_the_backup_waits_for_the_final_postgres_process_not_the_init_server(tmp_path):
+    """A fresh volume's temporary init server answers pg_isready and then shuts down; a dump
+    taken then failed CI with "the database system is shutting down"."""
+    import os
+    polls = tmp_path / 'polls'
+    script = """
+set -e
+source "$1"
+sleep() { :; }
+compose() {
+    case "$*" in
+        *"/proc/1/comm"*)
+            echo poll >> "$POLLS"
+            if [ "$(wc -l < "$POLLS")" -lt 3 ]; then printf 'bash\\n'; else printf 'postgres\\n'; fi ;;
+        *"pg_isready"*) return 0 ;;  # the init server answers too: readiness alone is not enough
+        *"SELECT relkind"*) echo query >> "$POLLS"; printf 'r\\n' ;;
+        *"SELECT to_regclass"*) printf 't\\n' ;;
+    esac
+}
+create_backup() { echo backup; }
+ensure_target_upgrade_backup
+"""
+    result = subprocess.run(['bash', '-c', script, 'fixture', str(ROOT / 'scripts/target_upgrade_backup.sh')],
+                            env={**os.environ, 'POLLS': str(polls)}, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    # Nothing is queried or dumped until the init server is gone.
+    assert polls.read_text().split() == ['poll', 'poll', 'poll', 'query']
+    assert 'backup' in result.stdout.split()

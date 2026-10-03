@@ -414,6 +414,29 @@ def delete_remote_evidence_object(storage_uri: str) -> dict[str, Any]:
         }
 
 
+# Profiles under which content was stored exactly as captured (raw HTTP archive blobs).
+RAW_REDACTION_PROFILES = frozenset({"none", "raw"})
+RAW_CONTENT_WITHHELD = (
+    "Unmasked HTTP traffic is not served here. Read it masked through "
+    "/scans/{id}/http-transactions or /hunts/{id}/http-transactions, or verbatim through the "
+    "operator-gated raw export."
+)
+
+
+def public_evidence_object(row: dict[str, Any], *, results_dir: Path) -> dict[str, Any]:
+    """An evidence object as an API may return it: unmasked captured traffic is withheld.
+
+    Raw archive blobs hold Authorization headers, cookies and login bodies exactly as sent;
+    the archive export masks them unless the deployment and the operator allow raw export.
+    Serving the same bytes from the generic evidence surface would bypass that gate.
+    """
+    if str(row.get("redaction_profile") or "").strip().lower() in RAW_REDACTION_PROFILES:
+        public = {key: value for key, value in row.items() if key != "content"}
+        public.update(content=None, content_withheld=True, content_withheld_reason=RAW_CONTENT_WITHHELD)
+        return public
+    return hydrate_evidence_content(row, results_dir=results_dir)
+
+
 def hydrate_evidence_content(row: dict[str, Any], *, results_dir: Path) -> dict[str, Any]:
     storage_uri = str(row.get("storage_uri") or "")
     if storage_uri.startswith(S3_STORAGE_PREFIX):

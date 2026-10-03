@@ -3,12 +3,16 @@ import { createApprovalReceipt } from './api'
 
 export type DeletionSelection =
   | { kind: 'target'; target_id: string }
+  /** A domain group as the Targets list shows it, with all its subdomains and linked services. */
+  | { kind: 'domain'; domain: string }
+  /** Permanent deletion of one credential profile or request collection. */
+  | { kind: 'credential_profile' | 'request_collection'; id: string }
   | { kind: 'findings'; finding_ids: string[]; scan_id?: string }
   | { kind: 'findings'; older_than_days: number; status?: string; root_domain?: string }
 
 export interface DeletionPreview {
   schema: 'shakerscan.record-deletion/v1'
-  kind: 'target' | 'findings'
+  kind: 'target' | 'domain' | 'findings' | 'credential_profile' | 'request_collection'
   preview_id: string
   preview_hash: string
   scope_receipt_id: string
@@ -19,7 +23,15 @@ export interface DeletionPreview {
   retained: string[]
   would_delete: number
   dry_run: true
-  external_files_deleted: false
+  external_files_deleted: boolean
+}
+
+export interface DeletionFileOutcome {
+  complete: boolean
+  files_erased?: number
+  files_missing?: number
+  file_errors?: Array<{ uri: string; error: string }>
+  unverified_result_files?: string[]
 }
 
 export interface DeletionResult {
@@ -28,7 +40,9 @@ export interface DeletionResult {
   deleted_ids: string[]
   deleted_records: Record<string, number>
   retained: string[]
-  external_files_deleted: false
+  external_files_deleted: boolean
+  files?: DeletionFileOutcome
+  detached_references?: Record<string, number>
   operation_id: string
   idempotent_replay: boolean
 }

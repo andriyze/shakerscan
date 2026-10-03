@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import AuthenticationProfiles from '@/components/AuthenticationProfiles'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -668,6 +669,9 @@ function CredentialsContent() {
                       {profile.is_active && <Button size="sm" variant="secondary" onClick={() => setSharing(profile)}><Share2 className="h-4 w-4" /> Share…</Button>}
                       {profile.is_active && <Button size="sm" variant="secondary" onClick={() => openRotate(profile)}><RotateCw className="h-4 w-4" /> Rotate</Button>}
                       {profile.is_active && <Button size="sm" variant="ghost" onClick={() => setDeactivating(profile)}><Trash2 className="h-4 w-4" /> Deactivate</Button>}
+                      <DeleteRecordsButton selection={{ kind: 'credential_profile', id: profile.id }} label="Delete permanently"
+                        variant="ghost" subject={`credential ${profile.name}`} onDeleted={() => void loadProfiles()}
+                        className="text-red-300 hover:text-red-200" />
                     </>
                   )}
                 </div>

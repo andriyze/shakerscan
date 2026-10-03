@@ -69,7 +69,11 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
       const result = await executeRecordDeletion(preview, approval.current)
       onDeleted(result)
       onClose()
-      toast.success('Records deleted. Historical scans and external files were retained.')
+      if (result.files && !result.files.complete) {
+        toast.error('Records deleted, but some files could not be erased. The deletion receipt lists them.')
+      } else {
+        toast.success('Deleted. Records and their files were erased.')
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Deletion failed')
     } finally {
@@ -88,15 +92,18 @@ export function RecordDeletionDialog({ preview, subject, onClose, onDeleted, onA
       <p>Already-admitted or running work is not cancelled. Use its cancellation controls separately.</p>
       {error && <p role="alert" className="text-red-300">{error}</p>}
     </div> : <div className="max-h-[60vh] space-y-3 overflow-y-auto">
-      <p>This permanently removes the following database records. This cannot be undone.</p>
+      <p>This permanently removes the following records and erases their files. This cannot be undone.</p>
+      {(preview.kind === 'domain' || (preview.kind === 'target' && preview.root_ids.length > 1)) && <p className="font-medium text-gray-200">
+        {preview.root_ids.length} target{preview.root_ids.length === 1 ? '' : 's'}
+        {preview.kind === 'domain' ? ' in this domain, its subdomains and their linked services' : ', including its linked services'}
+      </p>}
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
         {Object.entries(preview.records.delete).map(([table, value]) => <div key={table} className="contents">
           <dt className="wrap-break-word">{table.replaceAll('_', ' ')}</dt><dd>{value.count}</dd>
         </div>)}
       </dl>
-      <p className="font-medium text-gray-200">Not a complete data erasure</p>
+      <p className="font-medium text-gray-200">What is kept</p>
       {preview.retained.map(text => <p key={text}>{text}</p>)}
-      <p>Only the selected IDs are affected. Subdomains and sibling targets are not recursively deleted.</p>
       {preview.blockers.map(text => <p role="alert" key={text} className="text-amber-300">{text}</p>)}
       {preview.kind === 'target' && preview.root_ids.length === 1 && onArchived && !archived && (
         <Button disabled={busy} onClick={() => { setArchiveMode(true); setError(null) }}>Archive target instead</Button>
