@@ -25,7 +25,12 @@ from .network_inputs import (
 )
 
 
+from .ssh_commands import SshCommandAdapter
+
+
 NETWORK_CAPABILITY_ADAPTERS = {
+    "ssh.exec": lambda: SshCommandAdapter("ssh.exec"),
+    "ssh.close": lambda: SshCommandAdapter("ssh.close"),
     "ports.discover": lambda: PortsDiscoverAdapter(),
     "service.fingerprint": lambda: ServiceFingerprintAdapter(),
     "service.nse_check": lambda: _nse_check_adapter(),

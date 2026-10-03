@@ -378,6 +378,48 @@ export const HUNT_START_CONTRACT = {
     {
       "call": {
         "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/ssh.exec"
+      },
+      "description": "Execute an operator-delegated command directly on the bound SSH target. Requires an explicit ssh.exec credential grant; ssh.connect alone grants no commands. Returns an opaque reusable session and output; never launches device inventory.",
+      "name": "ssh.exec",
+      "required_approval": "network_discovery",
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "paramiko.exec",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "paramiko.exec"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
+        "url_template": "/hunts/{hunt_id}/capabilities/ssh.close"
+      },
+      "description": "Close this Hunt's reusable SSH transport without executing a command.",
+      "name": "ssh.close",
+      "required_approval": null,
+      "target_kinds": [
+        "api",
+        "device",
+        "network",
+        "web"
+      ],
+      "tool": {
+        "adapter": "paramiko.exec",
+        "alternate_adapters": [],
+        "binary": null,
+        "name": "paramiko.exec"
+      }
+    },
+    {
+      "call": {
+        "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/web.probe"
       },
       "description": "Passive HTTP fingerprint of a target-bound URL.",

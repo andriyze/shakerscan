@@ -119,6 +119,9 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     target = await request('POST','/targets/hosts',{'locator':'127.0.0.1','name':'Local command fixture',
                         'environment':'lab','approved_by':'ssh-runtime-fixture','port_hints':[fixture.port]})
                     target_id = target['id']
+                    if kind == 'device':
+                        device_view = await request('POST', f'/targets/{target_id}/device-profile', {})
+                        assert device_view['device_id'] == target_id
                     approval = (await request('GET',f'/targets/{target_id}/authorization'))['authorization']['approval_receipt_id']
                     await request('PUT',f'/targets/{target_id}/hunt-authority',{'expected_revision':0,
                         'ssh_host_keys':[{'port':fixture.port,'fingerprint':fixture.fingerprint}]})

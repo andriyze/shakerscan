@@ -501,10 +501,12 @@ def _http_principal_schema(
 
 
 from .asset_capability_specs import asset_capability_specs
+from .ssh_command_contract import ssh_command_specs
 
 CAPABILITY_REGISTRY = CapabilityRegistry(
     (
         *asset_capability_specs(CapabilitySpec, _schema, _HTTP_TARGETS),
+        *ssh_command_specs(CapabilitySpec, _schema, _NETWORK_TARGETS),
         CapabilitySpec(
             "scan.finalize",
             "Build one deterministic report from immutable action receipts and manifests.",

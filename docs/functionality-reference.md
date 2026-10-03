@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 452 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 376 | `api/**/*.py` |
+| Public REST operations | 455 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 379 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1935,6 +1935,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/bind` | `bind_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/read` | `read_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/usage` | `record_hunt_skill_usage` |
+| `POST` | `/hunts/{hunt_id}/ssh/actions/{action_id}/cancel` | `cancel_ssh_action` |
+| `GET` | `/hunts/{hunt_id}/ssh/actions/{action_id}/output` | `ssh_action_output` |
+| `POST` | `/hunts/{hunt_id}/ssh/exec` | `stream_ssh_command` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |

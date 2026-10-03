@@ -27,7 +27,7 @@ ShakerScan has one deterministic Scan and one AI-driven Hunt. Preserve these bou
 1. Do not add a DAST scan type. Resource presets define ceilings; active testing is permission,
    not scan identity.
 2. Do not add target-specific Hunt engines. Target kind filters the shared Hunt runtime.
-3. Do not expose arbitrary shell commands or planner-supplied argv as capabilities.
+3. Never expose local shell/argv. Remote `ssh.exec` requires an explicit stored SSH command grant.
 4. Every network action uses runtime target binding and scope/destination validation.
 5. Every executable capability has one canonical registry entry declaring risk, budgets,
    placement, parser/output schema, and evidence contract.
@@ -265,7 +265,7 @@ target binding, scope, policy, approval, budget, capability execution, evidence,
 does not investigate in the background unless an external planner actively drives it.
 
 Start from `GET /hunts/contract`. Invoke only capabilities returned in the run manifest through
-`POST /hunts/{id}/capabilities/{name}`. Never supply argv or use a shell escape.
+`POST /hunts/{id}/capabilities/{name}`. No local shell escape; remote SSH uses `ssh.exec`.
 
 One authorization, then obey. A target's standing authorization is the operator's confirmation;
 do not re-ask for it per Hunt. Ask for `active_testing`, `allow_state_changing_http`,
@@ -374,10 +374,10 @@ uses the saved login service, not the inventory record's default port. Do not by
 credentials or redirect credentials to another asset; a credential reaches another target only
 through an operator's grant.
 
-SSH plans are immutable and inert until the user separately confirms exact commands. Hunt
-may authenticate through `ssh.connect` using its selected stored SSH identity on the operator's
-port, the saved profile port, or port 22. It pins the host key, reports authentication evidence, and
-closes the connection without executing commands.
+`ssh.connect` is authentication-only. With an explicit stored `ssh.exec` grant, use direct commands,
+reuse the returned session ID, and `ssh.close` when done; no inventory scan or repeated confirmation.
+Host pins, grants and budgets still apply. See `docs/hunt-ssh.md` for streaming and cancellation.
+Legacy exact-command SSH plans remain available; they are not required for already-delegated commands.
 Device Hunt uses the shared runtime; do not revive retired device-agent writes. Startup supplies one
 dedicated network worker, separate from DAST slots. Opt out with `SHAKERSCAN_NETWORK_WORKER_ENABLED=false`
 or `shakerscan devices stop`; `shakerscan devices start` re-enables it. Use `./scanner.sh` only in source instructions.

@@ -6,6 +6,7 @@ owns pacing and health; no worker placement may bypass either one.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Mapping
 
 from .device_policy import DeviceHuntPolicyState
@@ -35,8 +36,20 @@ def reserve_device_traffic(run: Mapping[str, Any], spec: Any, amounts: dict[str,
         )
 
 
+def action_device_state(run: Mapping[str, Any], capability_name: str | None = None):
+    """An explicitly granted SSH command is not an HTTP/inventory pacing step.
+
+    Keep every quota and circuit-breaker check. Only the HTTP-style inter-request
+    delay is irrelevant to a serial, authenticated remote command channel.
+    """
+    context = run['context_pack']
+    context = json.loads(context) if isinstance(context, str) else dict(context)
+    state = DeviceHuntPolicyState.from_mapping(context.get('device_policy_state') or {})
+    return replace(state, minimum_request_interval_ms=0) if capability_name == 'ssh.exec' else state
+
+
 async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
-                                   fragility: int, requests: int, scans: int = 0) -> None:
+                                   fragility: int, requests: int, scans: int = 0, capability_name: str | None = None) -> None:
     """Called under the run transaction, before writing a reservation."""
     try:
         import device_agent
@@ -70,22 +83,16 @@ async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
         device_id) or 0)
     if legacy + daily + fragility > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
         raise ValueError("Daily fragility budget for this device is exhausted")
-    context = run["context_pack"]
-    if isinstance(context, str):
-        context = json.loads(context)
-    DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {}).require_admission(
+    action_device_state(run, capability_name).require_admission(
         request_attempts=requests, scan_attempts=scans, fragility_cost=fragility,
     )
 
 
-def require_worker_device_policy(run: Mapping[str, Any]) -> None:
+def require_worker_device_policy(run: Mapping[str, Any], capability_name: str | None = None) -> None:
     """Recheck the latest circuit breaker and pacing immediately before dispatch."""
     if not run["device_target_id"]:
         return
-    context = run["context_pack"]
-    if isinstance(context, str):
-        context = json.loads(context)
-    DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {}).require_admission(
+    action_device_state(run, capability_name).require_admission(
         request_attempts=1, fragility_cost=1,
     )
 

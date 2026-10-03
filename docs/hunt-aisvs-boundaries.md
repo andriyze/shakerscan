@@ -108,10 +108,10 @@ editing and deletion without an extra promotion step. Committed public API/Hunt
 contracts, inventory and installer hashes are regenerated from their canonical
 sources and checked rather than hand-edited.
 
-Real-time SSH command execution, client output streaming, interactive terminals
-and worker session affinity are not delivered by this instruction/learning
-follow-up. Existing `ssh.connect` remains authentication-only. No fast command
-execution claim is based on its login timing.
+Direct SSH commands, worker-owned connection reuse, streamed output and cancellation
+are implemented by the same capability runtime; see [Hunt SSH](hunt-ssh.md). The
+command fixture executes real processes through the production worker, not just
+an authentication check. This is exec-channel reuse, not a persistent PTY terminal.
 
 ## AISVS mapping and limits
 

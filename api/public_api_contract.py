@@ -148,7 +148,9 @@ class PublicV2BodyLimitMiddleware:
                 message = messages[index]
                 index += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # Replay the buffered body once, then preserve real disconnects.
+            # Synthetic empty requests here starve streaming response tasks.
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
