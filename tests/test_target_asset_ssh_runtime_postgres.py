@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from tests.test_target_asset_startup_postgres import startup_database
+from tests.test_target_asset_inputs_postgres import encryption
 from tests.ssh_exec_fixture import CommandServer, HttpLogFixture, PASSWORD, USERNAME, tls_material
 
 
@@ -29,7 +30,6 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
         import httpx
         import redis
         import uvicorn
-        from cryptography.fernet import Fernet
         from targets.asset_migration import BoundConnectionPool
         from hunt.ssh_worker_lifecycle import maintain_ssh_sessions
         from hunt.ssh_routing import worker_queue, session_key
@@ -43,7 +43,8 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
         assert r.connection_pool.connection_kwargs.get('db') == 15
         r.flushdb()
         SSH_TRANSPORTS.close_all()
-        monkeypatch.setenv('AI_CREDENTIAL_ENC_KEY', Fernet.generate_key().decode())
+        # Earlier migration tests may cache an unavailable key; isolate both secret-store imports.
+        encryption(monkeypatch)
         app_module = importlib.import_module('api')
         if not hasattr(app_module, '_start_hunt_v2'):
             app_module = importlib.import_module('api.api')
