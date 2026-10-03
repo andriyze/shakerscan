@@ -212,15 +212,19 @@ def test_cascading_sensitive_hunt_archive_is_erased_with_its_target():
     An operator-approved, dangerous-tier deletion erases the target's own archive."""
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
+        blob = uuid4()
         async with pool.acquire() as c:
             hunt = await c.fetchval("INSERT INTO hunt_runs(target_kind,target_id,status) VALUES('web',$1,'completed') RETURNING id", t)
-            await c.execute("""INSERT INTO http_transactions(plane,hunt_run_id,target_id,method,url)
-                VALUES('hunt',$1,$2,'GET','https://example.invalid/synthetic')""", hunt, t)
+            # A Hunt's raw-header blob has no scan or finding link: it used to be orphaned forever.
+            await c.execute("INSERT INTO evidence_objects(id,storage_uri,retention_class) VALUES($1,'local:evidence_objects/hh/hunt.json','sensitive')", blob)
+            await c.execute("""INSERT INTO http_transactions(plane,hunt_run_id,target_id,method,url,request_headers_object_id)
+                VALUES('hunt',$1,$2,'GET','https://example.invalid/synthetic',$3)""", hunt, t, blob)
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
         assert not preview['blockers'], preview['blockers']
         await service.execute(pool, preview['preview_id'], await approve(pool, preview))
         async with pool.acquire() as c:
             assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE hunt_run_id=$1', hunt) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', blob) == 0
     run(scenario)
 
 

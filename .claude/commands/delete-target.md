@@ -36,6 +36,8 @@ everything it owns (scans, findings, endpoints, evidence, schedules).
    ```bash
    shakerscan api POST /data-deletion/preview '{"kind":"target","target_id":"{id}"}'
    ```
+   To delete a whole domain with all its subdomains and linked services, preview
+   `{"kind":"domain","domain":"example.com"}` instead; show the user every target in `root_ids`.
    The preview returns `preview_id`, `preview_hash`, `scope_receipt_id`, `expires_at`, cascade
    counts, `blockers` and what is retained. A preview with blockers cannot be executed; report
    them. Stop here and ask the user to confirm the exact preview.
@@ -48,5 +50,5 @@ everything it owns (scans, findings, endpoints, evidence, schedules).
    Use the user's name in `approved_by`. The approval is one-use and bound to the preview hash;
    a changed selection needs a new preview. A retry of `execute` returns the same durable receipt.
 
-5. Report the result: what was deleted (counts from the receipt), what was retained, and the
-   receipt id. On a `428`, the preview or approval was missing or stale: start again from step 3.
+5. Report the result: what was deleted (counts from the receipt), the `files` outcome (erased,
+   missing, failed, unproven result files), what was retained, and the receipt id. On a `428`, the preview or approval was missing or stale: start again from step 3.
