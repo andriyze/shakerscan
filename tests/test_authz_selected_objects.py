@@ -44,6 +44,19 @@ def run_case(overrides=None, *, cancelled=lambda: False):
     return result, calls
 
 
+def test_explicit_slug_selection_records_cross_access_without_entitlement_proof():
+    routes = [ROOT+"/objects/alice-1",ROOT+"/objects/bob-1"]
+    assert selected_object_pair(routes) is None
+    assert selected_object_pair(routes,explicit=True)==("alice-1","bob-1")
+    values = [response("bob-1"),response("alice-1"),response("alice-1"),response("alice-1")]
+    calls=[]
+    async def fetch(url, **kwargs):
+        calls.append(url); return values[len(calls)-1]
+    result=asyncio.run(compare_selected_objects(routes,fetcher=fetch,primary_headers=PRIMARY,secondary_headers=SECONDARY,explicit=True))
+    assert result["cross_access_observed"] and result["requests_attempted"]==4
+    assert result["proof_state"]=="inconclusive" and result["requires_entitlement_review"]
+
+
 def test_exact_selected_object_is_replayed_without_parent_or_enumeration():
     result, calls = run_case()
     assert [(u, h) for u, _, h, _ in calls] == [

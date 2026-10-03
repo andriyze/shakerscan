@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import StreamingResponse, JSONResponse
 
-from .ssh_routing import output_key, cancel_key, OUTPUT_TTL
+from .ssh_routing import output_key, cancel_key, route_session, OUTPUT_TTL
 
 router = APIRouter(tags=['hunts'])
 _configured_runtime = None
@@ -25,6 +25,16 @@ def _runtime():
     if _configured_runtime is None:
         raise HTTPException(503, 'SSH runtime is not ready')
     return _configured_runtime
+
+
+def require_ssh_session_available(redis, *, base_queue, hunt_id, session_id):
+    """Reject a disconnected session before admission creates a budget hold."""
+    try:
+        return route_session(redis, base_queue=base_queue,
+                             hunt_id=hunt_id, session_id=session_id)
+    except ValueError as exc:
+        raise HTTPException(409, f"{exc}. Reconnect with ssh.exec without session_id, "
+                            "using the selected stored SSH identity and port.") from exc
 
 
 async def _action(hunt_id, action_id):

@@ -141,6 +141,7 @@ async def verify_target_bound_object_authorization(
     primary_headers: Mapping[str, str],
     secondary_headers: Mapping[str, str],
     transaction_recorder: Callable[[dict[str, Any]], None] | None = None,
+    selected_object: bool = False,
 ) -> dict[str, Any]:
     """Run the existing ownership differential through the canonical HTTP path."""
     primary = dict(primary_headers)
@@ -187,7 +188,9 @@ async def verify_target_bound_object_authorization(
             },
         }
 
-    selected_pair = selected_object_pair(normalized_routes) if len(routes) == 2 else None
+    selected_pair = selected_object_pair(normalized_routes, explicit=selected_object) if len(routes) == 2 else None
+    if selected_object and selected_pair is None:
+        raise AuthzVerificationContractError("selected_object requires two distinct same-collection object URLs")
     request_count = 0
     started = time.monotonic()
     contract_violation: AuthzVerificationContractError | None = None
@@ -281,6 +284,7 @@ async def verify_target_bound_object_authorization(
         observation = await compare_selected_objects(
             normalized_routes, fetcher=bounded_fetch, primary_headers=primary,
             secondary_headers=secondary, cancelled=scanner_cancel_requested,
+            explicit=selected_object,
         )
         # This is access evidence only. Do not manufacture a listing, feed an
         # invented absence assertion to the validator, or promote a finding.

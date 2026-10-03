@@ -4046,6 +4046,7 @@ def _ai_gate_runtime_destinations(
 
 
 def _target_snapshot_for_manifest(target: dict[str, Any]) -> dict[str, Any]:
+    from runtime.ai_template_secrets import public as public_template
     credential = target.get("credential") if isinstance(target.get("credential"), dict) else {}
     return {
         "id": target.get("id"),
@@ -4060,7 +4061,7 @@ def _target_snapshot_for_manifest(target: dict[str, Any]) -> dict[str, Any]:
         "rate_limit_rps": target.get("rate_limit_rps"),
         "production_mode": target.get("production_mode"),
         "headers_template": _redact_secret_like_values(target.get("headers_template") or {}),
-        "request_template": _redact_secret_like_values(target.get("request_template") or {}),
+        "request_template": public_template(target.get("request_template")),
         "metadata_json": _redact_secret_like_values(target.get("metadata_json") or {}),
         "credential": {
             "auth_kind": credential.get("auth_kind") or "none",

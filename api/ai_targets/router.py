@@ -101,6 +101,10 @@ except ModuleNotFoundError:  # package import in host-side tests
 
 
 router = APIRouter()
+try:
+    from runtime.ai_template_secrets import protect_or_http_error as _protected_template, public as _public_template, reveal as _reveal_template
+except ModuleNotFoundError:
+    from ..runtime.ai_template_secrets import protect_or_http_error as _protected_template, public as _public_template, reveal as _reveal_template
 
 _pool_provider: Callable[[], Any] | None = None
 _deps: dict[str, Callable[..., Any]] = {}
@@ -280,7 +284,7 @@ async def run_ai_honey_demo(request: AIDemoRunRequest):
                         endpoint_url,
                         _normalize_ai_method(str(scenario.get("method") or "POST")),
                         json.dumps({"Content-Type": "application/json", "Accept": "application/json"}),
-                        json.dumps(request_template),
+                        json.dumps(_protected_template(request_template)),
                         response_path,
                         request.request_budget,
                         json.dumps(metadata),
@@ -757,7 +761,7 @@ async def create_ai_target(request: AITargetCreate):
                 endpoint_url,
                 method,
                 json.dumps(headers_template),
-                json.dumps(request_template),
+                json.dumps(_protected_template(request_template)),
                 response_path,
                 streaming_mode,
                 request.rate_limit_rps,
@@ -818,11 +822,11 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
                 _normalize_ai_headers_template(payload.get("headers_template")), existing["headers_template"]))
         if "request_template" in payload:
             update_data["request_template"] = json.dumps(
-                _normalize_ai_request_template(
+                _protected_template(_normalize_ai_request_template(
                     payload.get("request_template"),
                     method=effective_method,
                     target_type=effective_target_type,
-                )
+                ), existing["request_template"])
             )
         if "response_path" in payload:
             update_data["response_path"] = _normalize_ai_response_path(
@@ -2429,6 +2433,7 @@ def _ai_target_response(target_row: Any, credential_row: Optional[Any] = None) -
     for key in ("headers_template", "request_template", "metadata_json"):
         target[key] = _decode_json_value(target.get(key)) or {}
     target["headers_template"] = _masked_headers(target["headers_template"])
+    target["request_template"] = _public_template(target["request_template"])
     credential = dict(credential_row) if credential_row else None
     target["credential"] = _sanitize_ai_credential(credential)
     return target
@@ -3160,7 +3165,7 @@ def _run_ai_target_connectivity_probe(target: dict[str, Any], *, prompt: str, ti
     headers = ai_build_headers(target)
     headers.setdefault("User-Agent", "ShakerScan AI Gate connectivity check")
     endpoint_url = ai_build_url(str(target.get("endpoint_url") or ""), target)
-    body = ai_replace_placeholders(target.get("request_template") or {}, replacements)
+    body = ai_replace_placeholders(_reveal_template(target.get("request_template")), replacements)
     request_url = ai_append_query_params(endpoint_url, body) if method == "GET" else endpoint_url
     data = None
     if method != "GET":

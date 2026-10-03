@@ -373,6 +373,8 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
         async def fetch(self, query, *args):
             if "FROM hunt_skill_events" in query:
                 return []
+            if "FROM findings" in query:
+                return []
             assert "FROM hunt_actions WHERE hunt_run_id=$1" in query
             assert args == (uuid.UUID(hunt_id),)
             return [{
@@ -404,9 +406,35 @@ def test_hunt_run_service_get_includes_canonical_action_ledger():
         "action_statuses": {"completed": 1},
         "observation_count": 0,
         "finding_ids": [],
+        "finding_count": 0,
+        "finding_ids_truncated": False,
         "candidate_ids": [],
         "evidence_ids": [],
     }
+
+
+def test_current_finding_count_uses_bounded_live_rows_instead_of_deleted_history():
+    hunt_id, live_id = uuid.uuid4(), uuid.uuid4()
+    class Connection:
+        rows = [{"id": live_id, "total_count": 700}]
+        async def fetchrow(self, query, *args): return _row(id=hunt_id)
+        async def fetch(self, query, *args):
+            if "FROM findings" in query:
+                assert "LIMIT 500" in query
+                return self.rows
+            if "FROM hunt_actions" in query:
+                return [{"id": uuid.uuid4(), "capability_name": "findings.create", "status": "completed",
+                         "result_summary": {"ok": True, "finding_id": str(uuid.uuid4())}}]
+            return []
+    conn = Connection()
+    service = HuntRunService(lambda: _Pool(conn))
+    summary = asyncio.run(service.get(str(hunt_id)))["outcome_summary"]
+    assert summary["finding_ids"] == [str(live_id)]
+    assert summary["finding_count"] == 700 and summary["finding_ids_truncated"]
+    conn.rows = []
+    summary = asyncio.run(service.get(str(hunt_id)))["outcome_summary"]
+    assert summary["finding_ids"] == [] and summary["finding_count"] == 0
+    assert not summary["finding_ids_truncated"]
 
 
 def test_hunt_record_combines_explicit_trace_debrief_and_redacted_http_archive():

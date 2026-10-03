@@ -113,6 +113,8 @@ services:
         for secret in /results/.credential_enc.key /results/.credential_enc.key.lock; do
           if [ -e "$$secret" ]; then chown "$$api_uid:$$api_gid" "$$secret"; fi
         done
+        cd /app
+        python3 -c 'import os; from secret_store import initialize_storage_owner; initialize_storage_owner(int(os.environ["SHAKERSCAN_API_UID"]), int(os.environ["SHAKERSCAN_API_GID"]))'
     environment:
       - SHAKERSCAN_API_UID=${SHAKERSCAN_API_UID:-10002}
       - SHAKERSCAN_API_GID=${SHAKERSCAN_API_GID:-10002}
@@ -385,6 +387,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
@@ -470,6 +474,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -514,6 +520,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # Model Intake artifact scanning runs its own toolchain in a dedicated worker, isolated from Web
@@ -559,6 +567,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # Opt-in connected-device capacity. It uses a separate queue and health
@@ -615,6 +625,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   model-intake-sandbox:
@@ -670,6 +682,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api-storage-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ui:

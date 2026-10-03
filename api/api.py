@@ -1624,7 +1624,8 @@ def _load_effective_ai_settings() -> dict[str, Any]:
     settings = _default_ai_settings()
     try:
         r = get_redis()
-        overrides = r.hgetall(AI_SETTINGS_KEY) or {}
+        from runtime.ai_settings_secrets import load_settings
+        overrides = load_settings(r, AI_SETTINGS_KEY)
     except Exception:
         overrides = {}
 

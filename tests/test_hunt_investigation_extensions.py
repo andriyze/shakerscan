@@ -112,6 +112,41 @@ def test_mcp_can_cancel_a_stream_and_run_external_check_on_same_connection():
     assert set(replies)=={0,1,2} and all('result' in row for row in replies.values())
 
 
+@pytest.mark.parametrize('cancel_tool', ['shakerscan_hunt_ssh_cancel', 'shakerscan_hunt_cancel'])
+def test_mcp_cancellation_has_capacity_when_execution_and_its_queue_are_full(cancel_tool):
+    saturated = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    running = 0
+    cancelled_while_saturated = []
+    class Client:
+        def call_tool(self, name, args):
+            nonlocal running
+            if name == cancel_tool:
+                assert saturated.wait(2)
+                cancelled_while_saturated.append(not release.is_set())
+                release.set()
+                return {'cancellation_requested': True}
+            with lock:
+                running += 1
+                if running == 8:
+                    saturated.set()
+            assert release.wait(2), 'Cancellation queued behind the commands it must stop'
+            return {'closed': True}
+    requests = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call',
+                 'params': {'name': 'shakerscan_hunt_ssh_exec', 'arguments': {}}}
+                for index in range(33)]
+    requests.append({'jsonrpc': '2.0', 'id': 1000, 'method': 'tools/call',
+                     'params': {'name': cancel_tool, 'arguments': {}}})
+    output = io.BytesIO()
+    assert mcp.serve(mcp.MCPServer(Client()),
+                     io.BytesIO(b''.join(json.dumps(row).encode() + b'\n' for row in requests)), output) == 0
+    replies = {row['id']: row for row in map(json.loads, output.getvalue().splitlines())}
+    assert replies[32]['error']['code'] == -32009
+    assert cancelled_while_saturated == [True]
+    assert all('result' in replies[index] for index in [*range(32), 1000])
+
+
 def test_ssh_preserves_buffered_output_when_exec_acknowledgement_is_lost():
     from api.capabilities.ssh_channel import OutputCapture,run_command
     class Channel:

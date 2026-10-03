@@ -14,6 +14,7 @@ import { Activity, Bot, ChevronDown, ChevronUp, CircleHelp, ExternalLink, FileJs
 import { changeDeviceLocator, createDeviceCredential, createDeviceRequestCollection, deactivateDeviceCredential, deactivateDeviceRequestCollection, formatDate, getDevice, getDeviceCredentials, getDeviceReadiness, getDeviceRequestCollection, getDeviceRequestCollections, getDeviceScanActivity, getScan, listDeviceAgentSessions, renameDevice, scanDevice, type DeviceAgentRunSummary, type DeviceCredentialProfile, type DeviceDetailResponse, type DeviceRequestCollection, type DeviceRequestCollectionRequest, type DeviceScanActivity, type DeviceService, type Scan } from '@/lib/api'
 import { Button, Card, EmptyState, ErrorState, Field, Input, Modal, PageHeader, ScanStatusBadge, Select, TableSkeleton, Textarea, useToast } from '@/components/ui'
 import { devicePortCoverage, deviceReachabilityServiceSummary, deviceScorePresentation, deviceServiceDetails, deviceTargetScorePresentation } from '@/lib/deviceScanPresentation.mjs'
+import { networkScanTcpHints } from '@/lib/networkScanHints.mjs'
 
 const policyBadgeClass: Record<string, string> = {
   allow: 'bg-emerald-500/15 text-emerald-300',
@@ -109,8 +110,8 @@ function DeviceDetailContent() {
   const [scan, setScan] = useState({ profile: 'inventory', safety_profile: 'safe_remote', include_web_dast: true, web_scan_type: 'standard', port_hints: '', ssh_credential_profile_id: '', web_credential_profile_id: '', include_ssh_host_review: false, request_collection_ids: [] as string[], confirm_request_replay: false, allow_state_changing_requests: false, allow_untrusted_tls_credentials: false, confirm_authorized: false })
   useEffect(() => {
     if (!scanOpen) return
-    const hints = data?.device.metadata_json?.port_hints
-    if (Array.isArray(hints)) setScan(value => ({...value,port_hints:value.port_hints || hints.filter(port => Number.isInteger(port) && port > 0 && port <= 65535).join(', ')}))
+    const hints = networkScanTcpHints(data)
+    if (hints) setScan(value => ({ ...value, port_hints: value.port_hints || hints }))
   }, [scanOpen, data?.device.id])
 
   const load = useCallback(async () => {

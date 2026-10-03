@@ -9,6 +9,7 @@ import pytest
 from api.hunt.finding_actions import (
     HuntFindingActionError,
     create_hunt_finding,
+    _finding_url,
 )
 from api.runtime.capability_registry import (
     CAPABILITY_REGISTRY,
@@ -70,6 +71,8 @@ class _Connection:
         raise AssertionError(query)
 
     async def fetch(self, query, *args):
+        if "FROM http_transactions" in query:
+            return []
         if "FROM hunt_actions" in query:
             return [{"id": action_id} for action_id in args[1]] if self.expose_evidence else []
         raise AssertionError(query)
@@ -117,6 +120,23 @@ def test_hunt_create_rejects_evidence_not_owned_by_the_same_hunt():
     with pytest.raises(HuntFindingActionError, match="from this Hunt"):
         _create(connection, evidence_action_id=uuid.uuid4())
     assert connection.insert_args is None
+
+
+@pytest.mark.parametrize("path", ["/api/status", "http://tv.test:8081/api/status"])
+def test_network_finding_accepts_an_evidenced_same_asset_service(path):
+    assert _finding_url("host://tv.test", path, ["http://tv.test:8081/login"]) == "http://tv.test:8081/api/status"
+
+
+def test_relative_network_finding_requires_an_unambiguous_evidenced_service():
+    with pytest.raises(HuntFindingActionError, match="absolute URL"):
+        _finding_url("host://tv.test", "/status", ["http://tv.test:8081/", "https://tv.test:8443/"])
+    assert _finding_url("https://tv.test", "https://tv.test:443/status") == "https://tv.test:443/status"
+
+
+@pytest.mark.parametrize("path", ["http://other.test:8081/a", "http://tv.test:8082/a", "http://user:secret@tv.test:8081/a", "//other.test/a"])
+def test_network_finding_rejects_unevidenced_or_cross_asset_service(path):
+    with pytest.raises(HuntFindingActionError):
+        _finding_url("host://tv.test", path, ["http://tv.test:8081/"])
 
 
 def test_finding_capabilities_cannot_accept_verification_or_proof_fields():

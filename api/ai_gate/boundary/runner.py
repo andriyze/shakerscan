@@ -38,7 +38,8 @@ def prepare(target_url: str, options: dict[str, Any], header_builder: Callable) 
     if origin_of(target_url) != origin:
         raise ContractError("chat_origin_differs_from_authorized_target")
     chat_path = relative_path(urlsplit(endpoint).path or "/")
-    template = target.get("request_template")
+    from runtime.ai_template_secrets import reveal
+    template = reveal(target.get("request_template"))
     if not isinstance(template, dict):
         raise ContractError("json_chat_request_template_required")
     serialized = json.dumps(template)

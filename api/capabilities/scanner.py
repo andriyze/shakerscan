@@ -218,12 +218,12 @@ class ScannerExecutionAdapter:
                 "schema_version": "external-wire-telemetry/v1",
                 "accounting_mode": (
                     "exact"
-                    if str(settlement.get("mode") or "") == "exact"
-                    else str(enforcement.get("accounting_mode") or "conservative")
+                    if str(settlement.get("mode") or "") == "exact" and not process_result.get("execution_uncertain")
+                    else "conservative"
                 ),
                 "actual_http_requests": (
                     max(0, int(settlement.get("actual") or 0))
-                    if str(settlement.get("mode") or "") == "exact"
+                    if str(settlement.get("mode") or "") == "exact" and not process_result.get("execution_uncertain")
                     else None
                 ),
                 "observed_http_requests_minimum": max(

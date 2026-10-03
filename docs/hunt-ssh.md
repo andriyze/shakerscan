@@ -52,6 +52,11 @@ stream requests cancellation. Poll `/hunts/{id}/ssh/actions/{action_id}/output`
 for the current bounded output, retained briefly in Redis. Completed canonical
 records retain the final output under normal Hunt record retention.
 
+The Live SSH console supports HTTP LAN deployments as well as HTTPS and displays
+terminal status and errors alongside any partial stdout/stderr. MCP cancellation
+has separate bounded capacity so eight busy execution calls cannot delay a stop
+request behind the commands it needs to cancel.
+
 The selected target remains frozen. There is no input for another hostname,
 credential value or arbitrary local argv. All target kinds supported by network
 Hunt can use SSH; command permission is declared separately from authentication.

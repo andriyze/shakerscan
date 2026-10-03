@@ -216,14 +216,6 @@ class PinnedSocksProxy:
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connection_attempts += 1
-        if (
-            self.max_connections is not None
-            and self.connection_attempts > self.max_connections
-        ):
-            self.connections_rejected += 1
-            self.limit_exceeded.set()
-            writer.close()
-            return
         task = asyncio.create_task(self._handle(reader, writer))
         self._connections.add(task)
         task.add_done_callback(self._connections.discard)
@@ -281,6 +273,14 @@ class PinnedSocksProxy:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     break
+                # Local proxy probes and rejected SOCKS destinations send no target
+                # traffic. Charge only frozen-target connection attempts, including
+                # failed address fallbacks, before opening each upstream socket.
+                if self.max_connections is not None and self.upstream_connection_attempts >= self.max_connections:
+                    self.connections_rejected += 1
+                    self.limit_exceeded.set()
+                    await self._reply(writer, 1)
+                    return
                 self.upstream_connection_attempts += 1
                 self.address_attempts[address] = self.address_attempts.get(address, 0) + 1
                 try:

@@ -48,7 +48,7 @@ jobs:
       - name: Exercise actual command processes through Hunt and its production worker
         run: |
           mkdir -p artifacts
-          python -m pytest -q tests/test_hunt_stream_body_limit.py tests/test_hunt_ssh_commands.py tests/test_api_stream.py tests/test_target_asset_ssh_runtime_postgres.py tests/test_hunt_network_reservations.py --junitxml=artifacts/ssh-runtime.xml
+          python -m pytest -q tests/test_hunt_stream_body_limit.py tests/test_hunt_ssh_commands.py tests/test_ssh_channel_completion.py tests/test_api_stream.py tests/test_target_asset_ssh_runtime_postgres.py tests/test_hunt_network_reservations.py --junitxml=artifacts/ssh-runtime.xml
           python - <<'PY'
           import xml.etree.ElementTree as ET
           suites=ET.parse('artifacts/ssh-runtime.xml').findall('testsuite')

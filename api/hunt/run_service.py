@@ -324,8 +324,10 @@ def public_hunt_action(row: Any) -> dict[str, Any]:
         reservation_id and settlement_status == "succeeded" and has_measured_actual
     )
     budget_actual = numeric_budget(accounting.get("actual"))
+    conservative = str(accounting.get("charge_basis") or "").startswith("conservative")
     accounting_basis = (
-        "exact_settlement" if has_exact_accounting
+        "conservative_settlement" if has_exact_accounting and conservative
+        else "exact_settlement" if has_exact_accounting
         else "settlement_failed" if settlement_status == "failed"
         else "no_reservation" if has_accounting and not reservation_id
         else "legacy_reported_charge"
@@ -637,9 +639,15 @@ class HuntRunService:
                    ORDER BY created_at ASC, id ASC""",
                 hunt_uuid,
             )
+            live_findings = await connection.fetch(
+                "SELECT id, COUNT(*) OVER() AS total_count FROM findings WHERE hunt_run_id=$1 ORDER BY id LIMIT 500", hunt_uuid,
+            )
         result = public_hunt_run(row)
         result["actions"] = [public_hunt_action(action) for action in actions]
         result["outcome_summary"] = hunt_action_outcome_summary(result["actions"])
+        result["outcome_summary"]["finding_ids"] = sorted(str(item["id"]) for item in live_findings)
+        count = int(live_findings[0]["total_count"]) if live_findings else 0
+        result["outcome_summary"].update(finding_count=count, finding_ids_truncated=count > len(live_findings))
         result["skill_activity"] = [
             public_hunt_skill_event(event) for event in skill_events
         ]

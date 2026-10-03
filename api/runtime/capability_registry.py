@@ -1385,7 +1385,8 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
             planner_visible=True,
             hunt_executor="worker_http",
             planner_input_schema=_schema({
-                "mode":{"type":"string","enum":["object","function"],"default":"object"},
+                "mode":{"type":"string","enum":["object","selected_object","function"],"default":"object",
+                    "description":"selected_object compares two ordered owner/object references, including opaque slug IDs; access evidence alone never proves entitlement."},
                 "origin": _SERVICE_ORIGIN_PROPERTY,
                 "primary_principal": {"type": "string", "enum": ["primary"]},
                 "secondary_principal": {"type": "string", "enum": ["secondary"]},

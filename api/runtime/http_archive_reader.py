@@ -277,11 +277,12 @@ async def read_archive_stats(
             """SELECT DISTINCT action.capability_name
                FROM hunt_actions action
                WHERE action.hunt_run_id=$1
-                 AND action.status IN ('completed','partial')
+                 AND (action.status IN ('completed','partial')
+                      OR COALESCE(NULLIF(action.result_summary->'budget_consumed'->>'http_requests','')::int,0)>0)
                  AND NOT EXISTS (
                      SELECT 1 FROM http_transactions tx
                      WHERE tx.hunt_run_id=action.hunt_run_id
-                       AND tx.capability_name=action.capability_name
+                       AND tx.hunt_action_id=action.id
                  )
                ORDER BY action.capability_name""",
             hunt_run_id,

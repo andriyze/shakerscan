@@ -220,3 +220,19 @@ def test_scanner_adapter_never_reports_success_after_wire_limiter_overrun():
     assert result.status == "failed"
     assert result.actual_budget == requested
     assert result.errors[0].startswith("external_process_contract:")
+    wire = result.redacted_execution["wire_telemetry"]
+    assert wire["accounting_mode"] == "conservative"
+    assert wire["actual_http_requests"] is None
+
+
+def test_incomplete_wire_capture_cannot_inherit_an_exact_planned_ceiling_label():
+    async def process_runner(payload, *, heartbeat):
+        return {"status": "success", "elapsed_seconds": 1, "typed_output": {"records": []},
+                "settlement": {"mode": "observed_lower_bound", "observed_minimum": 5},
+                "process_enforcement": _enforcement(hard={"http_requests": 7, "tool_wall_seconds": 10}, mode="exact")}
+    requested = {"http_requests": 7, "tool_wall_seconds": 10}
+    result = _run(ScannerExecutionAdapter(specification=CAPABILITY_REGISTRY.require("templates.scan"),
+        process_payload={}, process_runner=process_runner, requested_budget=requested, redacted_execution={}), requested)
+    assert result.actual_budget["http_requests"] == 7
+    assert result.redacted_execution["wire_telemetry"]["accounting_mode"] == "conservative"
+    assert result.redacted_execution["wire_telemetry"]["actual_http_requests"] is None

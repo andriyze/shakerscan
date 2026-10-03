@@ -73,6 +73,8 @@ LIFECYCLE_FUNCTIONS = "\n".join(
         "containers_outside_compose_down",
         "remove_containers_outside_compose_down",
         "scan_worker_containers",
+        "running_scan_worker_containers",
+        "running_scan_worker_count",
         "remove_scan_worker_containers",
         "running_compose_service_count",
         "build_versions_match",
@@ -94,6 +96,31 @@ PRELUDE = "\n".join([
     "jq() { python3 -c 'import json, sys; print(json.load(sys.stdin).get(\"scanner_version\") or \"\")'; }",
     LIFECYCLE_FUNCTIONS,
 ])
+
+
+def test_rebuild_counts_and_removes_only_persistent_scan_workers(tmp_path):
+    calls = tmp_path / "calls.txt"
+    fake_workers = r'''
+docker() {
+    printf 'docker %s\n' "$*" >> "$CALLS"
+    case "$1" in
+        ps)
+            if [[ "$*" == *"label=com.docker.compose.oneoff=False"* ]]; then
+                printf 'shakerscan-worker-1\nshakerscan-worker-2\n'
+            else
+                printf 'shakerscan-worker-1\nshakerscan-worker-2\nshakerscan-worker-run-fixture\n'
+            fi
+            ;;
+    esac
+}
+'''
+    result = _run(PRELUDE + fake_workers + "\nrunning_scan_worker_count\nremove_scan_worker_containers\n", CALLS=str(calls))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[0] == "2"
+    lines = calls.read_text().splitlines()
+    assert {line.split()[-1] for line in lines if line.startswith("docker rm -f ")} == {
+        "shakerscan-worker-1", "shakerscan-worker-2"}
+    assert not any("shakerscan-worker-run-fixture" in line for line in lines)
 
 
 def test_stop_removes_every_container_compose_down_leaves_attached(tmp_path):
@@ -258,7 +285,8 @@ def _start(*args: str, reason: str, network_enabled: str = 'true', device_failur
         env={**os.environ, "REASON": reason, "SCRIPT_DIR": str(ROOT),
              "SHAKERSCAN_NETWORK_WORKER_ENABLED": network_enabled},
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
     return result.stdout
 
 

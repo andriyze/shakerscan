@@ -188,7 +188,9 @@ class HuntActionService:
         try:
             raw_result = await operation(lifecycle)
             result = dict(raw_result)
-            if not lifecycle.replayed:
+            if (result.get("action_result") or {}).get("status") in {"failed", "blocked", "cancelled"}:
+                lifecycle.mark_failure(HuntActionServiceError("capability did not succeed"))
+            if not lifecycle.replayed and (not lifecycle.failure or lifecycle.phases[-1]["phase"] == "settled"):
                 lifecycle.advance("returned")
             result["lifecycle"] = lifecycle.public_dict()
             return result

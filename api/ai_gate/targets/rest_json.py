@@ -471,7 +471,8 @@ class RestJsonConversationTarget:
             raise ValueError("AI target endpoint_url is required")
 
         self.endpoint_url = build_url(raw_url, target)
-        raw_request_template = target.get("request_template")
+        from runtime.ai_template_secrets import reveal
+        raw_request_template = reveal(target.get("request_template"))
         if raw_request_template is None:
             raw_request_template = {}
         if not isinstance(raw_request_template, dict):

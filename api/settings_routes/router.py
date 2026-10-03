@@ -317,7 +317,11 @@ async def update_ai_settings(request: AISettingsUpdate):
             deletes.append("demo_honey_scanner_url")
 
     if updates:
-        r.hset(AI_SETTINGS_KEY, mapping=updates)
+        from runtime.ai_settings_secrets import protect_settings, SecretStoreUnavailable
+        try:
+            r.hset(AI_SETTINGS_KEY, mapping=protect_settings(updates))
+        except SecretStoreUnavailable:
+            raise HTTPException(503, "Credential encryption is unavailable; provider key cannot be saved") from None
     if deletes:
         r.hdel(AI_SETTINGS_KEY, *deletes)
 

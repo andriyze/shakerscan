@@ -92,7 +92,7 @@ export function HuntResults({ hunt }: { hunt: HuntV2 }) {
           {(summary.partial_calls ?? 0) > 0 && <span>{summary.partial_calls} partial</span>}
           <span>{summary.executed_calls ?? summary.total_capability_calls} executed · {summary.total_capability_calls} attempted</span>
           <span>{hunt.outcome_summary?.observation_count} observations</span>
-          <span>{hunt.outcome_summary?.finding_ids.length} findings</span>
+          <span>{hunt.outcome_summary?.finding_count ?? hunt.outcome_summary?.finding_ids.length} findings</span>
           <span>{summary.candidate_ids.length} candidates</span>
           <span>{hunt.outcome_summary?.evidence_ids.length} evidence objects</span>
           <span>{Object.entries(summary.action_statuses).map(([status, count]) => `${count} ${status.replaceAll('_', ' ')}`).join(' · ')}</span>

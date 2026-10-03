@@ -204,7 +204,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
                     assert settled['status']=='committed'
                     assert json.loads(settled['actual_json']).get('tcp_ports_attempted',0)==0
                     nonzero=await execute("printf 'out\\n'; printf 'err\\n' >&2; exit 7",session_id=session)
-                    assert nonzero['action_result']['status']=='success',nonzero
+                    assert nonzero['action_result']['status']=='success',observation(nonzero)
                     assert observation(nonzero)['exit_status']==7 and observation(nonzero)['stderr']=='err\n'
                     started=time.monotonic();first_output=None;final=None;event=''
                     async with planner.stream('POST',f'/hunts/{hunt_id}/ssh/exec',json={

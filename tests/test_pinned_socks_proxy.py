@@ -97,16 +97,13 @@ def test_pinned_socks_proxy_closes_and_signals_at_connection_ceiling():
                 proxy.proxy_url, "owned.local", upstream_port,
             )
             assert code == 0
-            _reader2, second = await asyncio.open_connection(
-                "127.0.0.1", urllib.parse.urlsplit(proxy.proxy_url).port,
-            )
-            second.write(b"\x05\x01\x00")
-            await second.drain()
-            assert await _reader2.read() == b""
+            _reader2, second, second_code = await _socks_connect(proxy.proxy_url, "owned.local", upstream_port)
+            assert second_code == 1
             assert proxy.limit_exceeded.is_set()
             assert proxy.connection_attempts == 2
             assert proxy.connections_opened == 1
             assert proxy.connections_rejected == 1
+            assert proxy.upstream_connection_attempts == 1
             first.close()
             second.close()
         upstream.close()
@@ -154,4 +151,29 @@ def test_pinned_socks_proxy_uses_stable_preconnect_address_fallback():
         await upstream.wait_closed()
         assert observed == [b"ping"]
 
+    asyncio.run(scenario())
+
+
+def test_local_proxy_probe_and_rejected_destination_do_not_spend_target_connections():
+    async def scenario():
+        async def echo(reader, writer):
+            await reader.read()
+            writer.close()
+        try:
+            upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        except PermissionError:
+            pytest.skip("the unit-test sandbox forbids loopback listeners")
+        port = upstream.sockets[0].getsockname()[1]
+        async with PinnedSocksProxy(hostname="owned.local", pinned_address="127.0.0.1",
+                                    port=port, max_connections=1) as proxy:
+            reader, probe = await asyncio.open_connection("127.0.0.1", urllib.parse.urlsplit(proxy.proxy_url).port)
+            probe.close(); await probe.wait_closed()
+            _, rejected, code = await _socks_connect(proxy.proxy_url, "other.local", port)
+            assert code == 2
+            rejected.close(); await rejected.wait_closed()
+            _, actual, code = await _socks_connect(proxy.proxy_url, "owned.local", port)
+            assert code == 0 and proxy.upstream_connection_attempts == 1
+            assert not proxy.limit_exceeded.is_set()
+            actual.close(); await actual.wait_closed()
+        upstream.close(); await upstream.wait_closed()
     asyncio.run(scenario())

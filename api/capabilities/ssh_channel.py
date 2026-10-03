@@ -108,6 +108,12 @@ def run_command(session, values, *, command, cwd, stopped, capture, on_progress,
                 result['execution_uncertain'] = True
                 break
             if channel.closed or not session.transport.is_active():
+                # Transport packets can arrive between drain/exit checks and close.
+                # A closed channel may still hold authenticated output and an exit
+                # status. Drain those before declaring execution uncertain; the
+                # cancellation, output and deadline checks above still bound IO.
+                if channel.recv_ready() or channel.recv_stderr_ready() or channel.exit_status_ready():
+                    continue
                 result['execution_uncertain'] = True
                 break
             time.sleep(0.01)
