@@ -261,6 +261,18 @@ def _validate_kind_placement(*, auth_kind: str, target_kind: str, principal_slot
         raise CredentialStoreError("HTTP credentials cannot use principal_slot=ssh")
 
 
+def _destroyed_session_headers() -> str:
+    """Ciphertext of an empty header set, as session revocation writes it."""
+    try:
+        from secret_store import encrypt_secret
+    except ImportError:  # imported as a package in some contexts
+        from api.secret_store import encrypt_secret
+    try:
+        return encrypt_secret("{}")
+    except Exception:  # noqa: BLE001 - a missing key must not keep the captured headers alive
+        return _CIPHERTEXT_PREFIX + "destroyed"
+
+
 def _ciphertext(value: Any, *, name: str) -> str:
     normalized = str(value or "")
     if not normalized.startswith(_CIPHERTEXT_PREFIX) or len(normalized) <= len(_CIPHERTEXT_PREFIX):
@@ -792,6 +804,17 @@ class PostgresCredentialProfileStore:
             """UPDATE credential_profile_bindings
                SET is_active=false, updated_at=$1
                WHERE profile_id=$2 AND is_active=true""",
+            timestamp,
+            profile_uuid,
+        )
+        # A deactivated credential's live logins end now, not at their expiry: the captured
+        # cookies and headers are destroyed the same way an operator revocation destroys them.
+        await conn.execute(
+            """UPDATE auth_sessions
+               SET status='revoked', encrypted_headers=$1, revoked_at=$2,
+                   revocation_reason='credential_deactivated', updated_at=$2
+               WHERE profile_id=$3 AND status='active'""",
+            _destroyed_session_headers(),
             timestamp,
             profile_uuid,
         )

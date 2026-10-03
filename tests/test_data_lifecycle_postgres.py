@@ -575,3 +575,121 @@ def test_a_credentials_sessions_on_other_targets_do_not_block_deleting_its_home(
         async with pool.acquire() as c:
             assert await c.fetchval('SELECT COUNT(*) FROM auth_sessions WHERE profile_id=$1', UUID(profile.profile_id)) == 0
     run(scenario)
+
+
+async def _two_targets(c):
+    home, elsewhere = uuid4(), uuid4()
+    for target, name in ((home, 'home'), (elsewhere, 'elsewhere')):
+        await c.execute("INSERT INTO targets(id,url) VALUES($1,$2)", target, f'https://{name}-{target.hex[:6]}.example.invalid')
+    return home, elsewhere
+
+
+async def _shared_login(c, store, home, elsewhere, now):
+    profile = await store.create_profile(
+        c, target_kind='web', target_id=home, name=f'Login {uuid4().hex[:6]}', auth_kind='json_login',
+        principal_slot='primary', principal_label=None,
+        configuration={'auth_kind': 'json_login', 'secret_values_visible': False},
+        encrypted_secret='enc:fernet:synthetic', encrypted_metadata='enc:fernet:synthetic',
+        expires_at=None, allowed_capabilities=['http.request'], created_by='test', now=now)
+    await store.grant_profile(c, profile_id=profile.profile_id, target_kind='web', target_id=elsewhere,
+                              granted_by='test', now=now)
+    session = uuid4()
+    await c.execute("""INSERT INTO auth_sessions(id,owner_kind,owner_id,target_kind,target_id,target_binding_digest,
+        principal_slot,profile_id,profile_version,auth_kind,encrypted_headers,status,established_at,expires_at,
+        refresh_after,evidence_receipt_digest,source_action_id)
+        VALUES($1,'hunt',$2,'web',$3,$5,'primary',$4,1,'json_login','enc:fernet:live-cookies','active',NOW(),
+               NOW()+INTERVAL '1 hour',NOW()+INTERVAL '30 minutes',$6,$7)""",
+        session, uuid4(), elsewhere, UUID(profile.profile_id), '0' * 64, 'a' * 64, uuid4())
+    return profile, session
+
+
+def test_deactivating_a_credential_ends_its_live_sessions_now():
+    from datetime import timezone
+    from runtime.credential_store import PostgresCredentialProfileStore
+
+    async def scenario(pool):
+        store, now = PostgresCredentialProfileStore(), datetime.now(timezone.utc)
+        async with pool.acquire() as c:
+            home, elsewhere = await _two_targets(c)
+            profile, session = await _shared_login(c, store, home, elsewhere, now)
+            await store.deactivate_profile(c, profile_id=profile.profile_id, target_kind='web', target_id=home, now=now)
+            row = await c.fetchrow('SELECT status, encrypted_headers, revocation_reason FROM auth_sessions WHERE id=$1', session)
+        assert row['status'] == 'revoked' and row['revocation_reason'] == 'credential_deactivated'
+        assert row['encrypted_headers'] != 'enc:fernet:live-cookies'
+    run(scenario)
+
+
+def test_a_credential_is_deleted_permanently_with_every_copy_and_reference():
+    from datetime import timezone
+    from runtime.credential_store import PostgresCredentialProfileStore
+
+    async def scenario(pool):
+        store, now = PostgresCredentialProfileStore(), datetime.now(timezone.utc)
+        async with pool.acquire() as c:
+            home, elsewhere = await _two_targets(c)
+            profile, session = await _shared_login(c, store, home, elsewhere, now)
+            pid = UUID(profile.profile_id)
+            # A legacy mirror with the same id, assurance history (NO ACTION FK), and references.
+            await c.execute("""INSERT INTO target_credential_profiles(id,target_id,name,auth_kind,secret_value)
+                VALUES($1,$2,'legacy mirror','cookie','enc:fernet:legacy')""", pid, home)
+            await c.execute("""INSERT INTO authenticated_profile_revisions(profile_id,revision,credential_version,
+                credential_record_version,configuration_json,configuration_digest,created_by)
+                VALUES($1,1,1,0,'{}'::jsonb,$2,'test')""", pid, 'b' * 64)
+            await c.execute("""UPDATE targets SET metadata_json=jsonb_build_object('hunt_authority',
+                jsonb_build_object('credential_profile_ids', jsonb_build_array($2::text, 'keep-me'))) WHERE id=$1""",
+                elsewhere, str(pid))
+            schedule = await c.fetchval("""INSERT INTO schedules(target_id,frequency,scan_options)
+                VALUES($1,'daily',jsonb_build_object('credential_profile_ids', jsonb_build_array($2::text)))
+                RETURNING id""", home, str(pid))
+            running = await c.fetchval("""INSERT INTO scans(target_id,target_url,status,options)
+                VALUES($1,'https://home.example.invalid','running',
+                       jsonb_build_object('credential_profile_refs', jsonb_build_array($2::text))) RETURNING id""",
+                home, str(pid))
+        blocked = await service.preview(pool, {'kind': 'credential_profile', 'id': str(pid)})
+        assert any('use this credential' in b for b in blocked['blockers']), blocked['blockers']
+        async with pool.acquire() as c:
+            await c.execute("UPDATE scans SET status='completed' WHERE id=$1", running)
+        preview = await service.preview(pool, {'kind': 'credential_profile', 'id': str(pid)})
+        assert not preview['blockers'], preview['blockers']
+        for table in ('credential_profiles', 'credential_profile_versions', 'credential_profile_bindings',
+                      'auth_sessions', 'target_credential_profiles', 'authenticated_profile_revisions'):
+            assert preview['records']['delete'][table]['count'] >= 1, table
+        result = await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert result['detached_references'] == {'targets.metadata_json': 1, 'schedules.scan_options': 1}
+        async with pool.acquire() as c:
+            for table, column in (('credential_profiles', 'id'), ('credential_profile_versions', 'profile_id'),
+                                  ('credential_profile_bindings', 'profile_id'), ('auth_sessions', 'profile_id'),
+                                  ('target_credential_profiles', 'id'), ('authenticated_profile_revisions', 'profile_id')):
+                assert await c.fetchval(f'SELECT COUNT(*) FROM {table} WHERE {column}=$1', pid) == 0, table
+            assert await c.fetchval("SELECT metadata_json->'hunt_authority'->'credential_profile_ids' FROM targets WHERE id=$1",
+                                    elsewhere) == '["keep-me"]'
+            assert await c.fetchval("SELECT scan_options->'credential_profile_ids' FROM schedules WHERE id=$1", schedule) == '[]'
+            # The home target itself is untouched.
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', home) == 1
+    run(scenario)
+
+
+def test_a_request_collection_is_deleted_permanently_with_environments_and_bindings():
+    async def scenario(pool):
+        async with pool.acquire() as c:
+            home, elsewhere = await _two_targets(c)
+            collection = await c.fetchval("""INSERT INTO request_collections(target_id,name,format,encrypted_payload,payload_sha256)
+                VALUES($1,'Partner API','postman','enc:fernet:document',$2) RETURNING id""", home, 'c' * 64)
+            await c.execute("""INSERT INTO request_collection_environments(collection_id,name,encrypted_payload,payload_sha256)
+                VALUES($1,'prod','enc:fernet:environment',$2)""", collection, 'd' * 64)
+            await c.execute("""INSERT INTO request_collection_bindings(collection_id,target_kind,target_id,allowed_origins)
+                VALUES($1,'web',$2,'["https://elsewhere.example.invalid"]'::jsonb)""", collection, elsewhere)
+            await c.execute("""UPDATE targets SET metadata_json=jsonb_build_object('hunt_authority',
+                jsonb_build_object('collection_ids', jsonb_build_array($2::text))) WHERE id=$1""", elsewhere, str(collection))
+        preview = await service.preview(pool, {'kind': 'request_collection', 'id': str(collection)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['records']['delete']['request_collection_environments']['count'] == 1
+        assert preview['records']['delete']['request_collection_bindings']['count'] == 1
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM request_collections WHERE id=$1', collection) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM request_collection_environments WHERE collection_id=$1', collection) == 0
+            assert await c.fetchval("SELECT metadata_json->'hunt_authority'->'collection_ids' FROM targets WHERE id=$1",
+                                    elsewhere) == '[]'
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=ANY($1::uuid[])', [home, elsewhere]) == 2
+    run(scenario)

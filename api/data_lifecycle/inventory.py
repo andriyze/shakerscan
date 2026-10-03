@@ -15,7 +15,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from .statuses import TERMINAL_BY_TABLE
-from . import erasure
+from . import erasure, inputs
 
 MAX_RECORDS = 100000
 MAX_DOMAIN_TARGETS = 500
@@ -74,18 +74,26 @@ async def catalog(conn):
     return dict(columns), edges
 
 
+TARGET_KINDS = ('target', 'domain')
+
+
+def root_table(kind: str) -> str:
+    return inputs.INPUT_KINDS.get(kind) or ('findings' if kind == 'findings' else 'targets')
+
+
 def cascade_plan(kind: str, edges: list[dict], columns: dict):
-    root = 'findings' if kind == 'findings' else 'targets'
+    root = root_table(kind)
     deleted, detached, retained, restricted = (defaultdict(list) for _ in range(4))
     predicate = 'r.id = ANY($1::uuid[])'
     deleted[root].append(predicate)
     queue = [(root, predicate, (root,))]
-    if root == 'targets':
-        # A target's scans, credentials (every kind, including a host's device identity),
-        # sessions and collection bindings have no cascading FK to it; they go with it.
-        for table, clause in erasure.owned_by_targets(columns).items():
-            deleted[table].append(clause)
-            queue.append((table, clause, (table,)))
+    owned = erasure.owned_by_targets(columns) if root == 'targets' else inputs.owned(kind, columns)
+    # A target's scans, credentials (every kind, including a host's device identity), sessions
+    # and collection bindings, or a credential's assurance history and legacy copies, have no
+    # cascading FK to their owner; they go with it.
+    for table, clause in owned.items():
+        deleted[table].append(clause)
+        queue.append((table, clause, (table,)))
     serial = 0
     while queue:
         parent, predicate, path = queue.pop(0)
@@ -204,6 +212,11 @@ async def domain_roots(conn, domain: str):
 
 
 async def find_roots(conn, selection):
+    if selection['kind'] in inputs.INPUT_KINDS:
+        try:
+            return await inputs.find(conn, selection['kind'], UUID(selection['id']))
+        except LookupError as missing:
+            raise HTTPException(404, str(missing)) from None
     if selection['kind'] == 'domain':
         return await domain_roots(conn, selection['domain'])
     if selection['kind'] == 'target':
@@ -232,6 +245,10 @@ async def find_roots(conn, selection):
 
 
 async def owner_context(conn, kind, roots):
+    if kind in inputs.INPUT_KINDS:
+        # An input is owned by its home target; it carries no findings or runs of its own.
+        return {'target_id': await inputs.home_targets(conn, kind, roots), 'device_target_id': [],
+                'ai_target_id': [], 'scan_id': [], 'finding_id': []}
     column = 'id' if kind == 'findings' else 'target_id'
     rows = await conn.fetch(f'SELECT id, target_id, device_target_id, ai_target_id, scan_id FROM findings WHERE {column}=ANY($1::uuid[])', roots)
     owners = {key: sorted({str(r[key]) for r in rows if r[key]}, key=str)
@@ -340,6 +357,8 @@ def hashable(manifest):
 
 
 async def blockers(conn, columns, owners, kind, roots):
+    if kind in inputs.INPUT_KINDS:
+        return await inputs.running_users(conn, kind, roots, columns)
     issues = []
     for table, state in (await unfinished(conn, columns, owners)).items():
         if state['live']:
@@ -367,8 +386,10 @@ async def inventory(conn, selection, roots, columns, edges):
     plan = cascade_plan(kind, edges, columns)
     owners = await owner_context(conn, kind, roots)
     issues = await blockers(conn, columns, owners, kind, roots)
-    abandoned = {table: state['abandoned'] for table, state in (await unfinished(conn, columns, owners)).items()
-                 if state['abandoned']}
+    # Deleting an input never cancels its home target's work; only target and finding deletions do.
+    abandoned = {} if kind in inputs.INPUT_KINDS else {
+        table: state['abandoned'] for table, state in (await unfinished(conn, columns, owners)).items()
+        if state['abandoned']}
     groups = {}
     for name, predicates in zip(('delete', 'detach', 'retain', 'restrict'), plan):
         group = {}

@@ -7,9 +7,9 @@ import secrets
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 
-from . import erasure
+from . import erasure, inputs
 from .inventory import (cancel_abandoned, catalog, cascade_plan, decoded, digest, find_roots, hashable,
-                        ident, inventory, lock_inventory, quiesce_targets)
+                        ident, inventory, lock_inventory, quiesce_targets, root_table)
 
 # Rows a target owns without a cascading FK, deleted while their owners still exist: tool
 # receipts reference the runs they came from, so they go before the scans and Hunts.
@@ -154,8 +154,9 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 # never picked up or that nothing has touched for a while (live work blocked
                 # above), and stop automatic work on the targets so nothing is dispatched behind
                 # this deletion. Both change rows the hash covered, so they come after the check.
-                cancelled = await cancel_abandoned(conn, columns, current['owners'])
-                targets_rooted = current['kind'] != 'findings'
+                input_kind = current['kind'] in inputs.INPUT_KINDS
+                cancelled = {} if input_kind else await cancel_abandoned(conn, columns, current['owners'])
+                targets_rooted = current['kind'] in ('target', 'domain')
                 if targets_rooted:
                     await quiesce_targets(conn, columns, roots)
                 # Capture what must be erased before any owner disappears: evidence the deleted
@@ -164,13 +165,17 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 hunt_ids = ([str(r['id']) for r in await conn.fetch(
                     f"SELECT r.id FROM hunt_runs r WHERE {plan[0]['hunt_runs']}", roots)]
                     if 'hunt_runs' in plan[0] else [])
-                for table in OWNED_DELETE_ORDER if targets_rooted else ('tool_receipts',):
+                detached_references = {}
+                if input_kind:
+                    detached_references = await inputs.detach_references(conn, current['kind'], roots, columns)
+                    order = tuple(table for table, _ in inputs.CREDENTIAL_OWNED)
+                else:
+                    order = OWNED_DELETE_ORDER if targets_rooted else ('tool_receipts',)
+                for table in order:
                     if table in plan[0]:
                         await conn.execute(f'DELETE FROM public.{ident(table)} r WHERE {plan[0][table]}', roots)
-                if targets_rooted:
-                    removed = await conn.fetch('DELETE FROM targets WHERE id=ANY($1::uuid[]) RETURNING id', roots)
-                else:
-                    removed = await conn.fetch('DELETE FROM findings WHERE id=ANY($1::uuid[]) RETURNING id', roots)
+                root = root_table(current['kind'])
+                removed = await conn.fetch(f'DELETE FROM public.{ident(root)} WHERE id=ANY($1::uuid[]) RETURNING id', roots)
                 evidence_uris = await erasure.delete_evidence(conn, captured, columns)
                 await erasure.delete_owner_stats(conn, columns, [scan['id'] for scan in captured['scans']], hunt_ids)
                 if len(removed) != len(roots):
@@ -183,7 +188,7 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                             WHERE t.id=ANY($1::uuid[])""", ids)
                 result = {'status': 'deleted', 'operation_id': str(preview_id), 'preview_id': str(preview_id),
                           'approval_receipt_id': str(approval_id), 'kind': current['kind'],
-                          'cancelled_unfinished': cancelled,
+                          'cancelled_unfinished': cancelled, 'detached_references': detached_references,
                           'deleted_ids': current['root_ids'], 'deleted': len(removed),
                           'deleted_records': {k: v['count'] for k, v in current['records']['delete'].items()},
                           'detached_records': {k: v['count'] for k, v in current['records']['detach'].items()},
