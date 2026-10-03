@@ -258,7 +258,8 @@ def _start(*args: str, reason: str, network_enabled: str = 'true', device_failur
         env={**os.environ, "REASON": reason, "SCRIPT_DIR": str(ROOT),
              "SHAKERSCAN_NETWORK_WORKER_ENABLED": network_enabled},
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
     return result.stdout
 
 

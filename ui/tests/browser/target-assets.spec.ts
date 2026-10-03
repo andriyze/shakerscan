@@ -9,7 +9,7 @@ const target = {id:assetId,asset_id:assetId,name:'Shared fixture',url:'host://as
 const origins = [{id:originId,url:'https://asset.example.test:8443',name:'Management',is_active:true,current_membership:true,active_findings_count:0},{id:'00000000-0000-4000-8000-000000000298',url:'http://asset.example.test:3000',name:'API',is_active:true,current_membership:true,active_findings_count:0}]
 const history = {asset_id:assetId,kind:'scans',items:[],total:0,offset:0,limit:25}
 const serviceIntelligence = {services:[{id:originId,target_id:assetId,port:8008,transport:'tcp',address:'192.0.2.10',service:'http',binding_status:'observation_only',observation_status:'partial',evidence:[{hunt_id:collectionId,status:'partial'}]}],warnings:[],sources_truncated:false}
-async function mock(page: Page) {
+async function mock(page: Page, portHints = [8008,8060]) {
   const writes: string[] = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
@@ -19,7 +19,7 @@ async function mock(page: Page) {
     if (url.pathname.endsWith('/skill')) return route.fulfill({json:{target_id:assetId,revision:0,skill:null,max_characters:12000}})
     if (url.pathname===`/targets/${assetId}/asset`) return route.fulfill({json:{target,origins,services:[],service_intelligence:serviceIntelligence,credentials:[{id:profileId,name:'One shared session',auth_kind:'cookie',current_version:2,is_active:true}],request_collections:[{id:collectionId,name:'One shared collection',request_count:3,is_active:true}],history,active_findings:{},authorization:{approved_by:'fixture'}}})
     if (url.pathname===`/targets/${assetId}/authorization`) return route.fulfill({json:{authorization:{standing:true,approved_by:'fixture'}}})
-    if (url.pathname===`/devices/${assetId}`) return route.fulfill({json:{device:{...target,primary_locator:target.locator,metadata_json:{port_hints:[8008,8060]}},interfaces:[],locator_history:[],services:[],scans:[],service_intelligence:serviceIntelligence,authorization:{approved_by:'fixture'}}})
+    if (url.pathname===`/devices/${assetId}`) return route.fulfill({json:{device:{...target,primary_locator:target.locator,metadata_json:{port_hints:portHints}},interfaces:[],locator_history:[],services:[],scans:[],service_intelligence:serviceIntelligence,authorization:{approved_by:'fixture'}}})
     if (url.pathname==='/devices/readiness') return route.fulfill({json:{enabled:true,status:'ready',worker_count:1}})
     if (url.pathname===`/targets/${assetId}/history`) return route.fulfill({json:{...history,kind:url.searchParams.get('kind')}})
     return route.fulfill({json:{status:'healthy',workers:[],devices:[],targets:[],total:0}})
@@ -90,5 +90,22 @@ test('ASSET-004 connected-device view shows Hunt ports and reuses saved scan hin
   const dialog = page.getByRole('dialog',{name:'Scan Shared fixture'})
   await expect(dialog.getByLabel('Known TCP ports (optional)')).toHaveValue('8008, 8060')
   await expect(dialog.getByRole('button',{name:'Queue scan',exact:true})).toBeEnabled()
+  expect(writes).toEqual([])
+})
+
+test('ASSET-005 Hunt-discovered ports populate scan hints without saved metadata', async ({page}) => {
+  const writes = await mock(page, [])
+  await page.goto(`/devices/${assetId}`)
+  await page.getByRole('button',{name:'Start network scan',exact:true}).click()
+  const dialog = page.getByRole('dialog',{name:'Scan Shared fixture'})
+  const hints = dialog.getByLabel('Known TCP ports (optional)')
+  await expect(hints).toHaveValue('8008')
+  await hints.fill('8008, 9000')
+  await expect(hints).toHaveValue('8008, 9000')
+  await hints.fill('')
+  await expect(hints).toHaveValue('')
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click()
+  await page.getByRole('button',{name:'Start network scan',exact:true}).click()
+  await expect(hints).toHaveValue('8008')
   expect(writes).toEqual([])
 })
