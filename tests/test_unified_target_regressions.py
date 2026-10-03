@@ -151,7 +151,10 @@ def test_registered_hunt_asset_actions_keep_scope_and_share_explicitly(monkeypat
                 {'revision':0,'metadata_changes':False},recorded_by='operator:fixture')
             for name in asset_actions.NAMES:
                 assert CAPABILITY_REGISTRY.require(name).target_kinds == frozenset({'web','api','network','device'})
-                if name == 'targets.skill.read':
+                if name in {'targets.skill.read', 'targets.actions.read'}:
+                    result = await asset_actions.execute_asset_action(pool,run,name,{})
+                    assert result['ok'] is True
+                    assert result['observation']['subject_target_id'] == str(home)
                     continue
                 expected = 'metadata changes' if name.startswith('targets.') else 'no active'
                 with pytest.raises(HTTPException,match=expected):

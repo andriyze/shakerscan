@@ -20,7 +20,8 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
   const [notice,setNotice] = useState('')
   const controller = useRef<AbortController|null>(null)
   useEffect(()=>{setSession(null);setOutput({});setActionId(null);setError('');return ()=>controller.current?.abort()},[hunt.hunt_id])
-  const enabled = Boolean(hunt.capabilities?.some(item=>item.name==='ssh.exec')) && ['active','awaiting_planner'].includes(hunt.status)
+  const open = ['active','awaiting_planner'].includes(hunt.status)
+  const enabled = Boolean(hunt.capabilities?.some(item=>item.name==='ssh.exec')) && open
   async function run() {
     setBusy(true);setError('');setNotice('');setOutput({});setActionId(null)
     const abort = new AbortController();controller.current=abort
@@ -74,7 +75,7 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
     <p className="text-sm text-gray-400">Run commands with this Hunt’s selected stored SSH identity. Output appears as it arrives.</p>
     <Field label="Remote command"><Textarea mono rows={3} value={command} disabled={busy} onChange={event=>setCommand(event.target.value)} placeholder="uname -a && uptime" /></Field>
     <div className="flex flex-wrap items-end gap-3"><Field label="Port"><Input className="w-32" type="number" min={1} max={65535} value={port} disabled={busy || Boolean(session)} placeholder="Profile / 22" onChange={event=>setPort(event.target.value)} /></Field><Field label="Timeout (seconds)"><Input className="w-32" type="number" min={1} max={300} value={timeout} disabled={busy} onChange={event=>setTimeoutValue(event.target.value)} /></Field><Button loading={busy} disabled={!enabled || !command.trim()} onClick={()=>void run()}>Run command</Button>{busy && <Button variant="danger" disabled={!actionId} onClick={()=>void cancel()}><Square className="h-4 w-4" />Cancel</Button>}<Button variant="ghost" disabled={busy || !command.trim()} onClick={()=>void save()}><Save className="h-4 w-4" />Save action</Button></div>
-    {!enabled && <p className="text-xs text-amber-200">Select an SSH identity with ssh.exec permission when starting an authorized Hunt.</p>}
+    {!enabled && <p className="text-xs text-amber-200">{open?'Select an SSH identity with ssh.exec permission when starting an authorized Hunt.':'This Hunt has ended. Start a new Hunt to run SSH commands.'}</p>}
     {(busy || output.stdout || output.stderr || output.exit_status!==undefined) && <div className="rounded-xl border border-gray-800 bg-black/60 p-4"><pre aria-label="SSH stdout" className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-6 text-emerald-200">{output.stdout}</pre>{output.stderr && <pre aria-label="SSH stderr" className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-amber-200">{output.stderr}</pre>}<p role="status" className="mt-3 text-xs text-gray-500">{busy?'Running…':output.exit_status!==undefined?'Exit status: '+String(output.exit_status):output.status}{output.execution_uncertain?' · Execution uncertain':''}</p></div>}
     {error && <p role="alert" className="text-sm text-red-300">{error}</p>}{notice && <p role="status" className="text-xs text-blue-200">{notice}</p>}
   </Card>

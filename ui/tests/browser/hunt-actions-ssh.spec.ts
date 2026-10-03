@@ -74,3 +74,23 @@ test('live SSH displays stdout and stderr and saves a reusable action',async({pa
   expect(submitted.input).toMatchObject({command:'tail -n 40 /var/log/messages',port:2222})
   expect(saved.steps).toEqual([{capability:'ssh.exec',input:{command:'tail -n 40 /var/log/messages',port:2222}}])
 })
+
+test('completed Hunt explains why SSH commands cannot be submitted',async({page})=>{
+  await pinMockApiOrigin(page)
+  let executions=0
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route=>{
+    const path=new URL(route.request().url()).pathname
+    if(path===`/hunts/${run}`)return route.fulfill({json:{hunt_id:run,target_id:id,
+      target_kind:'network',objective:'Finished log investigation',status:'completed',
+      budget_profile:'fast',policy:{active_testing:true},budget:{},budget_used:{},actions:[],
+      capabilities:[{name:'ssh.exec',description:'Direct SSH',risk_tier:'active'}]}})
+    if(path.endsWith('/ssh/exec'))executions++
+    if(path.endsWith('/http-transactions'))return route.fulfill({json:{transactions:[],total:0,archive_total:0,fidelity:'complete'}})
+    return route.fulfill({status:404,json:{detail:'No fixture'}})
+  })
+  await page.goto(`/hunt?run=${run}#ssh`)
+  await expect(page.getByText('This Hunt has ended. Start a new Hunt to run SSH commands.')).toBeVisible()
+  await page.getByLabel('Remote command').fill('uname -s')
+  await expect(page.getByRole('button',{name:'Run command',exact:true})).toBeDisabled()
+  expect(executions).toBe(0)
+})
