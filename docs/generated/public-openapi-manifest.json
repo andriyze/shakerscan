@@ -3,7 +3,7 @@
     "title": "ShakerScan API",
     "version": "1.0.0"
   },
-  "component_schema_count": 194,
+  "component_schema_count": 197,
   "component_schema_sha256": {
     "AIBoundaryHypothesisCompileRequest": "9fc66853c38cd5c7986bffcadb1d610d7d24551ee7560ed819e6ea24c29b2e62",
     "AIBoundaryMaterializeRequest": "53e02c19ac64c4a42b004a4030ae13c198b427419a1e30842e692522a726d39b",
@@ -24,6 +24,8 @@
     "AITargetPrincipalUpdate": "78f3e4214ded88bd0ed475e878989cd71b9ac350ac63446050b4db0eb221af9f",
     "AITargetScanRequest": "3b27bf80fcea69fbd6afd1c38f9a0195aaa7a9862dcb630511922245577f8680",
     "AITargetUpdate": "c655747c95e4a0416bcb557707ad6db5751a9e1c4f7bcc6ce8bf63bcbc60ada7",
+    "ActionParameter": "d736f57d3ccfb9f37ba07ef1ede38c6025baf854559a6dffcf5f9e0db98893b4",
+    "ActionStep": "d9ed4ed265605ff5c74657c8d40e13e478b0b5e621e8550ba2f01cc8da65d06c",
     "AgentContextPackFromTargetRequest": "040c59150a018e78ed498bc1f2fd8e992de9424ae9897babac24f1124924abad",
     "AgentContextPackRequest": "b4074a180bcaca334dd41f78175c63faa57ff20c6f18dae86d5adf2d72aeef6b",
     "AgentDecisionTraceRequest": "d66adb099903f4250044bf4fb5eae6bccf5cf02a383ccdf4a9d52f540818ec51",
@@ -174,6 +176,7 @@
     "SourceIngestHint": "94e5d153a90162f75eaf9fc8318ac6c2311212f5731ba588e6ece3c516b5e462",
     "SourceIngestRequest": "242f6d3897985daa37e86f8ddf10f8c479e7a55d62061ac26a0c4cc7f6d8afa3",
     "SshHostKey": "e0cb5f650736842d35ce506a164b02a32d1cf77911a3c70a4cc6746415339f3a",
+    "TargetActionWrite": "f2a72a9a1d08f3cc4695828bb6f9dd8c296ce2e87bd47b4c515534de0d24b744",
     "TargetAuthorizationRequest": "8691bb145074eaf2c04c7edec0c4b0737363e08b610193f488ac016963952cea",
     "TargetAuthorizationRevocation": "d8a9a7d8ecd9aba76e9c7a87e14c10100e8534020de035f00ae0968ba8a06fa0",
     "TargetCreate": "4bc721e05f7d7396da1c9891d92c0771865f2702272d402b3d5d6de5ac4411cc",
@@ -190,9 +193,9 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
-    "TargetSkillDocument": "cc9bfe24c2d8060ee9a3f670d9f75233bff437823fd055bdae566f9e55d391cc",
-    "TargetSkillResponse": "2a924c9a47d648154f579e92d2460b2ec7c6bd37b8837adf842e48f96054c843",
-    "TargetSkillWrite": "da423b66daafebea01c8fa2f52bf3d60c0de8ef0c26ea427efafa5234206adfb",
+    "TargetSkillDocument": "540961583ea3969ab5bc32099dab213ea357de6e33bed7488a7be97492724559",
+    "TargetSkillResponse": "6f764cdd46f3e92da38d23f102995ab46848d77c6389356840821eba36fdabf1",
+    "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
@@ -200,9 +203,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "9e53f77e4817be76d89fe3dbb3c72a3051ea4770e1f90c81ba3ee540178e0eeb",
+  "contract_sha256": "15e122019580d15dc35fd35cd99945ff15b93457d46c4e60c7bdbae0b8794791",
   "openapi": "3.1.0",
-  "operation_count": 442,
+  "operation_count": 449,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -532,6 +535,21 @@
       "surface": null,
       "tags": []
     },
+    "DELETE /targets/{target_id}/actions/{action_id}": {
+      "deprecated": false,
+      "operation_id": "delete_target_action_targets__target_id__actions__action_id__delete",
+      "parameters_sha256": "353b193795d2e9dca7f337022359808b2d25d3a5124c76d586283075c9a92f26",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "DELETE /targets/{target_id}/authorization": {
       "deprecated": false,
       "operation_id": "revoke_target_authorization_targets__target_id__authorization_delete",
@@ -587,7 +605,7 @@
     "DELETE /targets/{target_id}/skill": {
       "deprecated": false,
       "operation_id": "delete_target_skill_targets__target_id__skill_delete",
-      "parameters_sha256": "9563f8356e65cfaf8c1a4fd168ab9d1606819cd82feda485e18e92dc4e580cb5",
+      "parameters_sha256": "4944f77fa5fc1a342075c1cf3c538984814cb346f6330968b961051b4e196465",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
@@ -1931,6 +1949,21 @@
         "Hunt"
       ]
     },
+    "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output": {
+      "deprecated": false,
+      "operation_id": "ssh_action_output_hunts__hunt_id__ssh_actions__action_id__output_get",
+      "parameters_sha256": "42d1bc498f4416eaf5785db3336ad34255f3173785ec0363aac381645d5fbc49",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "hunts"
+      ]
+    },
     "GET /investigation/candidates": {
       "deprecated": false,
       "operation_id": "list_investigation_candidates_investigation_candidates_get",
@@ -2897,6 +2930,21 @@
       "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "surface": null,
       "tags": []
+    },
+    "GET /targets/{target_id}/actions": {
+      "deprecated": false,
+      "operation_id": "list_target_actions_targets__target_id__actions_get",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
     },
     "GET /targets/{target_id}/asm/activity": {
       "deprecated": false,
@@ -4899,6 +4947,36 @@
         "Hunt"
       ]
     },
+    "POST /hunts/{hunt_id}/ssh/actions/{action_id}/cancel": {
+      "deprecated": false,
+      "operation_id": "cancel_ssh_action_hunts__hunt_id__ssh_actions__action_id__cancel_post",
+      "parameters_sha256": "b949ccef84a271f8dd8d222088871b4e57ea93047a1da63cbcefc52178b0f23c",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "hunts"
+      ]
+    },
+    "POST /hunts/{hunt_id}/ssh/exec": {
+      "deprecated": false,
+      "operation_id": "stream_ssh_command_hunts__hunt_id__ssh_exec_post",
+      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
+      "request_schema_sha256": null,
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": "hunt",
+      "tags": [
+        "hunts"
+      ]
+    },
     "POST /model-intake/admission/verify": {
       "deprecated": false,
       "operation_id": "verify_model_intake_admission_model_intake_admission_verify_post",
@@ -5624,6 +5702,21 @@
         "targets"
       ]
     },
+    "POST /targets/{target_id}/actions": {
+      "deprecated": false,
+      "operation_id": "create_target_action_targets__target_id__actions_post",
+      "parameters_sha256": "0e652a1353ac5088b31df5125ab3c2a41bcb6d5c92385081a88d4c5e899d0c50",
+      "request_schema_sha256": "cc5e590d42acaf0934733257f823734f747c1a4b2824436ea1b8263e4788186d",
+      "response_schema_sha256": {
+        "201": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "POST /targets/{target_id}/archive": {
       "deprecated": false,
       "operation_id": "archive_target_targets__target_id__archive_post",
@@ -5994,6 +6087,21 @@
       "surface": null,
       "tags": []
     },
+    "PUT /targets/{target_id}/actions/{action_id}": {
+      "deprecated": false,
+      "operation_id": "update_target_action_targets__target_id__actions__action_id__put",
+      "parameters_sha256": "31bd069aa28b8cd2867d344212afe9a1d6810ff4476ab219eb0f1a1382905663",
+      "request_schema_sha256": "cc5e590d42acaf0934733257f823734f747c1a4b2824436ea1b8263e4788186d",
+      "response_schema_sha256": {
+        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
+      },
+      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "surface": null,
+      "tags": [
+        "targets"
+      ]
+    },
     "PUT /targets/{target_id}/asm/policy": {
       "deprecated": false,
       "operation_id": "asm_set_policy_targets__target_id__asm_policy_put",
@@ -6097,6 +6205,7 @@
       "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
+      "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
       "POST /hunts",
       "POST /hunts/{hunt_id}/authorization-investigations",
@@ -6115,7 +6224,9 @@
       "POST /hunts/{hunt_id}/skills/suggestions",
       "POST /hunts/{hunt_id}/skills/{skill_id}/bind",
       "POST /hunts/{hunt_id}/skills/{skill_id}/read",
-      "POST /hunts/{hunt_id}/skills/{skill_id}/usage"
+      "POST /hunts/{hunt_id}/skills/{skill_id}/usage",
+      "POST /hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
+      "POST /hunts/{hunt_id}/ssh/exec"
     ],
     "model_intake": [
       "DELETE /model-intake/trust-anchors/{anchor_id}",

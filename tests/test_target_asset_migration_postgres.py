@@ -110,6 +110,8 @@ def test_transaction_rollback_restores_old_schema_and_data():
                     raise RuntimeError('forced rollback')
             assert await conn.fetchval("SELECT relkind::text FROM pg_class WHERE oid='device_targets'::regclass") == 'r'
             assert await conn.fetchval("SELECT name FROM device_targets WHERE id=$1", device) == 'Original'
-            assert await conn.fetchval("SELECT to_regclass('target_device_profiles')") is None
+            # Check the fixture schema: an already upgraded local instance may
+            # also expose the table through the public search-path fallback.
+            assert await conn.fetchval("SELECT to_regclass(format('%I.target_device_profiles',current_schema()))") is None
             assert await conn.fetchval("SELECT count(*) FROM targets") == 0
     asyncio.run(run())

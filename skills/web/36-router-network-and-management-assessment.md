@@ -3,14 +3,14 @@ id: skill.network.router-assessment
 name: router-network-and-management-assessment
 title: 36. Router Network and Management Assessment
 description: Assess routers, gateways, firewalls and access points through service discovery, administrative-interface testing, TLS and evidence-led management exposure review.
-version: 1.0.0
+version: 1.1.0
 kind: specialist
 phase: discovery
 risk: medium
 support: supported
 target_kinds: [network, device]
 capabilities: [http.request]
-optional_capabilities: [service.nse_check, tls.inspect, device.inspect, device.capabilities.inspect, device.scan, device.service.verify, device.ssh.propose]
+optional_capabilities: [service.nse_check, service.snmp.inspect, tls.inspect, ssh.exec, ssh.close, device.inspect, device.capabilities.inspect, device.scan, device.service.verify, device.ssh.propose]
 missing_capabilities: []
 server_enforced: [policy.evaluate]
 budget: {}
@@ -23,7 +23,7 @@ techniques: [management-service-inventory, anonymous-admin-baseline, authenticat
 promotion_gate: server-owned-applicable-proof-contract
 requires_skills: [skill.network.discovery-and-service-assessment]
 deferred_techniques:
-- technique: Native SNMP, routing, DNS-recursion and firewall-rule mutation tests
+- technique: Authenticated SNMP OID walks/SET, routing, DNS-recursion and firewall-rule mutation tests
   requires: Typed protocol or configuration executors; a TCP fingerprint cannot demonstrate these behaviors
 - technique: WAN exposure assessment from another network
   requires: An explicitly scoped public address and admitted worker placement; LAN observations do not establish WAN reachability
@@ -59,9 +59,19 @@ strings, equate a port label with access, or treat a management redirect as auth
 
 ## Deeper configuration evidence
 
+Use `service.snmp.inspect` on the actual UDP port (161 by default) for bounded SNMPv3 engine
+discovery. This uses no community strings or credential guesses and performs no OID walk or SET.
+Silence remains inconclusive. Save positive engine information as service knowledge.
+
+With a selected SSH identity granted `ssh.exec`, inspect logs, interface configuration and runtime
+state directly on the authorized asset. Reuse the returned session and close it when finished.
+Use saved target actions for repeatable commands. A bounded SSH log watch can overlap external
+HTTP/service checks; correlate timestamps and action evidence. Do not wait for an inventory scan
+or create a separate command proposal when direct command permission is already granted.
+
 If authorized SSH credentials and a device profile are selected, `device.scan` can request the fixed
 `ssh-authenticated-host-review` bundle to gather host evidence. When the operator explicitly requests
-additional commands, `device.ssh.propose` creates a bounded immutable proposal for separate review.
+additional reviewed commands rather than delegated execution, `device.ssh.propose` creates a bounded immutable proposal for separate review.
 It does not execute commands and never grants shell access to the ShakerScan host.
 
 Treat reboot, firmware changes, factory reset, WAN/LAN configuration, DHCP, DNS, firewall rules,

@@ -6,16 +6,34 @@ def asset_capability_specs(spec, schema, kinds):
     confirmed = {'type':'boolean','description':'Deprecated compatibility field; grants no authority. Metadata edits default on but obey operator opt-outs; sharing needs saved grants.'}
     identifier = {'type':'string','format':'uuid'}
     revision = {'type':'integer','minimum':0}
+    purpose = {'type':'string','enum':['instructions','knowledge'],'default':'instructions',
+               'description':'instructions applies delegated CRUD immediately to future Hunts; knowledge is automatically loaded advisory learning. Neither grants execution authority.'}
     skill_text = {'title':{'type':'string','minLength':1,'maxLength':120},
                   'methodology':{'type':'string','minLength':1,'maxLength':MAX_TARGET_SKILL_CHARACTERS},
-                  'expected_revision':revision}
+                  'expected_revision':revision, 'purpose':purpose}
+    action_text = {
+        'name':{'type':'string','minLength':1,'maxLength':120},
+        'instructions':{'type':'string','maxLength':4000},
+        'expected_revision':revision,
+        'steps':{'type':'array','minItems':1,'maxItems':16,'items':{'type':'object',
+            'additionalProperties':False, 'required':['capability','input'],
+            'properties':{'capability':{'type':'string','maxLength':120},
+                'input':{'type':'object'},'description':{'type':'string','maxLength':240}}}},
+        'parameters':{'type':'object','maxProperties':16},
+    }
     definitions = (
+        ('targets.actions.create','Save a named reusable action for this target using canonical capabilities and opaque references.',
+         action_text,('name','steps','expected_revision')),
+        ('targets.actions.update','Edit a saved action on this exact target with a revision check. Future Hunts load the change.',
+         {**action_text,'action_id':identifier},('action_id','name','steps','expected_revision')),
+        ('targets.actions.delete','Delete a saved action on this exact target with a revision check.',
+         {'action_id':identifier,'expected_revision':revision},('action_id','expected_revision')),
         ('targets.skill.create','Create instructions for this target, used automatically by future Hunts. Does not grant testing authority.',
          skill_text,('methodology','expected_revision')),
         ('targets.skill.update','Update this target’s saved instructions with a revision check. This Hunt’s startup snapshot is unchanged.',
          skill_text,('methodology','expected_revision')),
         ('targets.skill.delete','Delete this target’s saved instructions with a revision check. Existing Hunt snapshots are retained.',
-         {'expected_revision':revision},('expected_revision',)),
+         {'expected_revision':revision,'purpose':purpose},('expected_revision',)),
         ('targets.create','Register a hostname or IP as a canonical target without testing it.',
          {'locator':{'type':'string','minLength':1,'maxLength':253},
           'name':{'type':'string','maxLength':255},
@@ -33,7 +51,12 @@ def asset_capability_specs(spec, schema, kinds):
         'internal','read_only',kinds,'targets.skill.read','1',None,
         {'tool_wall_seconds':5},{'control_plane':True},schema({},required=()),
         'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
-    return (read,) + tuple(spec(name,description,'internal',
+    action_read = spec('targets.actions.read','Read named saved actions. Optional action_id and typed parameters resolve steps; execute each through the Hunt capability runtime.',
+        'internal','read_only',kinds,'targets.actions.read','1',None,
+        {'tool_wall_seconds':5},{'control_plane':True},
+        schema({'action_id':identifier,'parameters':{'type':'object','maxProperties':16}}),
+        'target-management/v1',('target_management_observation','tool_receipt'),hunt_executor='inline')
+    return (read,action_read) + tuple(spec(name,description,'internal',
         'read_only' if name.startswith('targets.') else 'active',kinds,name,'1',
         None if name.startswith('targets.') else 'active_testing',
         {'tool_wall_seconds':5},{'control_plane':True,**({} if name.startswith('targets.') else {'user_confirmation':True})},

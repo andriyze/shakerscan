@@ -115,6 +115,19 @@ target binding, scope, policy, approval, budget, execution, evidence, and proof 
 Architecture details are in the
 [documentation index](https://github.com/andriyze/shakerscan/blob/main/docs/README.md).
 
+Each target can store instructions, learned knowledge and named **Saved Hunt actions**. Actions
+compose canonical tool calls or a remote SSH command with typed parameters; saving one performs
+no testing. Hunt loads their index at startup and can read, create, update and delete them when
+target metadata edits are enabled. The **Live SSH** tab streams command output with the selected
+stored identity, supports cancellation and can save a useful command as an action.
+
+Hunt can watch SSH logs while checking the same asset's web services. Its agent worker runs bounded
+concurrent jobs; device Hunts allow one SSH command alongside one external traffic action while
+preserving device health pauses and all budgets. Browser workflows can submit authorized forms and
+clean up test objects. `authz.verify` supports object comparisons and repeated function-access
+matrices; role intent is never inferred from a successful response. Camera/router methodologies
+include RTSP OPTIONS, SSH algorithm/key inspection and bounded SNMPv3 engine discovery.
+
 ## LAN server
 
 To run the engine on one trusted machine and control it from another:

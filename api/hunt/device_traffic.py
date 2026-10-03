@@ -6,6 +6,7 @@ owns pacing and health; no worker placement may bypass either one.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Mapping
 
 from .device_policy import DeviceHuntPolicyState
@@ -35,8 +36,20 @@ def reserve_device_traffic(run: Mapping[str, Any], spec: Any, amounts: dict[str,
         )
 
 
+def action_device_state(run: Mapping[str, Any], capability_name: str | None = None):
+    """An explicitly granted SSH command is not an HTTP/inventory pacing step.
+
+    Keep every quota and circuit-breaker check. Only the HTTP-style inter-request
+    delay is irrelevant to a serial, authenticated remote command channel.
+    """
+    context = run['context_pack']
+    context = json.loads(context) if isinstance(context, str) else dict(context)
+    state = DeviceHuntPolicyState.from_mapping(context.get('device_policy_state') or {})
+    return replace(state, minimum_request_interval_ms=0) if capability_name == 'ssh.exec' else state
+
+
 async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
-                                   fragility: int, requests: int, scans: int = 0) -> None:
+                                   fragility: int, requests: int, scans: int = 0, capability_name: str | None = None) -> None:
     """Called under the run transaction, before writing a reservation."""
     try:
         import device_agent
@@ -49,11 +62,12 @@ async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
         """SELECT EXISTS(SELECT 1 FROM budget_reservations r
            JOIN hunt_runs h ON r.owner_kind='hunt' AND r.owner_id=h.id::text
            WHERE h.device_target_id=$1 AND r.status IN ('reserved','running')
+             AND ((r.capability_name='ssh.exec') = ($2='ssh.exec'))
              AND COALESCE((r.requested_json->>'device_fragility_points')::int,0)>0)""",
-        device_id,
+        device_id, capability_name or '',
     )
     if busy:
-        raise ValueError("A device traffic action is already in flight")
+        raise ValueError("A device traffic action in this execution lane is already in flight")
     legacy = int(await conn.fetchval(
         """SELECT COALESCE(SUM(fragility_cost),0) FROM device_agent_actions
            WHERE device_target_id=$1 AND outcome <> 'blocked'
@@ -70,29 +84,23 @@ async def require_device_admission(conn: Any, run: Mapping[str, Any], *,
         device_id) or 0)
     if legacy + daily + fragility > device_agent.MAX_FRAGILITY_PER_DEVICE_DAY:
         raise ValueError("Daily fragility budget for this device is exhausted")
-    context = run["context_pack"]
-    if isinstance(context, str):
-        context = json.loads(context)
-    DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {}).require_admission(
+    action_device_state(run, capability_name).require_admission(
         request_attempts=requests, scan_attempts=scans, fragility_cost=fragility,
     )
 
 
-def require_worker_device_policy(run: Mapping[str, Any]) -> None:
+def require_worker_device_policy(run: Mapping[str, Any], capability_name: str | None = None) -> None:
     """Recheck the latest circuit breaker and pacing immediately before dispatch."""
     if not run["device_target_id"]:
         return
-    context = run["context_pack"]
-    if isinstance(context, str):
-        context = json.loads(context)
-    DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {}).require_admission(
+    action_device_state(run, capability_name).require_admission(
         request_attempts=1, fragility_cost=1,
     )
 
 
 async def settle_device_traffic(conn: Any, run: Mapping[str, Any], requested: Mapping[str, int],
                                 actual: dict[str, int], *, status: str,
-                                health_observed: bool | None = None) -> None:
+                                health_observed: bool | None = None, capability_name: str | None = None) -> None:
     """Settle device usage in the worker's existing terminal transaction."""
     reserved = int(requested.get("device_fragility_points") or 0)
     if not run["device_target_id"] or not reserved:
@@ -106,11 +114,11 @@ async def settle_device_traffic(conn: Any, run: Mapping[str, Any], requested: Ma
     cost = min(reserved, max(int(actual.get("device_fragility_points") or 0),
                              traffic_envelope(actual))) if observed else 0
     actual["device_fragility_points"] = cost
-    await record_device_traffic(conn, run, cost, status=status, health_observed=health_observed)
+    await record_device_traffic(conn, run, cost, status=status, health_observed=health_observed, capability_name=capability_name)
 
 
 async def record_device_traffic(conn: Any, run: Mapping[str, Any], cost: int, *, status: str,
-                               health_observed: bool | None = None) -> None:
+                               health_observed: bool | None = None, capability_name: str | None = None) -> None:
     """Update usage independently of a capability's health observation.
 
     An explicit False means no health checkpoint: keep both prior failures and
@@ -123,11 +131,16 @@ async def record_device_traffic(conn: Any, run: Mapping[str, Any], cost: int, *,
     context = run["context_pack"]
     context = json.loads(context) if isinstance(context, str) else dict(context)
     state = DeviceHuntPolicyState.from_mapping(context.get("device_policy_state") or {})
+    previous_request_at = state.last_request_at
     state = state.reconcile_adapter_state({}, {
         "device_http_requests_used": cost,
         "health_observed": bool(cost) if health_observed is None else health_observed,
         "health_failed": status in {"failed", "partial"},
     }, actual_fragility=cost, health_failed=status in {"failed", "partial"})
+    if capability_name == 'ssh.exec':
+        # SSH still consumes quotas and fragility, but is not an external HTTP
+        # request and must not reset that lane's request pacing clock.
+        state = replace(state,last_request_at=previous_request_at)
     context["device_policy_state"] = state.public_dict()
     await conn.execute("UPDATE hunt_runs SET context_pack=$2::jsonb WHERE id=$1",
                        run["id"], json.dumps(context))

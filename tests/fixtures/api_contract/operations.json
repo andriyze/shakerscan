@@ -1205,6 +1205,21 @@
     "operation_id": "record_hunt_skill_usage_hunts__hunt_id__skills__skill_id__usage_post"
   },
   {
+    "path": "/hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
+    "method": "post",
+    "operation_id": "cancel_ssh_action_hunts__hunt_id__ssh_actions__action_id__cancel_post"
+  },
+  {
+    "path": "/hunts/{hunt_id}/ssh/actions/{action_id}/output",
+    "method": "get",
+    "operation_id": "ssh_action_output_hunts__hunt_id__ssh_actions__action_id__output_get"
+  },
+  {
+    "path": "/hunts/{hunt_id}/ssh/exec",
+    "method": "post",
+    "operation_id": "stream_ssh_command_hunts__hunt_id__ssh_exec_post"
+  },
+  {
     "path": "/investigation/candidates",
     "method": "get",
     "operation_id": "list_investigation_candidates_investigation_candidates_get"
@@ -1943,6 +1958,26 @@
     "path": "/targets/{target_id}",
     "method": "patch",
     "operation_id": "update_target_targets__target_id__patch"
+  },
+  {
+    "path": "/targets/{target_id}/actions",
+    "method": "get",
+    "operation_id": "list_target_actions_targets__target_id__actions_get"
+  },
+  {
+    "path": "/targets/{target_id}/actions",
+    "method": "post",
+    "operation_id": "create_target_action_targets__target_id__actions_post"
+  },
+  {
+    "path": "/targets/{target_id}/actions/{action_id}",
+    "method": "delete",
+    "operation_id": "delete_target_action_targets__target_id__actions__action_id__delete"
+  },
+  {
+    "path": "/targets/{target_id}/actions/{action_id}",
+    "method": "put",
+    "operation_id": "update_target_action_targets__target_id__actions__action_id__put"
   },
   {
     "path": "/targets/{target_id}/archive",

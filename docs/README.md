@@ -73,3 +73,7 @@ contracts and release notes describe what ships.
 
 Historical release plans and superseded operating documents are intentionally not maintained here.
 Use Git history or immutable release notes when investigating an older release.
+
+- [Hunt instruction trust and scoped planner access](hunt-aisvs-boundaries.md) — learning, delegated changes, and boundary tests.
+
+- [Direct SSH in Hunt](hunt-ssh.md) — delegated commands, reusable connections, live output and verification.

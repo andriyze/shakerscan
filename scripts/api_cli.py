@@ -147,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--api-url", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds (default 60)")
+    parser.add_argument("--stream", action="store_true", help="print SSE events as they arrive; never retry")
     parser.add_argument("method", help="GET, POST, PUT, PATCH or DELETE")
     parser.add_argument("path", help="the API path, with query string if any, e.g. /findings?limit=20")
     parser.add_argument("body", nargs="?", help="a JSON object for POST, PUT or PATCH")
@@ -154,6 +155,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         api_url = base_url(args.api_url)
         request = build_request(args.method, args.path, args.body, api_url=api_url, token=bearer_token())
+        if args.stream:
+            from api_stream import stream_response
+            try:
+                return stream_response(request, opener=_opener(), timeout=args.timeout)
+            except urllib.error.HTTPError as exc:
+                output, code = render(exc.code, exc.read(MAX_RESPONSE_BYTES).decode('utf-8', 'replace'))
+                print(output, file=sys.stderr)
+                return code
+            except (ValueError, OSError, urllib.error.URLError) as exc:
+                raise ApiCliError(str(exc)) from exc
         status, text = call(request, timeout=args.timeout)
     except ApiCliError as exc:
         print(f"shakerscan api: {exc}", file=sys.stderr)

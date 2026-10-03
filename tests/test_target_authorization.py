@@ -112,6 +112,22 @@ def test_authorize_once_then_reuse_without_expiry():
     assert current["approval_receipt_id"] == first["approval_receipt_id"]
 
 
+@pytest.mark.parametrize('url,host', [
+    ('host://192.168.1.187', '192.168.1.187'),
+    ('host://[fd00::187]', 'fd00::187'),
+])
+def test_private_host_authorization_is_saved_once_and_reused(url, host, monkeypatch):
+    monkeypatch.setenv('SHAKERSCAN_PRIVATE_NETWORK_TARGETS', 'allow')
+    conn = _Conn(url=url)
+    first = asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by='interactive-ui'))
+    assert first['standing'] and first['expires_at'] is None
+    assert conn.scopes[first['scope_receipt_id']]['host'] == host
+    again = asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by='interactive-ui'))
+    assert again['approval_receipt_id'] == first['approval_receipt_id']
+    assert len(conn.approvals) == 1
+    assert asyncio.run(ta.current_target_authorization(conn, TARGET_ID))['standing']
+
+
 def test_authorization_does_not_follow_a_target_whose_host_changed():
     conn = _Conn()
     asyncio.run(ta.authorize_target(conn, TARGET_ID, approved_by="alice"))

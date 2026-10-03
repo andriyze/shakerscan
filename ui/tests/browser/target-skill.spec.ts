@@ -5,7 +5,7 @@ const id = '00000000-0000-4000-8000-000000000311'
 const runId = '00000000-0000-4000-8000-000000000312'
 const target = {id,asset_id:id,name:'Living room TV',url:'host://tv.test',locator:'tv.test',environment:'lab',is_active:true,connected_device:true,origin_count:0,service_count:0,active_findings_count:0}
 const text = '## How to log in\nUse the saved TV administrator profile.\n\n## What to test\nInspect port 8443.\n\n## What to skip\nDo not reboot.'
-const skillDocument = (methodology = text, version = '1') => ({schema_version:'hunt-skill/v2',skill_id:`skill.target.${id}`,target_id:id,title:'TV investigation guide',methodology,version,body_sha256:'a'.repeat(64),updated_at:'2026-10-01T12:00:00Z'})
+const skillDocument = (methodology = text, version = '1') => ({schema_version:'hunt-skill/v2',skill_id:`skill.target.${id}`,target_id:id,title:'TV investigation guide',methodology,version,body_sha256:'a'.repeat(64),updated_at:'2026-10-01T12:00:00Z',written_by:'operator:target-skill-api'})
 
 /** The Targets list keeps instructions in each row's menu; the asset page keeps a button. */
 async function openInstructions(page: Page, verb: 'Create' | 'Edit') {
@@ -16,9 +16,11 @@ async function openInstructions(page: Page, verb: 'Create' | 'Edit') {
   } else await page.getByRole('button',{name}).click()
 }
 
-async function mock(page: Page, existing = false, conflict = false) {
+async function mock(page: Page, existing = false, conflict = false, advisory = false) {
   let revision = existing ? 1 : 0
   let saved: ReturnType<typeof skillDocument> | null = existing ? skillDocument() : null
+  let operatorSaved = advisory ? skillDocument('Never reboot the device.') : saved
+  if (advisory && saved) saved = {...saved, written_by:`hunt:${runId}`}
   const writes: Array<{method:string;body:Record<string,unknown>;revision:string | null}> = []
   await pinMockApiOrigin(page)
   await page.route(`${MOCK_API_ORIGIN}/**`, async route => {
@@ -28,13 +30,14 @@ async function mock(page: Page, existing = false, conflict = false) {
         const body = request.postDataJSON() || {}
         writes.push({method:request.method(),body,revision:url.searchParams.get('expected_revision')})
         if (conflict) {
-          conflict = false;revision = 2;saved = skillDocument('Instructions saved by another editor.', '2')
+          conflict = false;revision = 2;saved = skillDocument('Instructions saved by another editor.', '2');operatorSaved = saved
           return route.fulfill({status:409,json:{detail:'Target instructions changed. Reload before saving your edits.'}})
         }
         revision += 1
         saved = request.method() === 'DELETE' ? null : {...skillDocument(String(body.methodology),String(revision)),title:String(body.title)}
+        operatorSaved = saved; advisory = false
       }
-      return route.fulfill({json:{target_id:id,revision,skill:saved,max_characters:12000}})
+      return route.fulfill({json:{target_id:id,revision,skill:saved,operator_skill:operatorSaved,knowledge:advisory ? saved : null,trust:advisory ? 'hunt_advisory' : saved ? 'operator' : 'none',max_characters:12000}})
     }
     if (url.pathname === '/targets/inventory') return route.fulfill({json:{targets:[target],total:1,offset:0,limit:50}})
     if (url.pathname === `/targets/${id}/asset`) return route.fulfill({json:{target,origins:[],services:[],credentials:[],request_collections:[],active_findings:{},authorization:null}})
@@ -69,7 +72,7 @@ test('SKILL-001 create, preview, update and delete instructions from the target 
   expect(writes[1]).toMatchObject({method:'PUT',body:{expected_revision:1}})
   await openInstructions(page,'Edit')
   await dialog.getByRole('button',{name:'Delete',exact:true}).click()
-  await expect(dialog.getByText(/Existing Hunts keep their snapshot/)).toBeVisible()
+  await expect(dialog.getByText(/existing Hunt snapshots are retained/)).toBeVisible()
   await dialog.getByRole('button',{name:'Delete instructions',exact:true}).click()
   await expect(dialog).toBeHidden()
   expect(writes[2]).toMatchObject({method:'DELETE',revision:'2'})
@@ -141,4 +144,23 @@ test('SKILL-006 a Hunt shows the instructions it started with and leaves editing
   await expect(snapshot).toHaveAttribute('href',`/targets/${id}/asset`)
   await expect(page.getByRole('dialog',{name:'Target instructions',exact:true})).toHaveCount(0)
   expect(writes).toHaveLength(0)
+})
+
+
+test('SKILL-007 learning loads separately without blocking effective instruction edits', async ({page}) => {
+  const writes = await mock(page,true,false,true)
+  await page.goto(`/targets/${id}/asset`)
+  await openInstructions(page,'Edit')
+  const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
+  await expect(dialog.getByLabel('Instructions',{exact:true})).toHaveValue('Never reboot the device.')
+  const knowledge = dialog.getByTestId('target-learned-knowledge')
+  await knowledge.getByText('Automatically loaded learned knowledge · advisory').click()
+  await expect(knowledge).toContainText('Inspect port 8443.')
+  await expect(dialog.getByRole('button',{name:'Save as operator instructions',exact:true})).toHaveCount(0)
+  await expect(dialog.getByRole('button',{name:'Save instructions',exact:true})).toBeDisabled()
+  await dialog.getByLabel('Instructions',{exact:true}).fill('Inspect port 8443 instead; do not reboot.')
+  await dialog.getByRole('button',{name:'Save instructions',exact:true}).click()
+  await expect(dialog).toBeHidden()
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({method:'PUT',body:{expected_revision:1,methodology:'Inspect port 8443 instead; do not reboot.'}})
 })

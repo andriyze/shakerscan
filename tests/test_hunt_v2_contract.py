@@ -92,6 +92,27 @@ def test_device_ssh_proposal_requires_bound_credentials():
     }
 
 
+def test_known_ssh_service_does_not_require_or_enable_discovery():
+    contract = _contract("network", active=True, credentials_requested=True)
+    names = {item["name"] for item in capability_manifest(contract, credentials_available=True)}
+    assert {"ssh.connect", "ssh.exec"} <= names
+    assert not names & {"ports.discover", "service.fingerprint", "service.nse_check", "device.scan"}
+    assert contract.policy.network_discovery is False
+    assert contract.resolved_budget["max_tcp_ports"] > 0
+    assert contract.resolved_budget["max_udp_ports"] == 0
+
+
+def test_non_ssh_credentials_never_retain_network_budgets_without_discovery():
+    from dataclasses import replace
+    contract = replace(_contract("web", active=True, credentials_requested=True),
+                       credential_refs={"primary_credential_profile_id":"web-profile"})
+    assert contract.resolved_budget["max_hosts"] == 0
+    assert contract.resolved_budget["max_tcp_ports"] == 0
+    assert contract.resolved_budget["max_udp_ports"] == 0
+    names = {item["name"] for item in capability_manifest(contract, credentials_available=True)}
+    assert not names & {"ssh.exec", "ssh.connect", "ports.discover", "service.fingerprint", "service.nse_check"}
+
+
 def test_hunt_budget_profile_is_bounded():
     contract = _contract("api", budget_profile="fast")
     assert contract.resolved_budget_object.max_capability_calls == 20

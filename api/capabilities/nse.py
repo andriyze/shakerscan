@@ -19,6 +19,7 @@ from .nse_http_transport import HTTP_SCRIPT_LIMITS, http_envelope
 # not accept NSE categories, paths, script-args, or arbitrary script names here.
 NSE_SCRIPTS = frozenset({
     "ssl-enum-ciphers", "http-security-headers", "http-methods", "http-trace",
+    "rtsp-methods", "ssh2-enum-algos", "ssh-hostkey",
 })
 _HEADER_NAMES = (
     "content-security-policy", "strict-transport-security", "x-frame-options",
@@ -27,6 +28,14 @@ _HEADER_NAMES = (
 
 
 def _signals(script_id: str, output: str) -> dict[str, Any]:
+    if script_id == "rtsp-methods":
+        return {"methods":sorted(set(re.findall(r"\b(?:OPTIONS|DESCRIBE|SETUP|PLAY|PAUSE|TEARDOWN|ANNOUNCE|RECORD|GET_PARAMETER|SET_PARAMETER)\b",output)))}
+    if script_id == "ssh2-enum-algos":
+        return {"algorithms":sorted(set(re.findall(r"(?m)^\s+([a-zA-Z0-9][a-zA-Z0-9@._+-]{2,100})\s*$",output)))[:100]}
+    if script_id == "ssh-hostkey":
+        return {"fingerprints":re.findall(r"SHA256:[A-Za-z0-9+/]{43}",output)[:8]}
+    if script_id == "snmp-info":
+        return {"engine_information_observed":bool(output.strip())}
     if script_id == "ssl-enum-ciphers":
         grades = re.findall(r"least strength:\s*([A-F])\b", output, re.I)
         return {
@@ -91,6 +100,7 @@ class NseCheckAdapter:
                              if any(name in HTTP_SCRIPT_LIMITS for name in scripts) else [])
         if "ssl-enum-ciphers" in scripts:
             execution_scripts.append("+ssl-enum-ciphers")
+        execution_scripts.extend("+"+name for name in scripts if name in {"rtsp-methods","ssh2-enum-algos","ssh-hostkey"})
         sni = ("--script-args", "tls.servername=" + json.dumps(target.canonical_host or ""))
         commands = tuple(PreparedCommand(
             "nmap", (("-6",) if ipaddress.ip_address(address).version == 6 else ()) +
@@ -117,7 +127,7 @@ class NseCheckAdapter:
             # Native TLS still uses a device cost estimate, not a measured
             # handshake count. The HTTP component is measured at execution.
             estimated_budget["device_fragility_points"] = (
-                len(addresses) * (len(ports) * (2 + 32 * tls_scripts) + envelope["http_requests"])
+                len(addresses) * (len(ports) * (2 + 32 * tls_scripts + 8 * len(set(scripts) - set(HTTP_SCRIPT_LIMITS) - {"ssl-enum-ciphers"})) + envelope["http_requests"])
             )
         return PreparedExecution(
             self.capability_name, self.adapter_name, self.adapter_version, commands,
@@ -134,6 +144,7 @@ class NseCheckAdapter:
     def parse(
         self, output: str, *, timed_out: bool = False,
         expected_ports: Sequence[int] = (), expected_scripts: Sequence[str] = (),
+        transport: str = "tcp",
     ) -> ParsedCapabilityResult:
         observations: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -159,7 +170,7 @@ class NseCheckAdapter:
                     elif event == "start" and element.tag == "port":
                         try:
                             parsed_port = int(element.attrib.get("portid", ""))
-                            port = parsed_port if 1 <= parsed_port <= 65535 and element.attrib.get("protocol") == "tcp" else None
+                            port = parsed_port if 1 <= parsed_port <= 65535 and element.attrib.get("protocol") == transport else None
                         except ValueError:
                             port = None
                     elif event == "start" and element.tag == "state" and port:
@@ -169,7 +180,7 @@ class NseCheckAdapter:
                             errors.append("nmap_run_error")
                     elif event == "end" and element.tag == "script" and address and port:
                         for script_id, script_output in _script_outputs(element):
-                            if script_id in NSE_SCRIPTS:
+                            if script_id in NSE_SCRIPTS or (transport == "udp" and script_id == "snmp-info"):
                                 failed = bool(re.match(
                                     r"\s*(?:ERROR(?:\s*:|\s*$)|Script execution failed\b|Request failed\b)",
                                     script_output, re.I,
@@ -180,7 +191,7 @@ class NseCheckAdapter:
                                     errors.append(f"nse_script_no_output:{script_id}:{port}")
                                 observations.append({
                                     "kind": "nse_observation", "address": address, "port": port,
-                                    "transport": "tcp", "script_id": script_id,
+                                    "transport": transport, "script_id": script_id,
                                     "status": "failed" if failed else "reported" if script_output.strip() else "no_output",
                                     "signals": {} if failed else _signals(script_id, script_output),
                                     "output_sha256": hashlib.sha256(script_output.encode()).hexdigest(),

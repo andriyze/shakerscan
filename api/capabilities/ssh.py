@@ -13,7 +13,7 @@ from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.credentials import SSH_CREDENTIAL_KINDS, parse_credential_secret
 from runtime.models import PreparedExecution
 from secret_store import decrypt_secret
-from .network_inputs import CapabilityInputError, _addresses, _require_network_policy
+from .network_inputs import CapabilityInputError, _addresses, require_service_policy
 try:
     from targets.hunt_authority import read_hunt_authority, pin_authorized_first_contact
 except ModuleNotFoundError:
@@ -26,7 +26,7 @@ class SshConnectAdapter:
     adapter_version = '1'
 
     def prepare(self, *, target, args, policy, context=None):
-        _require_network_policy(policy)
+        require_service_policy(policy)
         if set(args) - {'port','host_key_fingerprint'}:
             raise CapabilityInputError('SSH accepts only a port and optional host-key fingerprint')
         refs = [dict(item) for item in (context or {}).get('credential_refs') or ()

@@ -1630,7 +1630,7 @@ async def _execute_hunt_capability_lifecycle(
                 validated_device_input = dict(request.input)
             uses_session = bool(
                 (
-                    name in {"http.request", "browser.navigate", "browser.interact"}
+                    name in {"http.request", "browser.navigate", "browser.interact", "browser.workflow"}
                     and request.input.get("session_ref")
                 )
                 or (
@@ -1746,7 +1746,7 @@ async def _execute_hunt_capability_lifecycle(
                     )
                     prepared_network = network_capability_adapter(name).prepare(
                         target=network_target, args=request.input, policy=network_policy,
-                        **({'context':authority_context} if name == 'ssh.connect' else {}),
+                        **({'context':authority_context} if name in {'ssh.connect', 'ssh.exec', 'ssh.close'} else {}),
                     )
                 except (CapabilityInputError, ValueError) as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1780,6 +1780,12 @@ async def _execute_hunt_capability_lifecycle(
                 charges = {
                     key: int(value) for key, value in spec.budget_cost.items() if key in limits
                 }
+                if name == "authz.verify":
+                    from capabilities.authz_modes import authz_call_budget
+                    try:
+                        charges.update(authz_call_budget(request.input))
+                    except ValueError as exc:
+                        raise HTTPException(422,str(exc)) from exc
                 if name == "candidate.verify":
                     assert candidate_record is not None
                     if str(run["target_kind"]) == "device":
@@ -1877,7 +1883,7 @@ async def _execute_hunt_capability_lifecycle(
                         conn, run, fragility=int(charges.get("device_fragility_points") or 0),
                         requests=(0 if is_device_queue or is_device_control or is_device_ssh_proposal
                                   else int(charges.get("device_fragility_points") or 1)),
-                        scans=1 if is_device_queue else 0,
+                        scans=1 if is_device_queue else 0, capability_name=name,
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3320,7 +3326,12 @@ async def _enqueue_canonical_network_capability(
     action_digest: str,
 ) -> dict[str, Any]:
     """Queue declarative canonical work; the worker independently reconstructs its argv."""
+    from .ssh_routing import route_session, seal_input, owner_available
     redis_client = get_redis()
+    queue_name = _get("AGENT_TOOL_QUEUE_NAME")
+    if capability_name in {"ssh.exec", "ssh.close"} and capability_input.get("session_id"):
+        queue_name = route_session(redis_client, base_queue=queue_name,
+            hunt_id=hunt_id, session_id=capability_input["session_id"])
     job_id = str(uuid.uuid4())
     result_key = f"agent_tool_result:{job_id}"
     cancel_key = f"agent_tool_cancel:{job_id}"
@@ -3329,20 +3340,20 @@ async def _enqueue_canonical_network_capability(
     await record_cancellable_job_durable(_pool(), redis_client, hunt_id, job_id)
     payload = {
         "job_id": job_id, "type": "canonical_network_capability",
-        "capability_name": capability_name, "capability_input": dict(capability_input),
+        "capability_name": capability_name, "capability_input": seal_input(capability_name, capability_input),
         "expected_input_digest": expected_input_digest,
         "expected_budget": {str(k): int(v) for k, v in expected_budget.items()},
         "hunt_id": str(hunt_id), "action_id": str(action_id),
         "budget_reservation_id": str(reservation_id),
         "action_digest": str(action_digest),
-        "submitted_at": utc_now_iso(), "_base_queue_name": _get("AGENT_TOOL_QUEUE_NAME"),
+        "submitted_at": utc_now_iso(), "_base_queue_name": queue_name,
     }
     redis_client.hset(f"job:{job_id}", mapping={
         "status": "queued", "current_phase": "canonical_capability_queued",
         "tool": capability_name,
     })
     redis_client.expire(f"job:{job_id}", max(3600, math.ceil(timeout_ms / 1000) + 300))
-    enqueue_job(redis_client, _get("AGENT_TOOL_QUEUE_NAME"), payload)
+    enqueue_job(redis_client, queue_name, payload)
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0 + 30.0
     try:
         while asyncio.get_running_loop().time() < deadline:
@@ -3354,7 +3365,12 @@ async def _enqueue_canonical_network_capability(
                 if not isinstance(parsed, dict):
                     raise RuntimeError("canonical capability worker returned a malformed result")
                 return parsed
-            await asyncio.sleep(0.2)
+            if not owner_available(redis_client, queue_name, _get("AGENT_TOOL_QUEUE_NAME")):
+                redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
+                return {"status":"failed", "error":"ssh_session_worker_unavailable", "partial":False,
+                        "typed_output":{"parser_status":"failed","records":[],"record_count":0},
+                        "budget_consumed":{}, "durable_budget_settled":False}
+            await asyncio.sleep(0.1 if capability_name.startswith('ssh.') else 0.2)
     except asyncio.CancelledError:
         redis_client.set(cancel_key, "1", ex=max(60, math.ceil(timeout_ms / 1000) + 30))
         raise
@@ -3819,9 +3835,16 @@ def _hunt_redacted_capability_input(
 ) -> dict[str, Any]:
     """Return the bounded planner/audit projection of one capability input."""
     values = dict(capability_input or {})
+    if capability_name == "ssh.exec":
+        from .ssh_command_audit import redact_ssh_command
+        values = redact_ssh_command(values)
     if capability_name in {'targets.skill.create', 'targets.skill.update'} and 'methodology' in values:
         body = str(values.pop('methodology'))
         values.update(body_sha256=hashlib.sha256(body.encode('utf-8')).hexdigest(), characters=len(body))
+    if capability_name in {'targets.actions.create', 'targets.actions.update'}:
+        for key in ('steps','instructions','parameters'):
+            body = json.dumps(values.pop(key, None), sort_keys=True, default=str)
+            values[key + '_sha256'] = hashlib.sha256(body.encode()).hexdigest()
     if capability_name == "http.request":
         values = redact_http_request_body(values)
     redacted = _arsenal_routes._redact_agent_payload(values)
@@ -4124,3 +4147,10 @@ def _hunt_bound_selector(ref: Mapping[str, Any], *, hard_limit: int, safe_method
         safe_methods_only=selector.safe_methods_only or safe_methods_only,
         max_requests=min(selector.max_requests, hard_limit),
     )
+
+
+from .ssh_stream import router as ssh_stream_router, configure_ssh_stream
+configure_ssh_stream(_pool=_pool, _hunt_run_or_404=_hunt_run_or_404,
+    execute_hunt_capability=execute_hunt_capability,
+    HuntCapabilityRequest=HuntCapabilityRequest, get_redis=get_redis)
+router.include_router(ssh_stream_router)

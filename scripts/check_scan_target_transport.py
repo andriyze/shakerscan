@@ -93,6 +93,9 @@ NON_TARGET_EGRESS_CLASSES = frozenset({
     "resolver",
 })
 REQUIRED_TARGET_TRANSPORT_ANCHORS = {
+    "api/capabilities/ssh_transport.py": (
+        "FrozenTargetSocketFactory", "frozen_addresses=(address,)", "connect_cancellable",
+    ),
     "api/agent_tools.py": (
         "build_enforced_scanner_plan", "pinned_proxy_url", "primary_frozen_address",
     ),

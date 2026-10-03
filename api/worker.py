@@ -19935,7 +19935,7 @@ async def _revalidate_hunt_action_authority(
 ) -> None:
     """Recheck mutable target and receipt authority immediately before traffic."""
     if agent_tools.CAPABILITY_REGISTRY.require(capability_name).placement_requirements.get("network_reachability"):
-        require_worker_device_policy(run)
+        require_worker_device_policy(run, capability_name)
     if run.get("device_target_id"):
         current = await conn.fetchrow(
             "SELECT primary_locator AS locator, is_active FROM device_targets WHERE id=$1",
@@ -21291,7 +21291,8 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
             capability_name, "worker_network"
         ):
             raise CapabilityInputError("capability is not a durable network action")
-        capability_input = dict(job_data.get("capability_input") or {})
+        from hunt.ssh_routing import unseal_input
+        capability_input = unseal_input(capability_name, dict(job_data.get("capability_input") or {}))
         worker_id = _worker_runtime_identity() or f"worker:{job_id[:8]}"
 
         async with db_pool.acquire() as conn:
@@ -21376,7 +21377,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     target=target,
                     args=capability_input,
                     policy=policy,
-                    **({'context':context} if capability_name == 'ssh.connect' else {}),
+                    **({'context':context} if capability_name in {'ssh.connect', 'ssh.exec', 'ssh.close'} else {}),
                 )
                 expected_input_digest = str(
                     job_data.get("expected_input_digest") or ""
@@ -21490,18 +21491,12 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
 
         started_at = persisted.record.started_at or datetime.now(timezone.utc)
         specification = agent_tools.CAPABILITY_REGISTRY.require(capability_name)
-        executable_network_adapter = NetworkExecutionAdapter(
-            prepared=prepared,
-            parser=adapter,
-            command_runner=run_streaming,
-            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,
-            max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000),
-        )
-        if capability_name == 'ssh.connect':
-            from capabilities.ssh import SshExecutionAdapter
-            executable_network_adapter = SshExecutionAdapter(prepared=prepared,pool=db_pool,
-                run=run,target=target,policy=policy,target_url=target_url,
-                revalidate=_revalidate_hunt_action_authority)
+        from capabilities.network_execution import build_network_execution
+        executable_network_adapter = build_network_execution(prepared=prepared,parser=adapter,
+            pool=db_pool,run=run,target=target,policy=policy,target_url=target_url,
+            revalidate=_revalidate_hunt_action_authority,capability_input=capability_input,
+            redis=redis_client,action_id=action_id,worker_id=worker_id,command_runner=run_streaming,
+            max_stdout_bytes=_AGENT_TOOL_OUTPUT_BYTES,max_stderr_bytes=min(_AGENT_TOOL_OUTPUT_BYTES, 20_000))
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -21568,7 +21563,7 @@ async def process_canonical_network_capability_job(job_data: dict[str, Any]) -> 
                     )
                 }
                 await settle_device_traffic(conn, locked, latest.record.requested, actual, status=action_status,
-                                            health_observed=False if capability_name == "service.nse_check" else None)
+                                            health_observed=False if capability_name in {"service.nse_check", "service.snmp.inspect", "ssh.exec", "ssh.close"} else None, capability_name=capability_name)
                 terminal, capability_receipt = terminalize_hunt_capability(
                     latest.record,
                     action_digest=queued_action_digest,
@@ -22207,7 +22202,8 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     "authorization proof requires distinct primary and secondary profiles"
                 )
             async def execute_authz() -> dict[str, Any]:
-                return await verify_target_bound_object_authorization(
+                from capabilities.authz_modes import verify_function_authorization
+                return await (verify_function_authorization if capability_input.get("mode") == "function" else verify_target_bound_object_authorization)(
                     authz_base,
                     routes,
                     target=target,
@@ -23111,6 +23107,10 @@ async def async_main():
         agent_tool_queue=AGENT_TOOL_QUEUE_NAME,
         model_intake_queue=MODEL_INTAKE_QUEUE_NAME,
     )
+    from hunt.ssh_worker_lifecycle import start_ssh_sessions
+    from hunt import agent_job_concurrency
+    ssh_task = start_ssh_sessions(r, db_pool, _worker_runtime_identity(),
+        base_queue_keys, AGENT_TOOL_QUEUE_NAME, AGENT_TOOL_ONLY_WORKER)
     queue_keys = list(base_queue_keys)
     print(
         f"Worker started, listening on queues: {', '.join(queue_keys)} "
@@ -23171,8 +23171,7 @@ async def async_main():
                     ),
                 ]
                 consumer_name = _worker_runtime_identity()
-                lease = await loop.run_in_executor(
-                    None,
+                lease = await agent_job_concurrency.lease_when_ready(
                     lambda: lease_job(
                         r,
                         queue_keys,
@@ -23180,6 +23179,7 @@ async def async_main():
                         block_ms=WORKER_QUEUE_BLOCK_SECONDS * 1000,
                         visibility_timeout_ms=QUEUE_VISIBILITY_TIMEOUT_SECONDS * 1000,
                     ),
+                    enabled=AGENT_TOOL_ONLY_WORKER,
                 )
                 if lease is None:
                     continue  # Timeout, continue polling
@@ -23200,7 +23200,7 @@ async def async_main():
                     # This marker is recovery metadata, never authority to run.
                     # The durable DB claim in each handler remains authoritative.
                     print(f"[worker] processing lease metadata error: {lease_err}", flush=True)
-                await _run_job_under_lease(r, lease, job_data)
+                await agent_job_concurrency.dispatch(r, lease, job_data, execute=_run_job_under_lease, enabled=AGENT_TOOL_ONLY_WORKER)
             except asyncio.CancelledError:
                 # Graceful shutdown requested (SIGTERM/SIGINT)
                 print("Worker received shutdown signal, exiting...", flush=True)
@@ -23213,6 +23213,10 @@ async def async_main():
         # Clean shutdown
         pass
     finally:
+        if ssh_task is not None:
+            await agent_job_concurrency.close()
+            ssh_task.cancel()
+            await worker_queue_policy_module.finish_cancelled_task(ssh_task)
         build_report_task.cancel()
         await worker_queue_policy_module.finish_cancelled_task(build_report_task)
         # A clean container replacement should disappear from lightweight fleet identity

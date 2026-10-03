@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import hashlib
 import ipaddress
@@ -119,6 +119,8 @@ class PreparedBrowserInteraction:
     redacted_execution: Mapping[str, Any]
     session_ref: str | None = None
     steps: tuple[Mapping[str, str], ...] = ()
+    max_state_changing_requests: int = 0
+    traffic_counts: dict[str, int] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -641,6 +643,33 @@ class BrowserInteractAdapter:
         )
 
 
+def require_workflow_policy(policy):
+    get = policy.get if isinstance(policy,dict) else lambda key: getattr(policy,key,None)
+    if not (get('active_testing') is True and get('allow_state_changing_http') is True and get('approval_receipt_id')):
+        raise BrowserCapabilityInputError('Browser workflows require active and state-changing HTTP authority')
+
+
+class BrowserWorkflowAdapter(BrowserInteractAdapter):
+    """Authorized forms and cleanup share the same pinned browser executor."""
+    adapter_name='playwright'
+    adapter_version='1'
+    capability_name='browser.workflow'
+
+    @classmethod
+    def prepare(cls,*,target,base_url,args):
+        from dataclasses import replace
+        writes=args.get('max_state_changing_requests',4)
+        if type(writes) is not int or not 1<=writes<=20:
+            raise BrowserCapabilityInputError('Workflow mutation ceiling must be from 1 to 20')
+        values={key:value for key,value in args.items() if key!='max_state_changing_requests'}
+        prepared=super().prepare(target=target,base_url=base_url,args=values)
+        return replace(prepared,max_state_changing_requests=writes,
+            input_digest=hashlib.sha256((prepared.input_digest+':writes:'+str(writes)).encode()).hexdigest(),
+            estimated_budget={**prepared.estimated_budget,'state_changing_requests':writes},
+            redacted_execution={**prepared.redacted_execution,'read_only_requests_only':False,
+                                'max_state_changing_requests':writes})
+
+
 def browser_capability_adapter(name: str):
     if name == "browser.login_check":
         from .browser_login_action import BrowserLoginAdapter
@@ -649,6 +678,8 @@ def browser_capability_adapter(name: str):
         BrowserNavigateAdapter.capability_name: BrowserNavigateAdapter,
         BrowserInteractAdapter.capability_name: BrowserInteractAdapter,
     }
+    if name == "browser.workflow":
+        return BrowserWorkflowAdapter
     normalized = str(name or "").strip().lower()
     if normalized not in adapters:
         raise BrowserCapabilityInputError(
@@ -809,7 +840,16 @@ async def _execute_browser_action(
                         )
                         return
                 elif request.method.upper() not in SAFE_BROWSER_METHODS:
-                    reason = "state_changing_method"
+                    if not isinstance(prepared, PreparedBrowserInteraction) or not prepared.max_state_changing_requests:
+                        reason = "state_changing_method"
+                    elif request.method.upper() not in {"POST","PUT","PATCH","DELETE"}:
+                        reason = "unsupported_mutation_method"
+                    elif prepared.traffic_counts.get("state_changing_requests",0) >= prepared.max_state_changing_requests:
+                        reason = "mutation_budget_exhausted"
+                    elif request_count >= prepared.max_requests:
+                        reason = "request_budget_exhausted"
+                    else:
+                        prepared.traffic_counts["state_changing_requests"] = prepared.traffic_counts.get("state_changing_requests",0)+1
                 elif request_count >= prepared.max_requests:
                     reason = "request_budget_exhausted"
             if reason:
@@ -1010,7 +1050,12 @@ async def _execute_browser_action(
                         raise BrowserCapabilityInputError(str(exc)) from exc
                     element_kind = "text_field"
                 else:
-                    element_kind = _validate_read_only_interaction(prepared, element)
+                    if prepared.max_state_changing_requests:
+                        if element.get("tag") not in {"button","input","a","summary"} and element.get("role") not in {"button","tab"}:
+                            raise BrowserCapabilityInputError("Workflow requires a clickable control")
+                        element_kind = "workflow_control"
+                    else:
+                        element_kind = _validate_read_only_interaction(prepared, element)
                 remaining_ms = prepared.timeout_ms - int((time.monotonic() - started) * 1_000)
                 if remaining_ms <= 0:
                     raise PlaywrightTimeoutError("browser interaction deadline expired")
@@ -1034,7 +1079,7 @@ async def _execute_browser_action(
                     "step_index": index, "selector_sha256": hashlib.sha256(step["selector"].encode()).hexdigest(),
                     "element_kind": element_kind, "url": _observation_url(page.url),
                     "client_route": redact_client_route(page.url),
-                    "same_origin": True, "read_only_requests_only": True,
+                    "same_origin": True, "read_only_requests_only": not bool(prepared.max_state_changing_requests),
                     "request_count": request_count, "blocked_request_count": len(blocked),
                 })
         remaining_seconds = max(0.001, prepared.timeout_ms / 1000 - (time.monotonic() - started))
@@ -1202,6 +1247,8 @@ def _browser_result(
         actual_budget={
             "browser_actions": browser_actions,
             "http_requests": request_count,
+            **({"state_changing_requests":prepared.traffic_counts.get("state_changing_requests",0)}
+               if isinstance(prepared,PreparedBrowserInteraction) and prepared.max_state_changing_requests else {}),
             **({
                 "state_changing_requests": 1
             } if (

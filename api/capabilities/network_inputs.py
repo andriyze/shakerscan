@@ -55,6 +55,11 @@ def _require_network_policy(policy: ScanPolicy) -> None:
         raise CapabilityInputError("network discovery requires active approval")
 
 
+def require_service_policy(policy: ScanPolicy) -> None:
+    if not policy.active_testing or not policy.approval_receipt_id:
+        raise CapabilityInputError("service authentication requires active approval")
+
+
 def _addresses(target: TargetBinding) -> tuple[str, ...]:
     if not target.allowed_addresses:
         raise CapabilityInputError("target binding has no approved runtime addresses")

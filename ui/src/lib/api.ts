@@ -5806,7 +5806,7 @@ export interface TargetAuthorization {
 // It ends only by revocation or when the target's scope changes.
 export async function getTargetAuthorization(targetId: string): Promise<TargetAuthorization | null> {
   const res = await fetch(`${API_URL}/targets/${targetId}/authorization`)
-  if (!res.ok) throw new Error('Failed to read target authorization')
+  if (!res.ok) throw new Error(await getApiErrorMessage(res, 'Failed to read target authorization'))
   const body = await res.json()
   return (body.authorization as TargetAuthorization | null) ?? null
 }
@@ -7705,7 +7705,9 @@ export async function createTargetPolicyApprovalReceipt({
   environment?: 'production' | 'lab'
   actionName?: string
 }): Promise<{ approvalReceiptId: string; scopeReceiptId: string; expiresAt: string }> {
-  const normalizedTargetUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
+  const normalizedTargetUrl = /^host:\/\//i.test(targetUrl.trim())
+    ? targetUrl.trim().replace(/^host:\/\//i, 'http://')
+    : /^[a-z][a-z0-9+.-]*:\/\//i.test(targetUrl.trim())
     ? targetUrl.trim()
     : `https://${targetUrl.trim()}`
   const parsed = new URL(normalizedTargetUrl)

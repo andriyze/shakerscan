@@ -1,4 +1,4 @@
-export type RunTab = 'results' | 'requests' | 'timeline' | 'details'
+export type RunTab = 'results' | 'requests' | 'timeline' | 'details' | 'ssh'
 export const RUN_TABS: RunTab[]
 export function huntIsLive(hunt: { status?: string; completed_at?: string | null } | null | undefined): boolean
 export function defaultRunTab(hunt: { status?: string; completed_at?: string | null } | null | undefined, hash?: string): RunTab

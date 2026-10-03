@@ -22,7 +22,8 @@ except ModuleNotFoundError:
     from ..targets.hunt_authority import require_hunt_delegation, save_authority
 
 NAMES = frozenset({'targets.create','targets.update','credentials.grant','collections.bind',
-                   'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete'})
+                   'targets.skill.read','targets.skill.create','targets.skill.update','targets.skill.delete',
+                   'targets.actions.read','targets.actions.create','targets.actions.update','targets.actions.delete'})
 
 
 async def execute_asset_action(pool, run, name, values):
@@ -46,16 +47,35 @@ async def _perform_asset_action(pool, run, name, values):
     policy = run.get('policy_json') or {}
     if isinstance(policy,str):
         policy = json.loads(policy)
+    if name.startswith('targets.actions.'):
+        from targets.actions import read_target_actions, write_target_action, TargetActionWrite, resolve_steps
+        async with pool.acquire() as conn, conn.transaction():
+            if name == 'targets.actions.read':
+                saved = await read_target_actions(conn, target_id)
+                if values.get('action_id'):
+                    action = next((item for item in saved['actions'] if item['id'] == values['action_id']), None)
+                    if action is None:
+                        raise HTTPException(404, 'Saved action not found on this target')
+                    saved['resolved_steps'] = resolve_steps(action, values.get('parameters'))
+                    saved['action'] = action
+                return {'ok':True, **saved, 'execution':'Invoke each step through this Hunt’s capabilities with its own idempotency key'}
+            await require_hunt_delegation(conn, run, name, values)
+            request = TargetActionWrite(**{key:value for key,value in values.items()
+                if key in {'name','instructions','steps','parameters','expected_revision'}}) if name != 'targets.actions.delete' else None
+            return {'ok':True, **await write_target_action(conn, target_id, name.rsplit('.',1)[-1],
+                expected_revision=values['expected_revision'], action_id=values.get('action_id'),
+                request=request, source=f"hunt:{run['id']}"), 'hunt_snapshot_unchanged':True}
     if name.startswith('targets.skill.'):
         async with pool.acquire() as conn, conn.transaction():
             if name == 'targets.skill.read':
                 return {'ok':True, **await read_target_skill(conn, target_id)}
-            await require_hunt_delegation(conn, run, name, values)
+            _, delegation = await require_hunt_delegation(conn, run, name, values)
             request = TargetSkillWrite(**{key:value for key,value in values.items()
-                if key in {'title','methodology','expected_revision'}}) if name != 'targets.skill.delete' else None
+                if key in {'title','methodology','expected_revision','purpose'}}) if name != 'targets.skill.delete' else None
             return {'ok':True, **await write_target_skill(conn, target_id, name.rsplit('.',1)[-1],
                 expected_revision=values['expected_revision'], request=request,
-                source=f"hunt:{run['id']}"), 'hunt_snapshot_unchanged':True}
+                source=f"hunt:{run['id']}", delegation=delegation, purpose=values.get('purpose','instructions')),
+                'hunt_snapshot_unchanged':True}
     if name not in {'targets.create', 'targets.update'} and not policy.get('active_testing'):
         raise HTTPException(403,'The Hunt has no active target-management authority')
     if name == 'targets.create':

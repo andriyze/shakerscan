@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 452 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 376 | `api/**/*.py` |
+| Public REST operations | 459 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 381 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1677,7 +1677,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 398 | Python sources + Compose manifests |
+| Runtime environment keys | 399 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -1935,6 +1935,9 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/bind` | `bind_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/read` | `read_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/usage` | `record_hunt_skill_usage` |
+| `POST` | `/hunts/{hunt_id}/ssh/actions/{action_id}/cancel` | `cancel_ssh_action` |
+| `GET` | `/hunts/{hunt_id}/ssh/actions/{action_id}/output` | `ssh_action_output` |
+| `POST` | `/hunts/{hunt_id}/ssh/exec` | `stream_ssh_command` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
@@ -2088,6 +2091,10 @@ for the profile contract, invocation, limits and acceptance gates.
 | `DELETE` | `/targets/{target_id}` | `delete_target` |
 | `GET` | `/targets/{target_id}` | `get_target` |
 | `PATCH` | `/targets/{target_id}` | `update_target` |
+| `GET` | `/targets/{target_id}/actions` | `list_target_actions` |
+| `POST` | `/targets/{target_id}/actions` | `create_target_action` |
+| `DELETE` | `/targets/{target_id}/actions/{action_id}` | `delete_target_action` |
+| `PUT` | `/targets/{target_id}/actions/{action_id}` | `update_target_action` |
 | `POST` | `/targets/{target_id}/archive` | `archive_target` |
 | `GET` | `/targets/{target_id}/asm/activity` | `asm_activity` |
 | `GET` | `/targets/{target_id}/asm/coverage` | `asm_coverage` |
@@ -2786,6 +2793,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
+| `SHAKERSCAN_HUNT_PLANNER_GRANT_FILE` | `api/hunt/planner_gateway.py` |
 | `SHAKERSCAN_INSTALL_KIND` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |

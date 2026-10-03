@@ -1710,6 +1710,27 @@
     "name": "record_hunt_skill_usage"
   },
   {
+    "path": "/hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
+    "methods": [
+      "POST"
+    ],
+    "name": "cancel_ssh_action"
+  },
+  {
+    "path": "/hunts/{hunt_id}/ssh/actions/{action_id}/output",
+    "methods": [
+      "GET"
+    ],
+    "name": "ssh_action_output"
+  },
+  {
+    "path": "/hunts/{hunt_id}/ssh/exec",
+    "methods": [
+      "POST"
+    ],
+    "name": "stream_ssh_command"
+  },
+  {
     "path": "/investigation/candidates",
     "methods": [
       "GET"
@@ -2760,6 +2781,34 @@
       "PATCH"
     ],
     "name": "update_target"
+  },
+  {
+    "path": "/targets/{target_id}/actions",
+    "methods": [
+      "GET"
+    ],
+    "name": "list_target_actions"
+  },
+  {
+    "path": "/targets/{target_id}/actions",
+    "methods": [
+      "POST"
+    ],
+    "name": "create_target_action"
+  },
+  {
+    "path": "/targets/{target_id}/actions/{action_id}",
+    "methods": [
+      "DELETE"
+    ],
+    "name": "delete_target_action"
+  },
+  {
+    "path": "/targets/{target_id}/actions/{action_id}",
+    "methods": [
+      "PUT"
+    ],
+    "name": "update_target_action"
   },
   {
     "path": "/targets/{target_id}/archive",

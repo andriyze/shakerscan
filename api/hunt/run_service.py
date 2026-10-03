@@ -572,6 +572,11 @@ def public_hunt_run(
         result["target_skill"] = {**result["target_skill"], "skill": {
             key: value for key, value in result["target_skill"]["skill"].items() if key != "methodology"
         }}
+    if not include_context and result["target_skill"] and result["target_skill"].get("advisory"):
+        result["target_skill"] = {**result["target_skill"], "advisory": {
+            key: value for key, value in result["target_skill"]["advisory"].items()
+            if key not in {"methodology", "title"}
+        }}
     # Surface actual normalization beside the effective policy, even without the context pack.
     # Unauthorized privileged work never reaches persistence as a downgraded success.
     started = context.get("hunt_start_contract")

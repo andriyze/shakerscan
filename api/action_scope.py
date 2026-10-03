@@ -247,7 +247,7 @@ def _receipt_id(input_payload: dict[str, Any], verdict: str, blocked_by: tuple[s
 
 
 def scope_origin_matches_target(scope_url: Any, target_url: Any) -> bool:
-    """True when a scope URL and its bound target describe the same origin.
+    """True when a scope URL describes the bound web origin or a service of its host asset.
 
     Web target identity is host-level, so `http://host:1111` and `http://host:2222` resolve to one
     target row. That merge is deliberate, but it means a scope receipt can be written for an origin
@@ -272,6 +272,16 @@ def scope_origin_matches_target(scope_url: Any, target_url: Any) -> bool:
         return scheme, host, int(port)
 
     left, right = origin(scope_url), origin(target_url)
+    if left:
+        try:
+            target = urllib.parse.urlsplit(str(target_url or '').strip())
+            if target.scheme.lower() == 'host' and not target.username and not target.password:
+                # A host asset has no default web origin. A receipt may name any HTTP(S)
+                # service of that exact host; destination policy is evaluated separately.
+                target.port  # Reject malformed ports instead of accepting unknown identity.
+                return bool(target.hostname and left[1] == _canonical_host(target.hostname))
+        except ValueError:
+            return False
     return bool(left and right and left == right)
 
 def evaluate_scope(

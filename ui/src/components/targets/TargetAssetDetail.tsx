@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { SharedServicePorts } from './SharedServicePorts'
 import { TargetSkillEditor } from './TargetSkillEditor'
+import { TargetActionsEditor } from './TargetActionsEditor'
+import { TargetKnowledgeEditor } from './TargetKnowledgeEditor'
 import { TargetHuntPermissions } from './TargetHuntPermissions'
 import { AssetCollections } from '@/components/collections/AssetCollections'
 import { AssetCredentials } from '@/components/collections/AssetCredentials'
@@ -72,6 +74,8 @@ export function TargetAssetDetail({ id }: {id: string}) {
     </div>} />
     <SharedServicePorts knowledge={data.service_intelligence} targetId={target.id} />
     <TargetSkillEditor targetId={target.id} targetName={target.name || target.locator} />
+    <TargetActionsEditor targetId={target.id} />
+    <div className="mb-6"><TargetKnowledgeEditor targetId={target.id} /></div>
     <TargetHuntPermissions targetId={target.id} />
     {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
     <Card className="mb-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm text-gray-300">Asset ID <span className="font-mono text-xs text-gray-500">{target.id}</span></p><p className="mt-2 text-sm text-gray-400">{target.connected_device ? [target.device_class,target.manufacturer,target.model,target.firmware_version].filter(Boolean).join(' · ') : 'No device-specific profile yet. Enabling the network view reuses this target.'}</p><p className="mt-2 text-xs text-gray-500">Credentials, collections, findings, and execution history are shared. Each application origin keeps its exact scope.</p></div><div className="text-sm">{data.authorization ? <span className="text-emerald-300">Authorized by {data.authorization.approved_by}</span> : <Button variant="secondary" onClick={() => {setEdit('authority');setValue('operator');setConfirmed(false)}}>Authorize asset</Button>}{target.connected_device && <div className="mt-3"><Link href={`/devices/${target.id}`} className="text-blue-300">Connected Devices view →</Link></div>}</div></div></Card>

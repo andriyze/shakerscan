@@ -37,11 +37,12 @@ def _running_network_reservation() -> DurableBudgetReservation:
 
 def test_worker_network_capability_set_is_explicit():
     assert {spec.name for spec in CAPABILITY_REGISTRY.for_hunt_executor("worker_network")} == {
+        "service.snmp.inspect",
         "ports.discover",
         "service.fingerprint",
         "service.nse_check",
         "subdomains.discover",
-        "ssh.connect",
+        "ssh.connect", "ssh.exec", "ssh.close",
     }
 
 
@@ -141,7 +142,9 @@ def test_worker_rebuilds_authority_starts_heartbeats_and_settles_atomically():
     assert handler.index("stored.record.start(") < handler.index("_dispatch_registered_hunt_adapter(")
     assert "heartbeat_reservation" in handler
     assert "_dispatch_registered_hunt_adapter(" in handler
-    assert "NetworkExecutionAdapter(" in handler
+    assert "build_network_execution(" in handler
+    factory = (Path(__file__).resolve().parents[1] / "api/capabilities/network_execution.py").read_text()
+    assert "NetworkExecutionAdapter(" in factory and "SshCommandExecutionAdapter(" in factory
     assert "capability_input=execution.redacted_execution" in handler
     assert "terminalize_hunt_capability(" in handler
     assert "_record_hunt_network_tool_receipt(" in handler
