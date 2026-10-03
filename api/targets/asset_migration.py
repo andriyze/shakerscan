@@ -179,5 +179,12 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                     f"{__package__}.asset_inputs_migration"
                 ).migrate_asset_inputs
                 await migrate_asset_inputs(conn)
+                # Data migrations added after the conversion must run here: the baseline above
+                # never runs again on a converted database. Each is marker-gated.
+                try:
+                    from runtime.ai_header_secrets import encrypt_stored_secrets
+                except ModuleNotFoundError:
+                    from api.runtime.ai_header_secrets import encrypt_stored_secrets
+                await encrypt_stored_secrets(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")

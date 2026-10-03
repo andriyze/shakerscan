@@ -7,14 +7,14 @@ import secrets
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 
-from . import erasure, inputs
+from . import erasure, inputs, records
 from .inventory import (cancel_abandoned, catalog, cascade_plan, decoded, digest, find_roots, hashable,
                         ident, inventory, lock_inventory, quiesce_targets, root_table)
 
 # Rows a target owns without a cascading FK, deleted while their owners still exist: tool
 # receipts reference the runs they came from, so they go before the scans and Hunts.
 OWNED_DELETE_ORDER = ('tool_receipts', 'scans', 'credential_profiles', 'credential_profile_bindings',
-                      'auth_sessions', 'request_collection_bindings')
+                      'auth_sessions', 'request_collection_bindings', 'scope_receipts', 'discovery_runs')
 
 COMMAND = 'data.records.delete'
 CONFIRMATIONS = {'confirm_authorized', 'confirm_scope_reviewed', 'confirm_delete_records'}
@@ -77,8 +77,8 @@ def check_expected(payload, kind=None, entity_id=None, selection=None):
     manifest = payload['manifest']
     if kind and manifest['kind'] != kind:
         raise HTTPException(409, 'Deletion preview is for a different record kind')
-    # A target preview lists the selected target first, then the services linked to it.
-    bound = manifest['root_ids'][:1] if kind == 'target' else manifest['root_ids']
+    # A target preview lists the selected target first, then its linked services; a scan, its shards.
+    bound = manifest['root_ids'][:1] if kind in ('target', 'scan') else manifest['root_ids']
     if entity_id and bound != [str(entity_id)]:
         raise HTTPException(409, 'Deletion preview does not match this exact record')
     if selection is not None and payload['selection'] != selection:
@@ -155,7 +155,11 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 # above), and stop automatic work on the targets so nothing is dispatched behind
                 # this deletion. Both change rows the hash covered, so they come after the check.
                 input_kind = current['kind'] in inputs.INPUT_KINDS
-                cancelled = {} if input_kind else await cancel_abandoned(conn, columns, current['owners'])
+                if current['kind'] in records.RECORD_KINDS:
+                    # Only the selected record's own abandoned work, never its target's.
+                    cancelled = await records.cancel_abandoned(conn, current['kind'], roots, columns)
+                else:
+                    cancelled = {} if input_kind else await cancel_abandoned(conn, columns, current['owners'])
                 targets_rooted = current['kind'] in ('target', 'domain')
                 if targets_rooted:
                     await quiesce_targets(conn, columns, roots)
@@ -170,11 +174,15 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                     detached_references = await inputs.detach_references(conn, current['kind'], roots, columns)
                     order = tuple(table for table, _ in inputs.CREDENTIAL_OWNED)
                 else:
-                    order = OWNED_DELETE_ORDER if targets_rooted else ('tool_receipts',)
-                for table in order:
-                    if table in plan[0]:
-                        await conn.execute(f'DELETE FROM public.{ident(table)} r WHERE {plan[0][table]}', roots)
+                    order = records.DELETE_ORDER if current['kind'] in records.RECORD_KINDS else OWNED_DELETE_ORDER
                 root = root_table(current['kind'])
+                if plan[1].get('scans'):
+                    # Surviving scans that used a deleted scan as their comparison baseline.
+                    await conn.execute(f"UPDATE scans r SET baseline_scan_id=NULL WHERE {plan[1]['scans']}", roots)
+                for table in order:
+                    # The root table itself is deleted last, by id, so its count can be checked.
+                    if table in plan[0] and table != root:
+                        await conn.execute(f'DELETE FROM public.{ident(table)} r WHERE {plan[0][table]}', roots)
                 removed = await conn.fetch(f'DELETE FROM public.{ident(root)} WHERE id=ANY($1::uuid[]) RETURNING id', roots)
                 evidence_uris = await erasure.delete_evidence(conn, captured, columns)
                 await erasure.delete_owner_stats(conn, columns, [scan['id'] for scan in captured['scans']], hunt_ids)

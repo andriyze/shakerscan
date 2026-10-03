@@ -60,6 +60,7 @@ try:
     )
     from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from secret_store import decrypt_secret, encrypt_secret
+    from runtime.ai_header_secrets import masked as _masked_headers, protect_or_http_error as _protected_headers
     from serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from targets import router as _targets_router
     from targets.router import AsmImproveRequest, AsmPolicyUpdate
@@ -92,6 +93,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from ..runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
     from ..secret_store import decrypt_secret, encrypt_secret
+    from ..runtime.ai_header_secrets import masked as _masked_headers, protect_or_http_error as _protected_headers
     from ..serialization import _decode_json_value, _json_object, _str_list, row_to_dict
     from ..targets import router as _targets_router
     from ..targets.router import AsmImproveRequest, AsmPolicyUpdate
@@ -726,7 +728,7 @@ async def create_ai_target(request: AITargetCreate):
     endpoint_url = _normalize_ai_endpoint_url(request.endpoint_url)
     method = _normalize_ai_method(request.method)
     streaming_mode = _normalize_ai_streaming_mode(request.streaming_mode)
-    headers_template = _normalize_ai_headers_template(request.headers_template)
+    headers_template = _protected_headers(_normalize_ai_headers_template(request.headers_template))
     request_template = _normalize_ai_request_template(
         request.request_template,
         method=method,
@@ -812,7 +814,8 @@ async def update_ai_target(target_id: str, request: AITargetUpdate):
         if "method" in payload:
             update_data["method"] = effective_method
         if "headers_template" in payload:
-            update_data["headers_template"] = json.dumps(_normalize_ai_headers_template(payload.get("headers_template")))
+            update_data["headers_template"] = json.dumps(_protected_headers(
+                _normalize_ai_headers_template(payload.get("headers_template")), existing["headers_template"]))
         if "request_template" in payload:
             update_data["request_template"] = json.dumps(
                 _normalize_ai_request_template(
@@ -2425,6 +2428,7 @@ def _ai_target_response(target_row: Any, credential_row: Optional[Any] = None) -
     target = row_to_dict(target_row)
     for key in ("headers_template", "request_template", "metadata_json"):
         target[key] = _decode_json_value(target.get(key)) or {}
+    target["headers_template"] = _masked_headers(target["headers_template"])
     credential = dict(credential_row) if credential_row else None
     target["credential"] = _sanitize_ai_credential(credential)
     return target

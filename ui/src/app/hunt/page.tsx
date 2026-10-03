@@ -155,7 +155,8 @@ function HuntContent() {
 
   useEffect(() => {
     const runId = searchParams.get('run')
-    if (!runId) return
+    // Leaving a run (the Hunts link, back navigation, or deleting it) returns to the list.
+    if (!runId) { setHunt(null); return }
     let cancelled = false
     setError(null)
     getHuntV2(runId)

@@ -1,18 +1,21 @@
 import { API_URL, getApiErrorMessage } from './apiConfig'
 import { createApprovalReceipt } from './api'
 
+export type RecordKind =
+  | 'credential_profile' | 'request_collection' | 'scan' | 'hunt' | 'ai_target' | 'model_intake_submission'
+
 export type DeletionSelection =
   | { kind: 'target'; target_id: string }
   /** A domain group as the Targets list shows it, with all its subdomains and linked services. */
   | { kind: 'domain'; domain: string }
-  /** Permanent deletion of one credential profile or request collection. */
-  | { kind: 'credential_profile' | 'request_collection'; id: string }
+  /** Permanent deletion of one record and everything it owns. */
+  | { kind: RecordKind; id: string }
   | { kind: 'findings'; finding_ids: string[]; scan_id?: string }
   | { kind: 'findings'; older_than_days: number; status?: string; root_domain?: string }
 
 export interface DeletionPreview {
   schema: 'shakerscan.record-deletion/v1'
-  kind: 'target' | 'domain' | 'findings' | 'credential_profile' | 'request_collection'
+  kind: 'target' | 'domain' | 'findings' | RecordKind
   preview_id: string
   preview_hash: string
   scope_receipt_id: string

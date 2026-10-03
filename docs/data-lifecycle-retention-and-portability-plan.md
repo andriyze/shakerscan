@@ -69,6 +69,11 @@ Credentials and request collections offer **Delete permanently** beside Deactiva
 is reversible and keeps the encrypted material; permanent deletion uses the same preview and
 approval flow and removes every copy (see below).
 
+A single scan (**Delete scan** on its page), Hunt (**Delete** on its run page), AI Gate target
+(**Delete permanently** beside Disable; **Show disabled targets** lists disabled ones) and Model
+Intake submission (**Delete submission**) are deleted the same way, with what they own and nothing
+else of their target.
+
 The Findings page supports selected-record deletion from the selection dock (Select, choose
 rows, More, Delete selected findings) and previewed age cleanup (Advanced cleanup). Neither is a
 front-line control: bulk triage (`POST /findings/bulk`) is the dock's primary action, and in
@@ -84,6 +89,8 @@ selected through this surface.
    `{"kind":"domain","domain":"example.com"}`,
    `{"kind":"credential_profile","id":"<UUID>"}`,
    `{"kind":"request_collection","id":"<UUID>"}`,
+   `{"kind":"scan","id":"<UUID>"}`, `{"kind":"hunt","id":"<UUID>"}`,
+   `{"kind":"ai_target","id":"<UUID>"}`, `{"kind":"model_intake_submission","id":"<UUID>"}`,
    `{"kind":"findings","finding_ids":["<UUID>"],"scan_id":"<optional UUID>"}`, or
    `{"kind":"findings","older_than_days":90,"status":"resolved","root_domain":"example.invalid"}`.
    The response includes exact IDs, cascade/detach/retain counts, blockers, expiry, a scope receipt,
@@ -129,7 +136,21 @@ a deleted scan; anything unproven is listed, not deleted. The receipt's `files` 
 many files were erased, missing or failed, and `external_files_deleted` is true only when none
 failed.
 
+Target and domain deletion also remove the target's authorization scope records, which name its
+URL and hosts, and a domain's subdomain-discovery runs.
+
 Finding deletion removes the selected findings, their cascading children and their evidence.
+
+Scan deletion removes the scan and its shard scans, the findings it last observed (a finding a
+later scan re-observed belongs to that scan and stays), recorded traffic, artifacts, checkpoints,
+saved sessions, budget reservations, evidence and files; a later scan that used it as a baseline
+loses only that link. Hunt deletion removes the Hunt with its actions, traffic, saved sessions,
+candidates, budget reservations and the findings only it produced. AI target deletion removes its
+surfaces, principals, credentials (with their copies in the credential store), findings and AI Gate
+scans. Model Intake submission deletion removes its evidence, runner jobs, reviews, admissions and
+evidence scan; quarantined model files are removed by the Model Intake quarantine cleanup once no
+admission protects them. Only the selected record's own running work blocks these deletions;
+work on it that was never started, or that nothing has touched for 15 minutes, is cancelled.
 
 Permanent credential deletion removes the profile, every encrypted version, every grant, its
 saved sessions, its assurance history, and the legacy mirrors a later sync would use to re-create
@@ -139,8 +160,9 @@ and strips the collection from delegated authority and schedules. A running scan
 still uses the input blocks its deletion. Deactivating a credential revokes its live sessions and
 destroys their captured headers at once.
 
-Content-free audit records (approvals, scope and deletion receipts, export events), backups and
-exports made before the deletion are retained; delete or rotate those separately. Holds do not
+Content-free audit records (approvals, deletion receipts, export events) and exports made before
+the deletion are retained. Backups made before the deletion still hold the records: list and
+delete them with `shakerscan backup list` and `shakerscan backup delete`. Holds do not
 block deletion by default: an open-source install has one operator, and records they own must be
 deletable through the approved preview. A deployment that keeps holds sets
 `SHAKERSCAN_DELETION_ENFORCE_HOLDS=1`; then an explicit `legal_hold` or `audit` class, or a
@@ -150,8 +172,8 @@ a running retention deletion always blocks until that deletion finishes. Use arc
 inventory without erasing history.
 No suppression/tombstone prevents future discovery or scans from creating new records.
 
-Model Intake targets use their separate product lifecycle. Mixed product ownership and legal or
-operational holds block this generic operation. Managed deployments must explicitly enable the
+Mixed product ownership and enforced legal or operational holds block this generic operation.
+Managed deployments must explicitly enable the
 `record_deletion` UI capability (plus `engine_admin` for the Findings list and detail controls)
 and authorize these endpoints at their gateway; this UI flag is not an API authorization mechanism. Standalone remains a single-user local application.
 

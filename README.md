@@ -151,7 +151,8 @@ the [LAN access guide](https://github.com/andriyze/shakerscan/blob/main/docs/lan
   trusted network.
 - Targets need explicit authorization before active testing; scope, budgets, and approvals are
   enforced server-side, not by the UI or the agent.
-- Stored credentials are encrypted at rest and never returned by the API or sent to planners.
+- Stored credentials, including secret headers in an AI target's header template, are encrypted at
+  rest and never returned by the API or sent to planners.
 - Release images are digest-pinned, scanned, and published with SBOMs and build attestations.
 
 Read [SECURITY.md](SECURITY.md) for the full trust boundaries and how to report a vulnerability.

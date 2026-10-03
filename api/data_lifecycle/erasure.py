@@ -35,9 +35,17 @@ def results_dir() -> Path:
     return Path(os.environ.get('RESULTS_DIR', '/results'))
 
 
-def owned_by_targets(columns: dict) -> dict[str, str]:
+def owned_by_targets(columns: dict, kind: str = 'target') -> dict[str, str]:
     """Rows a target owns without a cascading FK to it, keyed by table, as `r.` predicates on $1."""
     owned: dict[str, str] = {}
+    if {'target_id', 'normalized_scope'} <= columns.get('scope_receipts', set()):
+        # The target's authorization scope records name its URL and hosts. A deletion's own
+        # receipts hold only IDs and keep its replay working, so they stay.
+        owned['scope_receipts'] = ("r.target_id = ANY($1::uuid[]) "
+                                   "AND COALESCE(r.normalized_scope->>'kind', '') <> 'record_deletion'")
+    if kind == 'domain' and 'root_domain' in columns.get('discovery_runs', set()):
+        owned['discovery_runs'] = ('lower(r.root_domain) IN (SELECT lower(t.root_domain) FROM targets t '
+                                   'WHERE t.id = ANY($1::uuid[]) AND t.root_domain IS NOT NULL)')
     if 'credential_profiles' in columns:
         owned['credential_profiles'] = f"r.target_id = ANY($1::uuid[]) AND r.target_kind IN {CREDENTIAL_KINDS}"
     scans = columns.get('scans', set())
@@ -132,10 +140,13 @@ async def delete_evidence(conn, captured: dict[str, Any], columns: dict) -> list
 
 
 async def delete_owner_stats(conn, columns: dict, scan_ids: list[str], hunt_ids: list[str]) -> None:
-    if {'owner_kind', 'owner_id'} <= columns.get('http_archive_stats', set()):
+    # Traffic statistics and settled budget reservations are keyed by owner, without an FK.
+    for table in ('http_archive_stats', 'budget_reservations'):
+        if not {'owner_kind', 'owner_id'} <= columns.get(table, set()):
+            continue
         for kind, ids in (('scan', scan_ids), ('hunt', hunt_ids)):
             if ids:
-                await conn.execute('DELETE FROM http_archive_stats WHERE owner_kind=$1 AND owner_id::text=ANY($2::text[])',
+                await conn.execute(f'DELETE FROM {table} WHERE owner_kind=$1 AND owner_id::text=ANY($2::text[])',
                                    kind, ids)
 
 
