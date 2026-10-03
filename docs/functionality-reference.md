@@ -1677,7 +1677,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 396 | Python sources + Compose manifests |
+| Runtime environment keys | 398 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2766,6 +2766,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
+| `SHAKERSCAN_DELETION_ENFORCE_HOLDS` | `api/data_lifecycle/inventory.py` |
 | `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2781,6 +2782,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
 | `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` | `api/runtime/http_archive_router.py` |
+| `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |

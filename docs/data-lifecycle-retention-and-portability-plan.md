@@ -17,8 +17,10 @@ This document records only the current product boundary and genuinely unfinished
   and idempotent retry/finalization.
 - Retention schedules are disabled. Destructive cleanup cannot be converted into background
   automation.
-- HTTP request archives provide redacted JSON by default. Raw HAR is sensitive and requires explicit
-  operator authorization and deployment support.
+- HTTP request archives provide redacted JSON by default. HAR is offered masked or raw; raw HAR
+  (credentials included) is sensitive, requires explicit operator confirmation in the UI, and can be
+  turned off for a deployment with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0`. The generic evidence API
+  never serves unmasked captured traffic.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and
@@ -138,10 +140,14 @@ still uses the input blocks its deletion. Deactivating a credential revokes its 
 destroys their captured headers at once.
 
 Content-free audit records (approvals, scope and deletion receipts, export events), backups and
-exports made before the deletion are retained; delete or rotate those separately. A `sensitive`
-classification is a content label, not a hold: only an explicit `legal_hold` or `audit` class, or
-a `legal_hold`/`operational_hold` flag, blocks erasure. Use archive to hide inventory without
-erasing history.
+exports made before the deletion are retained; delete or rotate those separately. Holds do not
+block deletion by default: an open-source install has one operator, and records they own must be
+deletable through the approved preview. A deployment that keeps holds sets
+`SHAKERSCAN_DELETION_ENFORCE_HOLDS=1`; then an explicit `legal_hold` or `audit` class, or a
+`legal_hold`/`operational_hold` flag, blocks erasure. A `sensitive` classification is a content
+label, never a hold. Held rows are reported in the preview either way. Evidence already claimed by
+a running retention deletion always blocks until that deletion finishes. Use archive to hide
+inventory without erasing history.
 No suppression/tombstone prevents future discovery or scans from creating new records.
 
 Model Intake targets use their separate product lifecycle. Mixed product ownership and legal or

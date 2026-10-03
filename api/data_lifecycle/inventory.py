@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import defaultdict
 import hashlib
 import json
+import os
 import re
 from typing import Any
 from uuid import UUID
@@ -37,6 +38,17 @@ RETAINED = [
     'Backups and exports made before this deletion are not modified; delete or rotate them separately.',
     'Later scans or discovery may create a new target or finding record.',
 ]
+
+
+def holds_enforced() -> bool:
+    """Whether legal, audit and operational holds block deletion.
+
+    Off by default: an open-source install has one operator, and a record they own must be
+    deletable through the approved preview. A deployment that keeps holds sets
+    SHAKERSCAN_DELETION_ENFORCE_HOLDS=1; held rows are reported in the preview either way.
+    """
+    value = str(os.environ.get('SHAKERSCAN_DELETION_ENFORCE_HOLDS') or '').strip().lower()
+    return value in {'1', 'true', 'yes', 'on'}
 
 
 def ident(value: str) -> str:
@@ -366,7 +378,7 @@ async def blockers(conn, columns, owners, kind, roots):
             issues.append(f'{table}: {len(state["live"])} running record(s) ({shown}); cancel them '
                           f'(for a scan: POST /scans/{{id}}/cancel) or wait for them to finish')
     for key, table in (('target_id', 'targets'), ('device_target_id', 'device_targets'), ('ai_target_id', 'ai_targets')):
-        if owners[key] and table in columns:
+        if owners[key] and table in columns and holds_enforced():
             held = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE id=ANY($1::uuid[]) AND {hold_predicate()}', [UUID(v) for v in owners[key]])
             if held:
                 issues.append(f'{table}: an owner is on legal/operational hold')
@@ -401,7 +413,7 @@ async def inventory(conn, selection, roots, columns, edges):
                 group[table] = summary
                 if summary['count'] > MAX_RECORDS:
                     issues.append(f'{table}: deletion preview exceeds the {MAX_RECORDS}-record interactive limit')
-                if summary['held']:
+                if summary['held'] and holds_enforced():
                     issues.append(f'{table}: legal hold or protected evidence blocks deletion; '
                                   'archive the target to keep its records and original ownership intact')
                 # Do not delete a row belonging to a different owner through an indirect cascade.
@@ -419,8 +431,11 @@ async def inventory(conn, selection, roots, columns, edges):
             issues.append(f'{table}: restrictive ownership reference blocks deletion')
     # Evidence with a plain scan_id has no target FK. Protect it even though scans survive.
     if owners['target_id'] and 'evidence_objects' in columns:
+        # Evidence already claimed by a retention deletion always blocks (it is mid-flight);
+        # a hold blocks only on deployments that enforce holds.
+        held_clause = f'{hold_predicate(preserving=True)} OR ' if holds_enforced() else ''
         held = await conn.fetchval(f"""SELECT COUNT(*) FROM evidence_objects r JOIN scans s ON s.id=r.scan_id
-             WHERE s.target_id=ANY($1::uuid[]) AND ({hold_predicate(preserving=True)} OR r.retention_delete_pending_at IS NOT NULL)""", [UUID(v) for v in owners['target_id']])
+             WHERE s.target_id=ANY($1::uuid[]) AND ({held_clause}r.retention_delete_pending_at IS NOT NULL)""", [UUID(v) for v in owners['target_id']])
         if held:
             issues.append('Scan evidence is protected or has pending retention deletion')
     if plan[0].get('evidence_objects'):

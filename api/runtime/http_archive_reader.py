@@ -420,10 +420,8 @@ def export_document(
     creator_version: str = "2.0.0",
 ) -> dict[str, Any]:
     """Build the export envelope, stating what it is and what it is not."""
-    # HAR is replay evidence. Redacting its URL, cookies, headers, or bodies would make it
-    # look authoritative while changing the request. JSON remains the share-oriented view.
-    if export_format == "har":
-        redaction = "raw"
+    # A masked HAR states that it is masked in its own log comment and creator, so it can never
+    # pass for the verbatim request; verbatim HAR is an explicit, deployment-allowed choice.
     projected = [project(row, redaction=redaction) for row in rows]
     fidelity, fidelity_detail = archive_fidelity(
         stats or {}, total=archive_total if archive_total is not None else total,
@@ -440,6 +438,8 @@ def export_document(
         entries = [
             har_entry(
                 {**dict(row), **{
+                    # The projection is the masked view; the row is what was captured.
+                    "url": item["url"],
                     "request_headers": item["request"]["headers"],
                     "response_headers": item["response"]["headers"],
                 }},
@@ -449,6 +449,8 @@ def export_document(
             for row, item in zip(rows, projected)
         ]
         document = har_document(entries, creator_version=creator_version)
+        if redaction != "raw":
+            document["log"]["creator"]["name"] = "ShakerScan (masked)"
         document["log"]["comment"] = json.dumps({
             "owner": dict(owner),
             "redaction": redaction,

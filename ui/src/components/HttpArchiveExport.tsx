@@ -6,7 +6,9 @@ import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
 
 type ArchiveFormat = 'transactions' | 'har'
-type DownloadKind = ArchiveFormat | 'hunt-record'
+/** 'har-raw' is the verbatim HAR; it needs the deployment's raw-export opt-in. */
+type ExportKind = ArchiveFormat | 'har-raw'
+type DownloadKind = ExportKind | 'hunt-record'
 
 interface ArchivedTransaction {
   id: string
@@ -121,10 +123,10 @@ export default function HttpArchiveExport({
   const menuRef = useRef<HTMLDivElement>(null)
   const ownerPath = ownerKind === 'scan' ? 'scans' : 'hunts'
 
-  const archiveUrl = (format: ArchiveFormat, pageOffset = 0) => {
+  const archiveUrl = (format: ArchiveFormat, pageOffset = 0, redaction: 'redacted' | 'raw' = 'redacted') => {
     const params = new URLSearchParams({
       format,
-      redaction: 'redacted',
+      redaction,
       limit: String(format === 'transactions' ? PAGE_SIZE : 10_000),
       offset: String(pageOffset),
     })
@@ -160,13 +162,14 @@ export default function HttpArchiveExport({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ownerKind, ownerId])
 
-  const download = async (format: ArchiveFormat) => {
-    if (format === 'har' && !window.confirm(
+  const download = async (format: ExportKind) => {
+    const raw = format === 'har-raw'
+    if (raw && !window.confirm(
       'Raw HAR contains verbatim URLs, authentication headers, cookies, request bodies, and response data. Treat the downloaded file as sensitive. Continue?',
     )) return
     setDownloading(format)
     try {
-      const response = await fetch(archiveUrl(format, 0))
+      const response = await fetch(archiveUrl(raw ? 'har' : format, 0, raw ? 'raw' : 'redacted'))
       if (!response.ok) {
         const detail = await response.json().catch(() => null)
         throw new Error(detail?.detail || `Export failed (${response.status})`)
@@ -175,12 +178,12 @@ export default function HttpArchiveExport({
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = `shakerscan-${ownerId}.${format === 'har' ? 'RAW.har' : 'json'}`
+      anchor.download = `shakerscan-${ownerId}.${raw ? 'RAW.har' : format === 'har' ? 'masked.har' : 'json'}`
       document.body.appendChild(anchor)
       anchor.click()
       anchor.remove()
       URL.revokeObjectURL(url)
-      toast.success(format === 'har' ? 'Raw HAR export downloaded' : 'Request archive downloaded')
+      toast.success(raw ? 'Raw HAR export downloaded' : format === 'har' ? 'Masked HAR downloaded' : 'Request archive downloaded')
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : 'Could not export request archive')
     } finally {
@@ -237,8 +240,13 @@ export default function HttpArchiveExport({
           <Button size="sm" variant="secondary" onClick={() => download('transactions')} disabled={downloading !== null}>
             <Download className="h-4 w-4" />{downloading === 'transactions' ? 'Preparing…' : 'Requests JSON'}
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => download('har')} disabled={downloading !== null}>
-            <Download className="h-4 w-4" />{downloading === 'har' ? 'Preparing…' : `Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}
+          <Button size="sm" variant="secondary" onClick={() => download('har-raw')} disabled={downloading !== null}
+            title="Verbatim traffic, credentials included, for replay in Burp or similar">
+            <Download className="h-4 w-4" />{downloading === 'har-raw' ? 'Preparing…' : `Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => download('har')} disabled={downloading !== null}
+            title="Credentials, cookies and tokens masked; safe to share">
+            <Download className="h-4 w-4" />{downloading === 'har' ? 'Preparing…' : 'HAR 1.2 (masked)'}
           </Button>
         </div>
       </div>

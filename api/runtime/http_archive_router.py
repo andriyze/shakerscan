@@ -55,13 +55,7 @@ def raw_export_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _authorize_raw(request: Request) -> None:
-    """Gate verbatim export on the deployment switch and the operator credential.
-
-    ShakerScan has no users to authorize against -- it is a single-operator tool and says
-    so -- so this is not ownership. It is the product's existing privileged-operator
-    control: a credential plus loopback, HTTPS, or a trusted Tailscale transport.
-    """
+def _require_raw_export_enabled() -> None:
     if not raw_export_enabled():
         raise HTTPException(
             status_code=403,
@@ -70,6 +64,27 @@ def _authorize_raw(request: Request) -> None:
                 "verbatim request and response bodies"
             ),
         )
+
+
+def raw_har_enabled() -> bool:
+    """Whether verbatim HAR (credentials included) may be exported.
+
+    On by default: an open-source install has one operator, and replaying a proof in Burp
+    needs the real request. A deployment that must never hand out captured credentials sets
+    SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0 and keeps the masked HAR.
+    """
+    value = str(os.environ.get("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR") or "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def _authorize_raw(request: Request) -> None:
+    """Gate verbatim export on the deployment switch and the operator credential.
+
+    ShakerScan has no users to authorize against -- it is a single-operator tool and says
+    so -- so this is not ownership. It is the product's existing privileged-operator
+    control: a credential plus loopback, HTTPS, or a trusted Tailscale transport.
+    """
+    _require_raw_export_enabled()
     _require_operator(request)
 
 
@@ -127,11 +142,19 @@ async def _export(
         raise HTTPException(status_code=400, detail=f"unsupported export format {export_format}")
     if redaction not in REDACTION_MODES:
         raise HTTPException(status_code=400, detail=f"unsupported redaction mode {redaction}")
-    # HAR is always verbatim replay evidence. The raw JSON mode remains the privileged
-    # diagnostic surface; HAR is the explicitly labelled workflow selected by the operator.
-    effective_redaction = "raw" if export_format == "har" else redaction
-    if effective_redaction == "raw" and export_format != "har":
-        _authorize_raw(request)
+    # Every export, HAR included, honours the requested masking. Verbatim HAR is the replay
+    # workflow (Burp needs the real request) and is allowed unless the deployment turned it
+    # off; raw JSON keeps its stricter operator gate as the privileged diagnostic surface.
+    effective_redaction = redaction
+    if effective_redaction == "raw":
+        if export_format != "har":
+            _authorize_raw(request)
+        elif not raw_har_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail=("verbatim HAR is disabled on this deployment (SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR); "
+                        "export the masked HAR instead"),
+            )
     async with _pool().acquire() as conn:
         scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
         archive_total = await count_transactions(
@@ -157,7 +180,7 @@ async def _export(
         archive_total=archive_total, stats=stats,
     )
     name = scan_id or hunt_run_id or "export"
-    suffix = "RAW.har" if export_format == "har" else "json"
+    suffix = ("RAW.har" if effective_redaction == "raw" else "masked.har") if export_format == "har" else "json"
     return JSONResponse(
         document,
         headers={

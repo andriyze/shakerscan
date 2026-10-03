@@ -178,7 +178,7 @@ def _results_dir() -> Any:
 
 
 def _public_evidence_object_row(row: Any) -> dict[str, Any]:
-    return hydrate_evidence_content(row_to_dict(row), results_dir=_results_dir())
+    return public_evidence_object(row_to_dict(row), results_dir=_results_dir())
 
 
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")

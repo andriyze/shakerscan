@@ -122,7 +122,10 @@ def test_target_delete_erases_its_scans_and_evidence_and_preserves_sibling():
 
 
 @pytest.mark.parametrize('blocker', ['scan','hunt','retest','owner_hold','evidence_hold','pending_evidence'])
-def test_execution_and_holds_block_preview_and_execution(blocker):
+def test_execution_and_holds_block_preview_and_execution(blocker, monkeypatch):
+    # Holds block only on deployments that enforce them; running work always blocks.
+    monkeypatch.setenv('SHAKERSCAN_DELETION_ENFORCE_HOLDS', '1')
+
     async def scenario(pool):
         t,s,scan,f,other,e = await seeded(pool)
         preview = await service.preview(pool,{'kind':'target','target_id':str(t)})
@@ -229,7 +232,8 @@ def test_cascading_sensitive_hunt_archive_is_erased_with_its_target():
 
 
 @pytest.mark.parametrize('hold', ['legal_hold', 'audit', 'explicit'])
-def test_retained_http_history_still_honors_actual_holds(hold):
+def test_retained_http_history_still_honors_actual_holds(hold, monkeypatch):
+    monkeypatch.setenv('SHAKERSCAN_DELETION_ENFORCE_HOLDS', '1')
     # 'explicit' is a sensitive row with legal_hold=true in its metadata: the flag holds it,
     # the classification alone does not.
     async def scenario(pool):
@@ -696,4 +700,29 @@ def test_a_request_collection_is_deleted_permanently_with_environments_and_bindi
             assert await c.fetchval("SELECT metadata_json->'hunt_authority'->'collection_ids' FROM targets WHERE id=$1",
                                     elsewhere) == '[]'
             assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=ANY($1::uuid[])', [home, elsewhere]) == 2
+    run(scenario)
+
+
+@pytest.mark.parametrize('hold', ['owner_hold', 'evidence_hold', 'audit_instance'])
+def test_holds_do_not_block_deletion_unless_the_deployment_enforces_them(hold, monkeypatch):
+    """An open-source operator can delete every record they own. Authorization replay writes
+    audit-class evidence, which used to make a target undeletable forever."""
+    monkeypatch.delenv('SHAKERSCAN_DELETION_ENFORCE_HOLDS', raising=False)
+
+    async def scenario(pool):
+        t, s, scan, f, other, e = await seeded(pool)
+        async with pool.acquire() as c:
+            if hold == 'owner_hold':
+                await c.execute("UPDATE targets SET metadata_json='{\"legal_hold\":true}' WHERE id=$1", t)
+            elif hold == 'evidence_hold':
+                await c.execute("UPDATE evidence_objects SET retention_class='legal_hold' WHERE id=$1", e)
+            else:
+                await c.execute("""INSERT INTO evidence_instances(finding_id,target_id,evidence_object_id,retention_policy,hash)
+                    VALUES($1,$2,$3,'audit',$4)""", f, t, e, 'e' * 64)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', t) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', e) == 0
     run(scenario)

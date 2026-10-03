@@ -20049,7 +20049,7 @@ async def _persist_asm_decision(
 
 
 def _public_evidence_object_row(row: Any) -> dict[str, Any]:
-    return hydrate_evidence_content(row_to_dict(row), results_dir=RESULTS_DIR)
+    return public_evidence_object(row_to_dict(row), results_dir=RESULTS_DIR)
 
 
 
