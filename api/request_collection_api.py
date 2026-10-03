@@ -580,21 +580,56 @@ async def create_request_collection(request: RequestCollectionCreate):
 
 @router.get("/request-collections")
 async def list_request_collections(
-    target_id: str,
+    target_id: Optional[str] = None,
+    search: str = Query("", max_length=200),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    target_uuid = _uuid_or_400(target_id, "target id")
+    """Collections visible to one target, or, without a target, the whole library."""
+    pattern = f"%{search.strip()}%" if search.strip() else None
+    if target_id:
+        target_uuid = _uuid_or_400(target_id, "target id")
+        async with _pool().acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM request_collections
+                   WHERE is_active=true AND target_collection_visible(id,$1)
+                     AND ($4::text IS NULL OR name ILIKE $4 OR format ILIKE $4)
+                   ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
+                target_uuid, limit, offset, pattern,
+            )
+        return {
+            "collections": [_public_request_collection(row) for row in rows],
+            "count": len(rows), "limit": limit, "offset": offset,
+        }
+    # The library names each collection's owner and how widely it is bound, so an operator
+    # can find a collection before choosing the target it belongs to. Metadata only.
     async with _pool().acquire() as conn:
         rows = await conn.fetch(
-            """SELECT * FROM request_collections
-               WHERE is_active=true AND target_collection_visible(id,$1)
-               ORDER BY updated_at DESC LIMIT $2 OFFSET $3""",
-            target_uuid, limit, offset,
+            """SELECT c.*, owner.name AS owner_name, owner.url AS owner_url,
+                      target_asset_locator(owner.url) AS owner_locator,
+                      (SELECT count(*) FROM request_collection_bindings b
+                        WHERE b.collection_id=c.id AND b.is_active) AS binding_count,
+                      (SELECT count(*) FROM request_collection_selections s
+                        WHERE s.collection_id=c.id AND s.is_active) AS selection_count,
+                      COUNT(*) OVER() AS total_count
+               FROM request_collections c LEFT JOIN targets owner ON owner.id=c.target_id
+               WHERE c.is_active=true
+                 AND ($1::text IS NULL OR c.name ILIKE $1 OR c.format ILIKE $1
+                      OR owner.name ILIKE $1 OR owner.url ILIKE $1)
+               ORDER BY c.updated_at DESC, c.id LIMIT $2 OFFSET $3""",
+            pattern, limit, offset,
         )
+    collections = []
+    for row in rows:
+        item = _public_request_collection(row)
+        item.pop("total_count", None)
+        for key in ("binding_count", "selection_count"):
+            item[key] = int(item.get(key) or 0)
+        collections.append(item)
     return {
-        "collections": [_public_request_collection(row) for row in rows],
-        "count": len(rows), "limit": limit, "offset": offset,
+        "collections": collections, "count": len(rows),
+        "total": int(rows[0]["total_count"]) if rows else 0,
+        "limit": limit, "offset": offset,
     }
 
 

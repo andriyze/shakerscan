@@ -26,8 +26,8 @@ for (const link of ['id','url']) {
     })
     const params: Record<string,string> = link === 'id' ? {target_id:serviceId} : {target:service.url}
     await page.goto(`/credentials?${new URLSearchParams(params)}`)
-    await expect(page.getByRole('combobox').first()).toHaveValue('web')
-    await expect(page.getByRole('combobox').nth(1)).toHaveValue(serviceId)
+    await expect(page.getByLabel('Target type', {exact:true})).toHaveValue('web')
+    await expect(page.getByLabel('Target', {exact:true})).toHaveAttribute('data-value', serviceId)
     await expect.poll(() => consumers).toContain(serviceId)
     expect(consumers).not.toContain(hostId)
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false)

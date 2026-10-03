@@ -5,13 +5,18 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const page = readFileSync(path.join(root, 'src/app/hunts/page.tsx'), 'utf8')
+const page = readFileSync(path.join(root, 'src/components/hunt/HuntHistoryList.tsx'), 'utf8')
+const legacyRoute = readFileSync(path.join(root, 'src/app/hunts/page.tsx'), 'utf8')
 const launcher = readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
 const sidebar = readFileSync(path.join(root, 'src/components/Sidebar.tsx'), 'utf8')
 const client = readFileSync(path.join(root, 'src/lib/huntV2.ts'), 'utf8')
 
-test('hunt history is reachable from the sidebar', () => {
-  assert.match(sidebar, /href: '\/hunts'/)
+test('Hunts are one sidebar entry and one page', () => {
+  assert.match(sidebar, /href: '\/hunt', label: 'Hunts'/)
+  assert.doesNotMatch(sidebar, /href: '\/hunts'/)
+  // Old history links land on the same page with their filters intact.
+  assert.match(legacyRoute, /redirect\(`\/hunt\$\{params\.size \? `\?\$\{params\}` : ''\}`\)/)
+  assert.match(legacyRoute, /params\.append\(key, item\)/)
 })
 
 test('history filter state lives in the URL so a view survives reload and back', () => {
@@ -46,18 +51,12 @@ test('the page distinguishes loading, empty and error', () => {
   assert.match(page, /ErrorState/)
 })
 
-test('the launcher no longer renders a failed history fetch as "no hunts"', () => {
-  // It swallowed the error and set an empty list, which is a different and far more
-  // reassuring claim than "we could not load them".
-  assert.doesNotMatch(launcher, /\.catch\(\(\) => \{ if \(!cancelled\) setHuntHistory\(\[\]\) \}\)/)
-  assert.match(launcher, /setHuntHistoryError\(/)
-  assert.match(launcher, /error \? \(/)
-})
-
-test('the launcher links to the full history instead of capping silently', () => {
-  // The full history is the target's, by exact ID: search never matched a target UUID.
-  assert.match(launcher, /href=\{`\/hunts\?target_id=\$\{encodeURIComponent\(targetId\)\}`\}/)
-  assert.match(launcher, /View all \$\{total\}/)
+test('the Hunts page shows the full, paged history rather than a capped recent list', () => {
+  // A failed fetch must read as an error, never as "no hunts" (see the loading/empty/error test).
+  assert.match(launcher, /<HuntHistoryList \/>/)
+  assert.doesNotMatch(launcher, /limit: 12/)
+  // The launcher opens on demand, or immediately when a link preselected a target.
+  assert.match(launcher, /useState\(\(\) => Boolean\(searchParams\.get\('target'\) && !searchParams\.get\('run'\)\)\)/)
 })
 
 test('the client sends every supported filter and reads the total', () => {

@@ -96,5 +96,5 @@ test('connected-device view reuses real Hunt ports and opens the same target wor
   await expect(dialog.getByRole('button', { name: 'Queue scan', exact: true })).toBeEnabled()
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('link', { name: 'Start Hunt', exact: true }).first().click()
-  await expect(page.getByLabel('Target', { exact: true })).toHaveValue(id)
+  await expect(page.getByLabel('Target', { exact: true })).toHaveAttribute('data-value', id)
 })

@@ -1,9 +1,5 @@
-import { Suspense, type ReactNode } from 'react'
-import InvestigationReviewPanel from '@/components/hunt/InvestigationReviewPanel'
+import type { ReactNode } from 'react'
 
 export default function HuntLayout({ children }: { children: ReactNode }) {
-  return <>
-    <Suspense fallback={null}><InvestigationReviewPanel /></Suspense>
-    {children}
-  </>
+  return <>{children}</>
 }

@@ -11,7 +11,6 @@ import {
   Braces,
   Compass,
   FileArchive,
-  History,
   KeyRound,
   Menu,
   Network,
@@ -111,8 +110,7 @@ const navGroups: {
     heading: 'AI Investigator',
     badge: 'Agentic',
     items: [
-      { href: '/hunt', label: 'Agent Hunt', icon: <Compass className="w-5 h-5" /> },
-      { href: '/hunts', label: 'Hunt History', icon: <History className="w-5 h-5" /> },
+      { href: '/hunt', label: 'Hunts', icon: <Compass className="w-5 h-5" /> },
     ],
   },
   {

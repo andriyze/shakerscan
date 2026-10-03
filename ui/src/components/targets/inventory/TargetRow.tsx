@@ -16,7 +16,7 @@ import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
 import { TargetSkillEditor } from '../TargetSkillEditor'
 import { MenuItem, MenuSeparator, RowMenu } from './RowMenu'
 
-export const ROW_GRID = 'lg:grid lg:grid-cols-[1.75rem_minmax(0,2fr)_minmax(0,1.6fr)_10.5rem_7.5rem_9.5rem] lg:items-center lg:gap-4'
+export const ROW_GRID = 'lg:grid lg:grid-cols-[1.75rem_minmax(0,2fr)_minmax(0,1.5fr)_12rem_7rem_9.5rem] lg:items-center lg:gap-4'
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-500/15 text-red-300 ring-red-500/30',
@@ -60,7 +60,7 @@ function Pill({ children, className = '', title }: { children: ReactNode; classN
 export function SeverityPills({ counts, compact = false }: { counts?: TargetAsset['severity_counts']; compact?: boolean }) {
   const items = severitySummary(counts).filter(item => item.severity !== 'info')
   if (!items.length) return <span className="text-xs text-gray-600">{compact ? '' : 'No open findings'}</span>
-  return <span className="flex flex-wrap gap-1">{items.map(item =>
+  return <span className="flex flex-wrap gap-1 lg:flex-nowrap">{items.map(item =>
     <Pill key={item.severity} title={`${item.count} ${item.severity}`} className={`ring-1 ring-inset tabular-nums ${SEVERITY_STYLE[item.severity]}`}>
       {item.count}<span className="uppercase opacity-80">{item.severity.slice(0, 1)}</span>
     </Pill>)}</span>

@@ -208,14 +208,14 @@ export function TargetInventory() {
       <InventorySummary facets={facets} filters={filters} onChange={change} />
       <InventoryToolbar filters={filters} facets={facets} onChange={change} searchRef={searchInput} />
       {error && <div className="mb-4" role="alert"><ErrorState message={error} /></div>}
-      <div className="@container overflow-hidden rounded-xl border border-gray-800 bg-gray-900/30" role="table" aria-label="Targets" aria-busy={loading}>
+      <div className="@container" role="table" aria-label="Targets" aria-busy={loading}>
         <ColumnHeader />
         {loading && !groups.length
-          ? <div className="space-y-3 p-4">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-14 w-full rounded-lg" />)}</div>
+          ? <div className="space-y-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-24 w-full rounded-xl" />)}</div>
           : !groups.length
-            ? <div className="p-6"><EmptyState message="No targets match" hint="Try a different search or clear the filters."
+            ? <div className="rounded-xl border border-gray-800 p-6"><EmptyState message="No targets match" hint="Try a different search or clear the filters."
                 action={{ label: 'Clear filters', onClick: () => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false }) }} /></div>
-            : <div className={loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+            : <div className={`space-y-4 ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
                 {sections.domains.map(group => <DomainGroup key={group.root_domain} group={group} open={isOpen(group)}
                   onToggle={() => setExpanded(current => ({ ...current, [group.root_domain]: !isOpen(group) }))}
                   onDiscovered={() => { setExpanded(current => ({ ...current, [group.root_domain]: true })); refresh() }}

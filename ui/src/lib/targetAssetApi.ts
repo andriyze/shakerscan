@@ -96,7 +96,7 @@ export interface AssetDetail {
   origins: AssetOrigin[]
   services: Array<{id: string; transport: string; port: number; state: string; service_name: string; product?: string | null; version?: string | null; web_origin?: string | null; last_seen_at?: string | null}>
   credentials: CredentialProfile[]
-  request_collections: Array<{id: string; name: string; format: string; home_target_id: string; request_count: number; is_active: boolean}>
+  request_collections: Array<{id: string; name: string; format: string; home_target_id: string; request_count: number; safe_request_count: number; potentially_mutating_request_count: number; is_active: boolean; updated_at?: string}>
   active_findings: Record<string, number>
   history: AssetHistory
   authorization?: {approval_receipt_id: string; approved_by: string; inherited?: boolean; authority_target_id?: string} | null

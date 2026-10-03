@@ -24,5 +24,7 @@ test('a new Scan starts with the target credentials that fit each lane, never an
 
 test('a new Hunt starts with the target credentials per slot, and never an SSH identity', () => {
   assert.match(hunt, /setCredentialIds\(defaultHuntCredentialIds\(usable\)\)/)
-  assert.match(hunt, /shared from \$\{profile\.home_target_name \|\| 'another target'\}/)
+  const pickers = readFileSync(path.join(root, 'src/lib/pickerOptions.ts'), 'utf8')
+  assert.match(hunt, /options=\{credentialOptions\(/)
+  assert.match(pickers, /from \$\{profile\.home_target_name \|\| 'another target'\}/)
 })
