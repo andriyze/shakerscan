@@ -1,74 +1,68 @@
-# Hunt AISVS boundary follow-up
+# Hunt instruction, learning and planner boundaries
 
-**Status:** Implemented trust projection and opt-in ingress; deployment isolation is external.
+**Status:** Instruction CRUD and automatic learning implemented; scoped ingress is opt-in.
 
-Stacked on PR #296 at `14f0c649e2ec32f92641bbbaf9aa1c5969552825`. This is an
-engineering verification profile, not an AISVS conformance claim. Default-on
-metadata editing, operator opt-outs, standing target authorization, same-asset
-service reuse and canonical execution/proof remain intact.
+This follow-up builds on #296 without reversing default-on metadata editing,
+operator opt-outs, standing authorization or same-asset service reuse. It is not
+an AISVS compliance claim.
 
-## Audit of the new #296 commits
+## Effective instruction changes, not hidden drafts
 
-- `1a58843e`: default-on metadata with opt-outs; lightweight authority helpers no
-  longer import HTTP routers; installer closure repaired; CI starts through the
-  supported launcher and waits for network readiness within a fixed deadline.
-- `172098e`: removing metadata confirmation prompts does not let those registry
-  entries acquire binaries, network placement or network budget dimensions.
-- `14f0c64`: hosted installer synchronized; DNS expectations use canonical address
-  representation; CI contract tests now match launcher-based startup.
+The existing versioned `target_skill` record has two bounded sections, not two
+target inventories. `operator_skill` retains its compatibility field name but now
+means effective instructions: operator-written or written by Hunt under the
+server's saved target metadata delegation. `knowledge` contains learned advisory
+context. Each section is limited to 12,000 characters. They share the existing
+revision check and 20-entry history.
 
-These changes address the earlier installer/readiness failures without treating
-an unavailable network worker as ready. The two remaining boundaries addressed
-here are persistence of instruction trust and external-planner API access.
+`targets.skill.create|update|delete` defaults to `purpose: instructions`. A
+successful authorized update changes the instructions loaded by future Hunts.
+A successful deletion removes those active instructions; it does not leave a
+hidden operator baseline in force. Existing Hunt admission snapshots and revision
+history remain immutable. No additional UI save is required.
 
-## Operator instructions and advisory drafts
+Use `purpose: knowledge` on those same capabilities to create, update or remove
+learned context. Future Hunts automatically receive that context in
+`target_skill.advisory`, including its writer, source Hunt, digest and timestamp.
+It is clearly advisory even when it contains instructions copied from target
+responses. Removing knowledge does not erase the operator's instructions, and
+removing instructions does not discard useful learning. The editor and Hunt
+review show the two sections separately.
 
-The existing `target_skill` record retains an `operator_snapshot` alongside the
-latest editable revision. This is not a second target or methodology registry.
-Hunt can create/update/delete advisory drafts without extra confirmation, subject
-to the existing metadata opt-out. It cannot replace/delete operator directives.
-Twenty-revision history churn cannot displace the operator snapshot.
+The API derives writer and delegation provenance. Client-supplied writer, trust,
+or delegation fields are rejected. Saved operator opt-outs still stop metadata
+writes. Neither instructions nor learning can create testing authority, credential
+grants, or budget increases. Broad instruction delegation intentionally permits
+broad instruction edits: this is not a claim that a compromised delegated planner
+cannot abuse the permission that the operator chose to give it.
 
-New Hunts load operator-written instructions as `target_skill.skill`. A later
-Hunt-written or unknown-origin draft contributes only an `advisory` reference:
-revision, content digest and a validated source Hunt UUID. Its title/body are not
-automatically inserted into another planner's context. `targets.skill.read`
-retains useful drafts, labels their trust and returns operator instructions
-separately. Editable revision and operator instruction version can differ.
+### Example
 
-The existing editor displays this distinction and permits explicit operator save
-of an unchanged reviewed draft. The API derives writer identity; caller-supplied
-writer/trust/baseline fields are rejected. Operator deletion clears the baseline
-even after Hunt deleted its draft. Old unknown-origin text remains advisory;
-already-saved Hunt snapshots are not retroactively rewritten.
+```json
+{
+  "idempotency_key": "target-learning-001",
+  "input": {
+    "purpose": "knowledge",
+    "expected_revision": 3,
+    "methodology": "The management API is on port 8443; the selected viewer account cannot open the admin screen."
+  }
+}
+```
 
-This prevents automatic trust promotion, not every possible model response to an
-explicitly read malicious draft. Hashes identify content; they are not signatures
-against a database administrator or an unrestricted same-UID process.
+Send to the current Hunt's `targets.skill.create` capability when no knowledge
+section exists, or `targets.skill.update` otherwise. Read current state through
+`targets.skill.read`; revisions are shared across the two sections. For an
+operator-directed instruction change, use the default `instructions` purpose.
 
 ## Optional scoped planner listener
 
-`api/hunt/planner_gateway.py` is an authenticated ASGI ingress to the **existing
-API**, not another executor. The default operator listener is unchanged. The
-additional listener exposes one already-admitted Hunt using an expiring lease.
-It permits existing run-scoped capability/query/candidate/skill/lifecycle routes,
-while the canonical registry and runtime still validate all action parameters,
-permissions, credentials, budgets and proof. It does not expose operator target
-authorization, sharing, instruction promotion, budget increases, per-action
-approval, unrelated Hunts or arbitrary future routes.
+`api/hunt/planner_gateway.py` wraps the existing API, not another executor. An
+operator-created expiring lease permits one already-admitted Hunt. The canonical
+runtime still validates capability inputs, authorization, credentials, budgets
+and proof. The listener does not expose operator authorization, sharing, budget
+increases, unrelated Hunts or arbitrary new routes.
 
-A server-owned lease file is revalidated on every request and again after body
-upload. Removal, disablement, expiry or credential rotation revokes new ingress
-requests. Dropping the bearer never falls back to operator access. Caller
-credentials and role headers are stripped before dispatch; planner identity is
-server-derived. Ingress logs contain IDs/status, not bearer values or bodies.
-Bodies and upload duration are bounded. The grant file is owner-only, non-symlink,
-size-limited data containing a bearer hash. No lease-issuing HTTP route exists.
-
-### Deployment
-
-Admit the Hunt through the trusted operator workflow. Under the listener service's
-OS identity, create the lease (default eight hours; maximum 24 hours):
+Under the listener service's OS identity, create a lease:
 
 ```bash
 PYTHONPATH=api:scanner python -m hunt.planner_lease \
@@ -77,8 +71,7 @@ PYTHONPATH=api:scanner python -m hunt.planner_lease \
   --token-file /secure-transfer/planner-token
 ```
 
-The command prints no bearer. In the API environment, start the separate listener
-with a certificate trusted by the planner client:
+Start the optional listener in the API environment with trusted TLS material:
 
 ```bash
 SHAKERSCAN_HUNT_PLANNER_GRANT_FILE=/run/shakerscan/planner-grant.json \
@@ -87,48 +80,49 @@ SHAKERSCAN_HUNT_PLANNER_GRANT_FILE=/run/shakerscan/planner-grant.json \
   --ssl-certfile /run/tls/server.pem --ssl-keyfile /run/tls/server-key.pem
 ```
 
-Transfer **only the bearer file** to the isolated planner environment. The shipped
-API helper uses `SHAKERSCAN_API_TOKEN_FILE` and the listener's HTTPS URL. Supply the
-admitted Hunt ID; the planner does not start a second Hunt. Normal authorized
-capabilities and metadata drafts need no new approval prompts.
+Transfer only the bearer file to the planner; the existing API helper uses
+`SHAKERSCAN_API_TOKEN_FILE`. The planner must not independently reach the ordinary
+operator API, database, grant file or operator filesystem. This listener does not
+install network/filesystem isolation. Normal trusted-local operation is unchanged.
 
-**Required boundary:** the planner must not independently reach the ordinary
-operator API, database, grant file, private keys, operator credentials or host
-filesystem. Constrain planner egress to this listener and its selected model
-provider. Do not mount the operator's connection configuration. Run the listener
-outside the planner environment. The lease grants ingress access only, never
-additional testing authority. Deleting it revokes new requests; use the existing
-Hunt cancellation path for already-running work. Lease revocation does not stop
-in-flight execution or an external model process.
+Lease removal, expiry or disablement rejects new requests, including a revocation
+observed during body upload. It does not stop work already dispatched: use Hunt
+cancellation for that. Logs omit raw bearer values and request bodies.
 
-This PR does not install a launcher sandbox or container/network isolation policy.
-An unrestricted local coding agent remains part of the trusted operator
-installation. The opt-in listener is not evidence that an arbitrary deployment
-satisfies AISVS policy-decision isolation.
+## Verification scope
 
-## Verification and standards mapping
+`test_target_instruction_trust.py` tests effective update/delete, automatic
+learning, malformed provenance, history churn and immutable snapshots with the
+real writer/projection and a storage double.
 
-| Property | Tests | AISVS reference |
-| --- | --- | --- |
-| Drafts cannot automatically become operator intent or erase operator directives | `test_target_instruction_trust.py`, `test_target_asset_instruction_trust_postgres.py`, four-kind admission regression | v1.0-C9.2.5; C8.2.3 analogy |
-| Caller cannot claim operator provenance in instruction JSON | Strict model and negative writes | v1.0-C12.5.4, partial provenance |
-| Scoped caller cannot issue approvals or use another Hunt | `test_hunt_planner_gateway.py` | v1.0-C9.5.1, v1.0-C9.5.3 |
-| Expired/revoked leases cannot reach dispatch | Ingress tests, including revocation during upload | v1.0-C9.5.2, bounded delegation |
-| Actual CLI uses HTTPS without self-authorization | `test_hunt_planner_gateway_https.py` | Ingress/transport acceptance |
-| Unchanged drafts can be deliberately saved by the operator | UI state tests and `SKILL-007` browser test | v1.0-C9.2.5 |
+`test_target_asset_planner_runtime_postgres.py` exercises the actual FastAPI app
+behind the gateway, actual Hunt admission, capability execution, PostgreSQL
+mutations, action receipts, budget settlement, idempotency and revocation. It
+uses controlled DNS, not a success-returning backend. Existing PostgreSQL tests
+cover admission for web, API, network and device targets. The required runtime CI
+job rejects skipped tests. The existing real-HTTPS CLI test remains transport
+coverage, not a substitute for this runtime coverage.
 
-The PostgreSQL tests exercise actual schema/writes and admission projections, not
-an external model. The HTTPS test uses the shipped CLI and real TLS listener with
-a counting backend, not a live vulnerability scan or deployment firewall test.
-MCP component integrity, model/provider-change evaluation, complete process
-shutdown and cryptographic audit chains remain outside this patch. Existing
-security gates are not weakened.
+UI tests cover automatically available learning, effective delegated instructions,
+editing and deletion without an extra promotion step. Committed public API/Hunt
+contracts, inventory and installer hashes are regenerated from their canonical
+sources and checked rather than hand-edited.
 
-Mappings use the released AISVS 1.0, not development guidance:
-[C9](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C09-Orchestration-and-Agentic-Action.md),
-[C8](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C08-Memory-Embeddings-and-Vector-Database.md),
-[C5](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C05-Access-Control-and-Identity.md),
-[C12](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C12-Monitoring-and-Logging.md).
-C8 is an analogy for structured target knowledge, not a claim to implement a
-vector store. OWASP AISVS content is CC BY-SA 4.0; requirements are linked rather
-than vendored here.
+Real-time SSH command execution, client output streaming, interactive terminals
+and worker session affinity are not delivered by this instruction/learning
+follow-up. Existing `ssh.connect` remains authentication-only. No fast command
+execution claim is based on its login timing.
+
+## AISVS mapping and limits
+
+The released AISVS 1.0 requirements guide this work:
+[C9](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C09-Orchestration-and-Agentic-Action.md)
+for runtime authorization and controlled self-modification;
+[C5](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C05-Access-Control-and-Identity.md)
+for authorization separation;
+[C8](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C08-Memory-Embeddings-and-Vector-Database.md)
+by analogy for structured knowledge provenance;
+[C12](https://github.com/OWASP/AISVS/blob/main/1.0/en/0x10-C12-Monitoring-and-Logging.md)
+for provenance and observability. Requirements are linked, not vendored; OWASP
+AISVS is CC BY-SA 4.0. No vector-store conformance, complete prompt-injection
+resistance, isolated local planner, or live-model benchmark is claimed.
