@@ -80,6 +80,19 @@ def test_initializer_creates_private_api_owned_key_before_worker_start(monkeypat
     assert _reload_secret_store().decrypt_secret(ciphertext) == "fixture-canary"
 
 
+
+def test_initializer_failure_names_the_key_file_and_never_replaces_it(monkeypatch, tmp_path):
+    monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
+    path = tmp_path / "credential.key"
+    path.write_text("")  # damaged: an empty key must never be silently regenerated
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", str(path))
+    ss = _reload_secret_store()
+    with pytest.raises(ss.SecretStoreUnavailable) as failure:
+        ss.initialize_storage_owner(os.getuid(), os.getgid())
+    assert str(path) in str(failure.value) and "Restore it" in str(failure.value)
+    assert path.read_text() == ""
+
+
 @pytest.fixture(autouse=True)
 def reset_key_cache(monkeypatch):
     import secret_store

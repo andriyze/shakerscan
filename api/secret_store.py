@@ -117,7 +117,11 @@ def encryption_enabled() -> bool:
 def initialize_storage_owner(uid: int, gid: int) -> None:
     """Create the stable key before consumers start and retain private ownership."""
     if not encryption_enabled():
-        raise SecretStoreUnavailable("credential encryption initialization failed")
+        # Name the file and the safe recovery; never print key material.
+        raise SecretStoreUnavailable(
+            f"credential encryption key {_key_file_path()} could not be created or read. Restore it "
+            "from your safe copy; removing it creates a new key and stored credentials, request "
+            "collections and sessions can no longer be decrypted")
     if not str(os.environ.get("AI_CREDENTIAL_ENC_KEY", "") or "").strip():
         for path in (_key_file_path(), _key_file_path() + ".lock"):
             os.chown(path, int(uid), int(gid))
