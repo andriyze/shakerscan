@@ -19,6 +19,7 @@ export interface HuntTransaction {
   elapsed_ms?: number | null
   error?: string | null
   truncated?: boolean
+  hunt_action_id?: string | null
   request?: Message
   response?: Message
 }
@@ -69,27 +70,25 @@ function MessageView({ title, message }: { title: string; message?: Message }) {
   </div>
 }
 
+export interface HuntArchive {
+  rows: HuntTransaction[]
+  total: number
+  fidelity: { value: string; detail: string } | null
+  loading: boolean
+  error: string | null
+  loadMore: () => Promise<void>
+}
+
 /**
- * Every HTTP request a Hunt sent, shown up front: method, status, path, the capability that sent it,
- * and the masked request and response on demand. Reads the redacted archive; never the raw HAR.
+ * The Hunt's redacted request archive, auto-loading up to AUTO_LOAD rows. `version` changes when the
+ * run records more work, so a live Hunt refreshes without clearing the rows being read.
  */
-export function HuntRequestsPanel({ huntId }: { huntId: string }) {
+export function useHuntTransactions(huntId: string, version: number): HuntArchive {
   const [rows, setRows] = useState<HuntTransaction[]>([])
   const [total, setTotal] = useState(0)
   const [fidelity, setFidelity] = useState<{ value: string; detail: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
-  const [search, setSearch] = useState('')
-  const [method, setMethod] = useState('')
-  const [statusFilter, setStatusFilter] = useState('')
-  const [capability, setCapability] = useState('')
-  const [open, setOpen] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    const timer = setTimeout(() => setSearch(query.trim().toLowerCase()), 200)
-    return () => clearTimeout(timer)
-  }, [query])
 
   // Filters run in the browser over redacted rows: a server-side URL search would match the raw stored
   // URL and could confirm a value the redacted view masks.
@@ -128,16 +127,80 @@ export function HuntRequestsPanel({ huntId }: { huntId: string }) {
     }
     void loadInitial()
     return () => { cancelled = true }
-  }, [fetchPage])
+  }, [fetchPage, version])
 
-  async function loadMore() {
+  const loadMore = useCallback(async () => {
     setLoading(true)
     try {
       const archive = await fetchPage(rows.length)
       setRows(current => [...current, ...(archive.transactions || [])])
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load more requests') }
     finally { setLoading(false) }
-  }
+  }, [fetchPage, rows.length])
+
+  return { rows, total, fidelity, loading, error, loadMore }
+}
+
+/** One request: a summary line that expands to the masked request and response. */
+export function RequestRow({ row, index, expanded, onToggle, showCapability = true }: {
+  row: HuntTransaction; index: number; expanded: boolean; onToggle: () => void; showCapability?: boolean
+}) {
+  const { host, path } = splitUrl(row.url)
+  return <li>
+    <button type="button" onClick={onToggle} aria-expanded={expanded}
+      className={`grid w-full grid-cols-[1rem_4rem_3rem_minmax(0,1fr)] items-center gap-3 px-4 py-2 text-left hover:bg-gray-800/30 ${showCapability ? 'lg:grid-cols-[1rem_4rem_3rem_minmax(0,1fr)_12rem_5rem]' : 'lg:grid-cols-[1rem_4rem_3rem_minmax(0,1fr)_5rem]'}`}>
+      {expanded ? <ChevronDown className="h-4 w-4 text-gray-500" aria-hidden="true" /> : <ChevronRight className="h-4 w-4 text-gray-500" aria-hidden="true" />}
+      <MethodBadge method={row.method || 'GET'} />
+      <span className={`font-mono text-xs font-semibold ${statusTone(row)}`}>{row.status_code ?? 'ERR'}</span>
+      <span className="min-w-0">
+        <span className="block truncate font-mono text-xs text-gray-100" title={row.url || undefined}>{path}</span>
+        <span className="block truncate text-[11px] text-gray-500">{host}{row.error ? ` · ${row.error}` : ''}{row.truncated ? ' · body truncated' : ''}</span>
+      </span>
+      {showCapability && <span className="hidden truncate text-xs text-gray-400 lg:block" title={row.capability_name || row.adapter || undefined}>
+        {row.capability_name || row.adapter || 'unattributed'}{row.principal_slot ? <span className="text-gray-600"> · {row.principal_slot}</span> : null}
+      </span>}
+      <span className="hidden text-right text-xs text-gray-500 lg:block">{row.elapsed_ms != null ? `${row.elapsed_ms} ms` : ''}</span>
+    </button>
+    {expanded && <div className="grid gap-4 border-t border-gray-800/70 bg-gray-950/40 px-4 py-3 lg:grid-cols-2">
+      <p className="select-all break-all rounded-md bg-black/30 px-2 py-1.5 font-mono text-xs text-gray-200 lg:col-span-2">{(row.method || 'GET').toUpperCase()} {row.url || 'URL unavailable'}</p>
+      <MessageView title={`#${index + 1} request`} message={row.request} />
+      <MessageView title="Response" message={row.response} />
+      <p className="text-[11px] text-gray-500 lg:col-span-2">
+        {row.capability_name || row.adapter || 'Unattributed'}{row.principal_slot ? ` · ${row.principal_slot} principal` : ''}
+        {row.started_at ? ` · ${new Date(row.started_at).toLocaleString()}` : ''}
+        {row.request?.sha256 ? ` · request SHA-256 ${row.request.sha256.slice(0, 16)}…` : ''}
+      </p>
+    </div>}
+  </li>
+}
+
+export function useExpandedSet() {
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  const toggle = useCallback((id: string) => setOpen(current => {
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  }), [])
+  return { open, toggle }
+}
+
+/**
+ * Every HTTP request a Hunt sent: method, status, path, the capability that sent it, and the masked
+ * request and response on demand. Reads the redacted archive; never the raw HAR.
+ */
+export function HuntRequestsPanel({ archive }: { archive: HuntArchive }) {
+  const { rows, total, fidelity, loading, error, loadMore } = archive
+  const [query, setQuery] = useState('')
+  const [search, setSearch] = useState('')
+  const [method, setMethod] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [capability, setCapability] = useState('')
+  const { open, toggle } = useExpandedSet()
+
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(query.trim().toLowerCase()), 200)
+    return () => clearTimeout(timer)
+  }, [query])
 
   const capabilityOf = (row: HuntTransaction) => row.capability_name || row.adapter || 'unattributed'
   const capabilities = useMemo(() => [...new Set(rows.map(capabilityOf))].sort(), [rows])
@@ -148,9 +211,8 @@ export function HuntRequestsPanel({ huntId }: { huntId: string }) {
     && (!search || [row.url, row.method, row.status_code, capabilityOf(row), row.principal_slot, row.error]
       .some(value => String(value ?? '').toLowerCase().includes(search)))), [rows, method, statusFilter, capability, search])
   const counts = useMemo(() => Object.fromEntries(STATUS_CLASSES.map(kind => [kind, rows.filter(row => statusClass(row) === kind).length])), [rows])
-  const toggle = (id: string) => setOpen(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
 
-  return <Card id="requests" className="scroll-mt-6 p-0">
+  return <Card className="p-0">
     <div className="flex flex-wrap items-center gap-3 border-b border-gray-800 p-4">
       <h2 className="flex items-center gap-2 font-medium text-white"><ArrowUpDown className="h-4 w-4 text-blue-300" aria-hidden="true" />HTTP requests
         <span className="rounded-full bg-gray-800 px-2 py-0.5 text-xs text-gray-400">{total}</span></h2>
@@ -185,36 +247,7 @@ export function HuntRequestsPanel({ huntId }: { huntId: string }) {
       : loading && !rows.length ? <p role="status" className="p-6 text-center text-sm text-gray-400">Loading requests…</p>
       : !visible.length ? <p className="p-6 text-center text-sm text-gray-500">{rows.length ? 'No requests match these filters.' : 'This Hunt recorded no HTTP requests.'}</p>
       : <ol className="divide-y divide-gray-800/70" aria-label="HTTP requests">
-        {visible.map((row, index) => {
-          const { host, path } = splitUrl(row.url)
-          const expanded = open.has(row.id)
-          return <li key={row.id}>
-            <button type="button" onClick={() => toggle(row.id)} aria-expanded={expanded}
-              className="grid w-full grid-cols-[1rem_4rem_3rem_minmax(0,1fr)] items-center gap-3 px-4 py-2 text-left hover:bg-gray-800/30 lg:grid-cols-[1rem_4rem_3rem_minmax(0,1fr)_12rem_5rem]">
-              {expanded ? <ChevronDown className="h-4 w-4 text-gray-500" aria-hidden="true" /> : <ChevronRight className="h-4 w-4 text-gray-500" aria-hidden="true" />}
-              <MethodBadge method={row.method || 'GET'} />
-              <span className={`font-mono text-xs font-semibold ${statusTone(row)}`}>{row.status_code ?? 'ERR'}</span>
-              <span className="min-w-0">
-                <span className="block truncate font-mono text-xs text-gray-100" title={row.url || undefined}>{path}</span>
-                <span className="block truncate text-[11px] text-gray-500">{host}{row.error ? ` · ${row.error}` : ''}{row.truncated ? ' · body truncated' : ''}</span>
-              </span>
-              <span className="hidden truncate text-xs text-gray-400 lg:block" title={row.capability_name || row.adapter || undefined}>
-                {row.capability_name || row.adapter || 'unattributed'}{row.principal_slot ? <span className="text-gray-600"> · {row.principal_slot}</span> : null}
-              </span>
-              <span className="hidden text-right text-xs text-gray-500 lg:block">{row.elapsed_ms != null ? `${row.elapsed_ms} ms` : ''}</span>
-            </button>
-            {expanded && <div className="grid gap-4 border-t border-gray-800/70 bg-gray-950/40 px-4 py-3 lg:grid-cols-2">
-              <p className="select-all break-all rounded-md bg-black/30 px-2 py-1.5 font-mono text-xs text-gray-200 lg:col-span-2">{(row.method || 'GET').toUpperCase()} {row.url || 'URL unavailable'}</p>
-              <MessageView title={`#${index + 1} request`} message={row.request} />
-              <MessageView title="Response" message={row.response} />
-              <p className="text-[11px] text-gray-500 lg:col-span-2">
-                {row.capability_name || row.adapter || 'Unattributed'}{row.principal_slot ? ` · ${row.principal_slot} principal` : ''}
-                {row.started_at ? ` · ${new Date(row.started_at).toLocaleString()}` : ''}
-                {row.request?.sha256 ? ` · request SHA-256 ${row.request.sha256.slice(0, 16)}…` : ''}
-              </p>
-            </div>}
-          </li>
-        })}
+        {visible.map((row, index) => <RequestRow key={row.id} row={row} index={index} expanded={open.has(row.id)} onToggle={() => toggle(row.id)} />)}
       </ol>}
     {rows.length > 0 && <div className="flex items-center justify-between border-t border-gray-800 px-4 py-2.5 text-xs text-gray-500">
       <span>{visible.length} shown{rows.length < total ? ` · filtering the first ${rows.length} of ${total}` : ''}</span>

@@ -22,10 +22,15 @@ test('Hunt explains why it cannot start before privileged prerequisites are read
   assert.match(hunt, /<p role="alert"/)
 })
 
-test('Hunt presents compact adaptive methodologies without preloading the catalog', () => {
-  assert.match(hunt, />Methodologies</)
-  assert.match(hunt, /At most three suggestions are returned; methodology bodies are never preloaded\./)
-  assert.match(hunt, /applying one does not grant or restrict the Hunt&apos;s existing capabilities/)
-  assert.match(hunt, /suggestHuntSkills\(hunt\.hunt_id\)/)
-  assert.doesNotMatch(hunt, /map\(.*methodology/i)
+test('a Hunt run names the methodologies it used without loading or suggesting any', () => {
+  // Suggestions are planner context the terminal agent requests itself; the operator view only
+  // reports which methodologies the run bound, by title.
+  const details = readFileSync(path.join(root, 'src/components/hunt/HuntDetails.tsx'), 'utf8')
+  const runView = readFileSync(path.join(root, 'src/components/hunt/HuntRunView.tsx'), 'utf8')
+  assert.match(details, /Methodologies used/)
+  assert.match(details, /skill\.title/)
+  for (const source of [hunt, details, runView]) {
+    assert.doesNotMatch(source, /suggestHuntSkills|\/skills\/[^'"`]*\/read/)
+    assert.doesNotMatch(source, /map\(.*methodology/i)
+  }
 })

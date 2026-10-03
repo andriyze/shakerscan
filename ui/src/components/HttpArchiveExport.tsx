@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
@@ -97,12 +97,15 @@ export default function HttpArchiveExport({
   ownerId,
   compact = false,
   browse = true,
+  variant = 'card',
 }: {
   ownerKind: 'scan' | 'hunt'
   ownerId: string
   compact?: boolean
   /** False when the page already lists the calls, leaving only the exports. */
   browse?: boolean
+  /** 'menu' renders only an Export button whose menu offers the same downloads. */
+  variant?: 'card' | 'menu'
 }) {
   const toast = useToast()
   const [downloading, setDownloading] = useState<DownloadKind | null>(null)
@@ -114,6 +117,8 @@ export default function HttpArchiveExport({
   const [method, setMethod] = useState('')
   const [statusCode, setStatusCode] = useState('')
   const [offset, setOffset] = useState(0)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   const ownerPath = ownerKind === 'scan' ? 'scans' : 'hunts'
 
   const archiveUrl = (format: ArchiveFormat, pageOffset = 0) => {
@@ -284,6 +289,40 @@ export default function HttpArchiveExport({
       )}
     </>
   )
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', close)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', close) }
+  }, [menuOpen])
+
+  if (variant === 'menu') {
+    const item = 'flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left hover:bg-gray-800 disabled:opacity-50'
+    const choose = (action: () => Promise<void>) => { setMenuOpen(false); void action() }
+    return <div ref={menuRef} className="relative">
+      <Button size="sm" variant="secondary" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)} loading={downloading !== null}>
+        <Download className="h-4 w-4" />Export
+      </Button>
+      {menuOpen && <div role="menu" aria-label="Export" className="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-gray-700 bg-gray-900 p-1 shadow-xl shadow-black/40">
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('transactions'))}>
+          <span className="text-sm text-gray-100">Requests JSON</span>
+          <span className="text-xs text-gray-500">Masked; safe to share</span>
+        </button>
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har'))}>
+          <span className="text-sm text-amber-200">{`Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}</span>
+          <span className="text-xs text-gray-500">Verbatim traffic for Burp or replay; sensitive</span>
+        </button>
+        {ownerKind === 'hunt' && <button type="button" role="menuitem" className={item} onClick={() => choose(downloadHuntRecord)}>
+          <span className="text-sm text-gray-100">Full Hunt record</span>
+          <span className="text-xs text-gray-500">Decisions, actions and debrief as JSON</span>
+        </button>}
+      </div>}
+    </div>
+  }
 
   if (compact) return <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">{body}</div>
   return <Card className="mb-6 p-4">{body}</Card>

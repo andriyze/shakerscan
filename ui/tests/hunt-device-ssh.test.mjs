@@ -5,6 +5,10 @@ import test from 'node:test'
 
 const root = path.resolve(import.meta.dirname, '..')
 const page = fs.readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
+const runView = ['HuntRunView', 'HuntResults', 'HuntTimeline', 'HuntDetails', 'huntFormat'].map((name) => {
+  const file = name === 'huntFormat' ? `${name}.ts` : `${name}.tsx`
+  return fs.readFileSync(path.join(root, 'src/components/hunt', file), 'utf8')
+}).join('\n')
 const api = fs.readFileSync(path.join(root, 'src/lib/api.ts'), 'utf8')
 const huntClient = fs.readFileSync(path.join(root, 'src/lib/huntV2.ts'), 'utf8')
 
@@ -20,10 +24,12 @@ test('unified Hunt binds generic principal profiles without treating SSH proposa
 })
 
 test('unified Hunt renders and explicitly confirms immutable SSH command plans', () => {
-  assert.match(page, /SSH command plans/)
-  assert.match(page, /Confirm and queue these exact remote commands/)
-  assert.match(page, /expected_host_key_fingerprint/)
-  assert.match(page, /plan_digest/)
+  assert.match(runView, /SSH command plans/)
+  assert.match(runView, /Confirm and queue these exact remote commands/)
+  assert.match(runView, /expected_host_key_fingerprint/)
+  assert.match(runView, /plan_digest/)
+  // A proposed plan is a decision the operator makes at the top of the run, not in a details tab.
+  assert.match(runView, /kind === 'ssh_plan'/)
   assert.match(huntClient, /hunts\/\$\{encodeURIComponent\(huntId\)\}\/shell-plans/)
   assert.match(huntClient, /confirm_exact_commands: true/)
   assert.match(huntClient, /confirm_remote_device_effects: true/)
@@ -31,6 +37,6 @@ test('unified Hunt renders and explicitly confirms immutable SSH command plans',
 })
 
 test('active unified Hunts refresh so external planner proposals appear', () => {
-  assert.match(page, /getHuntV2\(hunt\.hunt_id\)/)
-  assert.match(page, /window\.setInterval\(refresh, 5000\)/)
+  assert.match(runView, /getHuntV2\(hunt\.hunt_id\)/)
+  assert.match(runView, /window\.setInterval\(refresh, 5000\)/)
 })

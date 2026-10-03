@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const hunt = readFileSync(path.join(root, 'src/app/hunt/page.tsx'), 'utf8')
+const runView = ['HuntRunView.tsx', 'HuntTimeline.tsx', 'HuntDetails.tsx']
+  .map((file) => readFileSync(path.join(root, 'src/components/hunt', file), 'utf8')).join('\n')
 const legacyDeviceView = readFileSync(
   path.join(root, 'src/components/history/LegacyDeviceInvestigation.tsx'),
   'utf8',
@@ -35,14 +37,18 @@ test('canonical Hunt history has durable exact-run links and audit details', () 
   assert.match(hunt, /searchParams\.get\('run'\)/)
   assert.match(hunt, /getHuntV2\(runId\)/)
   assert.match(runList, /&run=\$\{encodeURIComponent\(hunt\.hunt_id\)\}/)
-  assert.match(hunt, /Run ID/)
-  assert.match(hunt, /<Link href="\/hunt" [^>]*>.*Hunts<\/Link>/)
-  assert.match(hunt, /Capability action ledger/)
-  assert.match(hunt, /Canonical receipts and content-safe outcomes/)
-  assert.match(hunt, /action\.result\.reference_ids/)
-  assert.match(hunt, /href=\{`\/scans\/\$\{scanId\}`\}/)
-  assert.match(hunt, /href=\{`\/findings\/\$\{findingId\}`\}/)
-  assert.match(hunt, /Audit identifiers/)
+  assert.match(hunt, /<HuntRunView hunt=\{hunt\}/)
+  assert.match(runView, /Run ID/)
+  assert.match(runView, /<Link href="\/hunt" [^>]*>.*Hunts<\/Link>/)
+  assert.match(runView, /Canonical receipts and content-safe outcomes/)
+  assert.match(runView, /action\.result\.reference_ids/)
+  assert.match(runView, /href=\{`\/scans\/\$\{scanId\}`\}/)
+  assert.match(runView, /href=\{`\/findings\/\$\{findingId\}`\}/)
+  assert.match(runView, /Audit identifiers/)
+  // Each call shows what it was called with and why it failed, from the server's record export.
+  assert.match(runView, /\/hunts\/\$\{encodeURIComponent\(hunt\.hunt_id\)\}\/record/)
+  assert.match(runView, /aria-label="Called with"/)
+  assert.match(runView, /outcome\.errors\.map/)
 })
 
 test('a newly started Hunt immediately becomes a reload-safe exact-run URL', () => {
@@ -66,7 +72,7 @@ test('open Hunt sessions do not imply background network execution', async () =>
   assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /not investigate autonomously/)
   assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /not running background traffic/)
   assert.match(HUNT_SESSION_NON_AUTONOMOUS_NOTICE, /only when your coding agent submits/)
-  assert.match(hunt, /HUNT_SESSION_NON_AUTONOMOUS_NOTICE/)
+  assert.match(runView, /HUNT_SESSION_NON_AUTONOMOUS_NOTICE/)
 })
 
 test('the legacy device investigation view is history only', async () => {
