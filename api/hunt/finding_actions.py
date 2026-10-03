@@ -44,7 +44,7 @@ def _bounded_text(value: Any, label: str, *, maximum: int, required: bool = Fals
     return str(redact_text(text)) if text else None
 
 
-def _finding_url(target_url: str, path: Any) -> str:
+def _finding_url(target_url: str, path: Any, observed_urls: Sequence[str] = ()) -> str:
     value = str(path or "").strip()
     if not value:
         return target_url
@@ -52,14 +52,28 @@ def _finding_url(target_url: str, path: Any) -> str:
         raise HuntFindingActionError("path exceeds 2000 characters")
     try:
         base = urllib.parse.urlsplit(target_url)
+        def origin(url: str) -> tuple[str, str | None, int | None]:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.username or parsed.password:
+                raise ValueError("userinfo is not allowed")
+            return parsed.scheme.lower(), parsed.hostname, parsed.port or ({"http": 80, "https": 443}.get(parsed.scheme.lower()))
+        observed = {origin(url) for url in observed_urls if urllib.parse.urlsplit(url).hostname == base.hostname}
+        if base.scheme not in {"http", "https"} and not urllib.parse.urlsplit(value).scheme:
+            if len(observed) != 1:
+                raise HuntFindingActionError("Use an absolute URL for an evidenced HTTP service")
+            scheme, host, port = next(iter(observed))
+            host = f"[{host}]" if host and ":" in host else host
+            target_url = f"{scheme}://{host}:{port}/"
         resolved = urllib.parse.urlsplit(urllib.parse.urljoin(target_url, value))
-        same_port = resolved.port == base.port
+        permitted = origin(urllib.parse.urlunsplit(resolved)) in {origin(target_url), *observed}
+    except HuntFindingActionError:
+        raise
     except ValueError as exc:
         raise HuntFindingActionError("Finding path is not a valid target URL") from exc
     if (
         resolved.scheme.lower() not in {"http", "https"}
         or resolved.hostname != base.hostname
-        or not same_port
+        or not permitted
     ):
         raise HuntFindingActionError("Finding path must remain on the Hunt target origin")
     return urllib.parse.urlunsplit(
@@ -167,7 +181,13 @@ async def create_hunt_finding(
                 values=values.get("evidence_action_ids") or (),
             )
             target_url = _target_url(run)
-            finding_url = _finding_url(target_url, values.get("path"))
+            service_evidence = await conn.fetch(
+                """SELECT DISTINCT url FROM http_transactions
+                   WHERE hunt_run_id=$1 AND hunt_action_id=ANY($2::uuid[])
+                     AND status_code IS NOT NULL AND error IS NULL""",
+                hunt_uuid, [uuid.UUID(value) for value in evidence_action_ids],
+            )
+            finding_url = _finding_url(target_url, values.get("path"), [row["url"] for row in service_evidence])
             fingerprint = hashlib.sha256(
                 json.dumps(
                     {

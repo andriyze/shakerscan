@@ -8,6 +8,8 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+CONTROL_TOOLS = frozenset({'shakerscan_hunt_ssh_cancel', 'shakerscan_hunt_cancel'})
+
 
 def serve(server, stdin, stdout, *, limit, error_type, error_response):
     lock = threading.Lock()
@@ -27,8 +29,12 @@ def serve(server, stdin, stdout, *, limit, error_type, error_response):
             response = error_response(request.get('id'),error_type(-32603,'MCP request failed'))
         if response is not None:
             emit(response)
-    with ThreadPoolExecutor(max_workers=8,thread_name_prefix='hunt-mcp') as pool:
+    # Cancelling must remain responsive when execution workers and their bounded queue are full.
+    # The separate lane is bounded too; both still use the same server validation and output lock.
+    with ThreadPoolExecutor(max_workers=8,thread_name_prefix='hunt-mcp') as pool, \
+            ThreadPoolExecutor(max_workers=2,thread_name_prefix='hunt-mcp-control') as control_pool:
         pending = set()
+        control_pending = set()
         while True:
             line = stdin.readline(limit+1)
             if not line:
@@ -46,11 +52,15 @@ def serve(server, stdin, stdout, *, limit, error_type, error_response):
                 emit(error_response(None,exc))
                 continue
             pending = {task for task in pending if not task.done()}
+            control_pending = {task for task in control_pending if not task.done()}
             if request.get('method')=='tools/call':
-                if len(pending)>=32:
+                params = request.get('params')
+                control = isinstance(params, dict) and isinstance(params.get('name'), str) and params['name'] in CONTROL_TOOLS
+                tasks, executor, cap = (control_pending, control_pool, 8) if control else (pending, pool, 32)
+                if len(tasks)>=cap:
                     emit(error_response(request.get('id'),error_type(-32009,'Too many concurrent MCP calls')))
                 else:
-                    pending.add(pool.submit(handle,request))
+                    tasks.add(executor.submit(handle,request))
             else:
                 handle(request)
     return 0

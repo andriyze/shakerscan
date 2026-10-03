@@ -65,6 +65,20 @@ def test_auto_generated_key_is_stable_and_file_is_private(monkeypatch, tmp_path)
     assert second.decrypt_secret(ciphertext) == "hunter2"
 
 
+def test_initializer_creates_private_api_owned_key_before_worker_start(monkeypatch, tmp_path):
+    monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
+    path = tmp_path / "credential.key"
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", str(path))
+    ss = _reload_secret_store()
+    ss.initialize_storage_owner(os.getuid(), os.getgid())
+    for file in (path, tmp_path / "credential.key.lock"):
+        assert file.stat().st_mode & 0o777 == 0o600
+        assert file.stat().st_uid == os.getuid()
+    ciphertext = ss.encrypt_secret("fixture-canary")
+    ss.initialize_storage_owner(os.getuid(), os.getgid())
+    assert _reload_secret_store().decrypt_secret(ciphertext) == "fixture-canary"
+
+
 def teardown_module(module):
     os.environ.pop("AI_CREDENTIAL_ENC_KEY", None)
     os.environ.pop("AI_CREDENTIAL_ENC_KEY_FILE", None)

@@ -26,7 +26,7 @@ export interface HuntActionV2 {
     budget_consumed: Record<string, number>
     budget_accounting: {
       schema_version: 'hunt-budget-settlement/v1'
-      basis: 'exact_settlement' | 'settlement_failed' | 'no_reservation' | 'legacy_reported_charge'
+      basis: 'exact_settlement' | 'conservative_settlement' | 'settlement_failed' | 'no_reservation' | 'legacy_reported_charge'
       settlement_status: string
       reservation_id?: string | null
       charge_basis: 'capability_reported_settlement' | 'conservative_full_reservation' | 'legacy_unknown' | string

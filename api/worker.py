@@ -1708,7 +1708,8 @@ def _load_runtime_ai_settings() -> dict[str, Any]:
     }
     try:
         r = get_redis()
-        overrides = _decode_redis_hash(r.hgetall(AI_SETTINGS_KEY))
+        from runtime.ai_settings_secrets import load_settings
+        overrides = load_settings(r, AI_SETTINGS_KEY)
     except Exception:
         overrides = {}
 
@@ -20367,7 +20368,7 @@ async def process_canonical_scanner_capability_job(
                 )
                 requested_budget = {
                     key: int(value)
-                    for key, value in spec.budget_cost.items()
+                    for key, value in agent_tools.canonical_hunt_scanner_budget(capability_name).items()
                     if key in limits
                 }
                 requested_budget["agent_actions"] = 1
@@ -20660,6 +20661,9 @@ async def process_canonical_scanner_capability_job(
                     capability_input, observations, target_kind=target.target_kind,
                     allowed_origins=target.allowed_origins,
                 )
+                from hunt.endpoint_knowledge import enrich_crawl_endpoints
+                await enrich_crawl_endpoints(conn, target=target, origin=execution_target,
+                    capability=capability_name, input=capability_input, records=observations)
                 persisted = await store.persist_terminal(
                     conn,
                     previous=latest,
@@ -20689,6 +20693,9 @@ async def process_canonical_scanner_capability_job(
                         reconciled,
                         reservation_id=reservation_id,
                         settlement_status="succeeded",
+                        charge_basis=("measured_wire_settlement" if
+                            execution.redacted_execution.get("wire_telemetry", {}).get("accounting_mode") == "exact"
+                            else "conservative_enforced_ceiling"),
                     ),
                     "budget_reservation_id": reservation_id,
                     "budget_reservation_state": terminal.status,
@@ -21737,6 +21744,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
     reservation_store = PostgresBudgetReservationStore()
     session_store = PostgresAuthSessionStore()
     credential_stack = AsyncExitStack()
+    execution_started = False
     worker_session = None
     secondary_worker_session = None
     private_session = None
@@ -22210,6 +22218,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     primary_headers=primary_headers,
                     secondary_headers=secondary_headers,
                     transaction_recorder=_record_call,
+                    **({"selected_object": True} if capability_input.get("mode") == "selected_object" else {}),
                 )
 
             operation = execute_authz
@@ -22288,9 +22297,6 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                 principal_slot = worker_session.metadata.principal_slot
             elif requested_principal not in {"", "anonymous", "anon", "none"}:
                 principal_slot = requested_principal
-                context_ref = _worker_hunt_profile_context(
-                    context, principal_slot, capability="http.request",
-                )
                 conn = await credential_stack.enter_async_context(db_pool.acquire())
                 authority = await validate_worker_credential_authority(
                     conn,
@@ -22301,24 +22307,13 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
                     scope_receipt_id=target.scope_receipt_id,
                     action_name="hunt.capability:http.request",
                 )
-                resolved = await credential_stack.enter_async_context(
-                    WorkerCredentialResolver().resolve(
-                        conn,
-                        profile_id=context_ref["profile_id"],
-                        target=target,
-                        capability="http.request",
-                        authority=authority,
-                    )
+                from hunt.http_principal import resolve_http_principal
+                trusted_headers, worker_session = await resolve_http_principal(
+                    conn, context=context, target=target, authority=authority,
+                    hunt_id=hunt_id, principal=principal_slot, stack=credential_stack,
+                    session_store=session_store, origin=urllib.parse.urlunsplit(
+                        (*urllib.parse.urlsplit(capability_input.get("origin") or target_url)[:2], "", "", "")),
                 )
-                if (
-                    resolved.profile.current_version
-                    != int(context_ref.get("profile_version") or 0)
-                    or resolved.profile.principal_slot != principal_slot
-                ):
-                    raise CredentialResolutionError(
-                        "managed Hunt principal changed after admission"
-                    )
-                trusted_headers = resolved.http_headers().as_dict()
             public_input = dict(capability_input)
             public_input.pop("session_ref", None)
             public_input.pop("as_principal", None)
@@ -22350,6 +22345,7 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             redacted_execution=redacted_execution,
         )
         started_at = persisted.record.started_at or datetime.now(timezone.utc)
+        execution_started = True
         execution = await _dispatch_registered_hunt_adapter(
             hunt_id=str(hunt_id),
             action_id=str(action_id),
@@ -22680,6 +22676,14 @@ async def process_canonical_http_capability_job(job_data: dict[str, Any]) -> Non
             await credential_stack.aclose()
         except Exception:  # noqa: BLE001 - cleanup must not hide a durable result
             pass
+        if persisted is not None and result.get("status") == "failed" and publish_result:
+            from hunt.worker_failure import settle_worker_failure
+            try:
+                result = await settle_worker_failure(db_pool, reservation_store, persisted,
+                    result=result, target=target, policy=policy, spec=spec,
+                    execution_started=execution_started)
+            except Exception as exc:
+                print(f"[hunt] failure settlement failed: {type(exc).__name__}", flush=True)
         if job_id and publish_result:
             redis_client.set(
                 result_key,

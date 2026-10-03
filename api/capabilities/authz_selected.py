@@ -29,7 +29,7 @@ MAX_BODY_BYTES = 262_144
 DEADLINE_SECONDS = 50
 
 
-def selected_object_pair(routes: Sequence[str]) -> tuple[str, str] | None:
+def selected_object_pair(routes: Sequence[str], *, explicit: bool = False) -> tuple[str, str] | None:
     """Recognize an exact pair, not two guesses about collection existence.
 
     The existing capability's ordered routes remain the only wire input. A
@@ -53,7 +53,8 @@ def selected_object_pair(routes: Sequence[str]) -> tuple[str, str] | None:
                 or "//" in url.path or any(unquote(s) in {".", ".."} for s in url.path.split("/"))):
             return None
         parent, _, identifier = url.path.rstrip("/").rpartition("/")
-        if not parent or not any(p.fullmatch(identifier) for p in _IDENTIFIERS):
+        if not parent or not (any(p.fullmatch(identifier) for p in _IDENTIFIERS)
+                or explicit and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}", identifier)):
             return None
         parts.append(((url.scheme, url.hostname.lower(), port, parent, url.path.endswith("/")), identifier))
     if parts[0][0] != parts[1][0] or parts[0][1] == parts[1][1]:
@@ -143,9 +144,10 @@ async def compare_selected_objects(
     routes: Sequence[str], *, fetcher: Fetch,
     primary_headers: Mapping[str, str], secondary_headers: Mapping[str, str],
     cancelled: Callable[[], bool] = lambda: False,
+    explicit: bool = False,
 ) -> dict[str, Any]:
     """Perform at most four GETs; return bounded metadata, never response contents."""
-    ids = selected_object_pair(routes)
+    ids = selected_object_pair(routes, explicit=explicit)
     if ids is None:
         raise ValueError("selected-object comparison requires two distinct same-collection object GETs")
     if not primary_headers or not secondary_headers or dict(primary_headers) == dict(secondary_headers):

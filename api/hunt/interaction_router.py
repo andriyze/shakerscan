@@ -1778,7 +1778,9 @@ async def _execute_hunt_capability_lifecycle(
                 }
             else:
                 charges = {
-                    key: int(value) for key, value in spec.budget_cost.items() if key in limits
+                    key: int(value) for key, value in (
+                        agent_tools.canonical_hunt_scanner_budget(name) if is_scanner else spec.budget_cost
+                    ).items() if key in limits
                 }
                 if name == "authz.verify":
                     from capabilities.authz_modes import authz_call_budget
@@ -3255,7 +3257,10 @@ async def _execute_hunt_capability_lifecycle(
                     action_id, status, json.dumps(_arsenal_routes._redact_agent_payload(receipt_payload), default=str),
                     _optional_uuid(receipt_id) if receipt_id else None,
                 )
-        lifecycle.advance("settled")
+        if not worker_durable_budget or (isinstance(receipt_payload, Mapping) and receipt_payload.get("durable_budget_settled") is True):
+            lifecycle.advance("settled")
+        else:
+            lifecycle.mark_failure(RuntimeError("worker settlement is incomplete"))
     canonical_action_result = (
         capability_execution.public_dict()
         if capability_execution is not None

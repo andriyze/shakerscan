@@ -741,6 +741,14 @@ def validate_private_interactsh_server(url: Any) -> str | None:
     return f"{scheme}://{authority}"
 
 
+def canonical_hunt_scanner_budget(capability_name: str) -> dict[str, int]:
+    """Admission ceiling for the exact server-owned Hunt scanner selection."""
+    budget = dict(CAPABILITY_REGISTRY.require(capability_name).budget_cost)
+    if capability_name == "templates.scan":
+        budget["http_requests"] = canonical_passive_nuclei_request_upper_bound()
+    return budget
+
+
 def canonical_hunt_scanner_options(
     capability_name: str,
     planner_input: Mapping[str, Any],

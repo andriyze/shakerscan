@@ -3,14 +3,14 @@ id: skill.network.smart-tv-assessment
 name: smart-tv-network-and-application-assessment
 title: 34. Smart TV Network and Application Assessment
 description: Assess smart TVs, connected displays and media appliances through service discovery, management-interface testing, retained LAN descriptors and evidence-led platform review.
-version: 1.0.0
+version: 1.1.0
 kind: specialist
 phase: discovery
 risk: medium
 support: supported
 target_kinds: [network, device]
 capabilities: [http.request]
-optional_capabilities: [service.nse_check, tls.inspect, device.inspect, device.capabilities.inspect, device.scan, device.service.verify, device.ssh.propose]
+optional_capabilities: [service.nse_check, tls.inspect, device.inspect, device.capabilities.inspect, device.scan, device.service.verify, ssh.connect, ssh.exec, ssh.close, targets.actions.read, targets.actions.create, targets.skill.read, targets.skill.update]
 missing_capabilities: []
 server_enforced: [policy.evaluate]
 budget: {}
@@ -76,9 +76,19 @@ another tool. When one technique is unavailable, continue supported service and 
 Read [platform guidance](../device-hunt/references/smart-tv-platforms.md) only after evidence supports
 Android TV, Tizen or webOS. Read the [protocol/application reference](../device-hunt/references/smart-tv-protocol-application.md)
 for a relevant surface. These are hypothesis guides; the run manifest determines executable actions.
-If an SSH identity is selected and the operator requests host review, `device.scan` may select the
-fixed `ssh-authenticated-host-review` capability. `device.ssh.propose` creates a separately reviewed
-immutable SSH plan; it does not execute commands.
+If an SSH identity is selected and the operator requests host review, use `ssh.exec` for the
+requested remote commands under the stored command grant. Use the operator's advised port, the
+profile's saved port, or port 22. `ssh.connect` can establish authentication without commands;
+reuse the returned session ID for successive commands rather than reconnecting each time. Inspect
+logs over SSH while HTTP or other admitted service checks run, correlating timestamps and evidence.
+Cancel long commands through the canonical SSH action cancellation route, retain partial output,
+and report uncertain remote termination. `ssh.close` disconnects the session before changing port.
+
+Read saved target actions and fixed operator instructions at startup. Reuse suitable actions; save
+or edit reusable actions when the operator requests it. Record discoveries as advisory target
+knowledge without replacing fixed login guidance, exclusions or critical endpoint instructions.
+The fixed `device.scan` host review remains useful for a bounded posture report; it is optional
+and is not required around each direct SSH command.
 
 Report identified services, authentication coverage, device health, state-changing techniques not
 performed, protocol gaps and deterministic evidence. Explain firmware/version uncertainty and

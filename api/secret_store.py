@@ -114,6 +114,16 @@ def encryption_enabled() -> bool:
     return _get_fernet() is not None
 
 
+def initialize_storage_owner(uid: int, gid: int) -> None:
+    """Create the stable key before consumers start and retain private ownership."""
+    if not encryption_enabled():
+        raise SecretStoreUnavailable("credential encryption initialization failed")
+    if not str(os.environ.get("AI_CREDENTIAL_ENC_KEY", "") or "").strip():
+        for path in (_key_file_path(), _key_file_path() + ".lock"):
+            os.chown(path, int(uid), int(gid))
+            os.chmod(path, 0o600)
+
+
 def encrypt_secret(value: Any) -> Any:
     """Encrypt a secret for storage, failing closed when no stable key is available."""
     if value is None:
