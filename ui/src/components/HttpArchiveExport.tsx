@@ -320,9 +320,13 @@ export default function HttpArchiveExport({
           <span className="text-sm text-gray-100">Requests JSON</span>
           <span className="text-xs text-gray-500">Masked; safe to share</span>
         </button>
-        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har'))}>
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har-raw'))}>
           <span className="text-sm text-amber-200">{`Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}</span>
           <span className="text-xs text-gray-500">Verbatim traffic for Burp or replay; sensitive</span>
+        </button>
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har'))}>
+          <span className="text-sm text-gray-100">HAR 1.2 (masked)</span>
+          <span className="text-xs text-gray-500">Credentials, cookies and tokens masked; safe to share</span>
         </button>
         {ownerKind === 'hunt' && <button type="button" role="menuitem" className={item} onClick={() => choose(downloadHuntRecord)}>
           <span className="text-sm text-gray-100">Full Hunt record</span>
