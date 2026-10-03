@@ -1,0 +1,69 @@
+name: Publish reviewed SSH source objects
+
+on:
+  pull_request:
+    branches: [codex/network-worker-defaults]
+    paths: ['.github/workflows/pr297-publish-reviewed-blobs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  reviewed-source:
+    if: github.repository == 'andriyze/shakerscan' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'codex/hunt-aisvs-boundaries'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pr297-ssh-candidate-3ec8d4f972cfabffca06bd079c52c6cec2616324
+          path: candidate
+          repository: andriyze/shakerscan
+          run-id: 37092371306
+          github-token: ${{ github.token }}
+      - name: Store exact independently checked bytes; do not execute source or change refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          root = Path('candidate')
+          raw_index = (root/'index.json').read_bytes()
+          assert hashlib.sha256(raw_index).hexdigest() == '3c194ace67f636faad99de27e10e6facb6e1ef133fbedd1504fb0f3b311e0b0f'
+          index = json.loads(raw_index)
+          assert index['head_sha'] == '6edeb85e9ad66cc714ff07afcb19bde9e21af3a3'
+          assert len(index['files']) == 21
+          stored = {}
+          for name, item in index['files'].items():
+              # Artifact upload excluded this hidden path. Its exact reviewed
+              # contents will be supplied directly in the final Git tree.
+              if name == '.github/workflows/hunt-ssh-acceptance.yml':
+                  assert item['sha'] == '11a293691dae6cd7c10f09befc9b75a4c54b1cab'
+                  continue
+              assert not Path(name).is_absolute() and '..' not in Path(name).parts
+              assert name.startswith(('api/', 'scripts/', 'tests/', 'docs/', 'skills/', 'install/', 'ui/')) or name == 'AGENTS.md'
+              path = root/name
+              assert path.is_file() and not path.is_symlink() and path.stat().st_size < 5000000
+              content = path.read_bytes()
+              assert hashlib.sha256(content).hexdigest() == item['sha256']
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              assert expected == item['sha'] and item['mode'] in {'100644', '100755'}
+              payload = json.dumps({'content':base64.b64encode(content).decode(), 'encoding':'base64'}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/andriyze/shakerscan/git/blobs',
+                  data=payload, method='POST', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],
+                  'Content-Type':'application/json', 'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  assert json.load(response)['sha'] == expected
+              stored[name] = item
+          Path('reviewed-blobs.json').write_text(json.dumps({'source_head_sha':index['head_sha'], 'files':stored}, indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reviewed-ssh-blob-ids-${{ github.sha }}
+          path: reviewed-blobs.json
+          retention-days: 3
+          if-no-files-found: error
