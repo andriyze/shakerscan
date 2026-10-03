@@ -2,6 +2,8 @@
 
 import Link from '@/components/WorkspaceLink'
 import { useEffect, useMemo, useState } from 'react'
+import { Search } from 'lucide-react'
+import { CollectionViewer } from '@/components/collections/CollectionViewer'
 import {
   getRequestCollection,
   listRequestCollections,
@@ -37,6 +39,8 @@ export function RequestCollectionPicker({
   const [details, setDetails] = useState<RequestCollectionDetail[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [viewing, setViewing] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -81,6 +85,12 @@ export function RequestCollectionPicker({
     ])))
   }, [choices, onMetadataChange])
 
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  const shown = choices.filter(({ collection, selection }) => {
+    const text = `${collection.name} ${selection.name} ${selection.replay_policy}`.toLowerCase()
+    return words.every((word) => text.includes(word)) || selectedIds.includes(selection.id)
+  })
+
   function toggle(selectionId: string, checked: boolean) {
     const next = checked
       ? Array.from(new Set([...selectedIds, selectionId]))
@@ -113,7 +123,16 @@ export function RequestCollectionPicker({
         </p>
       ) : (
         <div className="space-y-2">
-          {choices.map(({ collection, selection }) => {
+          {choices.length > 4 && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-500" aria-hidden="true" />
+              <input aria-label="Search request selections" value={query} onChange={(event) => setQuery(event.target.value)}
+                placeholder={`Search ${choices.length} selections…`}
+                className="h-9 w-full rounded-lg border border-gray-700 bg-gray-900 pl-9 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-hidden" />
+            </div>
+          )}
+          {!shown.length && <p className="text-xs text-gray-500">No selections match.</p>}
+          {shown.map(({ collection, selection }) => {
             const activeUnavailable = (
               selection.replay_policy === 'confirmed_active' && !allowConfirmedActive
             )
@@ -137,6 +156,10 @@ export function RequestCollectionPicker({
                   </span>
                   <span className="mt-1 block text-xs text-gray-500">
                     {selection.selected_request_count} requests · {selection.replay_policy.replaceAll('_', ' ')} · digest {selection.selection_digest.slice(0, 12)}
+                    {' · '}
+                    <button type="button" className="text-blue-300 hover:text-blue-200" onClick={(event) => { event.preventDefault(); setViewing(collection.id) }}>
+                      View requests
+                    </button>
                   </span>
                   {activeUnavailable && (
                     <span className="mt-1 block text-xs text-amber-400">
@@ -152,6 +175,7 @@ export function RequestCollectionPicker({
       <p className="text-xs text-gray-600">
         Collection documents and environment values remain encrypted and are resolved only by the worker.
       </p>
+      <CollectionViewer collectionId={viewing} onClose={() => setViewing(null)} />
     </div>
   )
 }

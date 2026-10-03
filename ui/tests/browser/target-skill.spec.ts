@@ -134,20 +134,16 @@ test('SKILL-005 target detail editor is usable at desktop and mobile widths', as
   await page.screenshot({path:testInfo.outputPath('target-skill-editor.png')})
 })
 
-test('SKILL-006 Hunt review retains its startup snapshot while editing future instructions', async ({page}) => {
+test('SKILL-006 a Hunt shows the instructions it started with and leaves editing to the target', async ({page}) => {
   const writes = await mock(page,true)
-  await page.goto(`/hunt?target=${id}&run=${runId}`)
-  await expect(page.getByRole('heading',{name:'Target instructions at startup'})).toBeVisible()
-  await page.getByText('TV investigation guide',{exact:true}).click()
-  await expect(page.getByText('Inspect port 8443.',{exact:true})).toBeVisible()
-  await openInstructions(page,'Edit')
-  const dialog = page.getByRole('dialog',{name:'Target instructions',exact:true})
-  await dialog.getByLabel('Instructions',{exact:true}).fill('Changed for future Hunts')
-  await dialog.getByRole('button',{name:'Save instructions'}).click()
-  await expect(dialog).toBeHidden()
-  await expect(page.getByText('Inspect port 8443.',{exact:true})).toBeVisible()
-  expect(writes).toHaveLength(1)
-  expect(writes[0].method).toBe('PUT')
+  await page.goto(`/hunt?target=${id}&run=${runId}#details`)
+  // The run names the snapshot it loaded at startup; edits to the target's instructions affect
+  // future Hunts only, so they happen on the target page rather than from this run.
+  const snapshot = page.getByRole('link',{name:'TV investigation guide · v1',exact:true})
+  await expect(snapshot).toBeVisible()
+  await expect(snapshot).toHaveAttribute('href',`/targets/${id}/asset`)
+  await expect(page.getByRole('dialog',{name:'Target instructions',exact:true})).toHaveCount(0)
+  expect(writes).toHaveLength(0)
 })
 
 

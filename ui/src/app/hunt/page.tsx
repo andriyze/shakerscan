@@ -1,14 +1,13 @@
 'use client'
 
 import { Suspense, useEffect, useMemo, useState } from 'react'
-import { HUNT_SESSION_NON_AUTONOMOUS_NOTICE, huntStatusLabel } from '@/lib/labels'
 import { useSearchParams } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
-import { Compass, ShieldCheck } from 'lucide-react'
+import { Compass, Plus } from 'lucide-react'
 import {
   getDeviceAgentSession,
+  getTarget,
   getTargetAuthorization,
-  type DeviceAgentShellPlan,
   type DeviceAgentSession,
 } from '@/lib/api'
 import {
@@ -18,14 +17,9 @@ import {
 } from '@/lib/credentialApi'
 import { defaultHuntCredentialIds } from '@/lib/credentialDefaults'
 import {
-  cancelHuntV2,
-  confirmHuntShellPlan,
   getHuntV2,
-  listHuntsV2,
-  suggestHuntSkills,
   startHuntV2Native,
   type HuntBudgetProfile,
-  type HuntSkillSuggestion,
   type HuntTargetKind,
   type HuntV2,
 } from '@/lib/huntV2'
@@ -34,15 +28,17 @@ import {
   HUNT_BUDGET_PROFILES,
   type HuntZeroableBudgetDimension,
 } from '@/lib/huntContract.generated'
-import { Button, Card, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { Button, Card, Combobox, EmptyState, Field, Select, Textarea, useToast } from '@/components/ui'
+import { credentialOptions, targetOptions } from '@/lib/pickerOptions'
 import { LegacyDeviceInvestigation } from '@/components/history/LegacyDeviceInvestigation'
 import { RequestCollectionPicker } from '@/components/RequestCollectionPicker'
 import { ApprovalReceiptField } from '@/components/ApprovalReceiptField'
 import { managedTargetAuthorizationIsAutomatic } from '@/lib/workspaceCapabilities'
-import HttpArchiveExport from '@/components/HttpArchiveExport'
-import HuntBudgetEditor from '@/components/hunt/HuntBudgetEditor'
+import { HuntHistoryList } from '@/components/hunt/HuntHistoryList'
+import { HuntRunView } from '@/components/hunt/HuntRunView'
+import { cleanTargetLocator, huntTargetTitle } from '@/lib/huntListModel.mjs'
 import { getAllTargetAssets, type TargetAsset } from '@/lib/targetAssetApi'
-import { TargetSkillEditor, TargetSkillPreview } from '@/components/targets/TargetSkillEditor'
+import { TargetSkillEditor } from '@/components/targets/TargetSkillEditor'
 
 type TargetChoice = {
   id: string
@@ -68,82 +64,6 @@ function positiveInteger(value: string): number | undefined {
   if (!/^\d+$/.test(value.trim())) return undefined
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
-}
-
-function huntActionStatusClass(status: string): string {
-  if (status === 'completed') return 'bg-emerald-500/10 text-emerald-300'
-  if (status === 'partial') return 'bg-amber-500/10 text-amber-300'
-  if (status === 'blocked' || status === 'cancelled') return 'bg-gray-700 text-gray-300'
-  if (status === 'failed') return 'bg-red-500/10 text-red-300'
-  return 'bg-blue-500/10 text-blue-300'
-}
-
-function formatHuntDuration(startedAt?: string, completedAt?: string | null): string | null {
-  if (!startedAt) return null
-  const start = Date.parse(startedAt)
-  const end = completedAt ? Date.parse(completedAt) : Date.now()
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
-  const seconds = Math.max(0, Math.round((end - start) / 1000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
-  if (minutes < 60) return `${minutes}m ${remainder}s`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m`
-}
-
-function HuntHistory({
-  targetId,
-  runs,
-  loading,
-  total,
-  error,
-}: {
-  targetId: string
-  runs: HuntV2[]
-  loading: boolean
-  total: number
-  error: string | null
-}) {
-  return (
-    <Card className="p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-medium text-white">Recent Hunts for this target</h2>
-          <p className="mt-1 text-xs text-gray-500">Open a durable run to inspect its policy, budget use, capabilities, scans, and outcome.</p>
-        </div>
-        <Link href={`/hunts?target_id=${encodeURIComponent(targetId)}`} className="text-xs text-blue-400 hover:text-blue-300">
-          {total > runs.length ? `View all ${total}` : 'View all hunts'}
-        </Link>
-      </div>
-      {loading ? (
-        <p className="mt-4 text-sm text-gray-500">Loading Hunt history…</p>
-      ) : error ? (
-        <p role="alert" className="mt-4 text-sm text-amber-300">{error}</p>
-      ) : runs.length === 0 ? (
-        <p className="mt-4 text-sm text-gray-500">No canonical Hunts have been recorded for this target.</p>
-      ) : (
-        <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800">
-          {runs.map((run) => (
-            <Link
-              key={run.hunt_id}
-              href={`/hunt?target=${encodeURIComponent(targetId)}&run=${encodeURIComponent(run.hunt_id)}`}
-              className="block px-4 py-3 hover:bg-gray-800/60"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm font-medium text-gray-200">{run.objective}</span>
-                <span className="rounded-sm bg-gray-800 px-2 py-1 text-xs text-gray-300">{huntStatusLabel(run.status)}</span>
-              </div>
-              <p className="mt-1 text-xs text-gray-500">
-                {run.target_kind} · {run.budget_profile} · {run.budget_used.agent_actions || 0} capability calls
-                {run.created_at ? ` · ${new Date(run.created_at).toLocaleString()}` : ''}
-              </p>
-            </Link>
-          ))}
-        </div>
-      )}
-    </Card>
-  )
 }
 
 const ZEROABLE_BUDGETS = HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)
@@ -183,17 +103,12 @@ function HuntContent() {
   const [credentialsLoading, setCredentialsLoading] = useState(false)
   const [credentialError, setCredentialError] = useState<string | null>(null)
   const [hunt, setHunt] = useState<HuntV2 | null>(null)
-  const [skillSuggestions, setSkillSuggestions] = useState<HuntSkillSuggestion[]>([])
-  const [skillSuggestionsError, setSkillSuggestionsError] = useState<string | null>(null)
-  const [huntHistory, setHuntHistory] = useState<HuntV2[]>([])
-  const [huntHistoryLoading, setHuntHistoryLoading] = useState(false)
-  const [huntHistoryTotal, setHuntHistoryTotal] = useState(0)
-  const [huntHistoryError, setHuntHistoryError] = useState<string | null>(null)
+  // The launcher opens from New Hunt, or straight away when a target was preselected by a link.
+  const [launcherOpen, setLauncherOpen] = useState(() => Boolean(searchParams.get('target') && !searchParams.get('run')))
   const [legacyDeviceRun, setLegacyDeviceRun] = useState<DeviceAgentSession | null>(null)
   const [legacyRunLoading, setLegacyRunLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
-  const [confirmingPlanId, setConfirmingPlanId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -252,28 +167,6 @@ function HuntContent() {
     return () => { cancelled = true }
   }, [searchParams])
 
-  useEffect(() => {
-    if (!hunt?.hunt_id) {
-      setSkillSuggestions([])
-      setSkillSuggestionsError(null)
-      return
-    }
-    let cancelled = false
-    suggestHuntSkills(hunt.hunt_id)
-      .then((result) => {
-        if (!cancelled) {
-          setSkillSuggestions(result.suggestions || [])
-          setSkillSuggestionsError(null)
-        }
-      })
-      .catch((cause) => {
-        if (!cancelled) {
-          setSkillSuggestionsError(cause instanceof Error ? cause.message : 'Failed to load methodology suggestions')
-        }
-      })
-    return () => { cancelled = true }
-  }, [hunt?.hunt_id, hunt?.skills?.length])
-
   const choices = useMemo<TargetChoice[]>(() => assets.map((target) => ({
       id: target.id,
       sourceKind: target.connected_device ? 'device' : target.url.startsWith('host://') ? 'network' : 'web',
@@ -281,6 +174,22 @@ function HuntContent() {
       detail: target.url,
     })), [assets])
   const selectedChoice = choices.find((choice) => choice.id === targetId)
+  // The run detail carries no target name. Inactive targets are not launch choices, so read those directly.
+  const [runTargetRecord, setRunTargetRecord] = useState<{ id: string; name?: string; url?: string } | null>(null)
+  const runTargetId = hunt?.target_id
+  const runTargetKnown = Boolean(runTargetId && assets.some((target) => target.id === runTargetId))
+  useEffect(() => {
+    if (!runTargetId || runTargetKnown) return
+    let cancelled = false
+    getTarget(runTargetId).then((target) => { if (!cancelled) setRunTargetRecord({ id: target.id, name: target.name, url: target.url }) }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [runTargetId, runTargetKnown])
+  const runTarget = hunt ? (() => {
+    const known = assets.find((target) => target.id === hunt.target_id) || (runTargetRecord?.id === hunt.target_id ? runTargetRecord : undefined)
+    const named = { target_name: hunt.target_name || known?.name, target_url: hunt.target_url || known?.url, target_id: hunt.target_id }
+    return { title: huntTargetTitle(named), locator: cleanTargetLocator(named.target_url) }
+  })() : null
+  const targetOptionList = useMemo(() => targetOptions(assets), [assets])
   const targetKind: HuntTargetKind = selectedChoice?.sourceKind === 'device'
     ? 'device'
     : selectedChoice?.sourceKind === 'network' ? 'network' : webTargetKind
@@ -292,34 +201,6 @@ function HuntContent() {
       .then(authorization => {if (!cancelled && authorization?.standing) setAuthorizedTargetId(selectedChoice.id)})
       .catch(() => undefined)
     return () => {cancelled = true}
-  }, [selectedChoice?.id])
-
-  useEffect(() => {
-    let cancelled = false
-    setHuntHistory([])
-    if (!selectedChoice) {
-      setHuntHistoryLoading(false)
-      return () => { cancelled = true }
-    }
-    setHuntHistoryLoading(true)
-    listHuntsV2({ targetId: selectedChoice.id, limit: 12 })
-      .then(({ hunts, total }) => {
-        if (cancelled) return
-        setHuntHistory(hunts)
-        setHuntHistoryTotal(total)
-        setHuntHistoryError(null)
-      })
-      // A swallowed failure rendered as "no hunts recorded", which is a different and
-      // reassuring claim than "we could not load them".
-      .catch((cause) => {
-        if (cancelled) return
-        setHuntHistory([])
-        setHuntHistoryError(
-          cause instanceof Error ? cause.message : 'Failed to load Hunt history',
-        )
-      })
-      .finally(() => { if (!cancelled) setHuntHistoryLoading(false) })
-    return () => { cancelled = true }
   }, [selectedChoice?.id])
 
   useEffect(() => {
@@ -351,27 +232,6 @@ function HuntContent() {
       .finally(() => { if (!cancelled) setCredentialsLoading(false) })
     return () => { cancelled = true }
   }, [selectedChoice?.id, targetKind])
-
-  useEffect(() => {
-    if (!hunt || !['active', 'awaiting_planner'].includes(hunt.status)) return
-    let cancelled = false
-    const refresh = () => getHuntV2(hunt.hunt_id)
-      .then((current) => { if (!cancelled) setHunt(current) })
-      .catch(() => undefined)
-    const timer = window.setInterval(refresh, 5000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [hunt?.hunt_id, hunt?.status])
-
-  const shellPlans = useMemo<DeviceAgentShellPlan[]>(() => {
-    const deviceState = hunt?.context_pack?.device_state
-    if (!deviceState || typeof deviceState !== 'object' || Array.isArray(deviceState)) return []
-    const plans = (deviceState as { shell_plans?: unknown }).shell_plans
-    return Array.isArray(plans)
-      ? plans.filter((plan): plan is DeviceAgentShellPlan => Boolean(
-          plan && typeof plan === 'object' && 'plan_id' in plan,
-        ))
-      : []
-  }, [hunt?.context_pack])
 
   const selectedCredentialCount = Object.values(credentialIds).filter(Boolean).length
   const privileged = activeTesting || networkDiscovery || allowStateChanging || allowOobInteractions || selectedCredentialCount > 0
@@ -478,63 +338,43 @@ function HuntContent() {
     }
   }
 
-  async function confirmShellPlan(plan: DeviceAgentShellPlan) {
-    if (!hunt) return
-    setConfirmingPlanId(plan.plan_id)
-    try {
-      setHunt(await confirmHuntShellPlan(hunt.hunt_id, plan))
-      toast.success('Exact SSH command plan queued')
-    } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : 'Failed to confirm SSH command plan')
-    } finally {
-      setConfirmingPlanId(null)
-    }
-  }
-
-  async function cancel() {
-    if (!hunt) return
-    try {
-      setHunt(await cancelHuntV2(hunt.hunt_id))
-      toast.success('Agent Hunt Session cancelled')
-    } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : 'Failed to cancel Hunt')
-    }
-  }
-
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <div className="flex items-start gap-3">
-        <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300">
-          <Compass className="h-6 w-6" />
+      {!hunt && !searchParams.get('run') && (
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-violet-500/10 p-2 text-violet-300"><Compass className="h-6 w-6" /></div>
+            <div>
+              <h1 className="text-2xl font-semibold text-white">Hunts</h1>
+              <p className="mt-1 max-w-2xl text-sm text-gray-400">
+                Evidence-driven sessions your coding agent drives for web, API, network and device targets. The agent proposes each permitted capability call; the runtime executes and proves it.
+              </p>
+            </div>
+          </div>
+          {!launcherOpen && <Button onClick={() => setLauncherOpen(true)}><Plus className="h-4 w-4" aria-hidden="true" />New Hunt</Button>}
         </div>
-        <div>
-          <h1 className="text-2xl font-semibold text-white">Agent Hunt Session</h1>
-          <p className="mt-1 text-sm text-gray-400">
-            An evidence-driven capability session your coding agent drives for web, API, network, and connected-device targets. It does not investigate on its own — the agent proposes each permitted capability call and the runtime executes and proves it.
-          </p>
-        </div>
-      </div>
+      )}
 
       {legacyRunLoading ? (
         <Card className="p-5 text-sm text-gray-400">Loading historical device investigation…</Card>
       ) : legacyDeviceRun ? (
         <LegacyDeviceInvestigation run={legacyDeviceRun} />
+      ) : !hunt && searchParams.get('run') && !error ? (
+        <p role="status" className="text-sm text-gray-400">Loading Hunt…</p>
       ) : !hunt ? (
         <>
-          <Card className="space-y-5 p-5">
+          {launcherOpen && <Card className="space-y-5 p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-medium text-white">New Hunt</h2>
+            <Button size="sm" variant="ghost" onClick={() => setLauncherOpen(false)}>Close</Button>
+          </div>
           {loading ? <p className="text-sm text-gray-400">Loading targets…</p> : choices.length === 0 ? (
             <EmptyState message="No targets available" hint="Add a hostname, IP address, or application target first." />
           ) : (
             <>
               <Field label="Target">
-                <Select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-                  <option value="">Choose a target</option>
-                  {choices.map((choice) => (
-                    <option key={`${choice.sourceKind}:${choice.id}`} value={choice.id}>
-                      {choice.label} · {choice.detail.replace(/^host:\/\//, '')}
-                    </option>
-                  ))}
-                </Select>
+                <Combobox value={targetId} onChange={setTargetId} options={targetOptionList}
+                  placeholder="Choose a target" searchPlaceholder="Search targets by name, host or environment…" />
               </Field>
 
               {selectedChoice?.sourceKind === 'web' && (
@@ -563,54 +403,6 @@ function HuntContent() {
                   <option value="thorough">Thorough</option>
                 </Select>
               </Field>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="text-sm text-gray-300">
-                  Optional maximum duration (seconds)
-                  <input
-                    type="number"
-                    min="1"
-                    value={maxDurationSeconds}
-                    onChange={(event) => setMaxDurationSeconds(event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
-                  />
-                </label>
-                <label className="text-sm text-gray-300">
-                  Optional maximum HTTP requests
-                  <input
-                    type="number"
-                    min="1"
-                    value={maxHttpRequests}
-                    onChange={(event) => setMaxHttpRequests(event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
-                  />
-                </label>
-              </div>
-
-              <details className="rounded-lg border border-gray-800 bg-gray-950 p-4">
-                <summary className="cursor-pointer text-sm font-medium text-white">
-                  Optional hard ceilings (zero disables a dimension)
-                </summary>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  {ZEROABLE_BUDGETS.map((definition) => (
-                    <label key={definition.name} className="text-sm text-gray-300">
-                      {definition.label}
-                      <input
-                        type="number"
-                        min="0"
-                        max={HUNT_BUDGET_PROFILES[budget][definition.name]}
-                        value={zeroableBudgets[definition.name] ?? ''}
-                        onChange={(event) => setZeroableBudgets((current) => ({
-                          ...current,
-                          [definition.name]: event.target.value,
-                        }))}
-                        placeholder={`Profile ceiling: ${HUNT_BUDGET_PROFILES[budget][definition.name]}`}
-                        className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
-                      />
-                    </label>
-                  ))}
-                </div>
-              </details>
 
               <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950 p-4">
                 <div>
@@ -680,16 +472,6 @@ function HuntContent() {
                 )}
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="text-sm text-gray-300">
-                  Scope receipt ID (optional)
-                  <input
-                    value={scopeReceipt}
-                    onChange={(event) => setScopeReceipt(event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
-                  />
-                </label>
-              </div>
               {(receiptRequired || approvalReceipt) && (
                 <ApprovalReceiptField
                   targetId={selectedChoice?.id}
@@ -724,20 +506,14 @@ function HuntContent() {
                       const candidates = credentialProfiles.filter((profile) => profile.principal_slot === slot)
                       return (
                         <Field key={slot} label={`${CREDENTIAL_SLOT_LABELS[slot]} (optional)`}>
-                          <Select
+                          <Combobox
                             value={credentialIds[slot]}
-                            onChange={(event) => setCredentialIds((current) => ({
-                              ...current,
-                              [slot]: event.target.value,
-                            }))}
-                          >
-                            <option value="">{slot === 'ssh' ? 'No SSH identity' : `No ${slot} identity`}</option>
-                            {candidates.map((profile) => (
-                              <option key={profile.id} value={profile.id}>
-                                {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}
-                              </option>
-                            ))}
-                          </Select>
+                            onChange={(value) => setCredentialIds((current) => ({ ...current, [slot]: value }))}
+                            options={credentialOptions(candidates)}
+                            noneLabel={slot === 'ssh' ? 'No SSH identity' : `No ${slot} identity`}
+                            searchPlaceholder="Search credentials…"
+                            emptyMessage={candidates.length ? 'No matching credentials' : 'No credentials in this slot for this target'}
+                          />
                         </Field>
                       )
                     })}
@@ -759,17 +535,78 @@ function HuntContent() {
                 />
               )}
 
-              <Field
-                label="Capability allowlist (optional)"
-                hint="Leave empty for the server-defined capabilities allowed by this target and policy."
-              >
-                <input
-                  value={capabilityIds}
-                  onChange={(event) => setCapabilityIds(event.target.value)}
-                  placeholder="web.probe, web.crawl, templates.scan"
-                  className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
-                />
-              </Field>
+              <details className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+                <summary className="cursor-pointer text-sm font-medium text-white">Advanced: limits, scope receipt and capability allowlist</summary>
+                <div className="mt-4 space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="text-sm text-gray-300">
+                    Optional maximum duration (seconds)
+                    <input
+                      type="number"
+                      min="1"
+                      value={maxDurationSeconds}
+                      onChange={(event) => setMaxDurationSeconds(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                    />
+                  </label>
+                  <label className="text-sm text-gray-300">
+                    Optional maximum HTTP requests
+                    <input
+                      type="number"
+                      min="1"
+                      value={maxHttpRequests}
+                      onChange={(event) => setMaxHttpRequests(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                    />
+                  </label>
+                </div>
+                <details className="rounded-lg border border-gray-800 bg-gray-950 p-4">
+                  <summary className="cursor-pointer text-sm font-medium text-white">
+                    Optional hard ceilings (zero disables a dimension)
+                  </summary>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    {ZEROABLE_BUDGETS.map((definition) => (
+                      <label key={definition.name} className="text-sm text-gray-300">
+                        {definition.label}
+                        <input
+                          type="number"
+                          min="0"
+                          max={HUNT_BUDGET_PROFILES[budget][definition.name]}
+                          value={zeroableBudgets[definition.name] ?? ''}
+                          onChange={(event) => setZeroableBudgets((current) => ({
+                            ...current,
+                            [definition.name]: event.target.value,
+                          }))}
+                          placeholder={`Profile ceiling: ${HUNT_BUDGET_PROFILES[budget][definition.name]}`}
+                          className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </details>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="text-sm text-gray-300">
+                    Scope receipt ID (optional)
+                    <input
+                      value={scopeReceipt}
+                      onChange={(event) => setScopeReceipt(event.target.value)}
+                      className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white"
+                    />
+                  </label>
+                </div>
+                <Field
+                  label="Capability allowlist (optional)"
+                  hint="Leave empty for the server-defined capabilities allowed by this target and policy."
+                >
+                  <input
+                    value={capabilityIds}
+                    onChange={(event) => setCapabilityIds(event.target.value)}
+                    placeholder="web.probe, web.crawl, templates.scan"
+                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
+                  />
+                </Field>
+                </div>
+              </details>
 
               {error && (
                 <p role="alert" className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">
@@ -786,323 +623,11 @@ function HuntContent() {
               </div>
             </>
           )}
-          </Card>
-          {selectedChoice && (
-            <HuntHistory
-              targetId={selectedChoice.id}
-              runs={huntHistory}
-              loading={huntHistoryLoading}
-              total={huntHistoryTotal}
-              error={huntHistoryError}
-            />
-          )}
+          </Card>}
+          <HuntHistoryList />
         </>
       ) : (
-        <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
-          <div className="space-y-5">
-            <Card className="space-y-4 p-5">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-gray-500">{hunt.target_kind} Hunt</p>
-                  <h2 className="mt-1 font-medium text-white">{hunt.objective}</h2>
-                </div>
-                <span className="rounded-sm bg-blue-500/10 px-2 py-1 text-xs text-blue-300">{huntStatusLabel(hunt.status)}</span>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="rounded-sm bg-gray-950 p-3">
-                  <span className="block text-xs text-gray-500">Budget</span>
-                  <span className="text-white">{hunt.budget_profile}{(hunt.budget_revision ?? 0) > 0 ? ' (amended)' : ''}</span>
-                </div>
-                <div className="rounded-sm bg-gray-950 p-3">
-                  <span className="block text-xs text-gray-500">Capability calls</span>
-                  <span className="text-white">
-                    {hunt.budget_used.agent_actions || 0} / {hunt.budget.max_capability_calls || 0}
-                  </span>
-                </div>
-                <div className="col-span-2 rounded-sm bg-gray-950 p-3">
-                  <span className="block text-xs text-gray-500">Run ID</span>
-                  <code className="break-all text-xs text-gray-300">{hunt.hunt_id}</code>
-                </div>
-              </div>
-              {hunt.created_at && (
-                <div className="space-y-1 text-xs text-gray-500">
-                  <p>Started {new Date(hunt.created_at).toLocaleString()}</p>
-                  {hunt.completed_at && <p>Completed {new Date(hunt.completed_at).toLocaleString()}</p>}
-                  {formatHuntDuration(hunt.created_at, hunt.completed_at) && (
-                    <p>{hunt.completed_at ? 'Elapsed' : 'Elapsed so far'} {formatHuntDuration(hunt.created_at, hunt.completed_at)}</p>
-                  )}
-                </div>
-              )}
-              {hunt.status === 'active' && (
-                <p className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-100/80">
-                  {HUNT_SESSION_NON_AUTONOMOUS_NOTICE}
-                </p>
-              )}
-              {Boolean(hunt.policy_adjustments?.length) && (
-                <div className="rounded-lg border border-amber-800 p-3 text-xs text-amber-100" role="status">
-                  <p className="font-medium">Resolved Hunt configuration</p>
-                  {hunt.policy_adjustments?.map((message) => <p key={message} className="mt-1">{message}</p>)}
-                </div>
-              )}
-              {hunt.stop_reason && <p className="text-sm text-amber-200">Stopped: {hunt.stop_reason.replaceAll('_', ' ')}</p>}
-              <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} compact />
-              {hunt.queued_scan?.scan_id && (
-                <Link href={`/scans/${hunt.queued_scan.scan_id}`} className="block rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-200 hover:bg-blue-500/10">
-                  Open queued Scan {hunt.queued_scan.scan_id.slice(0, 8)} · {hunt.queued_scan.status}
-                </Link>
-              )}
-              {hunt.outcome_summary && (
-                <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                  <p className="text-xs uppercase tracking-wide text-gray-500">Final debrief</p>
-                  <p className="mt-2 text-sm font-medium text-gray-200">Factual run record</p>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400 sm:grid-cols-3">
-                    <span>{hunt.outcome_summary.successful_calls ?? hunt.outcome_summary.capability_calls} succeeded</span>
-                    <span>{hunt.outcome_summary.unsuccessful_calls ?? 0} unsuccessful</span>
-                    {(hunt.outcome_summary.indeterminate_calls ?? 0) > 0 && <span>{hunt.outcome_summary.indeterminate_calls} outcome unknown</span>}
-                    {(hunt.outcome_summary.partial_calls ?? 0) > 0 && <span>{hunt.outcome_summary.partial_calls} partial</span>}
-                    <span>{hunt.outcome_summary.executed_calls ?? hunt.outcome_summary.total_capability_calls} executed · {hunt.outcome_summary.total_capability_calls} attempted</span>
-                    <span>{hunt.outcome_summary.observation_count} observations</span>
-                    <span>{hunt.outcome_summary.finding_ids.length} findings</span>
-                    <span>{hunt.outcome_summary.candidate_ids.length} candidates</span>
-                    <span>{hunt.outcome_summary.evidence_ids.length} evidence objects</span>
-                    <span>{Object.entries(hunt.outcome_summary.action_statuses).map(([status, count]) => `${count} ${status.replaceAll('_', ' ')}`).join(' · ')}</span>
-                  </div>
-                  {hunt.final_debrief?.summary && <p className="mt-3 text-sm text-gray-300"><span className="text-gray-500">Planner debrief:</span> {hunt.final_debrief.summary}</p>}
-                  {hunt.final_debrief?.next_actions && hunt.final_debrief.next_actions.length > 0 && (
-                    <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-400">
-                      {hunt.final_debrief.next_actions.map((action) => <li key={action}>{action}</li>)}
-                    </ul>
-                  )}
-                  {hunt.outcome_summary.candidate_ids.length > 0 && (
-                    <div className="mt-3 space-y-1 border-t border-gray-800 pt-3 text-xs">
-                      <p className="text-gray-500">Investigate candidate boundaries in AI Gate</p>
-                      {hunt.outcome_summary.candidate_ids.map((id) => (
-                        <Link key={id} href={`/ai-gate/boundary?hunt=${encodeURIComponent(hunt.hunt_id)}&candidate=${encodeURIComponent(id)}`} className="block break-all text-blue-300 hover:text-blue-200">
-                          Open candidate {id}
-                        </Link>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="flex items-start gap-2 rounded-lg border border-gray-800 bg-gray-950 p-3 text-xs text-gray-400">
-                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-                The runtime binds every capability to this target and the persisted V2 policy. Candidates cannot self-promote into verified findings.
-              </div>
-              {['active', 'awaiting_planner', 'budget_exhausted'].includes(hunt.status) && !hunt.completed_at && (
-                <Button variant="danger" onClick={cancel}>Cancel session</Button>
-              )}
-              <Link href={`/hunt?target=${encodeURIComponent(hunt.target_id)}`} className="text-sm text-blue-300 hover:text-blue-200">
-                Back to launcher and history
-              </Link>
-            </Card>
-
-            <HuntBudgetEditor hunt={hunt} onChanged={setHunt} />
-
-            {hunt.target_skill?.skill && <Card className="border-blue-500/20 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-medium text-white">Target instructions at startup</h2><span className="rounded-full bg-blue-500/10 px-2 py-1 text-xs text-blue-300">Version {hunt.target_skill.skill.version}</span></div><p className="mt-2 text-xs text-gray-500">This Hunt keeps the instructions it started with. Editing the saved skill affects future Hunts.</p><details className="mt-4"><summary className="cursor-pointer text-sm text-blue-300">{hunt.target_skill.skill.title}</summary><div className="mt-3"><TargetSkillPreview text={hunt.target_skill.skill.methodology} /></div></details><div className="mt-4"><TargetSkillEditor compact targetId={hunt.target_id} targetName={hunt.target_name || hunt.target_id} hasSkill /></div></Card>}
-            {hunt.target_skill?.advisory?.methodology && <Card className="border-blue-500/20 p-5"><h2 className="font-medium text-white">Learned knowledge at startup</h2><p className="mt-2 text-xs text-gray-400">Automatically included advisory context, not testing permissions. Written by {hunt.target_skill.advisory.written_by || 'unknown source'}.</p><details className="mt-4"><summary className="cursor-pointer text-sm text-blue-300">{hunt.target_skill.advisory.title || 'Learned target knowledge'}</summary><TargetSkillPreview text={hunt.target_skill.advisory.methodology} /></details></Card>}
-
-            <Card className="space-y-4 p-5">
-              <div>
-                <h2 className="font-medium text-white">Methodologies</h2>
-                <p className="mt-1 text-xs text-gray-500">
-                  Compact recommendations only. Your agent loads one full methodology when target evidence makes it relevant.
-                </p>
-                <p className="mt-1 text-xs text-gray-600">
-                  Methodologies guide investigation; applying one does not grant or restrict the Hunt&apos;s existing capabilities.
-                </p>
-              </div>
-              {(hunt.skills || []).length > 0 ? (
-                <div className="space-y-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Selected</p>
-                  {(hunt.skills || []).map((skill) => (
-                    <div key={skill.skill_id} className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
-                      <p className="text-sm font-medium text-violet-200">{skill.title}</p>
-                      <p className="mt-1 text-xs text-gray-500">
-                        {skill.requested ? 'Selected explicitly' : 'Required prerequisite'}
-                        {skill.phase ? ` · ${skill.phase}` : ''}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-gray-500">No methodology is selected. The agent can begin with ordinary discovery.</p>
-              )}
-              <p className="text-xs text-gray-500">Selection is not execution. Usage below links a methodology to a Hunt action; it does not establish a vulnerability.</p>
-              {(hunt.skill_activity || []).length > 0 && (
-                <details className="rounded-lg border border-gray-800 p-3">
-                  <summary className="cursor-pointer text-sm text-gray-300">Methodology activity</summary>
-                  <ol className="mt-3 space-y-2 text-xs">
-                    {[...(hunt.skill_activity || [])].reverse().slice(0, 20).map((event) => (
-                      <li key={event.event_id} className="rounded-sm bg-gray-950 p-2">
-                        <span className="text-violet-200">{event.event_type.replaceAll('_', ' ')}</span>
-                        <span className="ml-2 break-all text-gray-400">{event.skill_id.replace('skill.web.', '')} · v{event.skill_version}</span>
-                        {event.action_id && <p className="mt-1 break-all font-mono text-gray-500">Action {event.action_id}</p>}
-                        {event.reason && <p className="mt-1 text-gray-400">{event.reason}</p>}
-                      </li>
-                    ))}
-                  </ol>
-                </details>
-              )}
-              {skillSuggestions.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Suggested now</p>
-                  {skillSuggestions.map((suggestion) => (
-                    <div key={suggestion.skill_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                      <p className="text-sm text-gray-200">{suggestion.title}</p>
-                      <p className="mt-1 text-xs text-gray-500">{suggestion.reason}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {skillSuggestionsError && <p className="text-xs text-amber-300">{skillSuggestionsError}</p>}
-              <p className="text-xs text-gray-600">At most three suggestions are returned; methodology bodies are never preloaded.</p>
-            </Card>
-
-            {hunt.target_kind === 'device' && shellPlans.length > 0 && (
-              <Card className="space-y-4 p-5">
-                <div>
-                  <h2 className="font-medium text-white">SSH command plans</h2>
-                  <p className="mt-1 text-xs text-gray-500">
-                    Review every command. Plans are immutable, host-key pinned, and expire after 30 minutes.
-                  </p>
-                </div>
-                {shellPlans.map((plan) => (
-                  <div key={plan.plan_id} className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-medium text-amber-100">Port {plan.ssh_port} · {plan.status}</span>
-                      <span className="text-xs text-gray-500">Expires {new Date(plan.expires_at).toLocaleString()}</span>
-                    </div>
-                    <p className="text-xs text-gray-300">{plan.purpose}</p>
-                    <pre className="overflow-x-auto whitespace-pre-wrap rounded-sm bg-gray-950 p-3 text-xs text-blue-200">
-                      {plan.commands.join('\n')}
-                    </pre>
-                    <div className="space-y-1 text-xs text-gray-400">
-                      <p><span className="text-gray-500">Risk:</span> {plan.risk_summary}</p>
-                      <p className="break-all"><span className="text-gray-500">Pinned host key:</span> {plan.expected_host_key_fingerprint}</p>
-                      <p className="break-all"><span className="text-gray-500">Plan digest:</span> {plan.plan_digest}</p>
-                    </div>
-                    {plan.status === 'proposed' && (
-                      <Button onClick={() => confirmShellPlan(plan)} loading={confirmingPlanId === plan.plan_id}>
-                        Confirm and queue these exact remote commands
-                      </Button>
-                    )}
-                    {plan.scan_id && <p className="text-xs text-emerald-300">Queued scan: {plan.scan_id}</p>}
-                  </div>
-                ))}
-              </Card>
-            )}
-          </div>
-
-          <div className="space-y-5">
-            <Card className="p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-medium text-white">Capability action ledger</h2>
-                  <p className="mt-1 text-xs text-gray-500">
-                    Canonical receipts and content-safe outcomes for every capability call in this run.
-                  </p>
-                </div>
-                <span className="text-xs text-gray-500">{(hunt.actions || []).length} recorded</span>
-              </div>
-              {(hunt.actions || []).length === 0 ? (
-                <p className="mt-4 text-sm text-gray-500">No capability actions were recorded.</p>
-              ) : (
-                <div className="mt-4 space-y-3">
-                  {(hunt.actions || []).map((action) => {
-                    const references = action.result.reference_ids
-                    const accounting = action.result.budget_accounting
-                    const actualBudget = Object.entries(accounting.actual)
-                    const reservedBudget = Object.entries(accounting.reserved)
-                    const releasedBudget = Object.entries(accounting.released).filter(([, amount]) => amount > 0)
-                    const legacyBudget = Object.entries(action.result.budget_consumed)
-                    const formatBudget = (entries: Array<[string, number]>) => entries
-                      .map(([dimension, amount]) => `${amount} ${dimension.replaceAll('_', ' ')}`)
-                      .join(' · ')
-                    return (
-                      <div key={action.action_id} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <code className="text-sm text-blue-300">{action.capability_name}</code>
-                          <span className={`rounded-sm px-2 py-1 text-xs ${huntActionStatusClass(action.status)}`}>
-                            {action.status.replaceAll('_', ' ')}
-                          </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
-                          <span>{action.result.observation_count} observations</span>
-                          {action.started_at && <span>Started {new Date(action.started_at).toLocaleString()}</span>}
-                          {action.completed_at && <span>Finished {new Date(action.completed_at).toLocaleString()}</span>}
-                        </div>
-                        {accounting.basis === 'exact_settlement' && (
-                          <div className="mt-2 space-y-1 text-xs text-gray-500">
-                            <p>Settled charge: {actualBudget.length > 0 ? formatBudget(actualBudget) : 'none'}</p>
-                            <p>
-                              Charge basis: {accounting.charge_basis === 'conservative_full_reservation'
-                                ? 'conservative upper bound; measured consumption was unavailable'
-                                : 'capability-reported settlement'}
-                            </p>
-                            {reservedBudget.length > 0 && <p>Temporarily reserved: {formatBudget(reservedBudget)}</p>}
-                            {releasedBudget.length > 0 && <p>Released after settlement: {formatBudget(releasedBudget)}</p>}
-                          </div>
-                        )}
-                        {accounting.basis === 'legacy_reported_charge' && legacyBudget.length > 0 && (
-                          <p className="mt-2 text-xs text-amber-300/80">
-                            Legacy reported charge: {formatBudget(legacyBudget)} · reservation versus actual was not retained
-                          </p>
-                        )}
-                        {accounting.basis === 'settlement_failed' && (
-                          <p className="mt-2 text-xs text-red-300">Budget settlement failed; no released amount is asserted. Review the action receipt.</p>
-                        )}
-                        {accounting.basis === 'no_reservation' && (
-                          <p className="mt-2 text-xs text-amber-300/80">No durable reservation existed; displayed usage is reported execution data, not an exact settlement.</p>
-                        )}
-                        {(references.scan_ids.length > 0 || references.finding_ids.length > 0) && (
-                          <div className="mt-3 flex flex-wrap gap-3">
-                            {references.scan_ids.map((scanId) => (
-                              <Link key={scanId} href={`/scans/${scanId}`} className="text-xs text-blue-300 hover:text-blue-200">
-                                Open scan {scanId.slice(0, 8)}
-                              </Link>
-                            ))}
-                            {references.finding_ids.map((findingId) => (
-                              <Link key={findingId} href={`/findings/${findingId}`} className="text-xs text-blue-300 hover:text-blue-200">
-                                Open finding {findingId.slice(0, 8)}
-                              </Link>
-                            ))}
-                          </div>
-                        )}
-                        <details className="mt-3 text-xs text-gray-500">
-                          <summary className="cursor-pointer text-gray-400 hover:text-gray-300">Audit identifiers</summary>
-                          <dl className="mt-2 space-y-1">
-                            <div><dt className="inline">Action: </dt><dd className="inline break-all font-mono">{action.action_id}</dd></div>
-                            <div><dt className="inline">Receipt: </dt><dd className="inline break-all font-mono">{action.receipt_id || 'not recorded'}</dd></div>
-                            <div><dt className="inline">Input digest: </dt><dd className="inline break-all font-mono">{action.input_digest || 'not recorded'}</dd></div>
-                          </dl>
-                        </details>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </Card>
-
-            <Card className="p-5">
-              <h2 className="font-medium text-white">Available capabilities</h2>
-              <p className="mt-1 text-xs text-gray-500">
-                Your coding agent can query context and call only this persisted allowlist.
-              </p>
-              <div className="mt-4 space-y-2">
-                {(hunt.capabilities || []).map((capability) => (
-                  <div key={capability.name} className="rounded-lg border border-gray-800 bg-gray-950 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <code className="text-sm text-blue-300">{capability.name}</code>
-                      <span className="text-xs text-gray-500">{capability.risk_tier}</span>
-                    </div>
-                    <p className="mt-1 text-xs text-gray-400">{capability.description}</p>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </div>
-        </div>
+        <HuntRunView hunt={hunt} onChange={setHunt} target={runTarget} />
       )}
     </div>
   )

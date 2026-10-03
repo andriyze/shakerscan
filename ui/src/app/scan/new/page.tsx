@@ -23,7 +23,8 @@ import {
 } from '@/lib/api'
 import { listCredentialProfiles, type CredentialProfile } from '@/lib/credentialApi'
 import { preferredCredentialId } from '@/lib/credentialDefaults'
-import { Button, Card, Field, useToast } from '@/components/ui'
+import { Button, Card, Combobox, Field, useToast, type ComboboxOption } from '@/components/ui'
+import { credentialDescription, credentialOptions } from '@/lib/pickerOptions'
 import {
   RequestCollectionPicker,
   type RequestCollectionSelectionMetadata,
@@ -201,6 +202,20 @@ export default function NewScanPage() {
     }, 150)
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [familyPreset, budgetProfile, customFamilies, activeTesting, allowStateChanging, networkDiscovery, subdomainDiscovery, topology])
+
+  /** Searchable choices for one lane; incompatible profiles stay visible with the reason. */
+  function slotOptions(lane: 'primary' | 'secondary'): ComboboxOption[] {
+    return credentialProfiles.map((profile) => {
+      const compatibility = credentialCompatibility(profile, lane)
+      const option = credentialOptions([profile])[0]
+      return {
+        ...option,
+        group: compatibility.compatible ? option.group : 'Unavailable for this Scan',
+        disabled: !compatibility.compatible,
+        description: compatibility.reason ? `${credentialDescription(profile)} — ${compatibility.reason}` : option.description,
+      }
+    }).sort((left, right) => Number(Boolean(left.disabled)) - Number(Boolean(right.disabled)))
+  }
 
   function credentialCompatibility(
     profile: CredentialProfile,
@@ -747,34 +762,16 @@ export default function NewScanPage() {
                 <p className="text-xs text-gray-500">Loading credential profiles…</p>
               ) : (
                 <div className="grid gap-4 md:grid-cols-2">
-                  <label className="text-sm text-gray-300">
-                    Primary identity
-                    <select value={primaryCredentialId} onChange={(event) => { setPrimaryCredentialId(event.target.value); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
-                      <option value="">Anonymous</option>
-                      {credentialProfiles.map((profile) => {
-                        const compatibility = credentialCompatibility(profile, 'primary')
-                        return (
-                          <option key={profile.id} value={profile.id} disabled={!compatibility.compatible}>
-                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
-                          </option>
-                        )
-                      })}
-                    </select>
-                  </label>
-                  <label className="text-sm text-gray-300">
-                    Secondary identity
-                    <select value={secondaryCredentialId} onChange={(event) => { setSecondaryCredentialId(event.target.value); setApprovalReceipt('') }} className="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-white">
-                      <option value="">No comparator</option>
-                      {credentialProfiles.map((profile) => {
-                        const compatibility = credentialCompatibility(profile, 'secondary')
-                        return (
-                          <option key={profile.id} value={profile.id} disabled={!compatibility.compatible}>
-                            {profile.name} · {profile.auth_kind.replaceAll('_', ' ')} · v{profile.current_version}{profile.shared ? ` · shared from ${profile.home_target_name || 'another target'}` : ''}{compatibility.reason ? ` — unavailable: ${compatibility.reason}` : ''}
-                          </option>
-                        )
-                      })}
-                    </select>
-                  </label>
+                  <Field label="Primary identity">
+                    <Combobox value={primaryCredentialId} options={slotOptions('primary')} noneLabel="Anonymous"
+                      searchPlaceholder="Search credentials…" emptyMessage="No credentials for this target"
+                      onChange={(value) => { setPrimaryCredentialId(value); setApprovalReceipt('') }} />
+                  </Field>
+                  <Field label="Secondary identity">
+                    <Combobox value={secondaryCredentialId} options={slotOptions('secondary')} noneLabel="No comparator"
+                      searchPlaceholder="Search credentials…" emptyMessage="No credentials for this target"
+                      onChange={(value) => { setSecondaryCredentialId(value); setApprovalReceipt('') }} />
+                  </Field>
                 </div>
               )}
               {credentialError && <p className="text-xs text-amber-300">{credentialError}</p>}

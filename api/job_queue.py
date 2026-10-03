@@ -21,6 +21,9 @@ PAYLOAD_FIELD = "payload"
 ROUTE_SET_PREFIX = "shakerscan:queue-routes:"
 ROUTE_REQUIREMENTS_PREFIX = "shakerscan:queue-route-requirements:"
 DEFAULT_ROUTE_REGISTRY_MAX = 512
+# Longest a worker waits on one route before looking at its other routes again. It bounds how long
+# new work on an earlier route (a scan behind the broker route, say) waits for an idle worker.
+QUEUE_PROBE_INTERVAL_MS = max(100, int(os.environ.get("SHAKERSCAN_QUEUE_PROBE_INTERVAL_MS", "2000")))
 PLACEMENT_SCALAR_KEYS = {
     "region",
     "egress_group",
@@ -411,6 +414,24 @@ def _delivery_attempts(redis_client: Any, key: str, message_id: str) -> int:
     return 1
 
 
+def _long_poll_slices(block_ms: int, route_count: int) -> list[int]:
+    """The blocking reads that make up one long poll, adding up to the caller's ``block_ms``.
+
+    Only the last route may block (see ``lease_job``), so one long read would leave every earlier
+    route unread for its whole duration: a scan submitted just after the probe waited for the full
+    worker poll. Several routes therefore wait in short slices and re-probe the others in between,
+    while the total wait, and with it any lease deadline, stays what the caller asked for.
+    """
+    total = max(1, block_ms)
+    if route_count <= 1:
+        return [total]
+    slices: list[int] = []
+    while total > 0:
+        slices.append(min(QUEUE_PROBE_INTERVAL_MS, total))
+        total -= slices[-1]
+    return slices
+
+
 def lease_job(
     redis_client: Any,
     queue_names: Iterable[str],
@@ -476,11 +497,16 @@ def lease_job(
         # Probe each route without blocking, then long-poll only the last one.
         # Blocking each empty stream can multiply Redis' minimum wait by the
         # number of routes and make a broker lease request exceed its deadline.
-        for index, queue_name in enumerate(queues):
-            response = redis_client.xreadgroup(
-                CONSUMER_GROUP, consumer_name, {stream_key(queue_name): ">"},
-                count=1, block=max(1, block_ms) if index == len(queues) - 1 else None,
-            )
+        # The long poll is sliced so the earlier routes are probed again at
+        # least every QUEUE_PROBE_INTERVAL_MS rather than once per poll.
+        for slice_ms in _long_poll_slices(block_ms, len(queues)):
+            for index, queue_name in enumerate(queues):
+                response = redis_client.xreadgroup(
+                    CONSUMER_GROUP, consumer_name, {stream_key(queue_name): ">"},
+                    count=1, block=slice_ms if index == len(queues) - 1 else None,
+                )
+                if _decode_messages(response):
+                    break
             if _decode_messages(response):
                 break
     except Exception as exc:

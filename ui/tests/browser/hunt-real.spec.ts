@@ -29,9 +29,10 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
   const hasStandingAuthorization = Boolean(authorization?.standing && authorization?.approval_receipt_id)
 
   await page.goto(`/hunt?target=${encodeURIComponent(target.id)}`)
-  await expect(page.getByLabel('Target', { exact: true })).toHaveValue(target.id)
-  await page.getByLabel('Objective').fill('Production UI real-stack Hunt acceptance.')
+  await expect(page.getByLabel('Target', { exact: true })).toHaveAttribute('data-value', target.id)
+  await page.getByLabel('Objective', { exact: true }).fill('Production UI real-stack Hunt acceptance.')
   await page.getByLabel('Budget profile').selectOption('fast')
+  await page.getByText('Advanced: limits, scope receipt and capability allowlist').click()
   await page.getByText('Optional hard ceilings (zero disables a dimension)').click()
   for (const definition of HUNT_BUDGET_DIMENSIONS.filter((item) => item.zeroable)) {
     await page.getByLabel(definition.label).fill('0')

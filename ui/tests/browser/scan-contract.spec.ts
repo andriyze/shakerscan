@@ -102,9 +102,11 @@ test('Scan contract drives budget, zero ceilings, and migrated credential select
   await expect(advanced).toHaveAttribute('aria-expanded', 'true')
 
   const primary = page.getByLabel('Primary identity')
-  await expect(primary.locator(`option[value="${credential.id}"]`)).toBeEnabled()
-  await primary.selectOption(credential.id)
-  await expect(primary).toHaveValue(credential.id)
+  await primary.click()
+  const option = page.getByRole('listbox').getByRole('option', { name: new RegExp(credential.name) })
+  await expect(option).not.toHaveAttribute('aria-disabled', 'true')
+  await option.click()
+  await expect(primary).toHaveAttribute('data-value', credential.id)
 
   const stateChanging = page.getByLabel('Maximum state-changing requests')
   await expect(stateChanging).toHaveAttribute('min', '0')

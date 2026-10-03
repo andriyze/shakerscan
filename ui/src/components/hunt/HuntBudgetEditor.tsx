@@ -7,8 +7,8 @@ import { amendHuntBudget, getHuntV2, resumeHuntV2, type HuntV2 } from '@/lib/hun
 import { Button, Card, Field, Select } from '@/components/ui'
 
 /** An explicit operator edit, never an automatic retry that expands the budget. */
-export default function HuntBudgetEditor({ hunt, onChanged }: { hunt: HuntV2; onChanged: (value: HuntV2) => void }) {
-  const [dimension, setDimension] = useState('max_http_requests')
+export default function HuntBudgetEditor({ hunt, onChanged, initialDimension }: { hunt: HuntV2; onChanged: (value: HuntV2) => void; initialDimension?: string | null }) {
+  const [dimension, setDimension] = useState(() => initialDimension && (hunt.budget_amendable_dimensions || []).includes(initialDimension) ? initialDimension : 'max_http_requests')
   const [total, setTotal] = useState('')
   const [resume, setResume] = useState(true)
   const [busyAction, setBusyAction] = useState<'extend' | 'refresh' | 'resume' | null>(null)

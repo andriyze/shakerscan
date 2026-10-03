@@ -190,9 +190,9 @@
     "TargetPrincipalCreate": "9c7a0099e309721b8e541f4597f6fa02a60c62957aa7ad6ff91ae36f65d3a875",
     "TargetPrincipalUpdate": "b8894477c27a718804418bfa09c98e84b5ef42830b368abd0dc5bb86930f3072",
     "TargetScanRequest": "7b7458b366da2793dbc51e5ce6dd7f7ede43d953a340229079aae42d66504983",
-    "TargetSkillDocument": "540961583ea3969ab5bc32099dab213ea357de6e33bed7488a7be97492724559",
-    "TargetSkillResponse": "6f764cdd46f3e92da38d23f102995ab46848d77c6389356840821eba36fdabf1",
-    "TargetSkillWrite": "181db370cd6989a370c19918a735365b337b6f349176cd2975a5b4b781c5e22f",
+    "TargetSkillDocument": "cc9bfe24c2d8060ee9a3f670d9f75233bff437823fd055bdae566f9e55d391cc",
+    "TargetSkillResponse": "2a924c9a47d648154f579e92d2460b2ec7c6bd37b8837adf842e48f96054c843",
+    "TargetSkillWrite": "da423b66daafebea01c8fa2f52bf3d60c0de8ef0c26ea427efafa5234206adfb",
     "TargetUpdate": "313dd3ba3e6b4257f431bca32ece1dc13a0d0377a117e3941c77dddc22eedb58",
     "ToolReceiptRequest": "eb4ea7d29512451b66a7c85cb5dca9a0fd725719a4759cbe214027723d883886",
     "ValidationError": "ca285d0c0e64c42844efd2e860edb239e77cc49d87f065c5ccb7d2f55331b862",
@@ -200,9 +200,9 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "c4617ace7deaa89bc82868c213c1064d3b5b6527e7b79b0ee95506331043ed70",
+  "contract_sha256": "278d225f2ba6c8aaee7f03eeaf1943c70ba6d2d27aaa32b8a6c05fff6cbcdfab",
   "openapi": "3.1.0",
-  "operation_count": 445,
+  "operation_count": 442,
   "operations": {
     "DELETE /ai/scans/{scan_id}/transcript": {
       "deprecated": false,
@@ -587,7 +587,7 @@
     "DELETE /targets/{target_id}/skill": {
       "deprecated": false,
       "operation_id": "delete_target_skill_targets__target_id__skill_delete",
-      "parameters_sha256": "4944f77fa5fc1a342075c1cf3c538984814cb346f6330968b961051b4e196465",
+      "parameters_sha256": "9563f8356e65cfaf8c1a4fd168ab9d1606819cd82feda485e18e92dc4e580cb5",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "cd500422d024a17a348092ae4aaf8a4f8d679e03713c7a274862106be175e465",
@@ -1931,21 +1931,6 @@
         "Hunt"
       ]
     },
-    "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output": {
-      "deprecated": false,
-      "operation_id": "ssh_action_output_hunts__hunt_id__ssh_actions__action_id__output_get",
-      "parameters_sha256": "42d1bc498f4416eaf5785db3336ad34255f3173785ec0363aac381645d5fbc49",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "hunts"
-      ]
-    },
     "GET /investigation/candidates": {
       "deprecated": false,
       "operation_id": "list_investigation_candidates_investigation_candidates_get",
@@ -2366,7 +2351,7 @@
     "GET /request-collections": {
       "deprecated": false,
       "operation_id": "list_request_collections_request_collections_get",
-      "parameters_sha256": "8219b70c89b3af3c107828703af92bfc1fd7755dbde54cb92ce6b0db7c81e0e5",
+      "parameters_sha256": "7b2a41020a5d1e8a3c739a11781bf38ad7a7620610662e8ba98587f4fbf8326a",
       "request_schema_sha256": null,
       "response_schema_sha256": {
         "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -4914,36 +4899,6 @@
         "Hunt"
       ]
     },
-    "POST /hunts/{hunt_id}/ssh/actions/{action_id}/cancel": {
-      "deprecated": false,
-      "operation_id": "cancel_ssh_action_hunts__hunt_id__ssh_actions__action_id__cancel_post",
-      "parameters_sha256": "b949ccef84a271f8dd8d222088871b4e57ea93047a1da63cbcefc52178b0f23c",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "hunts"
-      ]
-    },
-    "POST /hunts/{hunt_id}/ssh/exec": {
-      "deprecated": false,
-      "operation_id": "stream_ssh_command_hunts__hunt_id__ssh_exec_post",
-      "parameters_sha256": "cc413fdb829ef94954b9a5eca8dc4a5d489194b070cc781a444e9f5f17c1fc09",
-      "request_schema_sha256": null,
-      "response_schema_sha256": {
-        "200": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-        "422": "e1fe533ef371cc6965d4015e800b2b5ca90e470f4aae3d57c2754a32b61e8c2d"
-      },
-      "security_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-      "surface": "hunt",
-      "tags": [
-        "hunts"
-      ]
-    },
     "POST /model-intake/admission/verify": {
       "deprecated": false,
       "operation_id": "verify_model_intake_admission_model_intake_admission_verify_post",
@@ -6142,7 +6097,6 @@
       "GET /hunts/{hunt_id}/candidates/{candidate_id}/boundary-context",
       "GET /hunts/{hunt_id}/http-transactions",
       "GET /hunts/{hunt_id}/record",
-      "GET /hunts/{hunt_id}/ssh/actions/{action_id}/output",
       "PATCH /hunts/{hunt_id}/candidates/{candidate_id}",
       "POST /hunts",
       "POST /hunts/{hunt_id}/authorization-investigations",
@@ -6161,9 +6115,7 @@
       "POST /hunts/{hunt_id}/skills/suggestions",
       "POST /hunts/{hunt_id}/skills/{skill_id}/bind",
       "POST /hunts/{hunt_id}/skills/{skill_id}/read",
-      "POST /hunts/{hunt_id}/skills/{skill_id}/usage",
-      "POST /hunts/{hunt_id}/ssh/actions/{action_id}/cancel",
-      "POST /hunts/{hunt_id}/ssh/exec"
+      "POST /hunts/{hunt_id}/skills/{skill_id}/usage"
     ],
     "model_intake": [
       "DELETE /model-intake/trust-anchors/{anchor_id}",

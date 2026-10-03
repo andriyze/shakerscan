@@ -5863,6 +5863,8 @@ export async function getFindings(params?: {
   offset?: number
   root_domain?: string
   scan_id?: string
+  /** Findings a Hunt recorded or re-observed. */
+  hunt_id?: string
   target_id?: string
   ai_target_id?: string
   device_target_id?: string
@@ -5898,6 +5900,7 @@ export async function getFindings(params?: {
   if (params?.offset) searchParams.set('offset', params.offset.toString())
   if (params?.root_domain) searchParams.set('root_domain', params.root_domain)
   if (params?.scan_id) searchParams.set('scan_id', params.scan_id)
+  if (params?.hunt_id) searchParams.set('hunt_id', params.hunt_id)
   if (params?.target_id) searchParams.set('target_id', params.target_id)
   if (params?.ai_target_id) searchParams.set('ai_target_id', params.ai_target_id)
   if (params?.device_target_id) searchParams.set('device_target_id', params.device_target_id)

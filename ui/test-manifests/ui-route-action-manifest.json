@@ -201,7 +201,7 @@
       "source": "src/app/hunt/page.tsx",
       "owner": "hunt",
       "caseId": "HUNT-001",
-      "stateAssertion": "Canonical target-bound Hunt launcher or durable run detail renders.",
+      "stateAssertion": "Hunt history with the launcher on demand, or a durable run with its HTTP requests first.",
       "smokePath": "/hunt"
     },
     {
@@ -209,7 +209,7 @@
       "source": "src/app/hunts/page.tsx",
       "owner": "hunt",
       "caseId": "HUNT-010",
-      "stateAssertion": "Cross-target hunt history renders with filters, sort and paging.",
+      "stateAssertion": "Old history links redirect to /hunt, which lists every Hunt with filters, sort and paging.",
       "smokePath": "/hunts"
     },
     {

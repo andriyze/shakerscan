@@ -1666,8 +1666,8 @@ for the profile contract, invocation, limits and acceptance gates.
 
 | Surface | Count | Source |
 |---|---|---|
-| Public REST operations | 455 | `api/**/*.py` FastAPI decorators |
-| Unique REST paths | 379 | `api/**/*.py` |
+| Public REST operations | 452 | `api/**/*.py` FastAPI decorators |
+| Unique REST paths | 376 | `api/**/*.py` |
 | Check families | 18 | `api/check_registry.py` |
 | Command Arsenal commands | 85 | `api/command_arsenal.py` |
 | Tool adapters | 0 | `api/command_arsenal.py` |
@@ -1935,9 +1935,6 @@ for the profile contract, invocation, limits and acceptance gates.
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/bind` | `bind_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/read` | `read_hunt_skill` |
 | `POST` | `/hunts/{hunt_id}/skills/{skill_id}/usage` | `record_hunt_skill_usage` |
-| `POST` | `/hunts/{hunt_id}/ssh/actions/{action_id}/cancel` | `cancel_ssh_action` |
-| `GET` | `/hunts/{hunt_id}/ssh/actions/{action_id}/output` | `ssh_action_output` |
-| `POST` | `/hunts/{hunt_id}/ssh/exec` | `stream_ssh_command` |
 | `POST` | `/internal/model-intake/admissions/issue` | `issue` |
 | `POST` | `/internal/model-intake/runner/jobs` | `submit_job` |
 | `GET` | `/internal/model-intake/runner/jobs/{job_id}` | `get_job` |
@@ -2787,7 +2784,6 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |
-| `SHAKERSCAN_HUNT_PLANNER_GRANT_FILE` | `api/hunt/planner_gateway.py` |
 | `SHAKERSCAN_INSTALL_KIND` | `api/model_intake/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_MAX_ACTIVE_SCANS` | `api/api.py`, `api/worker.py` |
 | `SHAKERSCAN_MAX_WORKERS` | `api/api.py`, `docker-compose.yml` |
@@ -2814,6 +2810,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_FAILURE_LIMIT` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_LEASE_HEARTBEAT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_QUEUE_MAX_DELIVERY_ATTEMPTS` | `api/fleet_routes/router.py`, `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_QUEUE_PROBE_INTERVAL_MS` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_ROUTE_MAX` | `api/job_queue.py` |
 | `SHAKERSCAN_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.worker.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_RELEASE_MANIFEST` | `scanner/release_identity.py` |

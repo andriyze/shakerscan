@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Download, Search } from 'lucide-react'
 import { API_URL } from '@/lib/api'
 import { Button, Card, Input, Select, useToast } from '@/components/ui'
@@ -96,10 +96,16 @@ export default function HttpArchiveExport({
   ownerKind,
   ownerId,
   compact = false,
+  browse = true,
+  variant = 'card',
 }: {
   ownerKind: 'scan' | 'hunt'
   ownerId: string
   compact?: boolean
+  /** False when the page already lists the calls, leaving only the exports. */
+  browse?: boolean
+  /** 'menu' renders only an Export button whose menu offers the same downloads. */
+  variant?: 'card' | 'menu'
 }) {
   const toast = useToast()
   const [downloading, setDownloading] = useState<DownloadKind | null>(null)
@@ -111,6 +117,8 @@ export default function HttpArchiveExport({
   const [method, setMethod] = useState('')
   const [statusCode, setStatusCode] = useState('')
   const [offset, setOffset] = useState(0)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   const ownerPath = ownerKind === 'scan' ? 'scans' : 'hunts'
 
   const archiveUrl = (format: ArchiveFormat, pageOffset = 0) => {
@@ -234,51 +242,87 @@ export default function HttpArchiveExport({
           </Button>
         </div>
       </div>
-      <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30" onToggle={(event) => { if (event.currentTarget.open && !loaded && !loading) void load(0) }}>
-        <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-blue-300">Browse recorded calls</summary>
-        <div className="border-t border-gray-800 p-3">
-          <form className="grid gap-2 sm:grid-cols-[minmax(12rem,1fr)_8rem_8rem_auto]" onSubmit={(event) => { event.preventDefault(); void load(0) }}>
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-600" />
-              <Input aria-label="Search archived calls" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Capability, adapter, or method" />
-            </div>
-            <Select aria-label="Filter archived calls by method" value={method} onChange={(event) => setMethod(event.target.value)}>
-              <option value="">All methods</option>
-              {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((value) => <option key={value}>{value}</option>)}
-            </Select>
-            <Input aria-label="Filter archived calls by status" inputMode="numeric" value={statusCode} onChange={(event) => setStatusCode(event.target.value.replace(/\D/g, '').slice(0, 3))} placeholder="Status" />
-            <Button size="sm" variant="secondary" type="submit" loading={loading}>Apply</Button>
-          </form>
-
-          {error && <p role="alert" className="mt-3 text-xs text-red-300">{error}</p>}
-          {loading && !archive && <p className="mt-3 text-xs text-gray-500">Loading recorded calls…</p>}
-          {archive && (
-            <>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                <span className={`rounded-sm px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
-                <span>{archive.fidelity_detail}</span>
-                <span>· {archive.total} match{archive.total === 1 ? '' : 'es'} in {archive.archive_total ?? archive.total} recorded call{(archive.archive_total ?? archive.total) === 1 ? '' : 's'}</span>
+      {browse && (
+        <details className="mt-3 rounded-lg border border-gray-800 bg-gray-950/30" onToggle={(event) => { if (event.currentTarget.open && !loaded && !loading) void load(0) }}>
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-blue-300">Browse recorded calls</summary>
+          <div className="border-t border-gray-800 p-3">
+            <form className="grid gap-2 sm:grid-cols-[minmax(12rem,1fr)_8rem_8rem_auto]" onSubmit={(event) => { event.preventDefault(); void load(0) }}>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-600" />
+                <Input aria-label="Search archived calls" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Capability, adapter, or method" />
               </div>
-              {archive.transactions.length === 0 ? (
-                <p className="mt-3 rounded-sm bg-gray-950 p-3 text-xs text-gray-500">
-                  {archive.fidelity === 'unavailable' ? 'No request archive is available for this historical run.' : 'No recorded calls match these filters.'}
-                </p>
-              ) : (
-                <div className="mt-3 space-y-2">{archive.transactions.map((transaction) => <TransactionDetail key={transaction.id} transaction={transaction} />)}</div>
-              )}
-              {archive.total > PAGE_SIZE && (
-                <div className="mt-3 flex items-center justify-between">
-                  <Button size="sm" variant="ghost" disabled={loading || offset === 0} onClick={() => void load(Math.max(0, offset - PAGE_SIZE))}>Previous</Button>
-                  <span className="text-xs text-gray-600">{offset + 1}-{Math.min(offset + PAGE_SIZE, archive.total)} of {archive.total}</span>
-                  <Button size="sm" variant="ghost" disabled={loading || offset + PAGE_SIZE >= archive.total} onClick={() => void load(offset + PAGE_SIZE)}>Next</Button>
+              <Select aria-label="Filter archived calls by method" value={method} onChange={(event) => setMethod(event.target.value)}>
+                <option value="">All methods</option>
+                {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((value) => <option key={value}>{value}</option>)}
+              </Select>
+              <Input aria-label="Filter archived calls by status" inputMode="numeric" value={statusCode} onChange={(event) => setStatusCode(event.target.value.replace(/\D/g, '').slice(0, 3))} placeholder="Status" />
+              <Button size="sm" variant="secondary" type="submit" loading={loading}>Apply</Button>
+            </form>
+
+            {error && <p role="alert" className="mt-3 text-xs text-red-300">{error}</p>}
+            {loading && !archive && <p className="mt-3 text-xs text-gray-500">Loading recorded calls…</p>}
+            {archive && (
+              <>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                  <span className={`rounded-sm px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
+                  <span>{archive.fidelity_detail}</span>
+                  <span>· {archive.total} match{archive.total === 1 ? '' : 'es'} in {archive.archive_total ?? archive.total} recorded call{(archive.archive_total ?? archive.total) === 1 ? '' : 's'}</span>
                 </div>
-              )}
-            </>
-          )}
-        </div>
-      </details>
+                {archive.transactions.length === 0 ? (
+                  <p className="mt-3 rounded-sm bg-gray-950 p-3 text-xs text-gray-500">
+                    {archive.fidelity === 'unavailable' ? 'No request archive is available for this historical run.' : 'No recorded calls match these filters.'}
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-2">{archive.transactions.map((transaction) => <TransactionDetail key={transaction.id} transaction={transaction} />)}</div>
+                )}
+                {archive.total > PAGE_SIZE && (
+                  <div className="mt-3 flex items-center justify-between">
+                    <Button size="sm" variant="ghost" disabled={loading || offset === 0} onClick={() => void load(Math.max(0, offset - PAGE_SIZE))}>Previous</Button>
+                    <span className="text-xs text-gray-600">{offset + 1}-{Math.min(offset + PAGE_SIZE, archive.total)} of {archive.total}</span>
+                    <Button size="sm" variant="ghost" disabled={loading || offset + PAGE_SIZE >= archive.total} onClick={() => void load(offset + PAGE_SIZE)}>Next</Button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </details>
+      )}
     </>
   )
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', close)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', close) }
+  }, [menuOpen])
+
+  if (variant === 'menu') {
+    const item = 'flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left hover:bg-gray-800 disabled:opacity-50'
+    const choose = (action: () => Promise<void>) => { setMenuOpen(false); void action() }
+    return <div ref={menuRef} className="relative">
+      <Button size="sm" variant="secondary" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)} loading={downloading !== null}>
+        <Download className="h-4 w-4" />Export
+      </Button>
+      {menuOpen && <div role="menu" aria-label="Export" className="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-gray-700 bg-gray-900 p-1 shadow-xl shadow-black/40">
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('transactions'))}>
+          <span className="text-sm text-gray-100">Requests JSON</span>
+          <span className="text-xs text-gray-500">Masked; safe to share</span>
+        </button>
+        <button type="button" role="menuitem" className={item} onClick={() => choose(() => download('har'))}>
+          <span className="text-sm text-amber-200">{`Raw HAR 1.2${archive ? ` · ${archive.fidelity}` : ''}`}</span>
+          <span className="text-xs text-gray-500">Verbatim traffic for Burp or replay; sensitive</span>
+        </button>
+        {ownerKind === 'hunt' && <button type="button" role="menuitem" className={item} onClick={() => choose(downloadHuntRecord)}>
+          <span className="text-sm text-gray-100">Full Hunt record</span>
+          <span className="text-xs text-gray-500">Decisions, actions and debrief as JSON</span>
+        </button>}
+      </div>}
+    </div>
+  }
 
   if (compact) return <div className="rounded-lg border border-gray-800 bg-gray-950 p-3">{body}</div>
   return <Card className="mb-6 p-4">{body}</Card>

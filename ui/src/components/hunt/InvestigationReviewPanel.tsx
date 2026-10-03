@@ -5,8 +5,10 @@ import { useSearchParams } from 'next/navigation'
 import { listReviewProposals, readInvestigation, type InvestigationReview } from '@/lib/huntReview'
 import { assessmentText, candidateHistoryText, isReviewId, reconcileReviewSelection } from '@/lib/huntReviewModel'
 
-function Review({ huntId }: { huntId: string }) {
+function Review({ huntId, hideWhenEmpty = false }: { huntId: string; hideWhenEmpty?: boolean }) {
   const [ids, setIds] = useState<string[]>([])
+  const [everHadProposals, setEverHadProposals] = useState(false)
+  useEffect(() => { if (ids.length > 0) setEverHadProposals(true) }, [ids.length])
   const [cursor, setCursor] = useState<string | null>(null)
   const [selected, setSelected] = useState('')
   const [review, setReview] = useState<InvestigationReview | null>(null)
@@ -81,6 +83,9 @@ function Review({ huntId }: { huntId: string }) {
   }, [huntId, selected, revision])
 
   if (!supported) return null
+  // On a run page a review history that was never there is noise. Once proposals were shown, an
+  // emptied refresh still says so rather than making the panel vanish under the operator.
+  if (hideWhenEmpty && !everHadProposals && !loading && !error && ids.length === 0) return null
   const history = review?.candidate_history || (review?.candidate ? [review.candidate] : [])
   return (
     <section aria-label="Investigation review" className="mb-6 space-y-4 rounded-xl border border-gray-700 bg-gray-900 p-5">
@@ -155,8 +160,8 @@ function Review({ huntId }: { huntId: string }) {
   )
 }
 
-export default function InvestigationReviewPanel() {
+export default function InvestigationReviewPanel({ hideWhenEmpty = false }: { hideWhenEmpty?: boolean }) {
   const searchParams = useSearchParams()
   const huntId = searchParams.get('run')
-  return isReviewId(huntId) ? <Review key={huntId} huntId={huntId} /> : null
+  return isReviewId(huntId) ? <Review key={huntId} huntId={huntId} hideWhenEmpty={hideWhenEmpty} /> : null
 }
