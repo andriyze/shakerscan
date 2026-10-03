@@ -30,7 +30,7 @@ test('production Hunt UI submits canonical passive V2 authority', async ({ page,
 
   await page.goto(`/hunt?target=${encodeURIComponent(target.id)}`)
   await expect(page.getByLabel('Target', { exact: true })).toHaveAttribute('data-value', target.id)
-  await page.getByLabel('Objective').fill('Production UI real-stack Hunt acceptance.')
+  await page.getByLabel('Objective', { exact: true }).fill('Production UI real-stack Hunt acceptance.')
   await page.getByLabel('Budget profile').selectOption('fast')
   await page.getByText('Advanced: limits, scope receipt and capability allowlist').click()
   await page.getByText('Optional hard ceilings (zero disables a dimension)').click()
