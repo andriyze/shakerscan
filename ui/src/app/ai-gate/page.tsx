@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { Bot, CheckCircle2, Clipboard, Download, Play, Plus, RefreshCw, ShieldCheck, Trash2, Wand2 } from 'lucide-react'
 import AISurfaceInventoryPanel from '@/components/AISurfaceInventoryPanel'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import {
   Button,
   Card,
@@ -386,6 +387,7 @@ export default function AIGateSettingsPage() {
   const [showAddTarget, setShowAddTarget] = useState(false)
   const [showAdvancedTarget, setShowAdvancedTarget] = useState(false)
   const [showDemoTargets, setShowDemoTargets] = useState(false)
+  const [showDisabledTargets, setShowDisabledTargets] = useState(false)
   const [demoRunning, setDemoRunning] = useState(false)
   const [demoResult, setDemoResult] = useState<AIDemoRunResponse | null>(null)
   const [controlRemediationMode, setControlRemediationMode] = useState(false)
@@ -416,7 +418,7 @@ export default function AIGateSettingsPage() {
   const loadTargets = useCallback(async () => {
     setLoading(true)
     try {
-      const payload = await getAITargets({ includeInactive: false, includeDemo: showDemoTargets, limit: 500 })
+      const payload = await getAITargets({ includeInactive: showDisabledTargets, includeDemo: showDemoTargets, limit: 500 })
       setTargets(payload.targets)
       setRunConfigs((prev) => {
         const next = { ...prev }
@@ -431,7 +433,7 @@ export default function AIGateSettingsPage() {
     } finally {
       setLoading(false)
     }
-  }, [showDemoTargets])
+  }, [showDemoTargets, showDisabledTargets])
 
   const loadInventory = useCallback(async () => {
     try {
@@ -1246,6 +1248,15 @@ export default function AIGateSettingsPage() {
               <p className="mt-1 text-xs text-gray-500">Saved AI surfaces ready for probe packs and deployment checks.</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
+              <label className="inline-flex items-center gap-2 text-xs text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={showDisabledTargets}
+                  onChange={(event) => setShowDisabledTargets(event.target.checked)}
+                  className="h-4 w-4 rounded-sm border-gray-700 bg-gray-800"
+                />
+                Show disabled targets
+              </label>
               {aiSettings?.demo_mode_enabled && (
                 <label className="inline-flex items-center gap-2 text-xs text-gray-400">
                   <input
@@ -1298,6 +1309,7 @@ export default function AIGateSettingsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-medium text-white">{target.name}</h3>
                         <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{TARGET_TYPES.find((type) => type.value === target.target_type)?.label || target.target_type}</span>
+                        {target.is_active === false && <span className="rounded-sm bg-gray-800 px-2 py-0.5 text-xs text-gray-400">Disabled</span>}
                         {isDemoTarget && <span className="rounded-sm bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">demo</span>}
                         {target.production_mode && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400">production</span>}
                         {isControlRemediationTarget && <span className="rounded-sm bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-200">control gap</span>}
@@ -1352,15 +1364,22 @@ export default function AIGateSettingsPage() {
                         </div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setConfirmDisableTarget(target)}
-                      className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400"
-                      aria-label={`Disable ${target.name}`}
-                      title="Disable target"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      Disable
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {target.is_active !== false && <button
+                        onClick={() => setConfirmDisableTarget(target)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-800 px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-400"
+                        aria-label={`Disable ${target.name}`}
+                        title="Disable target"
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                        Disable
+                      </button>}
+                      <DeleteRecordsButton
+                        selection={{ kind: 'ai_target', id: target.id }} label="Delete permanently" subject={target.name}
+                        variant="secondary" className="px-2 py-1 text-xs"
+                        onDeleted={() => { void loadTargets(); void loadInventory() }}
+                      />
+                    </div>
                   </div>
 
                   <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-[1fr_0.8fr_0.8fr_auto_auto_auto]">

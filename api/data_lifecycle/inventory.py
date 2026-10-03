@@ -16,7 +16,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from .statuses import TERMINAL_BY_TABLE
-from . import erasure, inputs
+from . import erasure, inputs, records
 
 MAX_RECORDS = 100000
 MAX_DOMAIN_TARGETS = 500
@@ -87,10 +87,13 @@ async def catalog(conn):
 
 
 TARGET_KINDS = ('target', 'domain')
+# References a deletion clears instead of refusing over: (table, columns).
+DETACHABLE = {('scans', ('baseline_scan_id',))}
 
 
 def root_table(kind: str) -> str:
-    return inputs.INPUT_KINDS.get(kind) or ('findings' if kind == 'findings' else 'targets')
+    return (inputs.INPUT_KINDS.get(kind) or records.RECORD_KINDS.get(kind)
+            or ('findings' if kind == 'findings' else 'targets'))
 
 
 def cascade_plan(kind: str, edges: list[dict], columns: dict):
@@ -99,7 +102,9 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
     predicate = 'r.id = ANY($1::uuid[])'
     deleted[root].append(predicate)
     queue = [(root, predicate, (root,))]
-    owned = erasure.owned_by_targets(columns) if root == 'targets' else inputs.owned(kind, columns)
+    owned = (erasure.owned_by_targets(columns, kind) if root == 'targets'
+             else records.owned(kind, columns) if kind in records.RECORD_KINDS
+             else inputs.owned(kind, columns))
     # A target's scans, credentials (every kind, including a host's device identity), sessions
     # and collection bindings, or a credential's assurance history and legacy copies, have no
     # cascading FK to their owner; they go with it.
@@ -123,6 +128,10 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
                       f'WHERE ({predicate.replace("r.", alias + ".")}) AND {join})')
             if child == 'evidence_objects':
                 continue  # erased explicitly below once nothing surviving references it
+            if (child, tuple(edge['child_keys'])) in DETACHABLE:
+                # A comparison baseline is a reference, not ownership: clear it, never block on it.
+                detached[child].append(clause)
+                continue
             if edge['action'] == 'c':
                 if child in path:
                     raise HTTPException(409, 'Cyclic ownership requires a separately reviewed deletion')
@@ -224,6 +233,11 @@ async def domain_roots(conn, domain: str):
 
 
 async def find_roots(conn, selection):
+    if selection['kind'] in records.RECORD_KINDS:
+        try:
+            return await records.find(conn, selection['kind'], UUID(selection['id']))
+        except LookupError as missing:
+            raise HTTPException(404, str(missing)) from None
     if selection['kind'] in inputs.INPUT_KINDS:
         try:
             return await inputs.find(conn, selection['kind'], UUID(selection['id']))
@@ -233,11 +247,9 @@ async def find_roots(conn, selection):
         return await domain_roots(conn, selection['domain'])
     if selection['kind'] == 'target':
         roots = [UUID(selection['target_id'])]
-        rows = await conn.fetch('SELECT id, discovery_source FROM targets WHERE id=ANY($1::uuid[])', roots)
+        rows = await conn.fetch('SELECT id FROM targets WHERE id=ANY($1::uuid[])', roots)
         if not rows:
             raise HTTPException(404, 'Target not found')
-        if rows[0]['discovery_source'] == 'model-intake':
-            raise HTTPException(409, 'Model Intake subjects require their product-specific lifecycle')
         # The selected target stays first: routes bind a preview to it by root_ids[0].
         return roots + await _members(conn, roots)
     if selection.get('finding_ids'):
@@ -257,6 +269,8 @@ async def find_roots(conn, selection):
 
 
 async def owner_context(conn, kind, roots):
+    if kind in records.RECORD_KINDS:
+        return await records.owners(conn, kind, roots)
     if kind in inputs.INPUT_KINDS:
         # An input is owned by its home target; it carries no findings or runs of its own.
         return {'target_id': await inputs.home_targets(conn, kind, roots), 'device_target_id': [],
@@ -371,12 +385,17 @@ def hashable(manifest):
 async def blockers(conn, columns, owners, kind, roots):
     if kind in inputs.INPUT_KINDS:
         return await inputs.running_users(conn, kind, roots, columns)
-    issues = []
-    for table, state in (await unfinished(conn, columns, owners)).items():
-        if state['live']:
-            shown = ', '.join(state['live'][:5]) + (', …' if len(state['live']) > 5 else '')
-            issues.append(f'{table}: {len(state["live"])} running record(s) ({shown}); cancel them '
-                          f'(for a scan: POST /scans/{{id}}/cancel) or wait for them to finish')
+    if kind in records.RECORD_KINDS:
+        # Only the selected record's own work blocks, not the rest of its target; its owner's
+        # enforced holds and an executing evidence retention still do.
+        issues = await records.blockers(conn, kind, roots, columns)
+    else:
+        issues = []
+        for table, state in (await unfinished(conn, columns, owners)).items():
+            if state['live']:
+                shown = ', '.join(state['live'][:5]) + (', …' if len(state['live']) > 5 else '')
+                issues.append(f'{table}: {len(state["live"])} running record(s) ({shown}); cancel them '
+                              f'(for a scan: POST /scans/{{id}}/cancel) or wait for them to finish')
     for key, table in (('target_id', 'targets'), ('device_target_id', 'device_targets'), ('ai_target_id', 'ai_targets')):
         if owners[key] and table in columns and holds_enforced():
             held = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE id=ANY($1::uuid[]) AND {hold_predicate()}', [UUID(v) for v in owners[key]])
@@ -384,7 +403,7 @@ async def blockers(conn, columns, owners, kind, roots):
                 issues.append(f'{table}: an owner is on legal/operational hold')
     # A host's device findings carry the host's own id as device_target_id: same asset, not mixed.
     foreign_devices = set(owners['device_target_id']) - {str(r) for r in roots}
-    if kind != 'findings' and (foreign_devices or owners['ai_target_id']):
+    if kind in TARGET_KINDS and (foreign_devices or owners['ai_target_id']):
         issues.append('Mixed product ownership: remove or resolve cross-product finding links first')
     if 'evidence_retention_previews' in columns and owners['target_id']:
         pending = await conn.fetchval("SELECT COUNT(*) FROM evidence_retention_previews WHERE target_id=ANY($1::uuid[]) AND status='executing'", [UUID(v) for v in owners['target_id']])
@@ -399,9 +418,14 @@ async def inventory(conn, selection, roots, columns, edges):
     owners = await owner_context(conn, kind, roots)
     issues = await blockers(conn, columns, owners, kind, roots)
     # Deleting an input never cancels its home target's work; only target and finding deletions do.
-    abandoned = {} if kind in inputs.INPUT_KINDS else {
-        table: state['abandoned'] for table, state in (await unfinished(conn, columns, owners)).items()
-        if state['abandoned']}
+    if kind in inputs.INPUT_KINDS:
+        abandoned = {}
+    elif kind in records.RECORD_KINDS:
+        abandoned = {table: state['abandoned'] for table, state in
+                     (await records.unfinished(conn, kind, roots, columns)).items() if state['abandoned']}
+    else:
+        abandoned = {table: state['abandoned'] for table, state in (await unfinished(conn, columns, owners)).items()
+                     if state['abandoned']}
     groups = {}
     for name, predicates in zip(('delete', 'detach', 'retain', 'restrict'), plan):
         group = {}

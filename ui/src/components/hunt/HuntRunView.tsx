@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from '@/components/WorkspaceLink'
 import { AlertTriangle, ArrowLeft, Square, Terminal } from 'lucide-react'
 import HttpArchiveExport from '@/components/HttpArchiveExport'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { CopyButton } from '@/components/findings/detail/CopyButton'
 import { Button, Card, ConfirmDialog, Tabs, useToast } from '@/components/ui'
 import type { DeviceAgentShellPlan } from '@/lib/api'
@@ -54,6 +56,7 @@ export function HuntRunView({ hunt, onChange, target }: {
   target: { title: string; locator: string } | null
 }) {
   const toast = useToast()
+  const router = useRouter()
   const live = huntIsLive(hunt)
   const [tab, setTab] = useState<RunTab>(() => defaultRunTab(hunt, typeof window === 'undefined' ? '' : window.location.hash))
   const [objectiveOpen, setObjectiveOpen] = useState(false)
@@ -156,6 +159,9 @@ export function HuntRunView({ hunt, onChange, target }: {
           </span>
           <HttpArchiveExport ownerKind="hunt" ownerId={hunt.hunt_id} variant="menu" />
           {stoppable && <Button size="sm" variant="danger" onClick={() => setConfirmStop(true)}><Square className="h-3.5 w-3.5" aria-hidden="true" />Stop</Button>}
+          {/* A running Hunt blocks its own deletion; the preview says so and an abandoned one is cancelled. */}
+          <DeleteRecordsButton selection={{ kind: 'hunt', id: hunt.hunt_id }} label="Delete" subject="this Hunt"
+            variant="secondary" className="px-2.5 py-1 text-sm" onDeleted={() => router.push('/hunt')} />
         </div>
       </div>
     </div>

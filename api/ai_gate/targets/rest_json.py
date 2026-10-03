@@ -14,6 +14,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover - supports package-style 
     if exc.name not in {"ai_gate", "ai_gate.budget"}:
         raise
     from api.ai_gate.budget import CHARS_PER_TOKEN_ESTIMATE, RequestBudget
+try:
+    from secret_store import decrypt_secret
+except ModuleNotFoundError:  # pragma: no cover - package-style local imports
+    from api.secret_store import decrypt_secret
 
 
 CALIBRATION_METADATA_ERROR_KEY = "calibration_metadata_error"
@@ -261,7 +265,8 @@ def build_headers(target: dict[str, Any]) -> dict[str, str]:
     headers = {}
     for key, value in as_dict(target.get("headers_template")).items():
         if isinstance(value, str) and key.strip():
-            headers[key.strip()] = value
+            # Secret header values are stored encrypted and decrypted only here, for the request.
+            headers[key.strip()] = decrypt_secret(value)
 
     credential = as_dict(target.get("credential"))
     auth_kind = credential.get("auth_kind") or "none"

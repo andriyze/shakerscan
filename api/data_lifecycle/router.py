@@ -25,9 +25,11 @@ def pool():
 
 class DeletionSelection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    kind: Literal['target', 'domain', 'findings', 'credential_profile', 'request_collection']
+    kind: Literal['target', 'domain', 'findings', 'credential_profile', 'request_collection',
+                  'scan', 'hunt', 'ai_target', 'model_intake_submission']
     target_id: UUID | None = None
-    # The credential profile or request collection to delete permanently.
+    # The credential profile, request collection, scan, Hunt, AI target or Model Intake submission
+    # to delete permanently.
     id: UUID | None = None
     # A domain group as the Targets list shows it, e.g. example.com or example.co.uk.
     domain: str | None = Field(default=None, min_length=1, max_length=253, pattern=r'^[A-Za-z0-9.-]+$')
@@ -40,12 +42,14 @@ class DeletionSelection(BaseModel):
     @model_validator(mode='after')
     def selection_is_explicit(self):
         filters = self.finding_ids or self.scan_id or self.older_than_days or self.status or self.root_domain
-        if self.kind in ('credential_profile', 'request_collection'):
+        if self.kind in ('credential_profile', 'request_collection', 'scan', 'hunt', 'ai_target',
+                         'model_intake_submission'):
             if not self.id or self.target_id or self.domain or filters:
-                raise ValueError('Permanent deletion of an input requires exactly one id')
+                raise ValueError(f'Permanent deletion of a {self.kind.replace("_", " ")} requires exactly one id')
             return self
         if self.id:
-            raise ValueError('id selects a credential profile or request collection only')
+            raise ValueError('id selects a credential profile, request collection, scan, Hunt, AI target '
+                             'or Model Intake submission only')
         if self.kind == 'domain':
             if not self.domain or self.target_id or filters:
                 raise ValueError('Domain deletion requires exactly one domain, without target or finding filters')
