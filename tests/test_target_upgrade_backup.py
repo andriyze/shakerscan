@@ -50,7 +50,8 @@ compose() {
     case "$*" in
         *"/proc/1/comm"*)
             echo poll >> "$POLLS"
-            if [ "$(wc -l < "$POLLS")" -lt 3 ]; then printf 'docker-entrypoi\\n'; else printf 'postgres\\n'; fi ;;
+            if [ "$(wc -l < "$POLLS")" -lt 3 ]; then printf 'bash\\n'; else printf 'postgres\\n'; fi ;;
+        *"pg_isready"*) return 0 ;;  # the init server answers too: readiness alone is not enough
         *"SELECT relkind"*) echo query >> "$POLLS"; printf 'r\\n' ;;
         *"SELECT to_regclass"*) printf 't\\n' ;;
     esac
