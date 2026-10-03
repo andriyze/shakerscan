@@ -120,6 +120,36 @@ def test_selected_ssh_identity_can_connect_without_discovery_permission():
     with pytest.raises(CapabilityInputError):
         network_capability_adapter('ports.discover').prepare(target=target,args={'profile':'top100'},policy=policy)
 
+
+def test_fast_fixture_commands_wait_for_delayed_exec_acknowledgement(monkeypatch,tmp_path):
+    import time
+    import paramiko
+    from tests.ssh_exec_fixture import CommandServer,PASSWORD,USERNAME
+    send = paramiko.Transport._send_user_message
+    def delayed_ack(transport,message):
+        if message.asbytes()[:1] == paramiko.common.cMSG_CHANNEL_SUCCESS:
+            time.sleep(0.05)
+        return send(transport,message)
+    monkeypatch.setattr(paramiko.Transport,'_send_user_message',delayed_ack)
+    fixture = CommandServer(tmp_path)
+    command = "printf 'fast-output'; exit 7"
+    fixture.allow(command)
+    client = paramiko.SSHClient()
+    client.get_host_keys().add(f'[127.0.0.1]:{fixture.port}',fixture.key.get_name(),fixture.key)
+    try:
+        client.connect('127.0.0.1',port=fixture.port,username=USERNAME,password=PASSWORD,
+            look_for_keys=False,allow_agent=False,timeout=3,auth_timeout=3,banner_timeout=3)
+        for _ in range(5):
+            stdin,stdout,stderr = client.exec_command(command,timeout=3)
+            stdin.close()
+            assert stdout.read() == b'fast-output'
+            assert stderr.read() == b''
+            assert stdout.channel.recv_exit_status() == 7
+            stdout.close();stderr.close()
+        assert fixture.logins == 1 and fixture.commands == [command]*5
+    finally:
+        client.close();fixture.close()
+
 def test_transport_is_owned_by_exact_run_target_identity_and_service():
     pool = SshTransportPool()
     binding = (str(uuid4()),'target-digest','192.0.2.1',2222,str(uuid4()),1)

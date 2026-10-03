@@ -23,6 +23,21 @@ USERNAME = 'fixture-operator'
 PASSWORD = 'fixture-only-password'
 
 
+class AcceptedExecTransport(paramiko.Transport):
+    """Publish exec acknowledgement before a fast fixture can close its channel."""
+    def __init__(self, sock):
+        super().__init__(sock)
+        self.exec_acknowledgements = {}
+
+    def _send_user_message(self, message):
+        packet = message.asbytes()
+        super()._send_user_message(message)
+        if packet[:1] == paramiko.common.cMSG_CHANNEL_SUCCESS:
+            event = self.exec_acknowledgements.pop(int.from_bytes(packet[1:5], 'big'), None)
+            if event is not None:
+                event.set()
+
+
 class HttpLogFixture:
     """Owned HTTP service whose real requests produce the SSH-watched log."""
     def __init__(self,directory):
@@ -116,12 +131,14 @@ class CommandServer:
                     return False
                 with server.lock:
                     server.commands.append(text)
-                thread = threading.Thread(target=server.execute, args=(channel, text), daemon=True)
+                acknowledged = threading.Event()
+                transport.exec_acknowledgements[channel.remote_chanid] = acknowledged
+                thread = threading.Thread(target=server.execute, args=(channel, text, acknowledged), daemon=True)
                 server.threads.append(thread)
                 thread.start()
                 return True
 
-        transport = paramiko.Transport(sock)
+        transport = AcceptedExecTransport(sock)
         transport.add_server_key(self.key)
         self.transports.append(transport)
         with self.lock:
@@ -140,7 +157,10 @@ class CommandServer:
             transport.close()
             sock.close()
 
-    def execute(self, channel, command):
+    def execute(self, channel, command, acknowledged):
+        if not acknowledged.wait(3):
+            channel.close()
+            return
         process = subprocess.Popen(['/bin/sh', '-c', command], cwd=self.directory,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True)
