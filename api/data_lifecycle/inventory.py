@@ -80,7 +80,9 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
     deleted[root].append(predicate)
     queue = [(root, predicate, (root,))]
     if kind == 'target' and 'credential_profiles' in columns:
-        clause = "r.target_id = ANY($1::uuid[]) AND r.target_kind IN ('web','api','network')"
+        # Every credential homed on the target, whatever its kind: a host's SSH identity is
+        # stored as target_kind='device' on the host row and must not outlive it.
+        clause = "r.target_id = ANY($1::uuid[]) AND r.target_kind IN ('web','api','network','device')"
         deleted['credential_profiles'].append(clause)
         queue.append(('credential_profiles', clause, ('credential_profiles',)))
     serial = 0

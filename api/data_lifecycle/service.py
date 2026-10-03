@@ -157,7 +157,7 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                     if 'credential_profiles' in columns:
                         # A credential belongs to its home target: deleting the target deletes it,
                         # and with it every share. Shares other credentials gave this target go too.
-                        await conn.execute("DELETE FROM credential_profiles WHERE target_id=ANY($1::uuid[]) AND target_kind IN ('web','api','network')", roots)
+                        await conn.execute("DELETE FROM credential_profiles WHERE target_id=ANY($1::uuid[]) AND target_kind IN ('web','api','network','device')", roots)
                     if 'credential_profile_bindings' in columns:
                         await conn.execute("DELETE FROM credential_profile_bindings WHERE binding_kind='target' AND binding_id=ANY($1::text[])", [str(root) for root in roots])
                     removed = await conn.fetch('DELETE FROM targets WHERE id=ANY($1::uuid[]) RETURNING id', roots)

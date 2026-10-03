@@ -391,3 +391,42 @@ def test_a_campaign_whose_scans_were_all_cancelled_is_abandoned_and_settled():
             done = await c.fetchval("INSERT INTO scans(target_id,target_url,status,campaign_id) VALUES($1,$2,'cancelled',$3) RETURNING id", t, f'https://{t}.example.invalid', live)
             assert await settle_campaign_after_scan(c, done) == 0
     run(scenario)
+
+
+def test_target_delete_erases_every_credential_homed_on_it_including_device_kind():
+    # A host's SSH identity is stored with target_kind='device' on the host's targets row. Deleting
+    # the host used to keep it (and its shares), so it stayed usable on the targets it was shared to.
+    from datetime import timezone
+    from runtime.credential_store import CredentialStoreError, PostgresCredentialProfileStore
+
+    async def scenario(pool):
+        store = PostgresCredentialProfileStore()
+        host, shared_to = uuid4(), uuid4()
+        now = datetime.now(timezone.utc)
+        async with pool.acquire() as c:
+            for target, name in ((host, 'device-host'), (shared_to, 'shared-host')):
+                await c.execute("INSERT INTO targets(id,url,discovery_source) VALUES($1,$2,'host')",
+                                target, f'host://{name}-{target.hex[:8]}.example.invalid')
+            profile = await store.create_profile(
+                c, target_kind='device', target_id=host, name='Host SSH', auth_kind='ssh_password',
+                principal_slot='ssh', principal_label=None, configuration={'auth_kind': 'ssh_password', 'secret_values_visible': False},
+                encrypted_secret='enc:fernet:synthetic-secret', encrypted_metadata='enc:fernet:synthetic-metadata',
+                expires_at=None, allowed_capabilities=['device.ssh.propose'], created_by='test', now=now)
+            await store.grant_profile(c, profile_id=profile.profile_id, target_kind='device', target_id=shared_to,
+                                      granted_by='test', now=now)
+            # Usable on the target it was shared to before the host is deleted.
+            await store.load_for_worker(c, profile_id=profile.profile_id, target_kind='device',
+                                        target_id=shared_to, capability='device.ssh.propose')
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(host)})
+        assert preview['records']['delete']['credential_profiles']['count'] == 1
+        assert preview['records']['delete']['credential_profile_versions']['count'] == 1
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview), preview_hash=preview['preview_hash'])
+        profile_id = UUID(profile.profile_id)
+        async with pool.acquire() as c:
+            for table, column in (('credential_profiles', 'id'), ('credential_profile_versions', 'profile_id'),
+                                  ('credential_profile_bindings', 'profile_id')):
+                assert await c.fetchval(f'SELECT COUNT(*) FROM {table} WHERE {column}=$1', profile_id) == 0, table
+            with pytest.raises(CredentialStoreError):
+                await store.load_for_worker(c, profile_id=profile.profile_id, target_kind='device',
+                                            target_id=shared_to, capability='device.ssh.propose')
+    run(scenario)
