@@ -16,18 +16,23 @@ def edge(parent, child, action='c', child_key=None):
             'child_keys': [child_key or parent.rstrip('s') + '_id'], 'parent_keys': ['id']}
 
 
-def test_cascade_preserves_sibling_targets_scans_and_external_storage_index():
+def test_target_erasure_takes_scans_credentials_and_evidence_but_not_sibling_targets():
     edges = [edge('targets', 'targets', 'n', 'parent_target_id'),
              edge('targets', 'scans', 'n'), edge('targets', 'findings'),
              edge('findings', 'evidence_objects'), edge('findings', 'finding_verifications'),
              edge('targets', 'schedules'), edge('credential_profiles', 'auth_sessions', child_key='profile_id')]
-    deleted, detached, retained, restricted = cascade_plan('target', edges, {'credential_profiles': set()})
-    assert set(deleted) == {'targets', 'findings', 'finding_verifications', 'schedules', 'credential_profiles', 'auth_sessions'}
-    assert set(detached) == {'evidence_objects'}
+    columns = {'credential_profiles': set(), 'scans': {'target_id', 'device_target_id'},
+               'evidence_objects': {'scan_id', 'finding_id'}, 'auth_sessions': {'target_id'}}
+    deleted, detached, retained, restricted = cascade_plan('target', edges, columns)
+    assert set(deleted) == {'targets', 'findings', 'finding_verifications', 'schedules', 'credential_profiles',
+                            'auth_sessions', 'scans', 'evidence_objects'}
+    assert not detached
+    # A sibling linked by parent_target_id survives; the target's own scans are no longer "retained".
     assert set(retained) == {'targets', 'scans'}
+    assert 'AND NOT' in retained['scans']
     assert not restricted
     assert 'ANY($1::uuid[])' in deleted['findings']
-    assert 'target_kind' in deleted['credential_profiles']
+    assert "'device'" in deleted['credential_profiles']
 
 
 def test_finding_deletion_never_expands_to_target_or_scans():

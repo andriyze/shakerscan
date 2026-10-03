@@ -91,6 +91,16 @@ class MemoryCredentialConn:
                 self.binding["is_active"] = False
                 self.binding["updated_at"] = args[0]
             return "UPDATE 1"
+        if normalized.startswith("UPDATE auth_sessions"):
+            # Deactivation revokes the profile's live sessions and destroys their headers.
+            destroyed, revoked_at, profile_id = args
+            self.revoked_sessions = [*getattr(self, "revoked_sessions", []), (profile_id, destroyed, revoked_at)]
+            return "UPDATE 0"
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        if "to_regclass('public.auth_sessions')" in query:
+            return True  # deactivation revokes the profile's sessions
         raise AssertionError(query)
 
     async def fetchrow(self, query, *args):
@@ -408,6 +418,9 @@ def test_deactivation_revokes_profile_and_binding():
     ))
     assert deactivated.is_active is False
     assert conn.binding["is_active"] is False
+    [(revoked_profile, destroyed, _)] = conn.revoked_sessions
+    assert str(revoked_profile) == deactivated.profile_id
+    assert destroyed.startswith("enc:fernet:")
     with pytest.raises(CredentialStoreError, match="unavailable for target"):
         asyncio.run(store.load_for_worker(
             conn,

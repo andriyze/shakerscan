@@ -1677,7 +1677,7 @@ for the profile contract, invocation, limits and acceptance gates.
 | Deprecated wrapper aliases | 0 | `scanner.sh` |
 | Make targets | 20 | `Makefile` |
 | Release gates | 17 | `scripts/release_gates.py` |
-| Runtime environment keys | 397 | Python sources + Compose manifests |
+| Runtime environment keys | 399 | Python sources + Compose manifests |
 | Internal compatibility scanner modules | 125 | `scanner/scanner_tools/` |
 | UI pages | 40 | `ui/src/app/` |
 | Skills | 9 | `skills/` |
@@ -2689,7 +2689,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
-| `RESULTS_DIR` | `api/api.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2773,6 +2773,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_CUSTOM_WORDLIST` | `scanner/scanner_tools/discovery.py` |
 | `SHAKERSCAN_DATA_BIND_HOST` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_DEBUG_POST_INFER` | `scanner/scanner.py` |
+| `SHAKERSCAN_DELETION_ENFORCE_HOLDS` | `api/data_lifecycle/inventory.py` |
 | `SHAKERSCAN_DEVICE_ALLOW_METADATA_TARGETS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_DENY_CIDRS` | `scanner/scanner_tools/device_posture.py` |
 | `SHAKERSCAN_DEVICE_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `docker-compose.release.yml`, `docker-compose.yml` |
@@ -2788,6 +2789,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
 | `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` | `api/runtime/http_archive_router.py` |
+| `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |

@@ -33,7 +33,7 @@ try:
     import asm_inventory
     import family_proof
     from scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
-    from evidence_storage import hydrate_evidence_content
+    from evidence_storage import hydrate_evidence_content, public_evidence_object
     from evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from retest_contract import (
         AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
@@ -48,7 +48,7 @@ except ModuleNotFoundError:  # package import in host-side tests
     )
     from .. import asm_inventory, family_proof
     from ..scan_verification_state import scan_time_verification_fields as _scan_time_verification_fields
-    from ..evidence_storage import hydrate_evidence_content
+    from ..evidence_storage import hydrate_evidence_content, public_evidence_object
     from ..evidence_triage import redact_finding_evidence as _redact_finding_evidence
     from ..retest_contract import (
         AI_ONLY_RETEST_TYPES, SUPPORTED_RETEST_TYPES, build_replay_commands,
@@ -178,7 +178,7 @@ def _results_dir() -> Any:
 
 
 def _public_evidence_object_row(row: Any) -> dict[str, Any]:
-    return hydrate_evidence_content(row_to_dict(row), results_dir=_results_dir())
+    return public_evidence_object(row_to_dict(row), results_dir=_results_dir())
 
 
 RETEST_QUEUE_NAME = os.environ.get("RETEST_QUEUE_NAME", "retest_jobs")

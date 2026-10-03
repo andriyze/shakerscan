@@ -7,6 +7,7 @@ import { featureEnabled } from '@/lib/workspaceCapabilities'
 import { configureScanHref, scanUrls } from '@/lib/targetInventoryModel.mjs'
 import { boundedDisplayText } from '@/lib/targetChoices'
 import { TargetDomainDiscovery } from '../TargetDomainDiscovery'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 import { ROW_GRID, SeverityPills, TargetRow, type RowActions } from './TargetRow'
 
 type Selection = { selected: Set<string>; toggle: (ids: string[], selected: boolean) => void }
@@ -42,9 +43,11 @@ export function ColumnHeader() {
   </div>
 }
 
-export function DomainGroup({ group, open, onToggle, onDiscovered, selection, actions, busy }: {
+export function DomainGroup({ group, open, onToggle, onDiscovered, onDomainDeleted, selection, actions, busy }: {
   group: TargetAssetGroup; open: boolean; onToggle: () => void; onDiscovered: () => void
   selection: Selection; actions: RowActions; busy: string | null
+  /** The whole domain group was deleted; reload the inventory. */
+  onDomainDeleted?: () => void
 }) {
   const root = group.targets.find(asset => asset.locator === group.root_domain)
   const children = group.targets.filter(asset => asset !== root)
@@ -81,6 +84,10 @@ export function DomainGroup({ group, open, onToggle, onDiscovered, selection, ac
           className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-gray-300 hover:bg-gray-800 hover:text-white">
           <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />Customize batch…</Link>}
         {discovery && <TargetDomainDiscovery domain={group.root_domain} onSettled={onDiscovered} />}
+        {onDomainDeleted && group.root_domain.includes('.') && <DeleteRecordsButton
+          selection={{ kind: 'domain', domain: group.root_domain }} label="Delete domain" variant="ghost"
+          subject={`${domain} and all its subdomains`} onDeleted={onDomainDeleted}
+          className="px-2 py-1 text-xs text-red-300 hover:text-red-200" />}
       </span>
     </div>
     <div role="rowgroup" className="divide-y divide-gray-800/60">

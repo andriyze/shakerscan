@@ -2273,7 +2273,11 @@ print_help() {
     echo "                       --no-cache  Full rebuild (slow, 10-20 min)"
     echo "                       scanner     Rebuild scanner/worker only"
     echo "                       ui          Rebuild + recreate UI only; leaves API/workers untouched"
-    echo "  backup [dir]       Back up PostgreSQL, results, config, and release metadata"
+    echo "  backup [dir] [--include-key]  Back up PostgreSQL, results, config, and release metadata"
+    echo "                     (the encryption key is left out unless --include-key; keeps the newest"
+    echo "                     SHAKERSCAN_BACKUP_KEEP=5 backups)"
+    echo "  backup list        List backups and whether each holds the encryption key"
+    echo "  backup delete <name|all> [--yes]  Permanently delete a backup, or every backup"
     echo "  db-upgrade         Migrate older PostgreSQL data now (--status, --remigrate, --keep-current, --remove-legacy)"
     echo "  reset              Reset database (WARNING: deletes all data)"
     echo "  shell              Open shell in scanner container"
@@ -3314,8 +3318,36 @@ reset_database() {
     fi
 }
 
+# The encryption key that decrypts stored credentials, collections and sessions. It is left out of
+# backups unless asked for: a backup holding both the ciphertext and its key exposes every secret.
+backup_key_file() {
+    printf '%s\n' "${AI_CREDENTIAL_ENC_KEY_FILE:-$SCRIPT_DIR/results/.credential_enc.key}"
+}
+
+backup_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
+}
+
+backup_key_fingerprint() {
+    local key_file
+    key_file="$(backup_key_file)"
+    if [ -f "$key_file" ]; then
+        backup_sha256 "$key_file" | cut -c1-16
+    elif [ -n "${AI_CREDENTIAL_ENC_KEY:-}" ]; then
+        printf '%s' "$AI_CREDENTIAL_ENC_KEY" | backup_sha256 | cut -c1-16
+    fi
+}
+
 create_backup() {
-    local backup_root="${1:-$SCRIPT_DIR/backups}"
+    local backup_root="" include_key=0 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --include-key) include_key=1 ;;
+            "") ;;
+            *) backup_root="$arg" ;;
+        esac
+    done
+    backup_root="${backup_root:-$SCRIPT_DIR/backups}"
     local timestamp
     local snapshot_dir
 
@@ -3337,12 +3369,23 @@ create_backup() {
     fi
 
     echo "Archiving result artifacts..."
-    if ! tar -C "$SCRIPT_DIR" -czf "$snapshot_dir/results.tar.gz" results; then
+    local key_file key_rel
+    key_file="$(backup_key_file)"
+    key_rel="${key_file#"$SCRIPT_DIR"/}"
+    local -a tar_exclude=()
+    [ "$include_key" = 1 ] || tar_exclude=(--exclude="$key_rel")
+    if ! tar -C "$SCRIPT_DIR" ${tar_exclude[@]+"${tar_exclude[@]}"} -czf "$snapshot_dir/results.tar.gz" results; then
         echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
         return 1
     fi
 
-    [ ! -f "$SCRIPT_DIR/.env" ] || cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        if [ "$include_key" = 1 ]; then
+            cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
+        else
+            grep -v '^AI_CREDENTIAL_ENC_KEY=' "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
+        fi
+    fi
     [ ! -f "$SCRIPT_DIR/VERSION" ] || cp "$SCRIPT_DIR/VERSION" "$snapshot_dir/VERSION"
     [ ! -f "$SCRIPT_DIR/docker-compose.release.yml" ] || \
         cp "$SCRIPT_DIR/docker-compose.release.yml" "$snapshot_dir/docker-compose.release.yml"
@@ -3352,11 +3395,92 @@ create_backup() {
         printf 'release_version=%s\n' "$(get_release_version)"
         printf 'image_tag=%s\n' "${SCANNER_IMAGE_TAG:-$DEFAULT_PREBUILT_IMAGE_TAG}"
         printf 'compose_project=%s\n' "${COMPOSE_PROJECT_NAME:-shakerscan}"
+        printf 'encryption_key_included=%s\n' "$([ "$include_key" = 1 ] && echo true || echo false)"
+        printf 'encryption_key_fingerprint=%s\n' "$(backup_key_fingerprint)"
     } > "$snapshot_dir/manifest.txt"
     rm "$snapshot_dir/.incomplete"
 
     echo -e "${GREEN}Backup complete: $snapshot_dir${NC}"
-    echo "This directory contains sensitive configuration and scan evidence; store it securely."
+    if [ "$include_key" = 1 ]; then
+        echo -e "${YELLOW}This backup includes the encryption key: anyone holding it can decrypt every stored credential. Store it securely.${NC}"
+    else
+        echo "The encryption key is not included. Stored credentials, collections and sessions in this backup"
+        echo "need the key with fingerprint $(backup_key_fingerprint); keep $(backup_key_file) separately."
+    fi
+    prune_backups "$backup_root"
+}
+
+# Keep the newest SHAKERSCAN_BACKUP_KEEP complete backups (default 5; 0 keeps every backup).
+prune_backups() {
+    local backup_root="${1:-$SCRIPT_DIR/backups}" keep="${SHAKERSCAN_BACKUP_KEEP:-5}" dir
+    case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+    [ "$keep" -gt 0 ] || return 0
+    [ -d "$backup_root" ] || return 0
+    local -a complete=()
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && [ ! -e "$dir/.incomplete" ] && complete+=("$dir")
+    done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d -name 'shakerscan-*' | sort -r)
+    local index=0
+    for dir in ${complete[@]+"${complete[@]}"}; do
+        index=$((index + 1))
+        if [ "$index" -gt "$keep" ]; then
+            rm -rf -- "$dir" && echo "Removed old backup $(basename "$dir") (keeping the newest $keep)."
+        fi
+    done
+}
+
+list_backups() {
+    local backup_root="${1:-$SCRIPT_DIR/backups}" dir state key
+    if [ ! -d "$backup_root" ] || [ -z "$(find "$backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)" ]; then
+        echo "No backups in $backup_root"
+        return 0
+    fi
+    while IFS= read -r dir; do
+        state="complete"
+        [ ! -e "$dir/.incomplete" ] || state="incomplete"
+        key="key excluded"
+        grep -q '^encryption_key_included=true' "$dir/manifest.txt" 2>/dev/null && key="KEY INCLUDED"
+        case "$(basename "$dir")" in postgres-*) key="PostgreSQL upgrade copy" ;; esac
+        printf '%-44s %-11s %-24s %s\n' "$(basename "$dir")" "$state" "$key" "$(du -sh "$dir" 2>/dev/null | cut -f1)"
+    done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d | sort)
+}
+
+# Delete one backup by name, or every backup with `all`. Backups hold copies of deleted records,
+# so removing them is part of deleting data completely.
+delete_backups() {
+    local name="${1:-}" backup_root="${2:-$SCRIPT_DIR/backups}" confirm="${3:-}" target
+    if [ -z "$name" ]; then
+        echo -e "${RED}Usage: ./scanner.sh backup delete <name|all> [--yes]${NC}"
+        return 1
+    fi
+    if [ "$name" = all ]; then
+        [ -d "$backup_root" ] || { echo "No backups in $backup_root"; return 0; }
+        if [ "$confirm" != "--yes" ]; then
+            read -r -p "Permanently delete every backup in $backup_root? (yes/no): " confirm
+            [ "$confirm" = yes ] || { echo "Cancelled"; return 1; }
+        fi
+        find "$backup_root" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} +
+        echo -e "${GREEN}Every backup in $backup_root was deleted.${NC}"
+        return 0
+    fi
+    case "$name" in */*|.|..|'') echo -e "${RED}Give a backup name from 'backup list'.${NC}"; return 1 ;; esac
+    target="$backup_root/$name"
+    [ -d "$target" ] || { echo -e "${RED}No backup named $name in $backup_root${NC}"; return 1; }
+    if [ "$confirm" != "--yes" ]; then
+        read -r -p "Permanently delete backup $name? (yes/no): " confirm
+        [ "$confirm" = yes ] || { echo "Cancelled"; return 1; }
+    fi
+    rm -rf -- "$target"
+    echo -e "${GREEN}Deleted backup $name.${NC}"
+}
+
+backup_cmd() {
+    case "${1:-}" in
+        list) list_backups "${2:-}" ;;
+        delete) delete_backups "${2:-}" "$SCRIPT_DIR/backups" "${3:-}" ;;
+        prune) prune_backups "${2:-}" ;;
+        *) create_backup "$@" ;;
+    esac
 }
 
 db_upgrade_cmd() {
@@ -4060,7 +4184,7 @@ case $COMMAND in
         rebuild_images "${ARGS[@]}"
         ;;
     backup)
-        create_backup "${ARGS[0]}"
+        backup_cmd "${ARGS[@]}"
         ;;
     db-upgrade)
         db_upgrade_cmd "${ARGS[@]}"

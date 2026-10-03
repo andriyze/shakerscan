@@ -64,7 +64,7 @@
     "CredentialProfileRotate": "4ca3ebdc99522e21b55ad4c1f39ef1ebe49103f815d8d6f566ab15b7ce24df46",
     "DedupeTargetsRequest": "64aa909bb1d9fb6b41e6f127353cfa9d02e6231bf6bba7b3d66c0faa27915c81",
     "DeletionExecution": "a55dc767725f6b0a6e9d58915878ec3206837e740bff406a1d549e8afb9f8923",
-    "DeletionSelection": "0111ad35c8d27c06caabff78152319845e803bb565441fbfc32ceb2dd0b8c3a9",
+    "DeletionSelection": "f7130aa13bf92b45d1c6165cd76dc4f540a6fdb95245130e429d0f1c14add402",
     "DeviceAgentShellConfirmRequest": "fdef7745a9931aea4c672a551ab838d981de2c6b0944bd82847ae7baaa52d437",
     "DeviceCredentialProfileCreate": "b25505648ad3d2e27de4afb54586d228485d92f256a42418acb2ace596582813",
     "DeviceCredentialProfileRotate": "ca0d7a30052e7a49bc93ac150e0d63f025ae2575d52826b2506954340f8084c7",
@@ -203,7 +203,7 @@
     "ValidationRequest": "cb81c65a5c80da74a19c6bd92e9c6a68f5cdb22fafeb94270481d463450f893e",
     "WorkerScaleRequest": "52e7ac017dfa1d92efa8e4071026b9bf24c0cf2a17f5d9e742349df3f08f6c62"
   },
-  "contract_sha256": "fe279820e5c784e5eb4472edda8bfab4852289f94f14e28cb58a1ae6dcca7494",
+  "contract_sha256": "21dabbc4e9dfb33681bb658fde2771b45f2a6cfbb8b458d24e94baa72c476355",
   "openapi": "3.1.0",
   "operation_count": 449,
   "operations": {

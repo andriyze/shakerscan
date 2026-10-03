@@ -22,12 +22,28 @@ shakerscan backup
 default. It contains:
 
 - a PostgreSQL custom-format dump;
-- the `results/` artifact tree;
-- `.env` as `runtime.env`, when present;
-- `VERSION`, release Compose configuration, and a small manifest.
+- the `results/` artifact tree, **without** the encryption key `results/.credential_enc.key`;
+- `.env` as `runtime.env`, when present, without an `AI_CREDENTIAL_ENC_KEY` line;
+- `VERSION`, release Compose configuration, and a manifest that records the encryption key's
+  fingerprint (`encryption_key_fingerprint`).
+
+Stored credentials, request collections and sessions in the dump are encrypted with that key, so a
+backup holding both would expose every secret to whoever holds the backup. Keep the key separately
+(it stays in `results/` on the install). `shakerscan backup --include-key` adds it when you need a
+self-contained backup; treat that one as the most sensitive file you have.
 
 The backup contains sensitive scan evidence and configuration. Keep it encrypted or on storage with
 equivalent access controls. A directory containing `.incomplete` is not a valid restore point.
+
+The newest 5 complete backups are kept and older ones are removed after each backup
+(`SHAKERSCAN_BACKUP_KEEP`, `0` keeps every backup). Backups hold copies of records you may later
+delete, so delete them when you no longer need them:
+
+```bash
+shakerscan backup list                      # name, state, whether it holds the key, size
+shakerscan backup delete shakerscan-TIMESTAMP
+shakerscan backup delete all                # every backup, including PostgreSQL upgrade copies
+```
 
 Target unification replaces the legacy device and input tables with compatibility views. Before
 starting the new API/workers against an existing legacy database, the launcher automatically creates
@@ -237,9 +253,14 @@ Move the failed-upgrade result tree aside, restore the archived artifacts and co
 install the previous tagged runtime without starting it:
 
 ```bash
-mv results "results.failed-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+moved="results.failed-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+mv results "$moved"
 tar -xzf /secure/path/shakerscan-backups/shakerscan-TIMESTAMP/results.tar.gz -C ~/.shakerscan
+# The backup does not carry the encryption key: put the install's key back before starting, or
+# stored credentials, collections and sessions cannot be decrypted.
+[ -f results/.credential_enc.key ] || cp "$moved/.credential_enc.key" results/.credential_enc.key
 cp /secure/path/shakerscan-backups/shakerscan-TIMESTAMP/runtime.env ~/.shakerscan/.env
+# If the install set AI_CREDENTIAL_ENC_KEY in .env instead, add that line back to .env.
 
 SHAKERSCAN_INSTALL_VERSION=PREVIOUS_VERSION SHAKERSCAN_START=0 \
   sh -c "$(curl -fsSL https://install.shakerscan.com)"

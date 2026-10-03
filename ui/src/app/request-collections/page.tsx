@@ -1,5 +1,6 @@
 'use client'
 import { featureEnabled } from '@/lib/workspaceCapabilities'
+import { DeleteRecordsButton } from '@/components/lifecycle/DeleteRecordsButton'
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useUrlFilters } from '@/lib/useUrlFilters'
@@ -518,7 +519,10 @@ function RequestCollectionsContent() {
                     <span className="rounded-sm bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300">
                       encrypted · digest {detail.collection.payload_sha256.slice(0, 12)}
                     </span>
-                    <Button variant="danger" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>
+                    <Button variant="secondary" size="sm" onClick={() => setDeleting(detail.collection)} disabled={busy}><Trash2 className="h-3.5 w-3.5" /> Deactivate</Button>
+                    <DeleteRecordsButton selection={{ kind: 'request_collection', id: detail.collection.id }} label="Delete permanently"
+                      subject={`collection ${detail.collection.name}`} disabled={busy}
+                      onDeleted={() => { setDetail(null); void loadCollections() }} />
                   </div>
                 </div>
               </Card>
@@ -652,9 +656,9 @@ function RequestCollectionsContent() {
 
       <ConfirmDialog
         open={Boolean(deleting)}
-        title={deleting ? `Delete "${deleting.name}"?` : 'Delete request collection?'}
-        message="The collection disappears from this list and its saved selections, bindings and environments are revoked, so no new Scan or Hunt can use it. Historical scan records keep their immutable selection digests; the encrypted document is erased when the owning target's records are deleted."
-        confirmLabel="Delete"
+        title={deleting ? `Deactivate "${deleting.name}"?` : 'Deactivate request collection?'}
+        message="The collection disappears from this list and its saved selections, bindings and environments are revoked, so no new Scan or Hunt can use it. Its encrypted document and environments are kept; use Delete permanently to erase them now."
+        confirmLabel="Deactivate"
         danger
         busy={busy}
         onConfirm={() => void deleteCollection()}

@@ -204,6 +204,7 @@ from scan.worker_dispatch import (
     is_deterministic_dast,
     prepare_worker_dispatch,
 )
+from worker_handlers.retest_candidates import find_retest_candidate
 from worker_handlers.non_dast import (
     NonDastWorkerHandler,
     NonDastWorkerServices,
@@ -6730,16 +6731,7 @@ async def process_finding_retest_job(job_data: dict):
             )
             # Link Deep Hunt's durable candidate to the existing deterministic retest record.
             # The retest verdict, never the model claim, owns the candidate lifecycle.
-            candidate = await conn.fetchrow(
-                """SELECT id, verifier_contract_id
-                   FROM investigation_candidates
-                   WHERE plane='web' AND (
-                         id=$2::uuid
-                         OR verification_context->>'finding_id'=$1::text
-                   )
-                   ORDER BY last_seen_at DESC, id DESC LIMIT 1""",
-                verification["finding_id"], verification.get("candidate_id"),
-            )
+            candidate = await find_retest_candidate(conn, verification)
             if candidate:
                 final_candidate_verdict = str(result.get("verdict") or "").lower()
                 candidate_status = (

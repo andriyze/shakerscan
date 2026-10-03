@@ -17,8 +17,10 @@ This document records only the current product boundary and genuinely unfinished
   and idempotent retry/finalization.
 - Retention schedules are disabled. Destructive cleanup cannot be converted into background
   automation.
-- HTTP request archives provide redacted JSON by default. Raw HAR is sensitive and requires explicit
-  operator authorization and deployment support.
+- HTTP request archives provide redacted JSON by default. HAR is offered masked or raw; raw HAR
+  (credentials included) is sensitive, requires explicit operator confirmation in the UI, and can be
+  turned off for a deployment with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0`. The generic evidence API
+  never serves unmasked captured traffic.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and
@@ -58,7 +60,14 @@ work or remove records. The target deletion dialog offers **Archive target inste
 own confirmation, including when erasure is blocked by protected history.
 `DELETE /targets/{id}` is a permanent database-record operation requiring the preview
 and approval below. The Targets page exposes a delete control on each actual target, including
-subdomains. It never interprets a root-domain group as recursive ownership of every subdomain.
+subdomains, and a **Delete domain** action on each domain group. Deleting a host also deletes the
+application services linked to it. Domain deletion selects exactly the targets the Targets list
+groups under that domain (multi-part suffixes such as `co.uk` included) plus each host's linked
+services; the preview lists every resolved target ID and the approval binds that exact list.
+
+Credentials and request collections offer **Delete permanently** beside Deactivate. Deactivating
+is reversible and keeps the encrypted material; permanent deletion uses the same preview and
+approval flow and removes every copy (see below).
 
 The Findings page supports selected-record deletion from the selection dock (Select, choose
 rows, More, Delete selected findings) and previewed age cleanup (Advanced cleanup). Neither is a
@@ -70,13 +79,17 @@ selected through this surface.
 
 ### Explicit API flow
 
-1. Call `POST /data-deletion/preview` with either
+1. Call `POST /data-deletion/preview` with one of
    `{"kind":"target","target_id":"<UUID>"}`,
+   `{"kind":"domain","domain":"example.com"}`,
+   `{"kind":"credential_profile","id":"<UUID>"}`,
+   `{"kind":"request_collection","id":"<UUID>"}`,
    `{"kind":"findings","finding_ids":["<UUID>"],"scan_id":"<optional UUID>"}`, or
    `{"kind":"findings","older_than_days":90,"status":"resolved","root_domain":"example.invalid"}`.
    The response includes exact IDs, cascade/detach/retain counts, blockers, expiry, a scope receipt,
-   and an immutable preview hash. It performs no deletion. The explicit batch limit is 500 findings;
-   the per-table inventory limit is 10,000 records. Oversized selections require a narrower preview.
+   and an immutable preview hash. It performs no deletion. The explicit batch limit is 500 findings,
+   a domain may resolve to at most 500 targets, and the per-table inventory limit is 100,000
+   records. Oversized selections require a narrower preview.
 2. Display the preview and retained-data warning to the operator. Only after explicit confirmation,
    call `POST /arsenal/approvals` using its `scope_receipt_id`, `risk_tier: "dangerous"`,
    `action_name: "data.records.delete"`, `approved_by`, `expires_at` equal to the preview expiry,
@@ -91,8 +104,9 @@ also require the preview and approval; missing preconditions return HTTP 428. A 
 batch cannot authorize a singleton route. Changed records, expiry, cross-owner dependencies,
 protected evidence, active work, and unresolved restrictive dependencies return HTTP 409.
 The complete inventory is revalidated under transaction-scoped writer locks; count updates,
-record removal, evidence-index detachment, and the durable result commit atomically. There is
-no external storage I/O in that transaction and no scheduled destructive execution.
+record removal and the durable result commit atomically. There is no external storage I/O in
+that transaction and no scheduled destructive execution: files are erased only after the commit,
+and their outcome is added to the same durable receipt.
 Completed-operation replay validates the stored manifest and approval association without
 locking writer tables. Expired pending previews fail before those locks; real deletion still
 performs locked revalidation. Run-state blockers follow each subsystem's terminal statuses;
@@ -100,27 +114,40 @@ unknown states and resumable states remain blockers.
 
 ### What is removed, and what is retained
 
-Target deletion removes the exact target and its owned cascading database records, including
-its findings and target-scoped credential profiles. The preview names the affected tables.
-Other target IDs survive; child-target parent links are detached. Finding deletion removes only
-the selected finding records and their cascading children, then refreshes owner finding counts.
+Target and domain deletion erase everything the target owns: its findings, scans (with their
+reports, artifacts, checkpoints, manifests, sealed session state and recorded HTTP traffic),
+Hunts (with their actions and traffic), tool receipts of those runs, schedules, endpoints, request
+collections, every credential homed on it (including a host's `device` identity), and the saved
+login sessions and collection bindings established on it. A host takes its linked application
+services. Evidence the deleted rows own or reference is erased once nothing that survives still
+points at it, because content-addressed blobs can be shared.
 
-Historical scans/reports, scan artifacts, exports, backups, and external content-addressed
-files are **not erased**. Scan HTTP archives survive with the scan. A `sensitive` classification
-alone does not prevent preserving a row; original links of retained and detached rows are
-bound into the preview and kept in the durable operation receipt. Explicit legal/operational
-holds and protected audit records still block even an ownership detachment.
+After the database commit, the files those rows named are erased: evidence blobs and scan
+artifacts (local or S3), scan checkpoints, and the per-scan result files the worker writes under
+`RESULTS_DIR/<host>/`. A result file is erased only when its recorded `scan_id`/`job_id` belongs to
+a deleted scan; anything unproven is listed, not deleted. The receipt's `files` block reports how
+many files were erased, missing or failed, and `external_files_deleted` is true only when none
+failed.
 
-Hunt HTTP archives have a cascading relationship with their Hunt: deleting a target erases its
-own Hunt and scan transaction archives with it under the dangerous-tier approval. A `sensitive`
-classification is a content label, not a hold: every recorded transaction carries it by default,
-and treating it as a hold made any target that had ever been scanned or hunted undeletable. Only
-an explicit `legal_hold` or `audit` class, or a `legal_hold`/`operational_hold` flag, blocks
-erasure. Use archive to hide inventory without erasing history.
-Finding-linked `evidence_objects` are detached before
-the finding FK cascade, preserving their storage index instead of silently orphaning blobs.
-A report may therefore still contain a historical copy of a deleted finding. Run the dedicated
-approved evidence-retention operation first when removing eligible content is also intended.
+Finding deletion removes the selected findings, their cascading children and their evidence.
+
+Permanent credential deletion removes the profile, every encrypted version, every grant, its
+saved sessions, its assurance history, and the legacy mirrors a later sync would use to re-create
+it, and strips its ID from other targets' delegated Hunt authority and from schedules. Permanent
+collection deletion removes the document, environments, request index, bindings and selections,
+and strips the collection from delegated authority and schedules. A running scan or open Hunt that
+still uses the input blocks its deletion. Deactivating a credential revokes its live sessions and
+destroys their captured headers at once.
+
+Content-free audit records (approvals, scope and deletion receipts, export events), backups and
+exports made before the deletion are retained; delete or rotate those separately. Holds do not
+block deletion by default: an open-source install has one operator, and records they own must be
+deletable through the approved preview. A deployment that keeps holds sets
+`SHAKERSCAN_DELETION_ENFORCE_HOLDS=1`; then an explicit `legal_hold` or `audit` class, or a
+`legal_hold`/`operational_hold` flag, blocks erasure. A `sensitive` classification is a content
+label, never a hold. Held rows are reported in the preview either way. Evidence already claimed by
+a running retention deletion always blocks until that deletion finishes. Use archive to hide
+inventory without erasing history.
 No suppression/tombstone prevents future discovery or scans from creating new records.
 
 Model Intake targets use their separate product lifecycle. Mixed product ownership and legal or

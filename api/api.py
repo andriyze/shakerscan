@@ -369,10 +369,12 @@ except ModuleNotFoundError as exc:
 
 try:
     from evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
+    from evidence_storage import public_evidence_object
 except ModuleNotFoundError as exc:
     if exc.name != "evidence_storage":
         raise
     from api.evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
+    from api.evidence_storage import public_evidence_object
 
 try:
     from artifact_storage import (
@@ -20049,7 +20051,7 @@ async def _persist_asm_decision(
 
 
 def _public_evidence_object_row(row: Any) -> dict[str, Any]:
-    return hydrate_evidence_content(row_to_dict(row), results_dir=RESULTS_DIR)
+    return public_evidence_object(row_to_dict(row), results_dir=RESULTS_DIR)
 
 
 

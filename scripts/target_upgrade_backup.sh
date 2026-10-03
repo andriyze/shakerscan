@@ -1,8 +1,18 @@
 # Sourced by the launcher. Capture the old schema before converting tables to views.
 ensure_target_upgrade_backup() {
-    local legacy_kind initialized attempt
+    local legacy_kind initialized attempt pid1_comm
     compose up --no-build -d postgres
+    # On a fresh volume the image first runs a temporary server for its init scripts, then shuts
+    # it down and execs the real one. That temporary server answers pg_isready too, so a dump
+    # taken then fails with "the database system is shutting down". Wait until the entrypoint
+    # shell has handed PID 1 to the final postgres process.
     for attempt in $(seq 1 60); do
+        pid1_comm="$(compose exec -T postgres cat /proc/1/comm 2>/dev/null | tr -d '\r\n')"
+        # While the image's entrypoint shell is PID 1 the server is the temporary init one, even
+        # when pg_isready already answers (observed: "bash ready" twice before "postgres").
+        case "$pid1_comm" in
+            bash|sh|docker-entrypoi*) sleep 1; continue ;;
+        esac
         if compose exec -T postgres pg_isready -U scanner -d scanner >/dev/null 2>&1; then
             break
         fi

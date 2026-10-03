@@ -7,6 +7,7 @@ const findingId = '22222222-2222-4222-8222-222222222222'
 const previewId = '33333333-3333-4333-8333-333333333333'
 const receiptId = '44444444-4444-4444-8444-444444444444'
 const targetUrl = 'https://target.example.invalid'
+const subdomainId = '55555555-5555-4555-8555-555555555555'
 
 /** Deletion lives in the target row's menu, never as a front-line control. */
 async function openDelete(page: Page) {
@@ -14,7 +15,7 @@ async function openDelete(page: Page) {
   await page.getByRole('button', { name: `Delete ${targetUrl}`, exact: true }).click()
 }
 
-async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean } = {}) {
+async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean; grouped?: boolean } = {}) {
   const writes: { path: string; body: Record<string, unknown> }[] = []
   let deleted = false
   let executions = 0
@@ -26,15 +27,22 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
     const path = new URL(request.url()).pathname
     const body = request.method() === 'POST' && request.postData() ? request.postDataJSON() : {}
     if (request.method() !== 'GET' && request.method() !== 'OPTIONS') writes.push({ path, body })
-    if (path === '/targets/inventory') return route.fulfill({ json: {
-      targets: deleted ? [] : [{
-        id: targetId, asset_id: targetId, name: null, url: targetUrl, locator: 'target.example.invalid',
+    if (path === '/targets/inventory') {
+      const asset = (id: string, locator: string) => ({
+        id, asset_id: id, name: null, url: `https://${locator}`, locator,
         is_active: true, environment: 'production', connected_device: false, origin_count: 1,
         service_count: 0, active_findings_count: 1, created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-      }],
-      total: deleted ? 0 : 1, offset: 0, limit: 50,
-    } })
+      })
+      const targets = deleted ? [] : options.grouped
+        ? [asset(targetId, 'example.invalid'), asset(subdomainId, 'api.example.invalid')]
+        : [asset(targetId, 'target.example.invalid')]
+      return route.fulfill({ json: {
+        targets, total: targets.length, offset: 0, limit: 50,
+        ...(options.grouped ? { groups: targets.length ? [{ root_domain: 'example.invalid', targets }] : [],
+          total_groups: targets.length ? 1 : 0, group_by: 'domain', inventory_kind: 'assets' } : {}),
+      } })
+    }
     if (path === '/targets/grouped') return route.fulfill({ json: {
       domains: deleted ? [] : [{ root_domain: 'example.invalid', root_target: { id: targetId, url: targetUrl,
         root_domain: 'example.invalid', is_root: true, is_active: true, total_scans: 0, active_findings_count: 1 },
@@ -45,7 +53,8 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
     if (path === '/data-deletion/preview') return route.fulfill({ json: {
       schema: 'shakerscan.record-deletion/v1', kind: body.kind, preview_id: previewId, preview_hash: 'a'.repeat(64),
       scope_receipt_id: `record-delete:${previewId}`, expires_at: new Date(Date.now() + 600000).toISOString(),
-      root_ids: body.kind === 'target' ? [targetId] : [findingId], would_delete: 1, dry_run: true,
+      root_ids: body.kind === 'domain' ? [targetId, subdomainId] : body.kind === 'target' ? [targetId] : [findingId],
+      would_delete: 1, dry_run: true,
       external_files_deleted: false,
       records: { delete: { ...(body.kind === 'target' ? { targets: { count: 1 } } : {}), findings: { count: 1 } }, detach: {}, retain: {}, restrict: {} },
       blockers: options.blocked ? ['scans: 1 active record; finish or cancel it first'] : [],
@@ -60,7 +69,8 @@ async function mockApi(page: Page, options: { blocked?: boolean; retry?: boolean
       executions += 1
       if (options.retry && executions === 1) return route.abort('failed')
       deleted = true
-      return route.fulfill({ json: { status: 'deleted', deleted: 1, deleted_ids: [targetId], external_files_deleted: false, retained: [], operation_id: previewId } })
+      return route.fulfill({ json: { status: 'deleted', deleted: 1, deleted_ids: [targetId], external_files_deleted: true,
+        files: { complete: true, files_erased: 3 }, retained: [], operation_id: previewId } })
     }
     return route.fulfill({ json: { status: 'healthy', workers: [], total: 0 } })
   })
@@ -72,7 +82,8 @@ test('target cancellation only previews; confirmed deletion uses the exact appro
   await page.goto('/targets')
   await openDelete(page)
   const dialog = page.getByRole('dialog', { name: `Delete ${targetUrl}` })
-  await expect(dialog.getByText('Not a complete data erasure')).toBeVisible()
+  await expect(dialog.getByText('What is kept')).toBeVisible()
+  await expect(dialog.getByText(/erases their files/)).toBeVisible()
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview'])
   await openDelete(page)
@@ -141,4 +152,20 @@ test('protected target offers a separately confirmed archive, never a deletion a
   await expect(dialog).not.toBeVisible()
   expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview', `/targets/${targetId}/archive`])
   await expect(page.getByTestId('target-asset-row')).toHaveCount(0)
+})
+
+
+test('a domain group deletes every target in it through one previewed approval', async ({ page }) => {
+  const writes = await mockApi(page, { grouped: true })
+  await page.goto('/targets')
+  const subject = 'example.invalid and all its subdomains'
+  await page.getByRole('button', { name: `Delete ${subject}`, exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: `Delete ${subject}` })
+  await expect(dialog.getByText(/2 targets in this domain/)).toBeVisible()
+  expect(writes.map(w => w.path)).toEqual(['/data-deletion/preview'])
+  expect(writes[0].body).toEqual({ kind: 'domain', domain: 'example.invalid' })
+  await dialog.getByRole('button', { name: 'Approve and delete records' }).click()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByText('Deleted. Records and their files were erased.')).toBeVisible()
+  expect(writes.filter(w => w.path === '/data-deletion/execute')).toHaveLength(1)
 })

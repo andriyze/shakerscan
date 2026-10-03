@@ -162,7 +162,9 @@ def test_the_har_document_is_valid_1_2():
     assert document["log"]["creator"]["name"] == "ShakerScan"
 
 
-def test_har_is_always_raw_and_honestly_labelled():
+def test_a_har_is_masked_unless_raw_is_asked_for_and_says_so():
+    """The UI's HAR download used to be verbatim whatever masking was requested, so any client
+    that reached the API got Authorization headers and URL credentials in one call."""
     secret_url = "https://admin:hunter2@t.example/x?access_token=LIVE_TOKEN"
     document = export_document(
         [{"id": "1", "method": "GET", "url": secret_url, "sequence": 0, "plane": "scan"}],
@@ -170,11 +172,77 @@ def test_har_is_always_raw_and_honestly_labelled():
         owner={"scan_id": "parent", "included_scan_ids": ["parent", "child"]}, total=1,
     )
     comment = json.loads(document["log"]["comment"])
-    assert document["log"]["entries"][0]["request"]["url"] == secret_url
-    assert comment["redaction"] == "raw"
-    assert comment["sensitive"] is True
+    serialized = json.dumps(document["log"]["entries"])
+    assert "hunter2" not in serialized and "LIVE_TOKEN" not in serialized
+    assert comment["redaction"] == "redacted" and comment["sensitive"] is False
+    # It can never pass for the verbatim request.
+    assert document["log"]["creator"]["name"] == "ShakerScan (masked)"
     assert comment["owner"]["included_scan_ids"] == ["parent", "child"]
+
+
+def test_a_raw_har_is_verbatim_and_labelled_sensitive():
+    secret_url = "https://admin:hunter2@t.example/x?access_token=LIVE_TOKEN"
+    document = export_document(
+        [{"id": "1", "method": "GET", "url": secret_url, "sequence": 0, "plane": "scan"}],
+        export_format="har", redaction="raw", owner={"scan_id": "s"}, total=1,
+    )
+    comment = json.loads(document["log"]["comment"])
+    assert document["log"]["entries"][0]["request"]["url"] == secret_url
+    assert comment["redaction"] == "raw" and comment["sensitive"] is True
     assert "Treat this export as sensitive" in comment["redaction_detail"]
+    assert document["log"]["creator"]["name"] == "ShakerScan"
+
+
+def _export_har(archive_router, redaction):
+    import asyncio
+    return asyncio.run(archive_router._export(
+        request=object(), scan_id="11111111-1111-4111-8111-111111111111", hunt_run_id=None,
+        export_format="har", redaction=redaction, method=None, status_code=None, search=None,
+        limit=10, offset=0,
+    ))
+
+
+def test_raw_har_is_allowed_by_default_without_an_account_and_can_be_turned_off(monkeypatch):
+    """Open-source installs have one operator and no accounts: verbatim HAR (credentials
+    included) is available by default; a deployment may turn it off and keep the masked HAR."""
+    from fastapi import HTTPException
+
+    from api.runtime import http_archive_router as archive_router
+
+    def _reached_database():
+        raise RuntimeError("reached the database")
+
+    def _no_account(request):
+        raise AssertionError("verbatim HAR must not require an operator account")
+
+    monkeypatch.setattr(archive_router, "_pool", _reached_database)
+    monkeypatch.setattr(archive_router, "_require_operator", _no_account)
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", raising=False)
+    for redaction in ("raw", "redacted"):
+        with pytest.raises(RuntimeError, match="reached the database"):
+            _export_har(archive_router, redaction)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "0")
+    with pytest.raises(HTTPException) as refused:
+        _export_har(archive_router, "raw")
+    assert refused.value.status_code == 403 and "masked HAR" in str(refused.value.detail)
+    # Refused before any row is read; the masked HAR stays available.
+    with pytest.raises(RuntimeError, match="reached the database"):
+        _export_har(archive_router, "redacted")
+
+
+def test_the_evidence_surface_withholds_unmasked_captured_traffic(tmp_path):
+    """GET /evidence/{id} served a raw archive blob verbatim, bypassing the archive's masking."""
+    from api.evidence_storage import public_evidence_object
+
+    raw = public_evidence_object({"id": "e1", "object_type": "http_archive_blob", "redaction_profile": "none",
+                                  "content": {"authorization": "Bearer LIVE"}}, results_dir=tmp_path)
+    assert raw["content"] is None and raw["content_withheld"] is True
+    assert "LIVE" not in json.dumps(raw)
+    masked = public_evidence_object({"id": "e2", "object_type": "finding_evidence",
+                                     "redaction_profile": "redact_sensitive_v1", "content": {"note": "kept"}},
+                                    results_dir=tmp_path)
+    assert masked["content"] == {"note": "kept"} and "content_withheld" not in masked
 
 
 def test_the_export_states_its_redaction_and_fidelity():

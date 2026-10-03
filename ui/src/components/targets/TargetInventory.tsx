@@ -216,7 +216,7 @@ export function TargetInventory() {
             ? <div className="rounded-xl border border-gray-800 p-6"><EmptyState message="No targets match" hint="Try a different search or clear the filters."
                 action={{ label: 'Clear filters', onClick: () => change({ search: '', environment: '', authorization: '', findings: '', activity: '', asset_type: '', archived: false }) }} /></div>
             : <div className={`space-y-4 ${loading ? 'opacity-60 transition-opacity' : 'transition-opacity'}`}>
-                {sections.domains.map(group => <DomainGroup key={group.root_domain} group={group} open={isOpen(group)}
+                {sections.domains.map(group => <DomainGroup key={group.root_domain} group={group} open={isOpen(group)} onDomainDeleted={refresh}
                   onToggle={() => setExpanded(current => ({ ...current, [group.root_domain]: !isOpen(group) }))}
                   onDiscovered={() => { setExpanded(current => ({ ...current, [group.root_domain]: true })); refresh() }}
                   selection={selection} actions={actions} busy={busy} />)}
