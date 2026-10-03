@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 from job_queue import (  # noqa: E402
     CONSUMER_GROUP,
+    QUEUE_PROBE_INTERVAL_MS,
     RouteCapacityExceeded,
     acknowledge_lease,
     clear_unleased,
@@ -521,3 +522,52 @@ def test_empty_route_poll_has_only_one_blocking_read():
     assert lease_job(redis, ["one", "two", "three"], consumer_name="worker", block_ms=100,
                      visibility_timeout_ms=1000) is None
     assert redis.calls == [None, None, 100]
+
+
+def test_work_on_an_earlier_route_is_seen_within_one_probe_interval():
+    # A scan submitted while an idle worker long-polls its last route (the broker) used to wait
+    # for that whole poll before the scan route was read again.
+    class ScanArrivesDuringWait(FakeStreams):
+        blocking_reads = []
+        def xreadgroup(self, group, consumer, streams, count, block):
+            if block is not None:
+                self.blocking_reads.append(block)
+                if len(self.blocking_reads) == 1:
+                    enqueue_job(self, "scan_jobs", {"scan_id": "new-scan"})
+                return []
+            return super().xreadgroup(group, consumer, streams, count, block)
+    redis = ScanArrivesDuringWait()
+    lease = lease_job(redis, ["scan_jobs", "retest_jobs", "broker_jobs"], consumer_name="worker",
+                      block_ms=30_000, visibility_timeout_ms=1000)
+    assert lease is not None and lease.queue_name == "scan_jobs"
+    assert json.loads(lease.payload) == {"scan_id": "new-scan"}
+    assert redis.blocking_reads == [QUEUE_PROBE_INTERVAL_MS]
+    assert QUEUE_PROBE_INTERVAL_MS <= 5_000
+
+
+def test_an_empty_poll_waits_exactly_the_callers_block_in_slices():
+    class RecordingRedis(FakeStreams):
+        calls = []
+        def xreadgroup(self, group, consumer, streams, count, block):
+            self.calls.append(block)
+            return []
+    redis = RecordingRedis()
+    block_ms = 2 * QUEUE_PROBE_INTERVAL_MS + 500
+    assert lease_job(redis, ["one", "two", "three"], consumer_name="worker", block_ms=block_ms,
+                     visibility_timeout_ms=1000) is None
+    blocking = [call for call in redis.calls if call is not None]
+    # A broker lease request keeps its deadline: the slices add up to what the caller asked for.
+    assert blocking == [QUEUE_PROBE_INTERVAL_MS, QUEUE_PROBE_INTERVAL_MS, 500]
+    assert redis.calls.count(None) == 2 * len(blocking)
+
+
+def test_a_single_route_worker_still_waits_in_one_read():
+    class RecordingRedis(FakeStreams):
+        calls = []
+        def xreadgroup(self, group, consumer, streams, count, block):
+            self.calls.append(block)
+            return []
+    redis = RecordingRedis()
+    assert lease_job(redis, ["device_jobs"], consumer_name="worker", block_ms=30_000,
+                     visibility_timeout_ms=1000) is None
+    assert redis.calls == [30_000]
