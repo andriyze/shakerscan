@@ -954,3 +954,28 @@ def test_an_enforced_hold_on_its_target_blocks_deleting_a_scan(monkeypatch):
         blocked = await service.preview(pool, {'kind': 'scan', 'id': str(scan)})
         assert any('hold' in b for b in blocked['blockers']), blocked['blockers']
     run(scenario)
+
+
+def test_ai_header_secrets_are_encrypted_on_an_already_converted_database(monkeypatch):
+    """The startup baseline never runs again once targets are converted; the backfill must."""
+    from cryptography.fernet import Fernet
+    import secret_store
+    from retest_contract import run_schema_migrations
+    monkeypatch.setenv('AI_CREDENTIAL_ENC_KEY', Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_store, '_fernet', None)
+    monkeypatch.setattr(secret_store, '_loaded', False)
+
+    async def scenario(pool):
+        async with pool.acquire() as c:
+            assert await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name='unified_target_assets_v1'")
+            await c.execute("DELETE FROM app_schema_migrations WHERE name='v2_ai_header_template_secrets_v1'")
+            ai = await c.fetchval("""INSERT INTO ai_targets(name,endpoint_url,headers_template)
+                VALUES('Legacy',$1,'{"X-Api-Key":"sk-plain","Accept":"application/json"}'::jsonb) RETURNING id""",
+                f'https://{uuid4().hex}.example.invalid/chat')
+        await run_schema_migrations(pool)
+        async with pool.acquire() as c:
+            headers = json.loads(await c.fetchval('SELECT headers_template::text FROM ai_targets WHERE id=$1', ai))
+            assert await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name='v2_ai_header_template_secrets_v1'")
+        assert headers['X-Api-Key'].startswith('enc:fernet:') and headers['Accept'] == 'application/json'
+        assert secret_store.decrypt_secret(headers['X-Api-Key']) == 'sk-plain'
+    run(scenario)

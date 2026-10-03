@@ -19,7 +19,6 @@ from typing import Any, Mapping
 
 from runtime.credential_store import PostgresCredentialProfileStore
 from runtime.auth_session_store import PostgresAuthSessionStore
-from runtime.ai_header_secrets import encrypt_stored_secrets as encrypt_stored_ai_header_secrets
 from runtime.credential_migration import (
     migrate_legacy_ai_credentials,
     migrate_legacy_device_credentials,
@@ -5015,7 +5014,6 @@ async def _run_schema_migrations_once(pool) -> None:
                 await migrate_scan_execute_capabilities(conn)
                 await migrate_legacy_device_credentials(conn)
                 await migrate_legacy_ai_credentials(conn)
-                await encrypt_stored_ai_header_secrets(conn)
 
             # Canonical de-dupe prevention must be present before startup completes;
             # current ON CONFLICT insert paths rely on this unique index. Keep the
