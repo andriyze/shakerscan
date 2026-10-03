@@ -67,6 +67,7 @@ def test_hunt_direct_ssh_reuses_streams_cancels_and_revalidates(monkeypatch, tmp
             pool = await asyncpg.create_pool(os.environ['TARGET_ASSET_TEST_DATABASE_URL'], database=database,
                                              min_size=2,max_size=8)
             monkeypatch.setattr(app_module,'db_pool',pool)
+            monkeypatch.setattr(app_module.app.state,'db_pool',pool,raising=False)
             monkeypatch.setattr(worker,'db_pool',pool)
             monkeypatch.setattr(app_module,'get_redis',lambda:r)
             monkeypatch.setattr(worker,'get_redis',lambda:r)
