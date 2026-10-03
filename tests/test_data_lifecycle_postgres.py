@@ -72,7 +72,7 @@ def run(scenario):
     asyncio.run(work())
 
 
-def test_finding_delete_preserves_storage_and_scopes_and_replays():
+def test_finding_delete_erases_its_evidence_and_scopes_and_replays():
     async def scenario(pool):
         t,s,scan,f,other,e = await seeded(pool)
         with pytest.raises(HTTPException) as error:
@@ -89,13 +89,13 @@ def test_finding_delete_preserves_storage_and_scopes_and_replays():
             assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1',f)==0
             assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1',other)==1
             assert await c.fetchval('SELECT active_findings_count FROM targets WHERE id=$1',t)==0
-            row=await c.fetchrow('SELECT finding_id,storage_uri FROM evidence_objects WHERE id=$1',e)
-            assert row['finding_id'] is None and row['storage_uri'].startswith('file:')
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1',e)==0
+            # Only the finding goes: its scan and target remain.
             assert await c.fetchval('SELECT target_id FROM scans WHERE id=$1',scan)==t
     run(scenario)
 
 
-def test_target_delete_removes_exact_root_and_preserves_child_and_scan():
+def test_target_delete_erases_its_scans_and_evidence_and_preserves_sibling():
     async def scenario(pool):
         t,s,scan,f,other,e = await seeded(pool)
         async with pool.acquire() as c:
@@ -107,15 +107,17 @@ def test_target_delete_removes_exact_root_and_preserves_child_and_scan():
         assert not preview['blockers'], preview['blockers']
         assert preview['records']['delete']['hunt_runs']['count']==1
         assert preview['records']['delete']['credential_profiles']['count']==1
+        assert preview['records']['delete']['scans']['count']==1
+        assert 'scans' not in preview['records']['retain']
         result = await service.execute(pool,preview['preview_id'],await approve(pool,preview))
-        assert result['deleted_ids']==[str(t)] and not result['external_files_deleted']
+        assert result['deleted_ids']==[str(t)] and result['external_files_deleted'] and result['files']['complete']
         async with pool.acquire() as c:
             assert not await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1',t)
             assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1 AND parent_target_id IS NULL',s)==1
             assert await c.fetchval('SELECT COUNT(*) FROM findings WHERE id=$1',other)==1
-            assert await c.fetchval('SELECT COUNT(*) FROM scans WHERE id=$1 AND target_id IS NULL',scan)==1
+            assert await c.fetchval('SELECT COUNT(*) FROM scans WHERE id=$1',scan)==0
             assert await c.fetchval('SELECT COUNT(*) FROM credential_profiles WHERE id=$1',profile)==0
-            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1 AND finding_id IS NULL',e)==1
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1',e)==0
     run(scenario)
 
 
@@ -179,26 +181,28 @@ def test_age_execution_uses_frozen_ids_not_new_age_matches():
     run(scenario)
 
 
-def test_retained_sensitive_scan_archive_keeps_original_ownership_in_receipt():
+def test_sensitive_scan_archive_is_erased_with_its_target_and_receipted():
     async def scenario(pool):
         t, sibling, scan, f, other, evidence = await seeded(pool)
-        transaction = uuid4()
+        transaction, blob = uuid4(), uuid4()
         async with pool.acquire() as c:
-            await c.execute("""INSERT INTO http_transactions(id,plane,scan_id,target_id,method,url)
-                VALUES($1,'scan',$2,$3,'GET','https://example.invalid/synthetic')""", transaction, scan, t)
+            await c.execute("""INSERT INTO evidence_objects(id,scan_id,storage_uri,retention_class)
+                VALUES($1,NULL,'file:///synthetic/unread/raw-headers.json','sensitive')""", blob)
+            await c.execute("""INSERT INTO http_transactions(id,plane,scan_id,target_id,method,url,request_headers_object_id)
+                VALUES($1,'scan',$2,$3,'GET','https://example.invalid/synthetic',$4)""", transaction, scan, t, blob)
             await c.execute("UPDATE evidence_objects SET retention_class='sensitive' WHERE id=$1", evidence)
         preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
         assert not preview['blockers'], preview['blockers']
-        links = preview['records']['retain']['http_transactions']['ownership']
-        assert {'id': str(transaction), 'scan_id': str(scan), 'target_id': str(t)} in links
-        receipt = await approve(pool, preview)
-        await service.execute(pool, preview['preview_id'], receipt)
+        assert preview['records']['delete']['http_transactions']['count'] == 1
+        # The raw-header blob a transaction points at has no scan link; it is still erased.
+        assert preview['records']['delete']['evidence_objects']['count'] == 2
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
         async with pool.acquire() as c:
-            row = await c.fetchrow('SELECT target_id,scan_id,retention_class FROM http_transactions WHERE id=$1', transaction)
-            assert row['target_id'] is None and row['scan_id'] == scan and row['retention_class'] == 'sensitive'
+            assert await c.fetchval('SELECT COUNT(*) FROM http_transactions WHERE id=$1', transaction) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=ANY($1::uuid[])', [blob, evidence]) == 0
             payload = decoded(await c.fetchval('SELECT result_json FROM command_results WHERE id=$1', UUID(preview['preview_id'])))
-            assert payload['manifest']['records']['retain']['http_transactions']['ownership'] == links
-            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', evidence) == 1
+            assert payload['result']['deleted_records']['http_transactions'] == 1
+            assert payload['result']['files']['complete'] is True
     run(scenario)
 
 
@@ -342,7 +346,8 @@ def test_abandoned_unfinished_rows_are_cancelled_by_an_approved_deletion():
         assert result['cancelled_unfinished'] == {'hunt_runs': 1, 'scans': 1}
         async with pool.acquire() as c:
             assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', t) == 0
-            assert await c.fetchval('SELECT status FROM scans WHERE id=$1', queued) == 'cancelled'
+            # Cancelled first, then erased with the target it belonged to.
+            assert await c.fetchval('SELECT COUNT(*) FROM scans WHERE id=$1', queued) == 0
     run(scenario)
 
 
@@ -429,4 +434,144 @@ def test_target_delete_erases_every_credential_homed_on_it_including_device_kind
             with pytest.raises(CredentialStoreError):
                 await store.load_for_worker(c, profile_id=profile.profile_id, target_kind='device',
                                             target_id=shared_to, capability='device.ssh.propose')
+    run(scenario)
+
+
+def test_target_erasure_removes_its_files_after_commit_but_keeps_a_shared_blob(tmp_path, monkeypatch):
+    """Evidence blobs, scan artifacts, the scan's result file and checkpoint are erased once the
+    rows naming them are gone. A blob another surviving scan still references is kept."""
+    monkeypatch.setenv('RESULTS_DIR', str(tmp_path))
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, evidence = await seeded(pool)
+        kept_scan, job, own_blob, shared_blob = uuid4(), str(uuid4()), uuid4(), uuid4()
+        own_uri, shared_uri = 'local:evidence_objects/aa/own.json', 'local:evidence_objects/bb/shared.json'
+        artifact_uri = f'local:scan_artifacts/{scan}/result.json'
+        files = {
+            'own': tmp_path / 'evidence-objects/aa/own.json',
+            'shared': tmp_path / 'evidence-objects/bb/shared.json',
+            'artifact': tmp_path / f'scan-artifacts/{scan}/result.json',
+            'checkpoint': tmp_path / f'{scan}_checkpoint.json',
+            'result': tmp_path / f'host.example.invalid/20261003_010000_{job[:8]}.json',
+            'latest': tmp_path / 'host.example.invalid/latest.json',
+            'other_result': tmp_path / f'host.example.invalid/20261003_020000_{job[:8]}.json',
+        }
+        for name, path in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            owner = {'scan_id': str(scan), 'job_id': job} if name in ('result', 'latest') else {'scan_id': 'someone-else'}
+            path.write_text(json.dumps(owner))
+        async with pool.acquire() as c:
+            await c.execute('UPDATE scans SET job_id=$2 WHERE id=$1', scan, job)
+            await c.execute("INSERT INTO scans(id,target_id,target_url,status) VALUES($1,$2,$3,'completed')",
+                            kept_scan, sibling, f'https://{sibling}.example.invalid')
+            for blob, uri in ((own_blob, own_uri), (shared_blob, shared_uri)):
+                await c.execute('INSERT INTO evidence_objects(id,storage_uri) VALUES($1,$2)', blob, uri)
+            await c.execute("""INSERT INTO http_transactions(plane,scan_id,target_id,method,url,request_headers_object_id,response_body_object_id)
+                VALUES('scan',$1,$2,'GET','https://example.invalid/a',$3,$4)""", scan, t, own_blob, shared_blob)
+            await c.execute("""INSERT INTO http_transactions(plane,scan_id,target_id,method,url,response_body_object_id)
+                VALUES('scan',$1,$2,'GET','https://example.invalid/b',$3)""", kept_scan, sibling, shared_blob)
+            await c.execute("""INSERT INTO scan_artifacts(scan_id,artifact_type,artifact_key,storage_uri,storage_backend,content_sha256)
+                VALUES($1,'result','result',$2,'local','0')""", scan, artifact_uri)
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(t)})
+        assert not preview['blockers'], preview['blockers']
+        result = await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        assert result['files']['complete'] and result['external_files_deleted']
+        for name in ('own', 'artifact', 'checkpoint', 'result', 'latest'):
+            assert not files[name].exists(), name
+        # Shared content and a file that does not provably belong to the deleted scan stay.
+        assert files['shared'].exists() and files['other_result'].exists()
+        assert str(files['other_result']) in result['files']['unverified_result_files']
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', own_blob) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM evidence_objects WHERE id=$1', shared_blob) == 1
+    run(scenario)
+
+
+def test_deleting_a_host_takes_its_linked_services_and_device_findings_do_not_block():
+    async def scenario(pool):
+        host, web, unrelated = uuid4(), uuid4(), uuid4()
+        async with pool.acquire() as c:
+            await c.execute("INSERT INTO targets(id,url,discovery_source) VALUES($1,'host://tv.example.invalid','host')", host)
+            await c.execute("INSERT INTO targets(id,url,asset_owner_id) VALUES($1,'https://tv.example.invalid:8443',$2)", web, host)
+            await c.execute("INSERT INTO targets(id,url) VALUES($1,'https://other.example.invalid')", unrelated)
+            # A device finding carries the host's own id as device_target_id.
+            await c.execute("""INSERT INTO findings(id,target_id,device_target_id,fingerprint,title,severity)
+                VALUES($1,$2,$2,$3,'Device issue','low')""", uuid4(), host, str(uuid4()))
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(host)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['root_ids'] == [str(host), str(web)]
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=ANY($1::uuid[])', [host, web]) == 0
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=$1', unrelated) == 1
+    run(scenario)
+
+
+def test_domain_deletion_selects_its_group_and_linked_services_only():
+    async def scenario(pool):
+        ids = {name: uuid4() for name in ('apex', 'sub', 'host', 'service', 'lookalike', 'other_tld', 'co_uk')}
+        rows = [('apex', 'https://acme-test.com', None), ('sub', 'https://api.acme-test.com', None),
+                ('host', 'host://db.acme-test.com', None), ('service', 'https://db.acme-test.com:9000', 'host'),
+                ('lookalike', 'https://notacme-test.com', None), ('other_tld', 'https://acme-test.org', None),
+                ('co_uk', 'https://shop.acme-test.co.uk', None)]
+        async with pool.acquire() as c:
+            for name, url, owner in rows:
+                source = 'host' if url.startswith('host://') else None
+                await c.execute("INSERT INTO targets(id,url,discovery_source,asset_owner_id) VALUES($1,$2,$3,$4)",
+                                ids[name], url, source, ids[owner] if owner else None)
+        preview = await service.preview(pool, {'kind': 'domain', 'domain': 'acme-test.com'})
+        roots = set(preview['root_ids'])
+        assert {str(ids[n]) for n in ('apex', 'sub', 'host', 'service')} <= roots
+        assert not {str(ids[n]) for n in ('lookalike', 'other_tld', 'co_uk')} & roots
+        async with pool.acquire() as c:
+            # Hosts the database created for these web targets belong to the same group.
+            locators = [r['locator'] for r in await c.fetch(
+                'SELECT target_asset_locator(url) AS locator FROM targets WHERE id=ANY($1::uuid[])',
+                [UUID(v) for v in roots])]
+        assert all(l == 'acme-test.com' or l.endswith('.acme-test.com') for l in locators), locators
+        multi_part = await service.preview(pool, {'kind': 'domain', 'domain': 'acme-test.co.uk'})
+        assert str(ids['co_uk']) in multi_part['root_ids']
+        assert not {str(ids[n]) for n in ('apex', 'lookalike', 'other_tld')} & set(multi_part['root_ids'])
+        with pytest.raises(HTTPException) as missing:
+            await service.preview(pool, {'kind': 'domain', 'domain': 'nothing-here.example'})
+        assert missing.value.status_code == 404
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            left = {r['id'] for r in await c.fetch('SELECT id FROM targets WHERE id=ANY($1::uuid[])', list(ids.values()))}
+            assert left == {ids['lookalike'], ids['other_tld'], ids['co_uk']}
+            assert await c.fetchval('SELECT COUNT(*) FROM targets WHERE id=ANY($1::uuid[])', [UUID(v) for v in roots]) == 0
+    run(scenario)
+
+
+def test_a_credentials_sessions_on_other_targets_do_not_block_deleting_its_home():
+    from datetime import timezone
+    from runtime.credential_store import PostgresCredentialProfileStore
+
+    async def scenario(pool):
+        store = PostgresCredentialProfileStore()
+        home, elsewhere = uuid4(), uuid4()
+        now = datetime.now(timezone.utc)
+        async with pool.acquire() as c:
+            for target, name in ((home, 'home'), (elsewhere, 'elsewhere')):
+                await c.execute("INSERT INTO targets(id,url) VALUES($1,$2)", target, f'https://{name}-{target.hex[:6]}.example.invalid')
+            profile = await store.create_profile(
+                c, target_kind='web', target_id=home, name='Shared login', auth_kind='json_login',
+                principal_slot='primary', principal_label=None,
+                configuration={'auth_kind': 'json_login', 'secret_values_visible': False},
+                encrypted_secret='enc:fernet:synthetic', encrypted_metadata='enc:fernet:synthetic',
+                expires_at=None, allowed_capabilities=['http.request'], created_by='test', now=now)
+            await store.grant_profile(c, profile_id=profile.profile_id, target_kind='web', target_id=elsewhere,
+                                      granted_by='test', now=now)
+            await c.execute("""INSERT INTO auth_sessions(id,owner_kind,owner_id,target_kind,target_id,target_binding_digest,
+                principal_slot,profile_id,profile_version,auth_kind,encrypted_headers,status,established_at,expires_at,
+                refresh_after,evidence_receipt_digest,source_action_id)
+                VALUES($1,'hunt',$2,'web',$3,$5,'primary',$4,1,'json_login','enc:fernet:session','active',NOW(),
+                       NOW()+INTERVAL '1 hour',NOW()+INTERVAL '30 minutes',$6,$7)""",
+                uuid4(), uuid4(), elsewhere, UUID(profile.profile_id), '0' * 64, 'a' * 64, uuid4())
+        preview = await service.preview(pool, {'kind': 'target', 'target_id': str(home)})
+        assert not preview['blockers'], preview['blockers']
+        assert preview['records']['delete']['auth_sessions']['count'] == 1
+        await service.execute(pool, preview['preview_id'], await approve(pool, preview))
+        async with pool.acquire() as c:
+            assert await c.fetchval('SELECT COUNT(*) FROM auth_sessions WHERE profile_id=$1', UUID(profile.profile_id)) == 0
     run(scenario)

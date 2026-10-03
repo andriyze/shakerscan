@@ -15,8 +15,10 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from .statuses import TERMINAL_BY_TABLE
+from . import erasure
 
-MAX_RECORDS = 10000
+MAX_RECORDS = 100000
+MAX_DOMAIN_TARGETS = 500
 EXECUTION_TABLES = ('scans', 'hunt_runs', 'agent_hunt_runs', 'device_agent_runs',
                     'research_episodes', 'campaigns', 'scan_campaigns', 'finding_verifications')
 PROTECTED = ('legal_hold', 'audit')
@@ -29,12 +31,11 @@ ABANDONED_AFTER_MINUTES = 15
 # running scan on its own, so a running scan is always treated as live here.
 NO_ACTIVITY_CLOCK = ('scans',)
 RETAINED = [
-    'Historical scan reports and scan artifacts are retained; their target link is detached.',
-    'External evidence files and their storage index are retained, not erased.',
-    'Exports, backups, detached audit records, and other targets are retained.',
-    'Deleting a host retains its application origins as independent targets; archiving retires linked services together.',
+    'Scans, Hunts, credentials, sessions, collections, evidence and their files are erased with their target.',
+    'Evidence or artifact files still referenced by another surviving record are kept for that record.',
+    'Content-free audit records (approvals, scope and deletion receipts, export events) are kept.',
+    'Backups and exports made before this deletion are not modified; delete or rotate them separately.',
     'Later scans or discovery may create a new target or finding record.',
-    'Original links of retained and detached rows are recorded in this deletion receipt.',
 ]
 
 
@@ -74,17 +75,17 @@ async def catalog(conn):
 
 
 def cascade_plan(kind: str, edges: list[dict], columns: dict):
-    root = 'targets' if kind == 'target' else 'findings'
+    root = 'findings' if kind == 'findings' else 'targets'
     deleted, detached, retained, restricted = (defaultdict(list) for _ in range(4))
     predicate = 'r.id = ANY($1::uuid[])'
     deleted[root].append(predicate)
     queue = [(root, predicate, (root,))]
-    if kind == 'target' and 'credential_profiles' in columns:
-        # Every credential homed on the target, whatever its kind: a host's SSH identity is
-        # stored as target_kind='device' on the host row and must not outlive it.
-        clause = "r.target_id = ANY($1::uuid[]) AND r.target_kind IN ('web','api','network','device')"
-        deleted['credential_profiles'].append(clause)
-        queue.append(('credential_profiles', clause, ('credential_profiles',)))
+    if root == 'targets':
+        # A target's scans, credentials (every kind, including a host's device identity),
+        # sessions and collection bindings have no cascading FK to it; they go with it.
+        for table, clause in erasure.owned_by_targets(columns).items():
+            deleted[table].append(clause)
+            queue.append((table, clause, (table,)))
     serial = 0
     while queue:
         parent, predicate, path = queue.pop(0)
@@ -100,9 +101,9 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
                                 for a, b in zip(edge['child_keys'], edge['parent_keys']))
             clause = (f'EXISTS (SELECT 1 FROM public.{ident(parent)} {alias} '
                       f'WHERE ({predicate.replace("r.", alias + ".")}) AND {join})')
-            if child == 'evidence_objects' and edge['child_keys'] == ['finding_id']:
-                detached[child].append(clause)
-            elif edge['action'] == 'c':
+            if child == 'evidence_objects':
+                continue  # erased explicitly below once nothing surviving references it
+            if edge['action'] == 'c':
                 if child in path:
                     raise HTTPException(409, 'Cyclic ownership requires a separately reviewed deletion')
                 deleted[child].append(clause)
@@ -111,8 +112,24 @@ def cascade_plan(kind: str, edges: list[dict], columns: dict):
                 retained[child].append(clause)
             else:
                 restricted[child].append(clause)
-    return tuple({table: ' OR '.join(f'({p})' for p in clauses)
-                  for table, clauses in group.items()} for group in (deleted, detached, retained, restricted))
+    plan = [{table: ' OR '.join(f'({p})' for p in clauses) for table, clauses in group.items()}
+            for group in (deleted, detached, retained, restricted)]
+    owners = [f'r.{column} IN (SELECT o.id FROM public."{table}" o WHERE {plan[0][table].replace("r.", "o.")})'
+              for column, table in (('hunt_id', 'hunt_runs'), ('scan_id', 'scans'))
+              if table in plan[0] and column in columns.get('tool_receipts', set())]
+    if owners:
+        # Tool receipts keep a deleted run's stdout/stderr evidence; they go with the run.
+        plan[0]['tool_receipts'] = ' OR '.join(f'({o})' for o in owners)
+        plan[2].pop('tool_receipts', None)
+    evidence = erasure.evidence_clause(plan[0], columns)
+    if evidence:
+        plan[0]['evidence_objects'] = evidence
+    # A row the operation deletes is not also "retained" or "detached": a scan is owned by its
+    # target and erased with it, even though its FK to the target is ON DELETE SET NULL.
+    for group in (plan[1], plan[2]):
+        for table in [t for t in group if t in plan[0]]:
+            group[table] = f'({group[table]}) AND NOT ({plan[0][table]})'
+    return tuple(plan)
 
 
 def hold_predicate(alias='r', *, preserving=False) -> str:
@@ -151,7 +168,44 @@ async def summarize(conn, table, clause, roots, *, preserving=False):
     """, roots))
 
 
+async def _members(conn, hosts):
+    """Application services linked to the selected host assets, deleted with them."""
+    if not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+                               "WHERE table_schema='public' AND table_name='targets' AND column_name='asset_owner_id')"):
+        return []
+    rows = await conn.fetch("""SELECT id FROM targets WHERE asset_owner_id=ANY($1::uuid[])
+        AND COALESCE(discovery_source,'')<>'model-intake' ORDER BY id""", hosts)
+    return [r['id'] for r in rows if r['id'] not in hosts]
+
+
+async def domain_roots(conn, domain: str):
+    """Every target the Targets list shows under this domain, plus each host's linked services.
+
+    The selection is the operator's explicit choice of a domain group; the preview lists every
+    resolved target ID and the approval binds that exact list, so nothing is inferred later.
+    """
+    from targets.asset_inventory import GROUP_DOMAIN, MULTI_PART_TLDS
+    grouped = GROUP_DOMAIN.format(tlds='$2')
+    rows = await conn.fetch(f"""WITH located AS (
+            SELECT t.id, t.root_domain, t.discovery_source,
+                   lower(split_part(target_asset_locator(t.url), '#', 1)) AS locator
+            FROM targets t)
+        SELECT id FROM located
+        WHERE COALESCE(discovery_source,'')<>'model-intake'
+          AND (({grouped})=$1 OR lower(root_domain)=$1)
+        ORDER BY id""", domain, sorted(MULTI_PART_TLDS))
+    hosts = [r['id'] for r in rows]
+    if not hosts:
+        raise HTTPException(404, 'No targets belong to this domain')
+    roots = hosts + await _members(conn, hosts)
+    if len(roots) > MAX_DOMAIN_TARGETS:
+        raise HTTPException(413, f'More than {MAX_DOMAIN_TARGETS} targets belong to this domain; delete its larger hosts first')
+    return roots
+
+
 async def find_roots(conn, selection):
+    if selection['kind'] == 'domain':
+        return await domain_roots(conn, selection['domain'])
     if selection['kind'] == 'target':
         roots = [UUID(selection['target_id'])]
         rows = await conn.fetch('SELECT id, discovery_source FROM targets WHERE id=ANY($1::uuid[])', roots)
@@ -159,7 +213,8 @@ async def find_roots(conn, selection):
             raise HTTPException(404, 'Target not found')
         if rows[0]['discovery_source'] == 'model-intake':
             raise HTTPException(409, 'Model Intake subjects require their product-specific lifecycle')
-        return roots
+        # The selected target stays first: routes bind a preview to it by root_ids[0].
+        return roots + await _members(conn, roots)
     if selection.get('finding_ids'):
         ids = [UUID(v) for v in selection['finding_ids']]
         scan = UUID(selection['scan_id']) if selection.get('scan_id') else None
@@ -177,11 +232,11 @@ async def find_roots(conn, selection):
 
 
 async def owner_context(conn, kind, roots):
-    column = 'target_id' if kind == 'target' else 'id'
+    column = 'id' if kind == 'findings' else 'target_id'
     rows = await conn.fetch(f'SELECT id, target_id, device_target_id, ai_target_id, scan_id FROM findings WHERE {column}=ANY($1::uuid[])', roots)
     owners = {key: sorted({str(r[key]) for r in rows if r[key]}, key=str)
               for key in ('target_id', 'device_target_id', 'ai_target_id', 'scan_id')}
-    if kind == 'target':
+    if kind != 'findings':
         owners['target_id'] = [str(r) for r in roots]
     owners['finding_id'] = sorted(str(r['id']) for r in rows)
     return owners
@@ -296,7 +351,9 @@ async def blockers(conn, columns, owners, kind, roots):
             held = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE id=ANY($1::uuid[]) AND {hold_predicate()}', [UUID(v) for v in owners[key]])
             if held:
                 issues.append(f'{table}: an owner is on legal/operational hold')
-    if kind == 'target' and (owners['device_target_id'] or owners['ai_target_id']):
+    # A host's device findings carry the host's own id as device_target_id: same asset, not mixed.
+    foreign_devices = set(owners['device_target_id']) - {str(r) for r in roots}
+    if kind != 'findings' and (foreign_devices or owners['ai_target_id']):
         issues.append('Mixed product ownership: remove or resolve cross-product finding links first')
     if 'evidence_retention_previews' in columns and owners['target_id']:
         pending = await conn.fetchval("SELECT COUNT(*) FROM evidence_retention_previews WHERE target_id=ANY($1::uuid[]) AND status='executing'", [UUID(v) for v in owners['target_id']])
@@ -327,7 +384,8 @@ async def inventory(conn, selection, roots, columns, edges):
                     issues.append(f'{table}: legal hold or protected evidence blocks deletion; '
                                   'archive the target to keep its records and original ownership intact')
                 # Do not delete a row belonging to a different owner through an indirect cascade.
-                if name == 'delete' and 'target_id' in columns[table] and owners['target_id']:
+                if (name == 'delete' and 'target_id' in columns[table] and owners['target_id']
+                        and table not in erasure.OWNED_ACROSS_TARGETS):
                     foreign = await conn.fetchval(f'SELECT COUNT(*) FROM public.{ident(table)} r WHERE ({clause}) AND target_id IS NOT NULL AND NOT target_id=ANY($2::uuid[])', roots, [UUID(v) for v in owners['target_id']])
                     if foreign:
                         issues.append(f'{table}: cascade crosses target ownership')
@@ -344,8 +402,8 @@ async def inventory(conn, selection, roots, columns, edges):
              WHERE s.target_id=ANY($1::uuid[]) AND ({hold_predicate(preserving=True)} OR r.retention_delete_pending_at IS NOT NULL)""", [UUID(v) for v in owners['target_id']])
         if held:
             issues.append('Scan evidence is protected or has pending retention deletion')
-    if plan[1].get('evidence_objects'):
-        pending = await conn.fetchval(f"SELECT COUNT(*) FROM evidence_objects r WHERE ({plan[1]['evidence_objects']}) AND retention_delete_pending_at IS NOT NULL", roots)
+    if plan[0].get('evidence_objects'):
+        pending = await conn.fetchval(f"SELECT COUNT(*) FROM evidence_objects r WHERE ({plan[0]['evidence_objects']}) AND retention_delete_pending_at IS NOT NULL", roots)
         if pending:
             issues.append('Finding evidence has pending retention deletion')
     return {'schema': 'shakerscan.record-deletion/v1', 'kind': kind,
@@ -361,5 +419,5 @@ async def lock_inventory(conn, columns, plan):
                              'evidence_objects', 'evidence_instances', 'evidence_retention_previews',
                              'approval_receipts', 'scope_receipts', 'command_results') if t in columns)
     await conn.execute("SET LOCAL lock_timeout='3s'")
-    await conn.execute("SET LOCAL statement_timeout='20s'")
+    await conn.execute("SET LOCAL statement_timeout='60s'")
     await conn.execute('LOCK TABLE ' + ', '.join('public.' + ident(t) for t in sorted(tables)) + ' IN SHARE ROW EXCLUSIVE MODE')

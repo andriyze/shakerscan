@@ -7,8 +7,14 @@ import secrets
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 
+from . import erasure
 from .inventory import (cancel_abandoned, catalog, cascade_plan, decoded, digest, find_roots, hashable,
-                        inventory, lock_inventory, quiesce_targets)
+                        ident, inventory, lock_inventory, quiesce_targets)
+
+# Rows a target owns without a cascading FK, deleted while their owners still exist: tool
+# receipts reference the runs they came from, so they go before the scans and Hunts.
+OWNED_DELETE_ORDER = ('tool_receipts', 'scans', 'credential_profiles', 'credential_profile_bindings',
+                      'auth_sessions', 'request_collection_bindings')
 
 COMMAND = 'data.records.delete'
 CONFIRMATIONS = {'confirm_authorized', 'confirm_scope_reviewed', 'confirm_delete_records'}
@@ -25,7 +31,7 @@ def public_preview(preview_id, payload, scope_id):
 async def preview(pool, selection):
     async with pool.acquire() as conn:
         async with conn.transaction(isolation='repeatable_read'):
-            await conn.execute("SET LOCAL statement_timeout='20s'")
+            await conn.execute("SET LOCAL statement_timeout='60s'")
             columns, edges = await catalog(conn)
             roots = await find_roots(conn, selection)
             manifest, _ = await inventory(conn, selection, roots, columns, edges)
@@ -71,7 +77,9 @@ def check_expected(payload, kind=None, entity_id=None, selection=None):
     manifest = payload['manifest']
     if kind and manifest['kind'] != kind:
         raise HTTPException(409, 'Deletion preview is for a different record kind')
-    if entity_id and manifest['root_ids'] != [str(entity_id)]:
+    # A target preview lists the selected target first, then the services linked to it.
+    bound = manifest['root_ids'][:1] if kind == 'target' else manifest['root_ids']
+    if entity_id and bound != [str(entity_id)]:
         raise HTTPException(409, 'Deletion preview does not match this exact record')
     if selection is not None and payload['selection'] != selection:
         raise HTTPException(409, 'Cleanup filters changed; inspect a new preview')
@@ -147,22 +155,24 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                 # above), and stop automatic work on the targets so nothing is dispatched behind
                 # this deletion. Both change rows the hash covered, so they come after the check.
                 cancelled = await cancel_abandoned(conn, columns, current['owners'])
-                if current['kind'] == 'target':
+                targets_rooted = current['kind'] != 'findings'
+                if targets_rooted:
                     await quiesce_targets(conn, columns, roots)
-                # Preserve the storage index: removing a finding must not silently orphan
-                # blobs or delete shared content. External deletion uses evidence retention.
-                if plan[1].get('evidence_objects'):
-                    await conn.execute(f"UPDATE evidence_objects r SET finding_id=NULL WHERE {plan[1]['evidence_objects']}", roots)
-                if current['kind'] == 'target':
-                    if 'credential_profiles' in columns:
-                        # A credential belongs to its home target: deleting the target deletes it,
-                        # and with it every share. Shares other credentials gave this target go too.
-                        await conn.execute("DELETE FROM credential_profiles WHERE target_id=ANY($1::uuid[]) AND target_kind IN ('web','api','network','device')", roots)
-                    if 'credential_profile_bindings' in columns:
-                        await conn.execute("DELETE FROM credential_profile_bindings WHERE binding_kind='target' AND binding_id=ANY($1::text[])", [str(root) for root in roots])
+                # Capture what must be erased before any owner disappears: evidence the deleted
+                # rows own or reference, artifacts and result files of the deleted scans.
+                captured = await erasure.capture(conn, plan[0], columns, roots)
+                hunt_ids = ([str(r['id']) for r in await conn.fetch(
+                    f"SELECT r.id FROM hunt_runs r WHERE {plan[0]['hunt_runs']}", roots)]
+                    if 'hunt_runs' in plan[0] else [])
+                for table in OWNED_DELETE_ORDER if targets_rooted else ('tool_receipts',):
+                    if table in plan[0]:
+                        await conn.execute(f'DELETE FROM public.{ident(table)} r WHERE {plan[0][table]}', roots)
+                if targets_rooted:
                     removed = await conn.fetch('DELETE FROM targets WHERE id=ANY($1::uuid[]) RETURNING id', roots)
                 else:
                     removed = await conn.fetch('DELETE FROM findings WHERE id=ANY($1::uuid[]) RETURNING id', roots)
+                evidence_uris = await erasure.delete_evidence(conn, captured, columns)
+                await erasure.delete_owner_stats(conn, columns, [scan['id'] for scan in captured['scans']], hunt_ids)
                 if len(removed) != len(roots):
                     raise HTTPException(409, 'Records changed during deletion; no changes committed')
                 for owner, table in (('target_id', 'targets'), ('device_target_id', 'device_targets'), ('ai_target_id', 'ai_targets')):
@@ -178,12 +188,26 @@ async def execute(pool, preview_id, approval_id, *, preview_hash=None, kind=None
                           'deleted_records': {k: v['count'] for k, v in current['records']['delete'].items()},
                           'detached_records': {k: v['count'] for k, v in current['records']['detach'].items()},
                           'retained': current['retained'], 'external_files_deleted': False,
-                          'dry_run': False, 'idempotent_replay': False}
+                          'files': {'pending': True}, 'dry_run': False, 'idempotent_replay': False}
                 payload['result'] = result
                 await conn.execute("""UPDATE command_results SET status='completed', dry_run=false,
-                    approval_receipt_id=$2, operator_message='Record deletion completed; external files retained',
+                    approval_receipt_id=$2, operator_message='Record deletion completed; erasing files',
                     result_json=$3::jsonb WHERE id=$1""", UUID(str(preview_id)), UUID(str(approval_id)), json.dumps(payload))
-                return result
+        # Files can only be erased once the rows naming them are committed away; the outcome,
+        # including anything that could not be erased, is added to the same durable receipt.
+        # The records are committed: nothing below may report the deletion as rolled back.
+        try:
+            async with pool.acquire() as conn:
+                files = await erasure.erase_files(conn, captured, evidence_uris)
+                result = {**result, 'files': files, 'external_files_deleted': files['complete']}
+                payload['result'] = result
+                await conn.execute("""UPDATE command_results SET operator_message=$2, result_json=$3::jsonb
+                    WHERE id=$1""", UUID(str(preview_id)),
+                    'Record deletion completed; files erased' if files['complete'] else
+                    'Record deletion completed; some files could not be erased', json.dumps(payload))
+        except Exception as exc:  # noqa: BLE001 - reported on the result instead
+            result = {**result, 'files': {'complete': False, 'error': type(exc).__name__}}
+        return result
     except Exception as exc:
         if getattr(exc, 'sqlstate', '') in {'55P03', '57014', '40001', '40P01', '23503', '23514'}:
             raise HTTPException(409, 'Deletion conflicted with active work or ownership; no changes committed. Retry or inspect a new preview.') from exc
