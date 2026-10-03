@@ -98,6 +98,11 @@ class MemoryCredentialConn:
             return "UPDATE 0"
         raise AssertionError(query)
 
+    async def fetchval(self, query, *args):
+        if "to_regclass('public.auth_sessions')" in query:
+            return True  # deactivation revokes the profile's sessions
+        raise AssertionError(query)
+
     async def fetchrow(self, query, *args):
         normalized = query.lstrip()
         if normalized.startswith("INSERT INTO credential_profiles"):
