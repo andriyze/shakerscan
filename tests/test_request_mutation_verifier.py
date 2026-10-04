@@ -192,3 +192,74 @@ def test_sqli_request_verifier_uses_error_differential_without_extraction():
     assert result.observations[0]["finding_verdict"] == "suspected"
     assert result.observations[0]["origin"] == "https://api.example.test"
     assert result.observations[0]["resolved_ips"] == ["192.0.2.10"]
+
+
+class SqliteConstantTransport(ReflectingTransport):
+    """SQLite's own wording -- the constant and its parser message -- on the mutation."""
+
+    async def send(self, request, **_kwargs):
+        self.requests.append(request)
+        # The bare constant only: no "near ...: syntax error" clause, so this isolates
+        # the SQLITE_ERROR signature the drifted upstream copy lacked.
+        body = (
+            b'{"error":"SQLITE_ERROR: unable to prepare statement"}'
+            if len(self.requests) == 2 else b'{"ok":true}'
+        )
+        return ReplayTransportResult(
+            status_code=500 if len(self.requests) == 2 else 200,
+            connected_address="192.0.2.10", final_url=request.url, response_body=body,
+        )
+
+
+def _run_sqli_request_verify(transport):
+    request = _request(
+        body="id=7&note=worker-secret",
+        content_type="application/x-www-form-urlencoded",
+    )
+    spec = CAPABILITY_REGISTRY.require("sqli.request_verify")
+    budget = dict(spec.budget_cost)
+    adapter = RequestMutationVerificationAdapter(
+        specification=spec, target=_target(), request=request,
+        candidate=_candidate(), transport=transport, requested_budget=budget,
+    )
+    return asyncio.run(CapabilityExecutor().execute(
+        CapabilityExecutionContext(
+            specification=spec, target=_target(), requested_budget=budget,
+            adapter_managed_cancellation=True,
+        ),
+        adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+
+
+def test_upstream_detector_recognises_sqlite_error_constant():
+    """A bare ``SQLITE_ERROR`` is what SQLite emits; the upstream detector must see it.
+
+    Before the shared signature set, the verifier's copy required a separator between
+    ``sqlite`` and ``error`` (matching ``sqlite3_exception`` only), so a reproducible
+    SQLite error-based injection stayed ``not_proven`` here and never escalated to the
+    repeated proof that would have verified it.
+    """
+    result = _run_sqli_request_verify(SqliteConstantTransport())
+    assert result.observations[0]["proof_status"] == "db_error_candidate_only"
+    assert result.observations[0]["finding_verdict"] == "suspected"
+
+
+class HarmlessErrorTransport(ReflectingTransport):
+    """A 500 whose prose mentions a database without any DB-error signature."""
+
+    async def send(self, request, **_kwargs):
+        self.requests.append(request)
+        body = (
+            b'{"message":"The database was unreachable; please try again later"}'
+            if len(self.requests) == 2 else b'{"ok":true}'
+        )
+        return ReplayTransportResult(
+            status_code=500 if len(self.requests) == 2 else 200,
+            connected_address="192.0.2.10", final_url=request.url, response_body=body,
+        )
+
+
+def test_upstream_detector_does_not_fire_on_harmless_prose():
+    result = _run_sqli_request_verify(HarmlessErrorTransport())
+    assert result.observations[0]["proof_status"] == "not_proven"
+    assert result.observations[0]["finding_verdict"] == "not_proven"

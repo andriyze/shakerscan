@@ -91,6 +91,44 @@ def test_executor_fails_closed_when_adapter_exceeds_or_expands_reserved_budget()
     )
 
 
+def test_contract_violation_neutralizes_a_verified_proof_observation():
+    """An over-reserving attempt must not carry a verified verdict to any consumer.
+
+    The adapter here spends more HTTP than it reserved -- a contract violation -- yet
+    emits an observation marked ``proof_state``/``finding_verdict`` ``verified``. The
+    executor fails the attempt; it must also downgrade those verdict fields so the
+    Scan finalizer and Hunt evidence paths, which promote solely on them, cannot turn
+    a broken attempt into a verified finding. The raw evidence is kept for diagnosis.
+    """
+    adapter = _Adapter(CapabilityAdapterResult(
+        status="success",
+        observations=({
+            "kind": "sqli_proof",
+            "candidate_id": "c" * 64,
+            "proof_state": "verified",
+            "finding_verdict": "verified",
+            "proof_contract": "sqli_boolean_differential/v1",
+        },),
+        actual_budget={
+            "http_requests": 99,  # far beyond the reserved 5
+            "tool_wall_seconds": 1,
+        },
+        execution_started=True,
+    ))
+
+    result = asyncio.run(CapabilityExecutor().execute(
+        _context(), adapter, heartbeat=lambda: asyncio.sleep(0), cancelled=lambda: False,
+    ))
+
+    assert result.status == "failed"
+    observation = result.observations[0]
+    assert observation["proof_state"] != "verified"
+    assert observation["finding_verdict"] != "verified"
+    # The non-verdict evidence is preserved so the failure can still be diagnosed.
+    assert observation["proof_contract"] == "sqli_boolean_differential/v1"
+    assert observation["candidate_id"] == "c" * 64
+
+
 def test_executor_cancellation_is_distinct_and_does_not_start_adapter():
     adapter = _Adapter()
 
