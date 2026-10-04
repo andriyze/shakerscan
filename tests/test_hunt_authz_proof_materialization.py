@@ -86,7 +86,90 @@ def make_receipt(result, *, hunt_id=HUNT, target_id=TARGET, capability="authz.ve
 
 def records(receipt, origin):
     return authz_finding_records(receipt, hunt_id=HUNT, action_id=ACTION,
-        target_id=TARGET, receipt_id=RECEIPT, allowed_origins=(origin,))
+        target_id=TARGET, receipt_id=RECEIPT, allowed_origins=(origin,), target_url=origin)
+
+
+def _service_proof(consumer_url, *, target_url="https://h.test",
+                   allowed=("https://h.test", "https://h.test:8443")):
+    """A verified cross-principal observation on one service of the Hunt's host."""
+    producer_url = consumer_url.rsplit("/", 1)[0]
+    observation = {
+        "kind": "authz_differential", "proof_state": "verified",
+        "proof_type": "cross_principal_replay", "principal_contexts_distinct": True,
+        "object_absent_from_secondary_listing": True, "responses_equivalent": True,
+        "consumer_url": consumer_url, "producer_url": producer_url,
+        "resource_id_sha256": "0" * 64, "owner_status": 200, "attacker_status": 200,
+        "accepted_principal_responses": {"primary": 200, "secondary": 200},
+    }
+    receipt = make_receipt({"observation": observation,
+                            "budget_consumed": {"http_requests": 4, "tool_wall_seconds": 1}})
+    projected = authz_finding_records(receipt, hunt_id=HUNT, action_id=ACTION,
+        target_id=TARGET, receipt_id=RECEIPT, allowed_origins=allowed, target_url=target_url)
+    assert len(projected) == 1
+    return projected[0]
+
+
+def test_the_same_route_on_another_service_port_is_a_distinct_finding():
+    """Hunt reuses its authority on other ports of the host, and the templated identity
+    keeps only path and parameter names: both proofs keyed one row, and the upsert
+    overwrote one service's verified finding with the other's."""
+    primary = _service_proof("https://h.test/api/orders/7")
+    alternate = _service_proof("https://h.test:8443/api/orders/9")
+    assert primary["fingerprint"] != alternate["fingerprint"]
+    assert alternate["url"].startswith("https://h.test:8443/")
+    # Another object id on the same alternate service is still the same endpoint.
+    assert _service_proof("https://h.test:8443/api/orders/11")["fingerprint"] == alternate["fingerprint"]
+
+
+def test_materializing_a_second_service_proof_does_not_overwrite_the_first():
+    class DB:
+        """The findings upsert, keyed like (target_id, fingerprint)."""
+        def __init__(self): self.rows = {}
+        async def fetchval(self, query, target_id, hunt_id, fingerprint, url, *args):
+            assert "ON CONFLICT" in query
+            self.rows.setdefault(fingerprint, {"id": uuid.uuid4()})["url"] = url
+            return self.rows[fingerprint]["id"]
+        async def execute(self, *args): pass
+
+    db = DB()
+    for url in ("https://h.test/api/orders/7", "https://h.test:8443/api/orders/9"):
+        observation = {
+            "kind": "authz_differential", "proof_state": "verified",
+            "proof_type": "cross_principal_replay", "principal_contexts_distinct": True,
+            "object_absent_from_secondary_listing": True, "responses_equivalent": True,
+            "consumer_url": url, "producer_url": url.rsplit("/", 1)[0],
+            "resource_id_sha256": "0" * 64, "owner_status": 200, "attacker_status": 200,
+            "accepted_principal_responses": {"primary": 200, "secondary": 200},
+        }
+        receipt = make_receipt({"observation": observation,
+                                "budget_consumed": {"http_requests": 4, "tool_wall_seconds": 1}})
+        assert len(asyncio.run(materialize_verified_hunt_findings(
+            db, HUNT, ACTION, TARGET, "https://h.test", "authz.verify", RECEIPT, {}, [],
+            capability_receipt=receipt, allowed_origins=("https://h.test", "https://h.test:8443"),
+        ))) == 1
+    assert sorted(row["url"] for row in db.rows.values()) == [
+        "https://h.test/api/orders/7", "https://h.test:8443/api/orders/9",
+    ]
+
+
+def test_default_port_spellings_of_one_service_share_a_fingerprint():
+    implicit = _service_proof("https://h.test/api/orders/7")
+    explicit = _service_proof("https://h.test:443/api/orders/9")
+    assert implicit["fingerprint"] == explicit["fingerprint"]
+    # Spelled with the port on the target side too.
+    assert _service_proof("https://h.test/api/orders/7",
+                          target_url="https://h.test:443/")["fingerprint"] == implicit["fingerprint"]
+
+
+def test_a_target_service_finding_keeps_the_fingerprint_it_had_before_service_qualifiers():
+    """Rows already proven on the Hunt target's own service must not be re-keyed."""
+    record = _service_proof("https://h.test/api/orders/7")
+    assert record["fingerprint"] == "t:33e0ffeed54c7ba2"
+    unqualified = templated_finding_identity({
+        "url": record["url"], "cwe": record["cwe"], "tool": record["tool"],
+        "title": record["title"], "evidence": record["evidence"],
+    })
+    assert record["fingerprint"] == "t:" + hashlib.sha256(unqualified.encode()).hexdigest()[:16]
 
 
 def test_real_bound_http_proof_projects_to_the_same_finding_as_scan(origin):

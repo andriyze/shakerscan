@@ -32,6 +32,25 @@ def _origin(value: urllib.parse.SplitResult) -> tuple[str, str | None, int | Non
     return scheme, value.hostname, value.port or default_port
 
 
+def service_identity_suffix(service_url: str, *, target_url: str) -> str:
+    """Qualify a Hunt finding identity with the service it was proven on.
+
+    Scan's templated identity keeps the path and parameter names only. A Hunt may reuse
+    its authority on other services of the same host, so the same route on another
+    scheme/port is a different endpoint and must not share (and overwrite) a row. The Hunt
+    target's own service, under any default-port spelling, gets no suffix, which keeps the
+    fingerprints of rows proven there before this qualifier existed.
+    """
+    service = _origin(urllib.parse.urlsplit(str(service_url)))
+    try:
+        baseline = _origin(urllib.parse.urlsplit(str(target_url)))
+    except ValueError:
+        baseline = None
+    if service == baseline:
+        return ""
+    return f"|service={service[0]}://{service[1]}:{service[2]}"
+
+
 def _verified_xss_fingerprint(
     proof: Mapping[str, Any], *, method: str, target_url: str,
 ) -> str:
@@ -69,12 +88,7 @@ def _verified_xss_fingerprint(
         })
         if not identity:
             raise ValueError("verified XSS proof has no canonical endpoint identity")
-    # Existing target-service fingerprints stay stable. An authorized alternate
-    # service must not collapse into the same endpoint on another scheme/port.
-    service = _origin(urllib.parse.urlsplit(str(proof["url"])))
-    baseline = _origin(urllib.parse.urlsplit(target_url))
-    if service != baseline:
-        identity += f"|service={service[0]}://{service[1]}:{service[2]}"
+    identity += service_identity_suffix(str(proof["url"]), target_url=target_url)
     return "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
@@ -242,7 +256,8 @@ async def materialize_verified_hunt_findings(
         from .authz_findings import authz_finding_records
         records = authz_finding_records(capability_receipt, hunt_id=hunt_id,
             action_id=action_id, target_id=target_id, receipt_id=receipt_id,
-            allowed_origins=allowed_origins or (target_url,), target_kind=target_kind)
+            allowed_origins=allowed_origins or (target_url,), target_url=target_url,
+            target_kind=target_kind)
     else:
         return []
     target_column = "device_target_id" if target_kind == "device" else "target_id"
@@ -318,4 +333,6 @@ async def materialize_verified_hunt_findings(
     return findings
 
 
-__all__ = ["materialize_verified_hunt_findings", "verified_xss_observations"]
+__all__ = [
+    "materialize_verified_hunt_findings", "service_identity_suffix", "verified_xss_observations",
+]
