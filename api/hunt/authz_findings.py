@@ -22,7 +22,7 @@ try:
 except ModuleNotFoundError:
     from scanner.findings import templated_finding_identity
 
-from .deterministic_findings import service_identity_suffix
+from .service_identity import service_identity_suffix
 
 
 def _origin(value: str) -> tuple[str, str, int] | None:

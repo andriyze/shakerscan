@@ -15,8 +15,9 @@ import uuid
 
 import pytest
 
-from api.runtime.http_archive import HttpTransaction, archive_recorded_calls
-from api.runtime.http_archive_reader import export_document, read_transactions
+from runtime import archive_blob_secrets
+from runtime.http_archive import HttpTransaction, archive_recorded_calls
+from runtime.http_archive_reader import export_document, read_transactions
 
 HUNT = "22222222-2222-4222-8222-222222222222"
 TARGET = "33333333-3333-4333-8333-333333333333"
@@ -27,11 +28,7 @@ LARGE_HEADER = "x" * (40 * 1024)
 
 
 def _blobs():
-    """The sealing module as the archive resolves it at call time (flat or package layout)."""
-    try:
-        from runtime import archive_blob_secrets
-    except ModuleNotFoundError:  # package import layout
-        from api.runtime import archive_blob_secrets
+    """The sealing module the archive resolves at call time."""
     return archive_blob_secrets
 
 
