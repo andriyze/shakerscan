@@ -487,8 +487,14 @@ async def store_archive_blobs(
     owned by the same scan (or the shared Hunt owner), and one JSONB insert persists every
     missing object. A large capture therefore does not issue four SQL statements per request.
     """
+    try:
+        from runtime.archive_blob_secrets import plaintext_digest
+    except ModuleNotFoundError:  # package import layout
+        from .archive_blob_secrets import plaintext_digest
     store = _sealing(store)
-    stored_by_key: dict[tuple[str | None, str], Mapping[str, Any]] = {}
+    # Deduplicate on the plaintext identity first and store only what is new: sealing is
+    # randomized, so storing before deduplication would leave unreferenced external copies.
+    pending: dict[tuple[str | None, str], Any] = {}
     canonical_by_input: dict[tuple[str | None, str], tuple[str | None, str]] = {}
     for owner_scan_id, content in contents:
         if content is None:
@@ -500,17 +506,16 @@ async def store_archive_blobs(
                 content, sort_keys=True, separators=(",", ":"), default=str,
             ).encode("utf-8", errors="replace")
         input_key = (owner_scan_id, hashlib.sha256(encoded).hexdigest())
-        stored = store(content)
-        digest = stored.get("content_sha256")
+        digest = plaintext_digest(content)
         if digest:
             canonical_key = (owner_scan_id, str(digest))
-            stored_by_key.setdefault(canonical_key, stored)
+            pending.setdefault(canonical_key, content)
             canonical_by_input[input_key] = canonical_key
-    if not stored_by_key:
+    if not pending:
         return {}
 
-    owners = sorted({owner for owner, _digest in stored_by_key if owner is not None})
-    digests = sorted({digest for _owner, digest in stored_by_key})
+    owners = sorted({owner for owner, _digest in pending if owner is not None})
+    digests = sorted({digest for _owner, digest in pending})
     existing_rows = await conn.fetch(
         """SELECT DISTINCT ON (scan_id, content_sha256)
                   id, scan_id, content_sha256
@@ -531,9 +536,12 @@ async def store_archive_blobs(
     }
 
     inserts: list[dict[str, Any]] = []
-    for key, stored in stored_by_key.items():
+    for key, content in pending.items():
         if key in object_ids:
             continue
+        stored = store(content)
+        if not stored.get("content_sha256"):
+            continue  # not archived (no stable key): the transaction records it as unavailable
         object_id = str(uuid.uuid4())
         inline_content = stored.get("content")
         if isinstance(inline_content, str):
@@ -625,6 +633,8 @@ async def archive_http_transactions(
             for field in ("request_headers", "request_body", "response_headers", "response_body"):
                 cache_key = entry[field]
                 entry[field] = object_ids.get(cache_key) if cache_key else None
+                if cache_key and entry[field] is None:
+                    entry.setdefault("unavailable", []).append(field)
         return pending
 
     prepared = await _prepare()
@@ -657,7 +667,11 @@ async def archive_http_transactions(
                 or item.response_body_truncated
             ),
             "retention_class": RETENTION_CLASS,
-            "metadata_json": bounded_metadata(item.metadata),
+            "metadata_json": {
+                **bounded_metadata(item.metadata),
+                # A payload that could not be archived is stated, never silently absent.
+                **({"payloads_unavailable": entry["unavailable"]} if entry.get("unavailable") else {}),
+            },
         })
     return await persist_transactions(conn, rows)
 

@@ -56,3 +56,24 @@ def test_without_a_key_the_payload_is_not_archived_at_all(monkeypatch):
     called = []
     stored = encrypting_store(lambda content: called.append(content) or {})({"cookie": "sid=1"})
     assert stored["content_sha256"] is None and called == []
+
+
+def test_a_payload_that_fit_inline_in_plaintext_stays_inline_when_sealed(key):
+    """Encryption grows a payload by about a third; it must not push it into external storage,
+    which the archive reader does not load."""
+    from evidence_storage import INLINE_STORAGE_URI, evidence_inline_max_bytes
+    from runtime.archive_blob_secrets import encrypting_store, reveal
+    body = "x" * (evidence_inline_max_bytes() - 1024)  # e.g. a 31 KiB body under a 32 KiB limit
+    externalized = []
+    stored = encrypting_store(lambda content: externalized.append(content) or {})(body)
+    assert externalized == [] and stored["storage_uri"] == INLINE_STORAGE_URI
+    assert json.loads(reveal(stored["content"])) == body
+
+
+def test_a_payload_too_large_inline_in_plaintext_is_still_externalized_sealed(key):
+    from evidence_storage import evidence_inline_max_bytes
+    from runtime.archive_blob_secrets import encrypting_store, is_envelope
+    externalized = []
+    encrypting_store(lambda content: externalized.append(content) or {"storage_uri": "local:x"})(
+        "y" * (evidence_inline_max_bytes() + 1))
+    assert len(externalized) == 1 and is_envelope(externalized[0])
