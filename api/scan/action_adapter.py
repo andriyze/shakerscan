@@ -33,7 +33,7 @@ try:
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
-    from capabilities.browser import XSSBrowserProofAdapter
+    from capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from capabilities.request_mutation import RequestMutationVerificationAdapter
     from capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
@@ -63,6 +63,7 @@ try:
     from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from runtime.receipts import CapabilityReceipt
     from runtime.request_replay_executor import execute_replay_plan
+    from runtime.request_shape import nested_json_body
     from runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
@@ -96,7 +97,7 @@ except (ImportError, ModuleNotFoundError):
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
-    from ..capabilities.browser import XSSBrowserProofAdapter
+    from ..capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
     from ..capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
@@ -126,6 +127,7 @@ except (ImportError, ModuleNotFoundError):
     from ..runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from ..runtime.receipts import CapabilityReceipt
     from ..runtime.request_replay_executor import execute_replay_plan
+    from ..runtime.request_shape import nested_json_body
     from ..runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
@@ -258,37 +260,12 @@ _BODY_PROOF_PLACEHOLDER = "shakerscan"
 def _nested_proof_body(fields: Sequence[str]) -> dict[str, Any]:
     """Rebuild a JSON proof body from dotted/flattened field names.
 
-    Discovery records nested body shape as dotted paths (``profile.email``) and an
-    array of objects as ``items`` plus ``items.id``. A proof body of literal flat
-    keys would make the verifier's dotted-path mutator traverse a missing node and
-    raise, and would send XSS/SQL proofs the wrong schema, so rebuild the nesting
-    the mutator and the target actually expect. Mirrors the fan-out worklist
-    renderer in api/scan/continuation.py so both paths agree on one shape.
+    A proof body of literal flat keys would make the verifier's dotted-path mutator
+    traverse a missing node and raise, and would send XSS/SQL proofs the wrong schema.
+    The shared renderer also serves the continuation worklist and the discovery tools,
+    so every path agrees on one shape.
     """
-    body: dict[str, Any] = {}
-    for raw_name in fields:
-        parts = [part for part in str(raw_name).split(".") if part]
-        if not parts:
-            continue
-        cursor: Any = body
-        for part in parts[:-1]:
-            child = cursor.get(part)
-            if isinstance(child, list):
-                if not child or not isinstance(child[0], dict):
-                    child[:] = [{}]
-                cursor = child[0]
-                continue
-            if isinstance(child, dict):
-                cursor = child
-                continue
-            nested: dict[str, Any] = {}
-            # A parent name plus child names is the flattened shape emitted for an
-            # array of objects (items, items.id).
-            cursor[part] = [nested] if child is not None else nested
-            cursor = nested
-        if not isinstance(cursor.get(parts[-1]), (dict, list)):
-            cursor[parts[-1]] = _BODY_PROOF_PLACEHOLDER
-    return body
+    return nested_json_body(fields, placeholder=_BODY_PROOF_PLACEHOLDER)
 
 
 def _candidate_for_synthetic_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -1579,6 +1556,13 @@ class DatabaseNeutralScanActionDispatcher:
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
         attempt_statuses: list[Mapping[str, Any]] = []
+        # Discovery (xss.verify_batch) ran under the primary principal, so the proof must
+        # too: replaying an authenticated candidate anonymously renders a login or 401 page
+        # and can never verify. The receipt's principal_context already claims this lane.
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
+        proof_headers = primary.headers() if primary.authenticated else None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if candidate_id not in candidate_signals:
@@ -1619,17 +1603,40 @@ class DatabaseNeutralScanActionDispatcher:
                 break
             if body_fields and sub_budget.get("state_changing_requests", 0) < 1:
                 break
-            adapter = XSSBrowserProofAdapter(XSSBrowserProofAdapter.prepare(
-                target=self.target, execution_url=execution_url,
-                candidate_id=candidate_id,
-                parameter_name=str(candidate.get("parameter_name") or ""),
-                method=str(resolved_request.get("method") or "GET"),
-                content_type=(
-                    str(resolved_request.get("content_type"))
-                    if resolved_request.get("content_type") else None
-                ),
-                body_field_names=body_fields,
-            ))
+            try:
+                prepared = XSSBrowserProofAdapter.prepare(
+                    target=self.target, execution_url=execution_url,
+                    candidate_id=candidate_id,
+                    parameter_name=str(candidate.get("parameter_name") or ""),
+                    method=str(resolved_request.get("method") or "GET"),
+                    content_type=(
+                        str(resolved_request.get("content_type"))
+                        if resolved_request.get("content_type") else None
+                    ),
+                    body_field_names=body_fields,
+                )
+            except BrowserCapabilityInputError as exc:
+                # One unprovable candidate is that candidate's failed attempt; it must
+                # never abort the rest of the batch.
+                rejected = {
+                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                    "status": "failed", "timed_out": False, "budget_consumed": {},
+                    "observations": ({
+                        "kind": "candidate_attempt", "attempt_id": attempt_id,
+                        "candidate_id": candidate_id, "family": "xss_browser_proof",
+                        "status": "failed", "proof_state": "not_proven",
+                        "budget_consumed": {},
+                    },),
+                    "errors": (f"xss_proof_input_rejected:{exc}",),
+                    "proof_state": "not_proven",
+                }
+                await checkpoint_attempt(action.action_id, rejected)
+                attempt_statuses.append({"status": "failed", "timed_out": False})
+                attempted += 1
+                observations.extend(rejected["observations"])
+                errors.append(rejected["errors"][0])
+                continue
+            adapter = XSSBrowserProofAdapter(prepared, trusted_headers=proof_headers)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             result = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(

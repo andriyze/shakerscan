@@ -1593,6 +1593,20 @@ async def _execute_hunt_capability_lifecycle(
                 }
                 else "anonymous"
             )
+            if is_scanner and agent_tools.normalize_principal_slot(
+                request.input.get("as_principal"),
+            ) != "anonymous":
+                # Scanner tools run without the Hunt's managed principal. Accepting the slot
+                # and running anonymously would record an unauthenticated attempt as if it
+                # had exercised that identity.
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"{name} runs anonymously in a Hunt and cannot apply as_principal; "
+                        "omit it, or use http.request with as_principal for an "
+                        "authenticated request"
+                    ),
+                )
             if name == "auth.session.establish":
                 try:
                     select_hunt_session_principal_reference(
