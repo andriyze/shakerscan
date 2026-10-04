@@ -10,7 +10,11 @@ SQLi/XSS or crAPI BOLA is visible immediately.
 
 Usage:
   python3 scripts/benchmark_targets.py juice_shop [crapi honey ...]
-      [--api http://localhost:8080] [--timeout 2400] [--auth] [--no-submit SCAN_ID]
+      [--api http://localhost:8080] [--timeout SECONDS] [--cancel-on-timeout] [--auth]
+      [--scan-id SCAN_ID]
+
+By default the runner waits for as long as the submitted scan is allowed to run: its resolved
+duration ceiling (read from the server) plus a margin. ``--timeout`` overrides that wait.
 
 Fixtures: tests/fixtures/benchmarks/<name>.yaml
 """
@@ -19,6 +23,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -108,6 +113,52 @@ BENCHMARK_CREDENTIAL_CAPABILITIES = [
     "xss.request_verify", "sqli.request_verify", "authz.verify",
     "sqli.prove_batch", "nosqli.verify_batch", "authz_surface.verify_batch",
 ]
+# What an expectation's `proof` demands of the finding that satisfies it, as candidate fields that
+# must all be true. `verified` is the server's projection of deterministic proof: only a
+# deterministic proof contract may mark a finding verified, and every unproven state (candidate,
+# suspected, likely_vulnerable, observed) leaves it false. "deterministic" therefore means "proven
+# by a deterministic proof contract" and demands exactly what "verified" does. It used to demand
+# nothing beyond class, route and severity, so an unverified low-confidence lead counted toward
+# expected_recall as if it were proven. An undeclared proof defaults to "deterministic"; an
+# unknown spelling is rejected instead of silently requiring nothing.
+PROOF_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "verified": ("verified",),
+    "deterministic": ("verified",),
+    "browser": ("verified", "browser_proven"),
+}
+DEFAULT_PROOF = "deterministic"
+# Every fixture key the evaluators below implement. A declared gate that nothing evaluates reads
+# as enforced while enforcing nothing, so an unknown key fails the run instead of being skipped.
+KNOWN_GATE_KEYS = frozenset({
+    "require_reliable_grade",
+    "require_auth_workflow_ready",
+    "known_expectation_gaps",
+    "min_expected_recall",
+    "min_categories_found",
+    "min_verified_high_critical",
+    "max_unverified_high_ratio",
+    "require_no_unproven_critical",
+    "require_verified_sqli",
+    "require_browser_proven_xss",
+    "require_verified_bola",
+    "bola_blocked_reason_if_single_user",
+})
+KNOWN_QUALITY_BAR_KEYS = frozenset({
+    "min_expected_recall",
+    "require_browser_proven_xss",
+    "require_reliable_grade",
+    "max_known_expectation_gaps",
+    "enforced",
+})
+TERMINAL_SCAN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+WAIT_POLL_SECONDS = 30
+# A scan's duration ceiling bounds its execution, not the time between submission and a readable
+# result: queueing before a worker claims it and report finalization come on top. The margin
+# covers both without letting the wait run unbounded.
+WAIT_MARGIN_MIN_SECONDS = 900
+WAIT_MARGIN_FRACTION = 0.10
+RELEASE_IMAGE_DIGESTS_ENV = "SHAKERSCAN_RELEASE_IMAGE_DIGESTS"
+_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _get(url, timeout=30):
@@ -475,17 +526,43 @@ def route_tokens(entry):
     return {t for t in toks if t}
 
 
-def match_expectation(entry, candidates, claimed_finding_ids):
+def expectation_proof(entry):
+    """Return the expectation's normalized proof requirement, rejecting an unknown spelling.
+
+    A typo such as ``proof: verifed`` used to fall through every proof check and so require no
+    proof at all -- the most permissive outcome for the least deliberate input.
+    """
+    proof = str(entry.get("proof") or DEFAULT_PROOF).strip().lower()
+    if proof not in PROOF_REQUIREMENTS:
+        raise ValueError(
+            f"expectation {entry.get('id')!r} declares unknown proof {proof!r}; "
+            f"known: {sorted(PROOF_REQUIREMENTS)}"
+        )
+    return proof
+
+
+def missing_proof(entry, candidate):
+    """The candidate fields the expectation's proof requires that the candidate lacks."""
+    return [
+        field for field in PROOF_REQUIREMENTS[expectation_proof(entry)]
+        if not candidate.get(field)
+    ]
+
+
+def match_expectation(entry, candidates, claimed_finding_ids, *, require_proof=True):
     """Return the first candidate finding that satisfies ``entry``, or None.
 
     ``claimed_finding_ids`` is mutated by the caller, not here: a finding already credited to
     another expectation is skipped, because one finding satisfying several expectations inflates
     recall exactly as much as an unrelated finding satisfying one.
+
+    ``require_proof=False`` is for the detected-but-unproven diagnostic only; a match made without
+    the proof requirement must never be counted as found.
     """
     compat = COMPAT.get(entry["family"], {entry["family"]})
     toks = route_tokens(entry)
     minsev = SEV_RANK.get(entry.get("min_severity", "high"), 3)
-    proof = entry.get("proof", "deterministic")
+    expectation_proof(entry)  # reject an unknown proof spelling even when not enforcing it
     for candidate in candidates:
         if str(candidate.get("finding_id")) in claimed_finding_ids:
             continue
@@ -496,9 +573,7 @@ def match_expectation(entry, candidates, claimed_finding_ids):
             continue
         if SEV_RANK.get(candidate.get("severity"), 0) < minsev:
             continue
-        if proof in ("verified", "browser") and not candidate.get("verified"):
-            continue
-        if proof == "browser" and not candidate.get("browser_proven"):
+        if require_proof and missing_proof(entry, candidate):
             continue
         return candidate
     return None
@@ -826,18 +901,49 @@ def collect_scorecard(report, fixture):
         for index, entry in enumerate(high_crit)
     ]
     claimed_finding_ids: set[str] = set()
+    unmatched_expectations = []
     for ent in expected:
-        proof = ent.get("proof", "deterministic")
+        proof = expectation_proof(ent)
         match = match_expectation(ent, expectation_candidates, claimed_finding_ids)
         if match is not None:
             claimed_finding_ids.add(str(match.get("finding_id")))
+        else:
+            unmatched_expectations.append(ent)
         hit = match.get("finding") if match else None
         (found if hit else missed).append({
             "id": ent["id"], "family": ent["family"], "route": ent.get("route"),
             "proof": proof, "min_severity": ent.get("min_severity", "high"),
             "evidence": (hit.get("title") if hit else None),
         })
+    # Diagnostic only, never recall: a missed expectation the scan DETECTED (class, route and
+    # severity all match) without the proof the expectation requires. It shows how close a miss
+    # is without crediting an unproven lead as found. Proven matches keep their claims, and each
+    # finding is still reported against at most one expectation.
+    detected_unproven = []
+    diagnostic_claims = set(claimed_finding_ids)
+    for ent in unmatched_expectations:
+        lead = match_expectation(
+            ent, expectation_candidates, diagnostic_claims, require_proof=False,
+        )
+        if lead is None:
+            continue
+        diagnostic_claims.add(str(lead.get("finding_id")))
+        lead_finding = lead.get("finding") or {}
+        detected_unproven.append({
+            "id": ent["id"], "family": ent["family"], "route": ent.get("route"),
+            "proof": expectation_proof(ent), "min_severity": ent.get("min_severity", "high"),
+            "evidence": lead_finding.get("title"),
+            "missing_proof": missing_proof(ent, lead),
+            "proof_state": lead_finding.get("proof_state"),
+        })
     followups = [_benchmark_miss_followup(m, fixture, auth_workflow) for m in missed]
+    # Categories are the answer key's families. A category is found when at least one of its
+    # expectations was found -- with its required proof, like every other found expectation.
+    expected_categories = sorted({str(e["family"]) for e in expected if e.get("family")})
+    found_categories = sorted({str(item["family"]) for item in found})
+    # A critical severity asserts the most serious outcome; without deterministic proof it is an
+    # inflated lead, whether or not it matches any expectation.
+    unproven_critical = [entry for entry in enriched if entry[3] == "critical" and not entry[4]]
 
     cov = ((report.get("smart_coverage") or {}).get("endpoints") or {})
     active = report.get("active_checks") or {}
@@ -901,8 +1007,16 @@ def collect_scorecard(report, fixture):
         "error": report.get("error_message") or None,
         "expected_found": found,
         "expected_missed": missed,
+        "expected_detected_unproven": detected_unproven,
+        "expected_categories": expected_categories,
+        "expected_categories_found": found_categories,
+        "unproven_critical": len(unproven_critical),
+        "unproven_critical_titles": [
+            str(entry[0].get("title") or "") for entry in unproven_critical[:10]
+        ],
         "benchmark_followups": followups,
         "body_completion_diagnostics": collect_body_completion_diagnostics(report),
+        # Proven expectations only; expected_detected_unproven is never counted here.
         "expected_recall": round(len(found) / max(1, len(expected)), 2),
         "family_coverage": family_coverage,
         "selected_family_gaps": selected_family_gaps,
@@ -930,6 +1044,11 @@ def apply_quality_bar(card, fixture):
     def chk(name, ok, detail):
         results.append({"gate": name, "pass": bool(ok), "detail": detail})
 
+    unknown_keys = sorted(set(bar) - KNOWN_QUALITY_BAR_KEYS)
+    if unknown_keys:
+        # A bar check nothing evaluates must not read as met.
+        chk("quality:fixture_keys_recognised", False,
+            "quality_bar declares unimplemented check(s): " + ", ".join(unknown_keys))
     if "min_expected_recall" in bar:
         recall = card.get("expected_recall")
         measured = isinstance(recall, (int, float)) and not isinstance(recall, bool)
@@ -981,11 +1100,45 @@ def apply_quality_bar(card, fixture):
     return results
 
 
+def fixture_problems(fixture):
+    """Return every declaration in a fixture that the scorer cannot evaluate.
+
+    Checked before a scan is submitted, so a typo or an unimplemented gate fails in seconds instead
+    of after a multi-hour scan -- and never silently passes.
+    """
+    problems = []
+    gates = fixture.get("gates") or {}
+    if not isinstance(gates, dict):
+        problems.append("gates must be a mapping")
+        gates = {}
+    unknown_gates = sorted(set(gates) - KNOWN_GATE_KEYS)
+    if unknown_gates:
+        problems.append("unimplemented gate key(s): " + ", ".join(unknown_gates))
+    bar = fixture.get("quality_bar") or {}
+    if not isinstance(bar, dict):
+        problems.append("quality_bar must be a mapping")
+        bar = {}
+    unknown_bar = sorted(set(bar) - KNOWN_QUALITY_BAR_KEYS)
+    if unknown_bar:
+        problems.append("unimplemented quality_bar key(s): " + ", ".join(unknown_bar))
+    for entry in fixture.get("expected") or []:
+        try:
+            expectation_proof(entry)
+        except ValueError as exc:
+            problems.append(str(exc))
+    return problems
+
+
 def apply_gates(card, fixture):
-    gates = fixture.get("gates", {})
+    gates = fixture.get("gates") or {}
     results = []
     def chk(name, ok, detail):
         results.append({"gate": name, "pass": bool(ok), "detail": detail})
+    unknown_gate_keys = sorted(set(gates) - KNOWN_GATE_KEYS)
+    if unknown_gate_keys:
+        # A declared gate must never be skipped: one nothing evaluates fails the run.
+        chk("fixture_gates_recognised", False,
+            "fixture declares unimplemented gate(s): " + ", ".join(unknown_gate_keys))
     invariant_violations = card.get("report_invariant_violations") or []
     chk("report_invariants_clean", not invariant_violations,
         "clean" if not invariant_violations else "; ".join(str(v) for v in invariant_violations[:5]))
@@ -1062,6 +1215,19 @@ def apply_gates(card, fixture):
             measured and float(recall) >= float(threshold),
             f"{recall if measured else 'not measured'} >= {threshold}",
         )
+    if "min_categories_found" in gates:
+        # Breadth across the answer key's families, each found with its required proof. Fail
+        # closed when the card never measured it.
+        threshold = int(gates["min_categories_found"])
+        found_categories = card.get("expected_categories_found")
+        measured = isinstance(found_categories, list)
+        count = len(found_categories) if measured else None
+        chk(
+            "min_categories_found",
+            measured and count >= threshold,
+            (f"{count} >= {threshold}" + (f" ({', '.join(found_categories)})" if found_categories else ""))
+            if measured else f"not measured >= {threshold}",
+        )
     if "min_verified_high_critical" in gates:
         n = gates["min_verified_high_critical"]
         chk("min_verified_high_critical", card["verified_high_critical"] >= n,
@@ -1070,6 +1236,47 @@ def apply_gates(card, fixture):
         m = gates["max_unverified_high_ratio"]
         chk("max_unverified_high_ratio", card["false_positive_risk"] <= m,
             f"{card['false_positive_risk']} <= {m}")
+    if gates.get("require_no_unproven_critical"):
+        # Critical severity needs deterministic proof. An unmeasured count is not zero.
+        count = card.get("unproven_critical")
+        measured = isinstance(count, int) and not isinstance(count, bool)
+        titles = card.get("unproven_critical_titles") or []
+        chk(
+            "require_no_unproven_critical",
+            measured and count == 0,
+            ("no unproven critical findings" if count == 0 else
+             f"{count} unproven critical finding(s): " + "; ".join(str(t) for t in titles[:5]))
+            if measured else "unproven critical count not measured",
+        )
+    if gates.get("bola_blocked_reason_if_single_user"):
+        # Without two distinct principals BOLA cannot be tested, so the honest result is a miss
+        # that names the missing principal -- never a found expectation, never a bare miss.
+        workflow = card.get("auth_workflow") or {}
+        single_user = workflow.get("two_principal_contexts_scheduled") is not True
+        bola_ids = {
+            str(entry.get("id")) for entry in (fixture.get("expected") or [])
+            if entry.get("family") == "bola"
+        }
+        if not single_user:
+            chk("bola_blocked_reason_if_single_user", True,
+                "two principal contexts scheduled; not a single-user run")
+        else:
+            credited = sorted(
+                str(item.get("id")) for item in (card.get("expected_found") or [])
+                if str(item.get("id")) in bola_ids
+            )
+            explained = {
+                str(item.get("expectation_id")) for item in (card.get("benchmark_followups") or [])
+                if "missing_second_principal" in (item.get("blocked_by") or [])
+            }
+            unexplained = sorted(bola_ids - set(credited) - explained)
+            chk(
+                "bola_blocked_reason_if_single_user",
+                not credited and not unexplained,
+                "single-user run: every BOLA expectation blocked by missing_second_principal"
+                if not credited and not unexplained else
+                f"single-user run: credited={credited or []}, missing blocked reason={unexplained or []}",
+            )
     if gates.get("require_verified_sqli"):
         ok = "sqli" in (card.get("verified_high_critical_families") or [])
         chk("require_verified_sqli", ok, "verified SQLi present" if ok else "no verified SQLi")
@@ -1222,6 +1429,7 @@ def submit_target(
     scan_id = resp.get("id") or resp.get("scan_id")
     if not scan_id:
         raise RuntimeError("benchmark scan submission returned no scan id")
+    budget = resp.get("budget") if isinstance(resp.get("budget"), dict) else {}
     return {
         "target": name,
         "scan_id": scan_id,
@@ -1230,13 +1438,223 @@ def submit_target(
         "two_user": two_user,
         "principal_validation": principal_validation,
         "require_current_workers": True,
+        "budget_profile": resp.get("budget_profile") or budget_profile,
+        # The resolved ceiling the server admitted this scan with; it bounds how long to wait.
+        "max_duration_seconds": _positive_seconds(budget.get("max_duration_seconds")),
     }
+
+
+def _positive_seconds(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _budget_duration(budget):
+    if isinstance(budget, str):
+        try:
+            budget = json.loads(budget)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(budget, dict):
+        return None
+    return _positive_seconds(budget.get("max_duration_seconds"))
+
+
+def scan_duration_ceiling(api, scan_id, *, submitted_seconds=None, budget_profile="thorough"):
+    """Return ``(seconds, source)``: how long the server allows this scan to run.
+
+    The scan's own resolved budget is authoritative (the submit response, then the scan row); the
+    public contract's profile ceiling is the fallback. Never a client-side copy of the ladder: the
+    old fixed 2400-second wait stopped polling a thorough scan 140 minutes before its ceiling.
+    """
+    seconds = _positive_seconds(submitted_seconds)
+    if seconds:
+        return seconds, "scan_resolved_budget"
+    try:
+        detail = _get(f"{api}/scans/{scan_id}")
+    except Exception:
+        detail = {}
+    seconds = _budget_duration((detail or {}).get("budget_json"))
+    if seconds:
+        return seconds, "scan_resolved_budget"
+    try:
+        contract = _get(f"{api}/scan/contracts")
+    except Exception:
+        contract = {}
+    profiles = contract.get("budget_profiles") if isinstance(contract, dict) else None
+    seconds = _budget_duration((profiles or {}).get(budget_profile))
+    if seconds:
+        return seconds, f"scan_contract_profile:{budget_profile}"
+    raise RuntimeError(
+        f"cannot determine the duration ceiling of scan {scan_id} from the server; "
+        "pass --timeout to choose the wait explicitly"
+    )
+
+
+def resolve_wait(api, scan_id, *, explicit_timeout=None, submitted_seconds=None,
+                 budget_profile="thorough"):
+    """How long to wait for a submitted scan, and why. An explicit ``--timeout`` always wins."""
+    if explicit_timeout is not None:
+        return {"limit_seconds": int(explicit_timeout), "source": "explicit_timeout"}
+    ceiling, source = scan_duration_ceiling(
+        api, scan_id, submitted_seconds=submitted_seconds, budget_profile=budget_profile,
+    )
+    margin = max(WAIT_MARGIN_MIN_SECONDS, math.ceil(ceiling * WAIT_MARGIN_FRACTION))
+    return {
+        "limit_seconds": ceiling + margin,
+        "source": source,
+        "scan_duration_ceiling_seconds": ceiling,
+        "margin_seconds": margin,
+    }
+
+
+def wait_for_scan(api, scan_id, limit_seconds, *, poll=WAIT_POLL_SECONDS):
+    """Poll until the scan is terminal or the wait is spent.
+
+    Returns ``(terminal, last_status_payload, waited_seconds)``. A transient read failure is retried
+    while time remains; a missing scan (HTTP error) is not transient.
+    """
+    started = time.time()
+    deadline = started + max(0, int(limit_seconds))
+    status = {}
+    while True:
+        try:
+            status = _get(f"{api}/scans/{scan_id}") or {}
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            status = {"status": status.get("status"), "read_error": str(exc)[:200]}
+        if str(status.get("status") or "") in TERMINAL_SCAN_STATUSES:
+            return True, status, time.time() - started
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return False, status, time.time() - started
+        time.sleep(min(poll, remaining))
+
+
+def unfinished_scan_card(name, scan_id, status, *, outcome, waited_seconds, wait,
+                         cancel_on_timeout=False, cancellation=None):
+    """An explicit, unscored card for a scan that was not terminal when the runner stopped.
+
+    Fetching the result of a running scan answers 404, which used to become an opaque
+    ``{"error": "HTTP Error 404"}`` card that read like a broken benchmark rather than an
+    unfinished scan. This names what happened, the scan, and whether it is still running.
+    """
+    scan_status = str((status or {}).get("status") or "unknown")
+    if cancellation and cancellation.get("scan_status_after"):
+        scan_status = str(cancellation["scan_status_after"])
+    still_running = scan_status not in TERMINAL_SCAN_STATUSES
+    limit = (wait or {}).get("limit_seconds")
+    detail = (
+        f"stopped waiting after {round(waited_seconds)} s"
+        + (f" (limit {limit} s from {wait.get('source')})" if wait else "")
+        + f"; scan {scan_id} is {scan_status} and was not scored"
+    )
+    return {
+        "target": name,
+        "scan_id": scan_id,
+        "status": outcome,
+        "scan_status": scan_status,
+        "scan_still_running": still_running,
+        "waited_seconds": round(waited_seconds),
+        "wait": wait,
+        "cancel_on_timeout": bool(cancel_on_timeout),
+        "cancellation": cancellation,
+        "detail": detail,
+        "passed": False,
+    }
+
+
+def cancel_scan(api, scan_id):
+    """Request cancellation through the canonical route and report what the server did."""
+    record = {"requested": True, "accepted": False, "error": None, "scan_status_after": None}
+    try:
+        _post(f"{api}/scans/{scan_id}/cancel", {})
+        record["accepted"] = True
+    except Exception as exc:
+        record["error"] = str(exc)[:300]
+    try:
+        record["scan_status_after"] = (_get(f"{api}/scans/{scan_id}") or {}).get("status")
+    except Exception as exc:
+        record["error"] = record["error"] or str(exc)[:300]
+    return record
+
+
+def release_image_digests_from_env(environ=None):
+    """Image digests a release pipeline pinned for this run, recorded only when well formed."""
+    raw = str((environ if environ is not None else os.environ).get(RELEASE_IMAGE_DIGESTS_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        images = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(images, dict) or not images or not all(
+        isinstance(key, str) and key and isinstance(value, str) and _IMAGE_DIGEST.fullmatch(value)
+        for key, value in images.items()
+    ):
+        return None
+    return dict(sorted(images.items()))
+
+
+def deployment_subject(api):
+    """Identify the deployment this benchmark measured, from the deployment itself.
+
+    Certification binds the DAST receipt to the candidate through this: the revision is read from
+    the live API (an image-built stack reports its immutable release manifest), never from the
+    dispatching environment, so a run against another deployment cannot certify this candidate.
+    """
+    subject = {"schema_version": "shakerscan-benchmark-subject/v1"}
+    try:
+        health = _get(f"{api}/health", timeout=30)
+    except Exception:
+        health = {}
+    if isinstance(health, dict):
+        revision = str(health.get("source_revision") or "").strip().lower()
+        if revision and revision != "unknown":
+            subject["source_revision"] = revision
+        for key in ("build_fingerprint", "scanner_version"):
+            value = str(health.get(key) or "").strip()
+            if value:
+                subject[key] = value
+    images = release_image_digests_from_env()
+    if images:
+        subject["images"] = images
+    return subject
+
+
+def settle_subject(initial, final):
+    """Keep the revision only if the deployment kept one identity for the whole run."""
+    subject = dict(initial)
+    stable = all(
+        initial.get(key) == final.get(key) for key in ("source_revision", "build_fingerprint")
+    )
+    subject["identity_stable"] = stable
+    if not stable:
+        # The run spanned two deployments; it measured neither one, so it cannot bind either.
+        subject.pop("source_revision", None)
+        subject["identity_at_completion"] = {
+            key: final.get(key) for key in ("source_revision", "build_fingerprint")
+        }
+    return subject
 
 
 def run_target(
     name, api, timeout, do_auth, preset_scan_id=None, rescore_after_retest=False,
     retest_wait=600, *, target_url_override=None, auth_target_url_override=None,
+    cancel_on_timeout=False,
 ):
+    """Submit (or reuse), wait, and score one benchmark.
+
+    ``timeout=None`` waits for the scan's own server-resolved duration ceiling plus a margin; an
+    integer is an explicit override. A scan still running when the wait ends yields an explicit
+    ``timed_out_waiting`` card -- cancelled first only when ``cancel_on_timeout`` is set.
+    """
     fx = yaml.safe_load(open(os.path.join(FIXTURE_DIR, f"{name}.yaml")))
     if target_url_override:
         fx["target_url"] = target_url_override
@@ -1244,6 +1662,7 @@ def run_target(
     scan_id = preset_scan_id
     two_user = False
     principal_validation = None
+    wait = None
     if not scan_id:
         receipt = submit_target(
             name, api, do_auth, target_url_override=target_url_override,
@@ -1253,12 +1672,26 @@ def run_target(
         two_user = receipt["two_user"]
         principal_validation = receipt.get("principal_validation")
         print(f"[{name}] submitted scan {scan_id} (two_user={two_user})", flush=True)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            st = _get(f"{api}/scans/{scan_id}")
-            if st.get("status") in ("completed", "failed", "cancelled"):
-                break
-            time.sleep(30)
+        wait = resolve_wait(
+            api, scan_id, explicit_timeout=timeout,
+            submitted_seconds=receipt.get("max_duration_seconds"),
+            budget_profile=str(receipt.get("budget_profile") or "thorough"),
+        )
+        print(f"[{name}] waiting up to {wait['limit_seconds']} s ({wait['source']})", flush=True)
+        terminal, status, waited = wait_for_scan(api, scan_id, wait["limit_seconds"])
+        if not terminal:
+            cancellation = cancel_scan(api, scan_id) if cancel_on_timeout else None
+            return unfinished_scan_card(
+                name, scan_id, status, outcome="timed_out_waiting", waited_seconds=waited,
+                wait=wait, cancel_on_timeout=cancel_on_timeout, cancellation=cancellation,
+            )
+    else:
+        # Scoring an existing scan never waits; an unfinished one is reported, not 404-scored.
+        status = _get(f"{api}/scans/{scan_id}") or {}
+        if str(status.get("status") or "") not in TERMINAL_SCAN_STATUSES:
+            return unfinished_scan_card(
+                name, scan_id, status, outcome="scan_not_finished", waited_seconds=0, wait=None,
+            )
     report = _get(f"{api}/scans/{scan_id}/result")
 
     # Scorecard #1: at scan finish (scan-time triage).
@@ -1323,6 +1756,8 @@ def run_target(
     out = dict(scoring_card)
     out["scan_id"] = scan_id
     out["target"] = name
+    if wait is not None:
+        out["wait"] = wait
     out["gates"] = gates
     out["passed"] = all(g["pass"] for g in gates)
     if quality is not None:
@@ -1346,7 +1781,15 @@ def main():
         "--auth-target-url", action="append", default=[], metavar="NAME=URL",
         help="host-reachable URL used only to mint benchmark credentials",
     )
-    ap.add_argument("--timeout", type=int, default=2400)
+    ap.add_argument(
+        "--timeout", type=int, default=None, metavar="SECONDS",
+        help="seconds to wait for a submitted scan; default: the scan's server-resolved duration "
+             "ceiling plus a margin, so a thorough scan is never abandoned before its ceiling",
+    )
+    ap.add_argument(
+        "--cancel-on-timeout", action="store_true",
+        help="cancel a scan still running when the wait ends (default: leave it running)",
+    )
     ap.add_argument("--auth", action="store_true", help="mint bearer tokens from fixture auth config")
     ap.add_argument("--scan-id", default=None, help="score an existing scan id instead of submitting")
     ap.add_argument("--submit-only", action="store_true",
@@ -1366,6 +1809,9 @@ def main():
     ap.add_argument("--hypothesis-created-by", default="benchmark_targets.py",
                     help="created_by value for benchmark hypothesis seeding")
     args = ap.parse_args()
+    if args.timeout is not None and args.timeout <= 0:
+        print("ABORT: --timeout must be a positive number of seconds", file=sys.stderr)
+        return 2
     target_url_overrides = {}
     for binding in args.target_url:
         name, separator, url = binding.partition("=")
@@ -1402,6 +1848,14 @@ def main():
         print(f"ABORT: no benchmark fixture for {missing_fixtures}. Available targets: {available}",
               file=sys.stderr)
         return 2
+    # A gate or proof requirement the scorer cannot evaluate must fail before a scan is spent on
+    # it, never be skipped after.
+    for name in args.targets:
+        with open(os.path.join(FIXTURE_DIR, f"{name}.yaml")) as handle:
+            problems = fixture_problems(yaml.safe_load(handle) or {})
+        if problems:
+            print(f"ABORT: fixture {name} cannot be evaluated: " + "; ".join(problems), file=sys.stderr)
+            return 2
 
     # §3/§10 fleet gate: a stale/mixed fleet silently produces bad numbers. Abort
     # unless explicitly overridden, and record the fleet state in the output.
@@ -1435,6 +1889,7 @@ def main():
         return 0
 
     os.makedirs(OUT_DIR, exist_ok=True)
+    initial_subject = deployment_subject(args.api)
     overall_ok = True
     cards = []
     for name in args.targets:
@@ -1444,6 +1899,7 @@ def main():
                 rescore_after_retest=args.rescore_after_retest, retest_wait=args.retest_wait,
                 target_url_override=target_url_overrides.get(name),
                 auth_target_url_override=auth_target_url_overrides.get(name),
+                cancel_on_timeout=args.cancel_on_timeout,
             )
         except Exception as e:
             card = {"target": name, "error": str(e), "passed": False}
@@ -1469,6 +1925,8 @@ def main():
         cards.append(card)
         overall_ok = overall_ok and card.get("passed")
         print(f"\n=== {name} scorecard ({card.get('phase', 'scan_finish')}) ===")
+        if card.get("status") in {"timed_out_waiting", "scan_not_finished"}:
+            print(f"  [{card['status'].upper()}] {card.get('detail')}")
         print(f"  verified H/C: {card.get('verified_high_critical')}  suspected: {card.get('suspected_high_critical')}  "
               f"FP-risk: {card.get('false_positive_risk')}  coverage: {card.get('coverage_percent')}")
         print(f"  expected recall: {card.get('expected_recall')}  "
@@ -1479,6 +1937,9 @@ def main():
             print(f"    [INVARIANT] report blocks disagree: {card['report_invariant_violations']}")
         for m in card.get("expected_missed", []):
             print(f"    MISS {m['id']} ({m['family']} {m['route']})")
+        for m in card.get("expected_detected_unproven", []):
+            print(f"    DETECTED-UNPROVEN {m['id']}: {m.get('evidence')} "
+                  f"(missing {', '.join(m.get('missing_proof') or [])}; not counted in recall)")
         for f in card.get("benchmark_followups", []):
             action = f.get("next_test_action") or f.get("blocked_action_template") or {}
             command = action.get("command") or "detector_gap"
@@ -1521,8 +1982,21 @@ def main():
     )
     quality_ok = full_bar_ok
     release_ok = bool(overall_ok and (quality_ok or not args.enforce_quality))
+    subject = settle_subject(initial_subject, deployment_subject(args.api))
+    if args.scan_id:
+        # Scoring a scan that ran earlier cannot attest which deployment ran it: the live API may
+        # have been redeployed since. Record what answered, but bind no revision.
+        subject = {
+            "schema_version": subject["schema_version"],
+            "scored_existing_scan": args.scan_id,
+            "deployment_at_scoring": {
+                key: value for key, value in subject.items() if key != "schema_version"
+            },
+        }
     run = {
         **artifact_metadata(release_ok),
+        # The deployment measured, read from it; certification requires it to be the candidate.
+        "subject": subject,
         "fleet": fleet, "fleet_uniform": uniform,
         "rescore_after_retest": args.rescore_after_retest,
         "seed_hypotheses": args.seed_hypotheses,

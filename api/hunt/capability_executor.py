@@ -51,6 +51,21 @@ class ExecutableCapabilityAdapter(Protocol):
     ) -> CapabilityAdapterResult: ...
 
 
+# Every proof consumer (the Scan finalizer and the Hunt evidence paths) promotes a
+# verified finding only when an observation's proof_state and finding_verdict read
+# "verified". Downgrading exactly these two fields neutralizes proof for all of them.
+_PROOF_VERDICT_FIELDS = ("proof_state", "finding_verdict")
+
+
+def _neutralize_proof(observation: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy whose verdict fields can no longer read as verified."""
+    item = dict(observation)
+    for field_name in _PROOF_VERDICT_FIELDS:
+        if str(item.get(field_name) or "") == "verified":
+            item[field_name] = "contract_violation"
+    return item
+
+
 @dataclass(frozen=True)
 class CapabilityExecutionContext:
     specification: CapabilitySpec
@@ -159,9 +174,19 @@ class CapabilityExecutor:
         if violations:
             # An invalid report cannot prove how much target traffic occurred. Fail
             # the adapter contract and conservatively settle the complete hold.
+            #
+            # An adapter that spent more traffic than it reserved (or reported an
+            # unknown dimension) has broken the one contract that makes its proof
+            # trustworthy, so its observations must not promote a verified finding.
+            # Neutralize the verdict fields every proof consumer reads before
+            # handing the observations on; the raw evidence is kept for diagnosis.
+            # Partial output on timeout never reaches here: a timeout is a status,
+            # not a budget violation, so this leaves invariant 9 untouched.
             return CapabilityAdapterResult(
                 status="failed",
-                observations=tuple(dict(item) for item in result.observations),
+                observations=tuple(
+                    _neutralize_proof(item) for item in result.observations
+                ),
                 errors=tuple(result.errors) + (
                     "adapter_budget_contract_violation:" + ",".join(sorted(violations)),
                 ),

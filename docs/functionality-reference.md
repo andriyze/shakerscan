@@ -2676,7 +2676,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SIGNER_URL` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
-| `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
+| `NUCLEI_TEMPLATES` | `api/scan/nuclei_template_index.py`, `scanner/scanner_tools/nuclei.py` |
 | `PARALLEL_SHARD_CONCURRENCY_HARD_MAX` | `api/worker.py` |
 | `PARALLEL_SHARD_MAX_PER_PARENT` | `api/worker.py` |
 | `PARALLEL_SHARD_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
@@ -2694,7 +2694,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `REDIS_PORT` | `docker-compose.release.yml`, `docker-compose.yml` |
 | `REDIS_URL` | `api/api.py`, `api/gungnir_worker.py`, `api/operations/router.py`, `api/worker.py`, `scanner/gungnir_worker.py` |
 | `RESEARCH_EPISODE_ABANDON_TTL_HOURS` | `api/api.py` |
-| `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
+| `RESULTS_DIR` | `api/api.py`, `api/data_lifecycle/erasure.py`, `api/runtime/archive_blob_secrets.py`, `api/runtime/http_archive_reader.py`, `api/runtime/http_archive_router.py`, `api/secret_store.py`, `api/worker.py` |
 | `RETEST_AI_BUDGET_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_COOLDOWN_SECONDS` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `RETEST_AI_CIRCUIT_ERROR_THRESHOLD` | `api/worker.py`, `docker-compose.release.yml`, `docker-compose.yml` |

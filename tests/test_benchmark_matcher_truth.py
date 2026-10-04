@@ -7,8 +7,10 @@ Two defects inflated recall in our own measurements:
   empty. Any finding of a compatible class and severity then satisfied that expectation, whatever
   route it was actually about.
 * A matched finding was never reserved, so one finding could satisfy several expectations at once.
+* ``proof: deterministic`` (also the default) checked only class, route and severity, so an
+  unverified lead counted toward ``expected_recall`` exactly like a proven finding.
 
-Both make a scorecard read better than the scan performed, which is worse than a low score.
+All of these make a scorecard read better than the scan performed, which is worse than a low score.
 """
 
 from __future__ import annotations
@@ -112,7 +114,15 @@ def test_matching_still_honours_severity_and_proof_requirements():
     assert benchmark.match_expectation(dict(base, min_severity="high"), [finding], set()) is None
 
     strong = dict(finding, severity="critical")
-    assert benchmark.match_expectation(dict(base, min_severity="high"), [strong], set()) is not None
+    # Deliberately changed: this used to assert that an UNVERIFIED critical finding satisfies an
+    # expectation with no declared proof. The default proof is "deterministic", which means proven
+    # by a deterministic proof contract -- the only thing that sets `verified` -- so crediting an
+    # unverified lead counted unproven findings toward expected_recall. The committed Juice Shop
+    # sample shows the harm: bfla-users was "found" by an unverified, low-confidence
+    # default-credentials finding.
+    assert benchmark.match_expectation(dict(base, min_severity="high"), [strong], set()) is None
+    assert benchmark.match_expectation(
+        dict(base, min_severity="high"), [dict(strong, verified=True)], set()) is not None
     # A verified-proof expectation must not be satisfied by a suspected finding.
     assert benchmark.match_expectation(
         dict(base, min_severity="high", proof="verified"), [strong], set()) is None
@@ -158,3 +168,84 @@ def test_browser_proof_route_can_be_attributed_by_its_redacted_network_request()
     }, fixture)
 
     assert [item["id"] for item in card["expected_found"]] == ["reflected-xss"]
+
+
+def _unverified_metrics_report():
+    return {
+        "findings": [{
+            "id": "lead-1",
+            "title": "Sensitive exposure: metrics endpoint",
+            "url": "https://app.test/metrics",
+            "severity": "high",
+            "verified": False,
+            "proof_state": "likely_vulnerable",
+        }],
+    }
+
+
+def _deterministic_fixture():
+    return {
+        "name": "unit",
+        "expected": [{
+            "id": "exposed-metrics", "family": "sensitive_exposure",
+            "route": "/metrics", "min_severity": "high", "proof": "deterministic",
+        }],
+        "gates": {},
+    }
+
+
+def test_a_deterministic_expectation_is_not_found_by_an_unverified_finding():
+    card = benchmark.collect_scorecard(_unverified_metrics_report(), _deterministic_fixture())
+
+    assert card["expected_found"] == []
+    assert [item["id"] for item in card["expected_missed"]] == ["exposed-metrics"]
+    assert card["expected_recall"] == 0.0
+
+
+def test_an_unverified_detection_is_reported_as_a_diagnostic_outside_recall():
+    card = benchmark.collect_scorecard(_unverified_metrics_report(), _deterministic_fixture())
+
+    assert card["expected_detected_unproven"] == [{
+        "id": "exposed-metrics", "family": "sensitive_exposure", "route": "/metrics",
+        "proof": "deterministic", "min_severity": "high",
+        "evidence": "Sensitive exposure: metrics endpoint",
+        "missing_proof": ["verified"], "proof_state": "likely_vulnerable",
+    }]
+    # The diagnostic never feeds the recall the gates and the quality bar read.
+    assert card["expected_recall"] == 0.0
+
+
+def test_a_verified_finding_satisfies_a_deterministic_expectation():
+    report = _unverified_metrics_report()
+    report["findings"][0]["verified"] = True
+    card = benchmark.collect_scorecard(report, _deterministic_fixture())
+
+    assert [item["id"] for item in card["expected_found"]] == ["exposed-metrics"]
+    assert card["expected_detected_unproven"] == []
+    assert card["expected_recall"] == 1.0
+
+
+def test_a_browser_expectation_reports_a_verified_non_browser_finding_as_unproven():
+    fixture = {
+        "expected": [{
+            "id": "xss", "family": "xss", "route": "/search",
+            "min_severity": "high", "proof": "browser",
+        }],
+    }
+    card = benchmark.collect_scorecard({"findings": [{
+        "id": "x1", "title": "Cross-site scripting", "url": "https://app.test/search?q=",
+        "severity": "high", "verified": True,
+    }]}, fixture)
+
+    assert card["expected_found"] == []
+    assert card["expected_detected_unproven"][0]["missing_proof"] == ["browser_proven"]
+
+
+def test_an_unknown_proof_spelling_is_rejected_rather_than_requiring_nothing():
+    entry = {"id": "e1", "family": "sensitive_exposure", "route": "/ftp", "proof": "verifed"}
+    with pytest.raises(ValueError, match="unknown proof"):
+        benchmark.match_expectation(entry, [], set())
+    assert benchmark.fixture_problems({"expected": [entry]}) == [
+        "expectation 'e1' declares unknown proof 'verifed'; "
+        "known: ['browser', 'deterministic', 'verified']"
+    ]

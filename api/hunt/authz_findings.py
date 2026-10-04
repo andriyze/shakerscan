@@ -22,6 +22,8 @@ try:
 except ModuleNotFoundError:
     from scanner.findings import templated_finding_identity
 
+from .service_identity import service_identity_suffix
+
 
 def _origin(value: str) -> tuple[str, str, int] | None:
     try:
@@ -37,7 +39,7 @@ def _origin(value: str) -> tuple[str, str, int] | None:
 def authz_finding_records(
     capability_receipt: Any, *, hunt_id: UUID, action_id: UUID,
     target_id: UUID, receipt_id: UUID, allowed_origins: tuple[str, ...],
-    target_kind: str = "web",
+    target_url: str, target_kind: str = "web",
 ) -> list[dict[str, Any]]:
     """Accept only this Hunt's canonical receipt, never the caller's loose flags.
 
@@ -74,6 +76,9 @@ def authz_finding_records(
         identity = templated_finding_identity(finding)
         if not identity:
             continue
+        # The same route on another authorized service of this host is another endpoint:
+        # without the qualifier its proof overwrote the other service's verified row.
+        identity += service_identity_suffix(finding["url"], target_url=target_url)
         proof = finding["proof_contract_v2"]
         evidence.update({
             "schema_version": "hunt-deterministic-finding/v1",

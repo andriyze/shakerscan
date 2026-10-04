@@ -222,6 +222,31 @@ async def _run(database_url: str) -> dict[str, object]:
         await pool.close()
 
 
+def _receipt_subject() -> dict[str, object]:
+    """Identify the runtime this receipt was produced on, read from the runtime itself.
+
+    Release certification binds the receipt to the candidate through ``source_revision``. The
+    script runs inside the deployment's API container, whose image carries its immutable release
+    manifest. An unidentifiable runtime records no revision, so its receipt certifies nothing.
+    The helper is inlined because each script is copied into the container on its own.
+    """
+    subject: dict[str, object] = {"schema_version": "shakerscan-fault-receipt-subject/v1"}
+    try:
+        try:  # release images expose /app/release_identity.py
+            from release_identity import load_release_identity
+        except ModuleNotFoundError:  # source checkout
+            from scanner.release_identity import load_release_identity
+        identity = load_release_identity()
+    except Exception:  # noqa: BLE001 - an unidentifiable runtime binds nothing
+        return subject
+    revision = str(identity.source_revision or "").strip().lower()
+    if revision and revision != "unknown":
+        subject["source_revision"] = revision
+    subject["scanner_version"] = str(identity.version)
+    subject["image_built"] = bool(identity.image_built)
+    return subject
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -232,6 +257,7 @@ def main() -> int:
     if not args.database_url:
         parser.error("--database-url or DATABASE_URL is required")
     receipt = asyncio.run(_run(args.database_url))
+    receipt["subject"] = _receipt_subject()
     if args.json:
         print(json.dumps(receipt, sort_keys=True))
     else:

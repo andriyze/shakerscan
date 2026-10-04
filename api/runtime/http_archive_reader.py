@@ -8,8 +8,12 @@ transactions at all -- reporting that as an empty list would read as "it sent no
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -26,14 +30,21 @@ except ModuleNotFoundError:  # package import layout
 from .http_archive import ARCHIVE_SCHEMA, har_document, har_entry
 
 try:
-    from evidence_storage import delete_remote_evidence_object, local_evidence_path
+    from evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 except ModuleNotFoundError:  # package import layout
-    from ..evidence_storage import delete_remote_evidence_object, local_evidence_path
+    from ..evidence_storage import delete_remote_evidence_object, hydrate_evidence_content, local_evidence_path
 
 
 EXPORT_FORMATS = frozenset({"transactions", "har"})
 REDACTION_MODES = frozenset({"redacted", "raw"})
 MAX_EXPORT_ROWS = 10_000
+# Payloads above the inline ceiling live in a file or object. One read loads at most this many
+# of their stored bytes: an inline payload is at most 32 KiB, but an external one can be a whole
+# 10 MB body, and a 10,000-row export would otherwise read without bound. A payload past the
+# budget is reported as omitted from that export, never shown as empty.
+MAX_EXTERNAL_PAYLOAD_BYTES = 64 * 1024 * 1024
+_BODY_FIELDS = ("request_body", "response_body")
+_OBJECT_COLUMNS = ("storage_uri", "content_sha256", "size_bytes")
 
 _SELECT = """
 SELECT t.id, t.plane, t.sequence, t.scan_id, t.hunt_run_id, t.hunt_action_id,
@@ -42,7 +53,15 @@ SELECT t.id, t.plane, t.sequence, t.scan_id, t.hunt_run_id, t.hunt_action_id,
        t.response_body_sha256, t.response_body_bytes, t.remote_ip, t.direct_origin,
        t.started_at, t.elapsed_ms, t.error, t.truncated, t.metadata_json,
        rh.content AS request_headers, rb.content AS request_body,
-       sh.content AS response_headers, sb.content AS response_body
+       sh.content AS response_headers, sb.content AS response_body,
+       rh.storage_uri AS request_headers_storage_uri, rh.content_sha256 AS request_headers_content_sha256,
+       rh.size_bytes AS request_headers_size_bytes,
+       rb.storage_uri AS request_body_storage_uri, rb.content_sha256 AS request_body_content_sha256,
+       rb.size_bytes AS request_body_size_bytes,
+       sh.storage_uri AS response_headers_storage_uri, sh.content_sha256 AS response_headers_content_sha256,
+       sh.size_bytes AS response_headers_size_bytes,
+       sb.storage_uri AS response_body_storage_uri, sb.content_sha256 AS response_body_content_sha256,
+       sb.size_bytes AS response_body_size_bytes
 FROM http_transactions t
 LEFT JOIN evidence_objects rh ON rh.id = t.request_headers_object_id
 LEFT JOIN evidence_objects rb ON rb.id = t.request_body_object_id
@@ -101,14 +120,18 @@ def _decoded(value: Any) -> Any:
 
 
 def _body_text(value: Any) -> str | None:
-    decoded = _decoded(value)
-    if decoded is None:
+    """The exported body. ``project`` has already decoded the stored JSON once, so a string is
+    the body itself and is kept verbatim: decoding it again re-serialized every JSON response
+    with other spacing and escapes. Only a JSON string is unwrapped once more, for payloads
+    stored double-encoded before the blob writer stopped encoding serialized JSON twice."""
+    if value is None:
         return None
-    if isinstance(decoded, str):
-        return decoded
-    if isinstance(decoded, (bytes, bytearray)):
-        return bytes(decoded).decode("utf-8", errors="replace")
-    return json.dumps(decoded)
+    if isinstance(value, str):
+        decoded = _decoded(value)
+        return decoded if isinstance(decoded, str) else value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return json.dumps(value)
 
 
 async def read_transactions(
@@ -122,6 +145,8 @@ async def read_transactions(
     search: str | None = None,
     limit: int = 1_000,
     offset: int = 0,
+    results_dir: Path | None = None,
+    external_payload_budget: int = MAX_EXTERNAL_PAYLOAD_BYTES,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -157,19 +182,133 @@ async def read_transactions(
         from runtime.archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
     except ModuleNotFoundError:  # package import layout
         from .archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
+    rows = [dict(row) for row in rows]
+    loaded, omitted = await _load_external_payloads(
+        rows, PAYLOAD_FIELDS,
+        results_dir=results_dir or Path(os.environ.get("RESULTS_DIR") or "/results"),
+        budget=external_payload_budget,
+    )
     revealed = []
     for row in rows:
-        row = dict(row)
         metadata = _decoded(row.get("metadata_json")) or {}
         unavailable = set(metadata.get("payloads_unavailable") or ()) if isinstance(metadata, dict) else set()
+        omitted_fields: set[str] = set()
         for key in PAYLOAD_FIELDS:
-            row[key], lost = reveal_payload(row.get(key))
+            storage_uri = row.pop(f"{key}_storage_uri", None)
+            content_sha256 = row.pop(f"{key}_content_sha256", None)
+            row.pop(f"{key}_size_bytes", None)
+            value, external = row.get(key), False
+            if value is None and _is_external(storage_uri):
+                if storage_uri in omitted:
+                    omitted_fields.add(key)
+                    continue
+                value, external = loaded.get(storage_uri), True
+                if value is None:
+                    unavailable.add(key)  # the file or object is gone or unreadable
+                    continue
+            value, lost = reveal_payload(value)
+            if external and not lost and not _names_plaintext(value, content_sha256):
+                value, lost = None, True  # not the payload this row recorded
+            if key in _BODY_FIELDS:
+                value = _legacy_bytes_repr(value, recorded_sha256=row.get(f"{key}_sha256"))
+            row[key] = value
             if lost:
                 unavailable.add(key)
         if unavailable:
             row["payload_unavailable"] = sorted(unavailable)
+        if omitted_fields:
+            row["payload_omitted"] = sorted(omitted_fields)
         revealed.append(row)
     return revealed
+
+
+def _is_external(storage_uri: Any) -> bool:
+    """The payload's object exists but is stored outside its row (a file or an S3 object)."""
+    return isinstance(storage_uri, str) and bool(storage_uri) and not storage_uri.startswith("inline:")
+
+
+def _read_external_payloads(storage_uris: Sequence[str], *, results_dir: Path) -> dict[str, str | None]:
+    """The stored text of each externalized payload, None where it cannot be read.
+
+    Reads through the evidence store, so local paths stay contained under the results
+    directory and S3 URIs are validated as for every other evidence read. No stored hash is
+    passed: for a sealed payload it names the plaintext, not the stored envelope, so it is
+    checked after decryption instead.
+    """
+    loaded: dict[str, str | None] = {}
+    for storage_uri in storage_uris:
+        try:
+            content = hydrate_evidence_content(
+                {"storage_uri": storage_uri}, results_dir=results_dir,
+            ).get("content")
+        except Exception:  # noqa: BLE001 - one unreadable object must not fail the export
+            content = None
+        loaded[storage_uri] = content if isinstance(content, str) else None
+    return loaded
+
+
+async def _load_external_payloads(
+    rows: Sequence[Mapping[str, Any]], fields: Sequence[str], *, results_dir: Path, budget: int,
+) -> tuple[dict[str, str | None], set[str]]:
+    """Load the external payloads these rows reference, each once, within the byte budget."""
+    sizes: dict[str, int] = {}
+    for row in rows:
+        for key in fields:
+            storage_uri = row.get(f"{key}_storage_uri")
+            if row.get(key) is None and _is_external(storage_uri) and storage_uri not in sizes:
+                sizes[storage_uri] = max(0, int(row.get(f"{key}_size_bytes") or 0))
+    wanted: list[str] = []
+    omitted: set[str] = set()
+    used = 0
+    for storage_uri, size in sizes.items():
+        if used + size > max(0, int(budget)):
+            omitted.add(storage_uri)
+            continue
+        used += size
+        wanted.append(storage_uri)
+    if not wanted:
+        return {}, omitted
+    # File and S3 reads block; keep them off the event loop.
+    loaded = await asyncio.to_thread(_read_external_payloads, wanted, results_dir=results_dir)
+    return loaded, omitted
+
+
+def _names_plaintext(value: Any, content_sha256: Any) -> bool:
+    """Whether a revealed external payload is the one its object row names."""
+    if not content_sha256:
+        return True
+    if not isinstance(value, str):
+        return False
+    actual = hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()
+    return hmac.compare_digest(actual, str(content_sha256))
+
+
+def _legacy_bytes_repr(value: Any, *, recorded_sha256: Any) -> Any:
+    """Compatibility for bodies archived before the batch writer decoded bytes.
+
+    That writer serialized the bytes object itself, so a body was stored as its Python repr
+    ("b'...'") instead of its text. Such a body is decoded here as the writer now stores it
+    (UTF-8, undecodable bytes replaced). Text that merely looks like a bytes literal is kept
+    when the recorded body digest shows it is the body verbatim, and text that is not
+    entirely one bytes literal is never touched.
+    """
+    if not isinstance(value, str):
+        return value
+    text = _decoded(value)
+    if (not isinstance(text, str) or len(text) < 3
+            or text[:2] not in ("b'", 'b"') or text[-1] != text[1]):
+        return value
+    if recorded_sha256 and hmac.compare_digest(
+        hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest(), str(recorded_sha256),
+    ):
+        return value
+    try:
+        literal = ast.literal_eval(text)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return value
+    if not isinstance(literal, bytes):
+        return value
+    return json.dumps(literal.decode("utf-8", errors="replace"))
 
 
 async def count_transactions(
@@ -424,6 +563,8 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
         "capture": item.get("metadata_json") or {},
         # Payloads this call recorded but the archive cannot show (see the export fidelity).
         "payload_unavailable": list(item.get("payload_unavailable") or ()),
+        # Payloads the archive holds but this export left out to bound its size.
+        "payload_omitted": list(item.get("payload_omitted") or ()),
     }
 
 
@@ -448,9 +589,16 @@ def export_document(
     # A recorded call whose headers or body could not be archived or decrypted is shown with its
     # metadata, but the archive does not claim it holds that call completely.
     missing = sum(1 for row in rows if row.get("payload_unavailable"))
+    omitted = sum(1 for row in rows if row.get("payload_omitted"))
+    notes = []
     if missing:
-        note = (f"{missing} recorded call(s) have payloads that are unavailable: archived without "
-                "an encryption key, or sealed with a key this install does not have")
+        notes.append(f"{missing} recorded call(s) have payloads that are unavailable: archived "
+                     "without an encryption key, sealed with a key this install does not have, or "
+                     "stored in an external file or object that can no longer be read")
+    if omitted:
+        notes.append(f"{omitted} recorded call(s) have externally stored payloads omitted from "
+                     "this export to bound its size; export fewer calls at a time to include them")
+    for note in notes:
         fidelity, fidelity_detail = (
             ("partial", note) if fidelity == "complete" else (fidelity, f"{fidelity_detail}; {note}")
         )

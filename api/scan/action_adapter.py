@@ -33,9 +33,9 @@ try:
         TlsInspectionExecutionAdapter,
     )
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
-    from capabilities.browser import XSSBrowserProofAdapter
+    from capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from capabilities.request_mutation import RequestMutationVerificationAdapter
-    from capabilities.sqli_proof import SQLiProofAdapter
+    from capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
@@ -63,6 +63,7 @@ try:
     from runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from runtime.receipts import CapabilityReceipt
     from runtime.request_replay_executor import execute_replay_plan
+    from runtime.request_shape import nested_json_body
     from runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
@@ -96,9 +97,9 @@ except (ImportError, ModuleNotFoundError):
         TlsInspectionExecutionAdapter,
     )
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
-    from ..capabilities.browser import XSSBrowserProofAdapter
+    from ..capabilities.browser import BrowserCapabilityInputError, XSSBrowserProofAdapter
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
-    from ..capabilities.sqli_proof import SQLiProofAdapter
+    from ..capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from ..capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
@@ -126,6 +127,7 @@ except (ImportError, ModuleNotFoundError):
     from ..runtime.pinned_http_replay import PinnedAiohttpReplayTransport
     from ..runtime.receipts import CapabilityReceipt
     from ..runtime.request_replay_executor import execute_replay_plan
+    from ..runtime.request_shape import nested_json_body
     from ..runtime.scan_credentials import (
         bind_scan_session_headers,
         resolve_scan_http_principal,
@@ -190,6 +192,10 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
+from .nuclei_template_index import (
+    nuclei_templates_directory,
+    resolve_active_nuclei_selection,
+)
 from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
     ScanWorkManifest,
@@ -258,37 +264,12 @@ _BODY_PROOF_PLACEHOLDER = "shakerscan"
 def _nested_proof_body(fields: Sequence[str]) -> dict[str, Any]:
     """Rebuild a JSON proof body from dotted/flattened field names.
 
-    Discovery records nested body shape as dotted paths (``profile.email``) and an
-    array of objects as ``items`` plus ``items.id``. A proof body of literal flat
-    keys would make the verifier's dotted-path mutator traverse a missing node and
-    raise, and would send XSS/SQL proofs the wrong schema, so rebuild the nesting
-    the mutator and the target actually expect. Mirrors the fan-out worklist
-    renderer in api/scan/continuation.py so both paths agree on one shape.
+    A proof body of literal flat keys would make the verifier's dotted-path mutator
+    traverse a missing node and raise, and would send XSS/SQL proofs the wrong schema.
+    The shared renderer also serves the continuation worklist and the discovery tools,
+    so every path agrees on one shape.
     """
-    body: dict[str, Any] = {}
-    for raw_name in fields:
-        parts = [part for part in str(raw_name).split(".") if part]
-        if not parts:
-            continue
-        cursor: Any = body
-        for part in parts[:-1]:
-            child = cursor.get(part)
-            if isinstance(child, list):
-                if not child or not isinstance(child[0], dict):
-                    child[:] = [{}]
-                cursor = child[0]
-                continue
-            if isinstance(child, dict):
-                cursor = child
-                continue
-            nested: dict[str, Any] = {}
-            # A parent name plus child names is the flattened shape emitted for an
-            # array of objects (items, items.id).
-            cursor[part] = [nested] if child is not None else nested
-            cursor = nested
-        if not isinstance(cursor.get(parts[-1]), (dict, list)):
-            cursor[parts[-1]] = _BODY_PROOF_PLACEHOLDER
-    return body
+    return nested_json_body(fields, placeholder=_BODY_PROOF_PLACEHOLDER)
 
 
 def _candidate_for_synthetic_proof(candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -1579,6 +1560,13 @@ class DatabaseNeutralScanActionDispatcher:
         consumed = {name: 0 for name in action.requested_budget}
         attempted = resumed = 0
         attempt_statuses: list[Mapping[str, Any]] = []
+        # Discovery (xss.verify_batch) ran under the primary principal, so the proof must
+        # too: replaying an authenticated candidate anonymously renders a login or 401 page
+        # and can never verify. The receipt's principal_context already claims this lane.
+        primary = resolve_scan_http_principal(
+            self.options, lane="primary", capability_name=action.capability_name,
+        )
+        proof_headers = primary.headers() if primary.authenticated else None
         for offset, (manifest_index, candidate) in enumerate(rows):
             candidate_id = str(candidate.get("candidate_id") or "")
             if candidate_id not in candidate_signals:
@@ -1619,17 +1607,40 @@ class DatabaseNeutralScanActionDispatcher:
                 break
             if body_fields and sub_budget.get("state_changing_requests", 0) < 1:
                 break
-            adapter = XSSBrowserProofAdapter(XSSBrowserProofAdapter.prepare(
-                target=self.target, execution_url=execution_url,
-                candidate_id=candidate_id,
-                parameter_name=str(candidate.get("parameter_name") or ""),
-                method=str(resolved_request.get("method") or "GET"),
-                content_type=(
-                    str(resolved_request.get("content_type"))
-                    if resolved_request.get("content_type") else None
-                ),
-                body_field_names=body_fields,
-            ))
+            try:
+                prepared = XSSBrowserProofAdapter.prepare(
+                    target=self.target, execution_url=execution_url,
+                    candidate_id=candidate_id,
+                    parameter_name=str(candidate.get("parameter_name") or ""),
+                    method=str(resolved_request.get("method") or "GET"),
+                    content_type=(
+                        str(resolved_request.get("content_type"))
+                        if resolved_request.get("content_type") else None
+                    ),
+                    body_field_names=body_fields,
+                )
+            except BrowserCapabilityInputError as exc:
+                # One unprovable candidate is that candidate's failed attempt; it must
+                # never abort the rest of the batch.
+                rejected = {
+                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                    "status": "failed", "timed_out": False, "budget_consumed": {},
+                    "observations": ({
+                        "kind": "candidate_attempt", "attempt_id": attempt_id,
+                        "candidate_id": candidate_id, "family": "xss_browser_proof",
+                        "status": "failed", "proof_state": "not_proven",
+                        "budget_consumed": {},
+                    },),
+                    "errors": (f"xss_proof_input_rejected:{exc}",),
+                    "proof_state": "not_proven",
+                }
+                await checkpoint_attempt(action.action_id, rejected)
+                attempt_statuses.append({"status": "failed", "timed_out": False})
+                attempted += 1
+                observations.extend(rejected["observations"])
+                errors.append(rejected["errors"][0])
+                continue
+            adapter = XSSBrowserProofAdapter(prepared, trusted_headers=proof_headers)
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
             result = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(
@@ -1844,14 +1855,44 @@ class DatabaseNeutralScanActionDispatcher:
             if sub_budget.get("http_requests", 0) < 4:
                 break
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
-            adapter = SQLiProofAdapter(
-                specification=specification,
-                target=self.target,
-                request=request,
-                candidate=proof_candidate,
-                transport=PinnedAiohttpReplayTransport(),
-                requested_budget=sub_budget,
-            )
+            # Constructing the adapter validates this candidate's request against the
+            # sub-budget -- a body candidate in a slice whose reservation tier carries
+            # no state_changing_requests cannot be funded, for one example. That is one
+            # candidate's problem, not the slice's: record it as a failed attempt with a
+            # reason and keep proving the rest, instead of letting the raise abort the
+            # whole batch.
+            try:
+                adapter = SQLiProofAdapter(
+                    specification=specification,
+                    target=self.target,
+                    request=request,
+                    candidate=proof_candidate,
+                    transport=PinnedAiohttpReplayTransport(),
+                    requested_budget=sub_budget,
+                )
+            except SQLiProofError as exc:
+                attempt = {
+                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                    "status": "failed", "timed_out": False,
+                    "budget_consumed": {},
+                    "observations": ({
+                        "kind": "candidate_attempt",
+                        "attempt_id": attempt_id,
+                        "candidate_id": candidate_id,
+                        "family": "sqli_proof",
+                        "status": "failed",
+                        "proof_state": "not_proven",
+                        "budget_consumed": {},
+                    },),
+                    "errors": (f"sqli_proof_unconstructable:{exc}",),
+                    "proof_state": "not_proven",
+                }
+                await checkpoint_attempt(action.action_id, attempt)
+                attempt_statuses.append({"status": "failed", "timed_out": False})
+                attempted += 1
+                observations.extend(attempt["observations"])
+                errors.append(str(attempt["errors"][0]))
+                continue
             result = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(
                     specification=specification,
@@ -2786,6 +2827,42 @@ class DatabaseNeutralScanActionDispatcher:
                 )
             except ScanWorkManifestError as exc:
                 raise ScanActionAdapterError(str(exc)) from exc
+        # Worker-process options carry the explicit template allowlist and control
+        # flags; the schema-validated capability input stays small (the allowlist
+        # can exceed the input-schema string ceiling and the control flags are not
+        # declared inputs). Default both to the manifest options for passive runs.
+        worker_template_options = dict(template_options)
+        args_template_options = dict(template_options)
+        if tool == "nuclei" and action.capability_name == "templates.active_batch":
+            selection = resolve_active_nuclei_selection(
+                nuclei_templates_directory(),
+                severities=template_options.get("severity"),
+                tags=template_options.get("tags"),
+                allow_state_changing_http=bool(self.policy.allow_state_changing_http),
+            )
+            if selection.skip:
+                # Fail closed: the active selection could not be resolved (index
+                # unavailable, or no permitted template once intrusive/non-GET
+                # exclusions apply). Record a coverage gap, never a clean result.
+                return self._skip(action, selection.skip_reason or "not_applicable")
+            worker_template_options = {
+                "severity": template_options.get("severity", "high,critical"),
+                "template_ids": ",".join(selection.template_ids),
+                "template_profile": "active",
+                "nuclei_active_state_changing": selection.includes_state_changing,
+            }
+            if template_options.get("template_pack_digest"):
+                worker_template_options["template_pack_digest"] = (
+                    template_options["template_pack_digest"]
+                )
+            # Keep only schema-declared, length-bounded fields in the capability
+            # input digest (no big id list, no worker control flags, no tag filter
+            # that the allowlist has already resolved).
+            args_template_options = {
+                key: template_options[key]
+                for key in ("severity", "template_pack_digest")
+                if key in template_options
+            }
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -2976,6 +3053,21 @@ class DatabaseNeutralScanActionDispatcher:
                         sub_budget["http_requests"] = min(
                             int(sub_budget.get("http_requests", 0)), state_changing,
                         )
+                elif tool == "nuclei" and worker_template_options.get(
+                    "nuclei_active_state_changing"
+                ):
+                    # Active Nuclei runs non-GET templates: conservatively every
+                    # request it sends may be a mutation, so bind the state-changing
+                    # reservation to the HTTP reservation exactly as a body attempt
+                    # does, so the adapter can settle it against requests sent.
+                    state_changing = int(sub_budget.get("state_changing_requests", 0))
+                    if state_changing > 0:
+                        sub_budget["http_requests"] = min(
+                            int(sub_budget.get("http_requests", 0)), state_changing,
+                        )
+                        sub_budget["state_changing_requests"] = int(
+                            sub_budget["http_requests"]
+                        )
                 if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                     break
                 if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
@@ -2997,8 +3089,8 @@ class DatabaseNeutralScanActionDispatcher:
                 args = dict(primary.capability_args())
                 args.update(body_request)
                 if tool == "nuclei":
-                    scanner_options.update(template_options)
-                    args.update(template_options)
+                    scanner_options.update(worker_template_options)
+                    args.update(args_template_options)
                 elif tool == "dalfox":
                     scanner_options["severity"] = "high"
                     args["severity"] = "high"

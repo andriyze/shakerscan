@@ -13,6 +13,8 @@ from typing import Any, Mapping
 import urllib.parse
 import uuid
 
+from .service_identity import _origin, service_identity_suffix
+
 try:
     from findings import template_path, templated_finding_identity
 except ModuleNotFoundError:
@@ -24,12 +26,6 @@ try:
 except ModuleNotFoundError:
     from scanner.scanner_tools.url_redaction import redact_client_route
     from scanner.scanner_tools.xss_evidence import apply_xss_execution_evidence
-
-
-def _origin(value: urllib.parse.SplitResult) -> tuple[str, str | None, int | None]:
-    scheme = value.scheme.lower()
-    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
-    return scheme, value.hostname, value.port or default_port
 
 
 def _verified_xss_fingerprint(
@@ -69,12 +65,7 @@ def _verified_xss_fingerprint(
         })
         if not identity:
             raise ValueError("verified XSS proof has no canonical endpoint identity")
-    # Existing target-service fingerprints stay stable. An authorized alternate
-    # service must not collapse into the same endpoint on another scheme/port.
-    service = _origin(urllib.parse.urlsplit(str(proof["url"])))
-    baseline = _origin(urllib.parse.urlsplit(target_url))
-    if service != baseline:
-        identity += f"|service={service[0]}://{service[1]}:{service[2]}"
+    identity += service_identity_suffix(str(proof["url"]), target_url=target_url)
     return "t:" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
@@ -242,7 +233,8 @@ async def materialize_verified_hunt_findings(
         from .authz_findings import authz_finding_records
         records = authz_finding_records(capability_receipt, hunt_id=hunt_id,
             action_id=action_id, target_id=target_id, receipt_id=receipt_id,
-            allowed_origins=allowed_origins or (target_url,), target_kind=target_kind)
+            allowed_origins=allowed_origins or (target_url,), target_url=target_url,
+            target_kind=target_kind)
     else:
         return []
     target_column = "device_target_id" if target_kind == "device" else "target_id"
@@ -318,4 +310,6 @@ async def materialize_verified_hunt_findings(
     return findings
 
 
-__all__ = ["materialize_verified_hunt_findings", "verified_xss_observations"]
+__all__ = [
+    "materialize_verified_hunt_findings", "service_identity_suffix", "verified_xss_observations",
+]

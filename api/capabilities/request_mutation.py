@@ -6,17 +6,18 @@ from dataclasses import replace
 import hashlib
 import json
 import math
-import re
 import time
 from typing import Any, Mapping, Sequence
 import urllib.parse
 
 try:
+    from capabilities.sql_error_signatures import sql_error_signatures
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:  # package imports in host-side tests
+    from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
@@ -40,17 +41,6 @@ _SQLI_FIELD_HINTS = frozenset({
     "account", "category", "customer", "filter", "id", "item", "order",
     "product", "record", "search", "sort", "user", "username",
 })
-_SQL_ERROR_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
-    r"you have an error in your sql syntax",
-    r"warning.{0,40}mysql",
-    r"unclosed quotation mark after the character string",
-    r"postgresql.{0,40}(error|exception)",
-    r"pg_query\(\)",
-    r"sqlite(?:3)?(?:error|_exception)",
-    r"ora-\d{4,5}",
-    r"sqlstate\[[0-9a-z]+\]",
-    r"syntax error.{0,80}(sql|query|database)",
-))
 
 
 class RequestMutationVerificationError(ValueError):
@@ -280,13 +270,6 @@ def _body_sha256(result: ReplayTransportResult) -> str:
     return hashlib.sha256(result.response_body).hexdigest()
 
 
-def _sql_errors(body: bytes) -> tuple[str, ...]:
-    text = body[:2_000_000].decode("utf-8", errors="replace")
-    return tuple(
-        pattern.pattern for pattern in _SQL_ERROR_PATTERNS if pattern.search(text)
-    )
-
-
 class RequestMutationVerificationAdapter:
     """Compare an exact control request with one bounded worker-private mutation."""
 
@@ -427,8 +410,8 @@ class RequestMutationVerificationAdapter:
             if marker_bytes in changed.response_body and marker_bytes not in control.response_body:
                 proof_status = "reflected_candidate_only"
         elif not partial:
-            control_errors = set(_sql_errors(control.response_body))
-            candidate_errors = set(_sql_errors(changed.response_body))
+            control_errors = set(sql_error_signatures(control.response_body))
+            candidate_errors = set(sql_error_signatures(changed.response_body))
             if candidate_errors - control_errors:
                 proof_status = "db_error_candidate_only"
         observation = {

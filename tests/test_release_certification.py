@@ -25,6 +25,16 @@ def _write(tmp_path: Path, name: str, value: dict) -> Path:
     return path
 
 
+def _fault_subject(revision: str = SOURCE) -> dict:
+    """The identity a fault producer reads from the API image's release manifest."""
+    return {
+        "schema_version": "shakerscan-fault-receipt-subject/v1",
+        "source_revision": revision,
+        "scanner_version": "9.9.9",
+        "image_built": True,
+    }
+
+
 def _evidence(tmp_path: Path):
     candidate = {
         "schema_version": "shakerscan-release-candidate/v1",
@@ -90,15 +100,26 @@ def _evidence(tmp_path: Path):
             "quality_bar_enforced": True,
             "release_quality_contract_passed": True,
             "quality_release_dispositions": [],
+            # The benchmark reads the deployment it measured from the live API and records the
+            # worker fleet it ran on; certification binds both to the candidate.
+            "subject": {
+                "schema_version": "shakerscan-benchmark-subject/v1",
+                "source_revision": SOURCE,
+                "identity_stable": True,
+            },
+            "fleet_uniform": True,
         },
         "fault_cancellation": {
             "schema_version": "scan-cancellation-race-receipt/v1", "passed": True,
+            "subject": _fault_subject(),
         },
         "fault_reservation_identity": {
             "schema_version": "scan-reservation-identity-receipt/v1", "passed": True,
+            "subject": _fault_subject(),
         },
         "fault_action_resume": {
             "schema_version": "scan-action-resume-receipt/v1", "passed": True,
+            "subject": _fault_subject(),
         },
         "real_fleet_parity": {
             "source_revision": SOURCE, "consistent": True,
@@ -531,3 +552,215 @@ def test_promotion_accepts_waived_dast_quality_only_with_its_scope_record(tmp_pa
     unknown["certification"]["scope_exclusions"].append({"boundary": "made_up", "state": "waived_declared_debt"})
     with pytest.raises(PromotionReceiptError, match="unknown or unwaived"):
         validate_certification_checks(unknown)
+
+
+# --- The DAST and fault receipts must have run against THIS candidate --------------------------
+# They were accepted on pass flags and schema alone, so a scorecard or fault receipt produced on
+# another deployment or an older build certified this candidate as readily as its own.
+
+FAULT_KEYS = ("fault_cancellation", "fault_reservation_identity", "fault_action_resume")
+FOREIGN_DIGEST = "sha256:" + "f" * 64
+
+
+def _replace_external(tmp_path, paths, key, value):
+    path = paths["external_evidence"][key][1]
+    paths["external_evidence"][key] = (value, _write(tmp_path, path.name, value))
+
+
+def _certify(candidate, upgrade, preservation, e2e, paths, **kwargs):
+    return certify_receipt(
+        candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+        source_sha=SOURCE, **paths, **kwargs,
+    )
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+def test_a_receipt_without_a_subject_cannot_certify(tmp_path, key):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = dict(paths["external_evidence"][key][0])
+    value.pop("subject")
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError, match="does not identify the deployment"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+@pytest.mark.parametrize("revision", ("b" * 40, None, "unknown"))
+def test_a_receipt_from_another_revision_cannot_certify(tmp_path, key, revision):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    if revision is None:
+        value["subject"].pop("source_revision")
+    else:
+        value["subject"]["source_revision"] = revision
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+@pytest.mark.parametrize("images", (
+    {"api": FOREIGN_DIGEST},
+    {**IMAGES, "scanner": FOREIGN_DIGEST},
+    {"not_a_release_image": IMAGES["api"]},
+    {},
+    "sha256:" + "1" * 64,
+))
+def test_a_receipt_from_other_image_digests_cannot_certify(tmp_path, key, images):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    value["subject"]["images"] = images
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError, match="final release image digests"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+@pytest.mark.parametrize("images", (dict(IMAGES), {"api": IMAGES["api"]}))
+def test_a_receipt_recording_the_candidate_digests_certifies(tmp_path, key, images):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    value["subject"]["images"] = images
+    _replace_external(tmp_path, paths, key, value)
+    receipt = _certify(candidate, upgrade, preservation, e2e, paths)
+    assert receipt["certification"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("fleet_uniform", (False, None))
+def test_a_dast_receipt_measured_on_a_stale_fleet_cannot_certify(tmp_path, fleet_uniform):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = dict(paths["external_evidence"]["dast_quality"][0])
+    if fleet_uniform is None:
+        value.pop("fleet_uniform")
+    else:
+        value["fleet_uniform"] = fleet_uniform
+    _replace_external(tmp_path, paths, "dast_quality", value)
+    with pytest.raises(CertificationError, match="stale or mixed worker fleet"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+def _load_script(path: Path, name: str):
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _produce_dast_receipt(tmp_path, monkeypatch, revisions):
+    """Run the real benchmark entry point as installed_stack_smoke.sh does, against a fake API.
+
+    ``revisions`` is what /health reports on each read (start of run, end of run): an image-built
+    stack reports the source revision baked into its release manifest.
+    """
+    import sys
+
+    benchmark = _load_script(
+        Path(__file__).resolve().parents[1] / "scripts" / "benchmark_targets.py",
+        "benchmark_receipt_producer_under_test",
+    )
+    reads = iter(revisions)
+
+    def fake_get(url, timeout=30):
+        assert url.endswith("/health"), url
+        return {"source_revision": next(reads), "build_fingerprint": "f" * 64,
+                "scanner_version": "9.9.9"}
+
+    monkeypatch.setattr(benchmark, "OUT_DIR", str(tmp_path / "runs"))
+    monkeypatch.setattr(benchmark, "_get", fake_get)
+    monkeypatch.setattr(benchmark, "check_fleet", lambda api: (True, {"count": 1, "stale": 0}))
+    monkeypatch.setattr(benchmark, "run_target", lambda name, *a, **k: {
+        "target": name, "passed": True, "gates": [], "expected_recall": 0.33,
+        "quality_gates": [
+            {"gate": "quality:min_expected_recall", "pass": True, "detail": "0.33 >= 0.33"},
+        ],
+        "quality_passed": True, "quality_enforced_passed": True,
+        "quality_release_contract": {"status": "full_bar", "valid": True},
+    })
+    monkeypatch.delenv("SHAKERSCAN_RELEASE_IMAGE_DIGESTS", raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "benchmark_targets.py", "juice_shop", "--api", "http://127.0.0.1:38001", "--auth",
+        "--enforce-quality", "--target-url", "juice_shop=http://juice-shop:3000",
+        "--auth-target-url", "juice_shop=http://127.0.0.1:44001",
+    ])
+    assert benchmark.main() == 0
+    return json.loads((tmp_path / "runs" / "benchmark-juice_shop.json").read_text())
+
+
+def test_the_benchmark_produces_a_dast_receipt_that_certifies_its_own_candidate(
+    tmp_path, monkeypatch,
+):
+    dast = _produce_dast_receipt(tmp_path, monkeypatch, [SOURCE, SOURCE])
+    assert dast["subject"]["source_revision"] == SOURCE
+    assert dast["subject"]["identity_stable"] is True
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    _replace_external(tmp_path, paths, "dast_quality", dast)
+    assert _certify(candidate, upgrade, preservation, e2e, paths)["certification"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("revisions", (["b" * 40, "b" * 40], [SOURCE, "b" * 40], ["unknown"] * 2))
+def test_a_benchmark_run_on_another_or_changing_deployment_cannot_certify(
+    tmp_path, monkeypatch, revisions,
+):
+    dast = _produce_dast_receipt(tmp_path, monkeypatch, revisions)
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    _replace_external(tmp_path, paths, "dast_quality", dast)
+    with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("script,key", (
+    ("run_scan_cancellation_race.py", "fault_cancellation"),
+    ("run_scan_reservation_identity.py", "fault_reservation_identity"),
+    ("run_scan_action_resume.py", "fault_action_resume"),
+))
+def test_fault_producers_bind_their_receipts_to_the_runtime_release_manifest(
+    tmp_path, monkeypatch, script, key,
+):
+    module = _load_script(
+        Path(__file__).resolve().parents[1] / "tests" / "e2e" / script, f"{key}_producer_under_test",
+    )
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    schema = paths["external_evidence"][key][0]["schema_version"]
+
+    # Inside the API image: the baked release manifest names the candidate.
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text(json.dumps({"version": "9.9.9", "source_revision": SOURCE}))
+    monkeypatch.setenv("SHAKERSCAN_RELEASE_MANIFEST", str(manifest))
+    subject = module._receipt_subject()
+    assert subject["source_revision"] == SOURCE and subject["image_built"] is True
+    _replace_external(tmp_path, paths, key, {"schema_version": schema, "passed": True, "subject": subject})
+    assert _certify(candidate, upgrade, preservation, e2e, paths)["certification"]["status"] == "pass"
+
+    # A runtime built from another revision cannot certify this candidate.
+    manifest.write_text(json.dumps({"version": "9.9.9", "source_revision": "b" * 40}))
+    _replace_external(tmp_path, paths, key, {
+        "schema_version": schema, "passed": True, "subject": module._receipt_subject(),
+    })
+    with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+    # An unidentifiable runtime records no revision and certifies nothing.
+    monkeypatch.setenv("SHAKERSCAN_RELEASE_MANIFEST", str(tmp_path / "absent.json"))
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    unidentified = module._receipt_subject()
+    assert "source_revision" not in unidentified
+    _replace_external(tmp_path, paths, key, {
+        "schema_version": schema, "passed": True, "subject": unidentified,
+    })
+    with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+def test_a_waiver_never_excuses_a_foreign_dast_receipt(tmp_path):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"]["dast_quality"][0]))
+    value.update({"passed": False, "quality_bar_passed": False,
+                  "release_quality_contract_passed": False})
+    value["subject"]["source_revision"] = "b" * 40
+    _replace_external(tmp_path, paths, "dast_quality", value)
+    with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths, waive_dast_quality=True)

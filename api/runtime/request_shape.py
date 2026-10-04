@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import urllib.parse
 
 
@@ -75,3 +75,88 @@ def public_request_body_shape(value: Any) -> tuple[str | None, tuple[str, ...]]:
         ("application/x-www-form-urlencoded", names)
         if names else (None, ())
     )
+
+
+def _field_path(raw_name: str) -> list[tuple[str, bool]]:
+    """Split one flattened field name into ``(key, is_array)`` segments.
+
+    An explicit ``[]`` marker (imported collections) and a numeric index segment (exact
+    replay paths such as ``items.0.id``) both mean the preceding key holds an array.
+    """
+    segments: list[tuple[str, bool]] = []
+    for part in str(raw_name).split("."):
+        if not part:
+            continue
+        if part.isdigit():
+            if not segments:
+                return []  # a top-level array has no named field to place
+            segments[-1] = (segments[-1][0], True)
+            continue
+        is_array = part.endswith("[]")
+        key = part[:-2] if is_array else part
+        if not key:
+            return []
+        segments.append((key, is_array))
+    return segments
+
+
+def json_field_leaf_name(raw_name: str) -> str:
+    """The key a nested body field is sent under (``profile.name`` -> ``name``)."""
+    segments = _field_path(raw_name)
+    return segments[-1][0] if segments else ""
+
+
+def nested_json_body(
+    field_names: Sequence[str], *, placeholder: str,
+    values: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Rebuild the JSON object that a list of flattened body field names describes.
+
+    Discovery records a nested body as dotted paths (``profile.email``), and an array of
+    objects either as a parent plus children (``items``, ``items.id``) or with an explicit
+    marker (``items[]``, ``items[].id``). A request built from literal dotted keys sends a
+    schema the target does not have, so the target ignores the field and the test proves
+    nothing. Every sender (proof, discovery tool, continuation worklist) rebuilds the real
+    nesting here so they all agree on one shape.
+
+    ``values`` places a value at an exact field name; every other leaf is ``placeholder``.
+    When the names use explicit ``[]`` markers, a parent plus children is an object, because
+    that convention lists every container and marks its arrays.
+    """
+    names = [str(name) for name in field_names if str(name).strip()]
+    explicit_arrays = any("[]" in name for name in names)
+    overrides = dict(values or {})
+    body: dict[str, Any] = {}
+    for raw_name in names:
+        segments = _field_path(raw_name)
+        if not segments:
+            continue
+        cursor: Any = body
+        for key, is_array in segments[:-1]:
+            child = cursor.get(key)
+            if is_array or isinstance(child, list):
+                if not isinstance(child, list):
+                    child = cursor[key] = []
+                if not child or not isinstance(child[0], dict):
+                    child[:] = [{}]
+                cursor = child[0]
+                continue
+            if isinstance(child, dict):
+                cursor = child
+                continue
+            nested: dict[str, Any] = {}
+            # Without explicit markers, a parent name plus child names is the flattened
+            # shape emitted for an array of objects (items, items.id).
+            cursor[key] = [nested] if child is not None and not explicit_arrays else nested
+            cursor = nested
+        key, is_array = segments[-1]
+        value = overrides.get(raw_name, placeholder)
+        existing = cursor.get(key)
+        if is_array:
+            if not isinstance(existing, list) or not existing:
+                cursor[key] = [value]
+            elif not isinstance(existing[0], (dict, list)):
+                existing[0] = value
+        elif not isinstance(existing, (dict, list)):
+            cursor[key] = value
+    return body

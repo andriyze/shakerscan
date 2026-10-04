@@ -432,6 +432,14 @@ def _sealing(store):
     return encrypting_store(store)
 
 
+def _stored_payload(content: Any) -> Any:
+    """A body is stored as its text. The store serializes payloads as JSON, and a bytes
+    object serialized that way became its Python repr ("b'...'") rather than the body."""
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content).decode("utf-8", errors="replace")
+    return content
+
+
 async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) -> str | None:
     """Put one header map or body in the content-addressed store and return its object id.
 
@@ -440,8 +448,7 @@ async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) 
     """
     if content is None:
         return None
-    if isinstance(content, (bytes, bytearray)):
-        content = bytes(content).decode("utf-8", errors="replace")
+    content = _stored_payload(content)
     stored = _sealing(store)(content)
     if not stored.get("content_sha256"):
         return None
@@ -506,6 +513,9 @@ async def store_archive_blobs(
                 content, sort_keys=True, separators=(",", ":"), default=str,
             ).encode("utf-8", errors="replace")
         input_key = (owner_scan_id, hashlib.sha256(encoded).hexdigest())
+        # Stored, digested and deduplicated as text, exactly as store_archive_blob stores one
+        # payload, so the object identity names what the object holds.
+        content = _stored_payload(content)
         digest = plaintext_digest(content)
         if digest:
             canonical_key = (owner_scan_id, str(digest))

@@ -28,7 +28,9 @@ import urllib.parse
 from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
-from runtime.request_shape import public_request_body_shape
+from runtime.request_shape import (
+    json_field_leaf_name, nested_json_body, public_request_body_shape,
+)
 from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
@@ -227,6 +229,49 @@ _CANONICAL_PASSIVE_NUCLEI_IDS = ",".join(sorted(
 # nmap -oN - human output: one row per scanned port, e.g. "8443/tcp open  https  nginx 1.25.3".
 _NMAP_SERVICE_LINE_RE = re.compile(r"^(\d{1,5}/(?:tcp|udp))\s+(\S+)\s+(\S+)(?:\s+(.*\S))?\s*$")
 _NUCLEI_FOCUSED_TAGS = "exposure,misconfig,auth-bypass,default-login"
+# One server-resolved active Nuclei template id. The ids come from the pinned,
+# checksum-verified bundle via scan/nuclei_template_index.py, so this only bounds
+# pathological values defensively before they reach the -id argv.
+_ACTIVE_NUCLEI_TEMPLATE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_MAX_ACTIVE_NUCLEI_TEMPLATE_IDS = 4_000
+_MAX_ACTIVE_NUCLEI_ALLOWLIST_BYTES = 200_000
+
+
+def _validate_active_nuclei_allowlist(template_ids: str) -> None:
+    """Fail closed on a malformed active Nuclei template id list before argv build."""
+    if len(template_ids) > _MAX_ACTIVE_NUCLEI_ALLOWLIST_BYTES:
+        raise AgentToolError("nuclei active template allowlist is too large")
+    ids = [item for item in template_ids.split(",") if item]
+    if not ids or len(ids) > _MAX_ACTIVE_NUCLEI_TEMPLATE_IDS:
+        raise AgentToolError("nuclei active template allowlist is invalid")
+    for template_id in ids:
+        if not _ACTIVE_NUCLEI_TEMPLATE_ID_RE.match(template_id):
+            raise AgentToolError("nuclei active template id is invalid")
+
+
+def _apply_nuclei_state_changing_hard_budget(
+    hard: dict[str, int],
+    proof_inputs: dict[str, Any],
+    options: Mapping[str, Any],
+    reservation: Mapping[str, int],
+    http: int,
+) -> None:
+    """Add the state-changing wire ceiling to an active Nuclei plan, when it applies.
+
+    The active selection includes non-GET templates only when state-changing HTTP
+    is authorized; the adapter binds the reservation's state-changing hold to its
+    HTTP hold. Conservatively every request the run sends may be a mutation, so the
+    hard ceiling for the dimension equals the HTTP ceiling. The dimension is absent
+    (never reserved, never charged) when the run is GET-only.
+    """
+    if not options.get("nuclei_active_state_changing"):
+        return
+    reserved_state_changing = int(reservation.get("state_changing_requests") or 0)
+    if reserved_state_changing <= 0:
+        return
+    hard["state_changing_requests"] = min(reserved_state_changing, int(http))
+    proof_inputs["state_changing_requests_upper_bound"] = hard["state_changing_requests"]
+    proof_inputs["may_send_non_get_methods"] = True
 
 
 # Minimum reservation an external verifier needs to run its fixed conservative
@@ -353,17 +398,28 @@ def _tmpl_nuclei(url: str, opts: dict[str, Any]) -> list[str]:
         args += ["-severity", severity]
     args += ["-rate-limit", "10", "-bulk-size", "10", "-concurrency", "10"]
     if template_ids:
-        if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
-            raise AgentToolError("nuclei template allowlist is not canonical")
-        # The reviewed passive pack needs only typed match metadata. Nuclei's
-        # default JSONL embeds the complete request/response and encoded
-        # template in every matcher result, which can exceed the worker's hard
-        # output ceiling even for this six-template, seven-request profile.
-        # The reviewed IDs include info/medium templates, so an independently
-        # supplied severity filter would silently select an empty intersection.
-        args += ["-id", template_ids, "-omit-raw", "-omit-template"]
-        if opts.get("filter_template_severity") is True:
-            args += ["-severity", severity]
+        if str(opts.get("template_profile") or "").strip().lower() == "active":
+            # The server-resolved active allowlist (scan/nuclei_template_index.py)
+            # is an explicit, method-filtered id list derived from the pinned
+            # bundle: it excludes intrusive templates and, unless state-changing
+            # HTTP is authorized, every non-GET template. Feeding it as -id is the
+            # robust method filter -- a template Nuclei would otherwise match by
+            # tag but that is not on this list never runs. Match evidence is
+            # retained (no -omit) exactly as the former tag-based active path did.
+            _validate_active_nuclei_allowlist(template_ids)
+            args += ["-id", template_ids]
+        else:
+            if template_ids != _CANONICAL_PASSIVE_NUCLEI_IDS:
+                raise AgentToolError("nuclei template allowlist is not canonical")
+            # The reviewed passive pack needs only typed match metadata. Nuclei's
+            # default JSONL embeds the complete request/response and encoded
+            # template in every matcher result, which can exceed the worker's hard
+            # output ceiling even for this six-template, seven-request profile.
+            # The reviewed IDs include info/medium templates, so an independently
+            # supplied severity filter would silently select an empty intersection.
+            args += ["-id", template_ids, "-omit-raw", "-omit-template"]
+            if opts.get("filter_template_severity") is True:
+                args += ["-severity", severity]
     tags = str(opts.get("tags") or "").strip().lower()
     if _TAGS_RE.match(tags):
         args += ["-tags", tags]
@@ -465,8 +521,14 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
         raise ValueError("injection body method is invalid")
     content_type = str(opts.get("content_type") or "").strip().lower()
     if "json" in content_type:
-        body = json.dumps({name: _BODY_PLACEHOLDER_VALUE for name in fields},
+        # Dotted names describe a nested body. Literal dotted keys send a schema the target
+        # ignores, so a nested field could never be found. The tools name a JSON value by
+        # its own key, so a nested field is offered under its leaf name.
+        body = json.dumps(nested_json_body(fields, placeholder=_BODY_PLACEHOLDER_VALUE),
                           sort_keys=True, separators=(",", ":"))
+        fields = [
+            name for name in dict.fromkeys(json_field_leaf_name(item) for item in fields) if name
+        ]
     else:
         body = "&".join(
             f"{urllib.parse.quote(name, safe='')}={_BODY_PLACEHOLDER_VALUE}" for name in fields
@@ -1321,6 +1383,9 @@ def build_enforced_scanner_plan(
                 "rate_per_second": rate_per_second, "burst": burst,
                 "retries": 0, "redirects": 0, "public_oob": False,
             }
+            _apply_nuclei_state_changing_hard_budget(
+                hard, proof_inputs, internal_options, reservation, http,
+            )
         elif http >= 4_000 and wall >= 300:
             hard = {"http_requests": 4_000, "tool_wall_seconds": 300}
             timeout_seconds, timeout_ms = 300, 300_000
@@ -1330,6 +1395,9 @@ def build_enforced_scanner_plan(
                 "duration_seconds": 300, "startup_and_engine_overhead": 1_000,
                 "retries": 0, "redirects": 0, "public_oob": False,
             }
+            _apply_nuclei_state_changing_hard_budget(
+                hard, proof_inputs, internal_options, reservation, 4_000,
+            )
         else:
             raise AgentToolError(
                 "nuclei active profile requires 4000 HTTP requests and 300 seconds"

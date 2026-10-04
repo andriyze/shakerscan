@@ -579,7 +579,7 @@ export const HUNT_START_CONTRACT = {
         "method": "POST",
         "url_template": "/hunts/{hunt_id}/capabilities/templates.scan"
       },
-      "description": "Reviewed target-bound GET-only Nuclei template scan.",
+      "description": "Target-bound Nuclei template scan; non-GET templates run only when state-changing HTTP is authorized.",
       "name": "templates.scan",
       "required_approval": "active_testing",
       "target_kinds": [
