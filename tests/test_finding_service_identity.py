@@ -116,13 +116,54 @@ CREATE TABLE finding_verifications(
 """
 
 
-@asynccontextmanager
-async def _database():
+def _validated_postgres_dsn():
     dedicated = os.environ.get("FINDING_SERVICE_TEST_POSTGRES_DSN")
     dsn = dedicated or os.environ.get("HUNT_TEST_POSTGRES_DSN")
     if not dsn:
-        pytest.skip("FINDING_SERVICE_TEST_POSTGRES_DSN is not configured")
-    require_disposable_database(dsn, "shakerscan_finding_service_test" if dedicated else "hunt_records")
+        pytest.skip("FINDING_SERVICE_TEST_POSTGRES_DSN or HUNT_TEST_POSTGRES_DSN is not configured")
+    return require_disposable_database(
+        dsn, "shakerscan_finding_service_test" if dedicated else "hunt_records",
+    )
+
+
+@pytest.mark.parametrize("dedicated,fallback,expected", [
+    ("postgresql://localhost/shakerscan_finding_service_test",
+     "postgresql://localhost/hunt_records", "postgresql://localhost/shakerscan_finding_service_test"),
+    (None, "postgresql://127.0.0.1/hunt_records", "postgresql://127.0.0.1/hunt_records"),
+])
+def test_postgres_dsn_selection_prefers_dedicated_and_supports_ci_fallback(
+    monkeypatch, dedicated, fallback, expected,
+):
+    monkeypatch.delenv("FINDING_SERVICE_TEST_POSTGRES_DSN", raising=False)
+    if dedicated:
+        monkeypatch.setenv("FINDING_SERVICE_TEST_POSTGRES_DSN", dedicated)
+    monkeypatch.setenv("HUNT_TEST_POSTGRES_DSN", fallback)
+    assert _validated_postgres_dsn() == expected
+
+
+@pytest.mark.parametrize("dedicated,fallback", [
+    ("postgresql://localhost/production", "postgresql://localhost/hunt_records"),
+    (None, "postgresql://remote.example.test/hunt_records"),
+])
+def test_postgres_dsn_selection_rejects_unsafe_configuration(monkeypatch, dedicated, fallback):
+    monkeypatch.delenv("FINDING_SERVICE_TEST_POSTGRES_DSN", raising=False)
+    if dedicated:
+        monkeypatch.setenv("FINDING_SERVICE_TEST_POSTGRES_DSN", dedicated)
+    monkeypatch.setenv("HUNT_TEST_POSTGRES_DSN", fallback)
+    with pytest.raises(ValueError, match="nonlocal, ambiguous, or non-test"):
+        _validated_postgres_dsn()
+
+
+def test_postgres_dsn_selection_skips_when_neither_test_database_is_configured(monkeypatch):
+    monkeypatch.delenv("FINDING_SERVICE_TEST_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("HUNT_TEST_POSTGRES_DSN", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        _validated_postgres_dsn()
+
+
+@asynccontextmanager
+async def _database():
+    dsn = _validated_postgres_dsn()
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(dsn)
     schema = "finding_service_" + uuid.uuid4().hex
@@ -222,7 +263,7 @@ def test_postgres_concurrent_canonical_insert_does_not_abort_legacy_reconciliati
             )
             await conn.execute("INSERT INTO finding_verifications(finding_id,verdict) VALUES($1,'exploited')", legacy_id)
             concurrent_id = uuid.uuid4()
-            second = await asyncpg.connect(os.environ["FINDING_SERVICE_TEST_POSTGRES_DSN"])
+            second = await asyncpg.connect(_validated_postgres_dsn())
             schema = await conn.fetchval("SELECT current_schema()")
             await second.execute(f'SET search_path TO "{schema}"')
 
