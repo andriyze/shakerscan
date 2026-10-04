@@ -88,7 +88,7 @@ export function HuntSshConsole({hunt,onChanged}:{hunt:HuntV2;onChanged:(hunt:Hun
     try {
       const saved=await getTargetActions(hunt.target_id)
       await saveTargetAction(hunt.target_id,saved.revision,{name:command.split('\n')[0].slice(0,120),
-        instructions:'Saved from Hunt '+hunt.hunt_id,parameters:{},steps:[{capability:'ssh.exec',input:{command,...(port?{port:Number(port)}:{})}}]})
+        instructions:'Saved from Hunt '+hunt.hunt_id,parameters:{},steps:[{capability:'ssh.exec',input:{command,timeout_seconds:Number(timeout),...(port?{port:Number(port)}:{})}}]})
       setNotice('Command saved as a reusable target action.')
     } catch(cause) {setError(cause instanceof Error?cause.message:'Could not save command')}
   }

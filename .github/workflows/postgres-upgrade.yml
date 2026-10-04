@@ -27,7 +27,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  # Not `smoke`: that name is the required E2E check, and a second job with it made a green
+  # PostgreSQL upgrade indistinguishable from (and able to stand in for) the E2E result.
+  postgres-upgrade-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

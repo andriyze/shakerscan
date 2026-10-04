@@ -98,3 +98,18 @@ def reset_key_cache(monkeypatch):
     import secret_store
     monkeypatch.setattr(secret_store, "_loaded", False)
     monkeypatch.setattr(secret_store, "_fernet", None)
+
+
+def test_a_new_key_file_is_owner_only_from_creation(monkeypatch, tmp_path):
+    """Not just after a later chmod: the temporary file never has the umask's wider mode."""
+    monkeypatch.delenv("AI_CREDENTIAL_ENC_KEY", raising=False)
+    path = tmp_path / "credential.key"
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY_FILE", str(path))
+    ss = _reload_secret_store()
+    monkeypatch.setattr(ss.os, "chmod", lambda *args, **kwargs: None)
+    previous = os.umask(0o022)
+    try:
+        assert ss.encryption_enabled()
+    finally:
+        os.umask(previous)
+    assert path.stat().st_mode & 0o777 == 0o600
