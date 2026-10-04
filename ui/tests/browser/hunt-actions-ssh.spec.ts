@@ -41,6 +41,41 @@ test('saved target actions create, edit and delete without executing network tra
   expect(revision).toBe(3);expect(executions).toBe(0)
 })
 
+test('editing starts from what a Hunt saved since the list loaded and keeps the SSH settings',async({page})=>{
+  await pinMockApiOrigin(page)
+  const step=(command:string)=>({capability:'ssh.exec',input:{command,port:22,cwd:'/var/log',timeout_seconds:120,max_output_bytes:131072}})
+  let revision=1,puts:Record<string,any>[]=[]
+  let actions:Record<string,unknown>[]=[{id:actionId,target_id:id,revision:1,name:'Check logs',instructions:'',parameters:{},steps:[step('tail -n 10 messages')]}]
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route=>{
+    const request=route.request(),path=new URL(request.url()).pathname
+    if(path.startsWith(`/targets/${id}/actions`)) {
+      if(request.method()==='PUT') {
+        const value=request.postDataJSON();puts.push(value)
+        if(value.expected_revision!==revision)return route.fulfill({status:409,json:{detail:'Saved actions changed'}})
+        actions=[{...actions[0],...value,id:actionId,revision:++revision}]
+      }
+      return route.fulfill({json:{target_id:id,revision,actions,max_actions:32,authority_granted:false}})
+    }
+    if(path===`/targets/${id}/asset`)return route.fulfill({json:{target:{id,name:'TV action fixture',locator:'tv.test',url:'host://tv.test',is_active:true,environment:'lab'},origins:[],services:[],credentials:[],request_collections:[],active_findings:{}}})
+    if(path==='/hunts/contract')return route.fulfill({json:{tool_calls:[{name:'ssh.exec'}]}})
+    if(path.endsWith('/history'))return route.fulfill({json:{items:[],total:0,offset:0,limit:25}})
+    return route.fulfill({status:404,json:{detail:'No fixture'}})
+  })
+  await page.goto(`/targets/${id}/asset`)
+  await expect(page.getByRole('heading',{name:'Check logs'})).toBeVisible()
+  // A Hunt updates the action after the list was shown.
+  actions=[{...actions[0],revision:2,steps:[step('tail -n 200 messages')]}];revision=2
+  await page.getByRole('button',{name:'Edit Check logs'}).click()
+  const dialog=page.getByRole('dialog')
+  await expect(dialog.getByLabel('Remote command')).toHaveValue('tail -n 200 messages')
+  await dialog.getByLabel('Action name').fill('Check recent logs')
+  await dialog.getByRole('button',{name:'Save action',exact:true}).click()
+  await expect(page.getByRole('heading',{name:'Check recent logs'})).toBeVisible()
+  expect(puts).toHaveLength(1)
+  expect(puts[0].expected_revision).toBe(2)
+  expect(puts[0].steps).toEqual([step('tail -n 200 messages')])
+})
+
 test.describe('HTTP LAN SSH',()=>{
 test('live SSH displays stdout and stderr and saves a reusable action',async({page})=>{
   await pinMockApiOrigin(page)
@@ -76,6 +111,7 @@ test('live SSH displays stdout and stderr and saves a reusable action',async({pa
   await expect(page.getByRole('heading',{name:'Live SSH',exact:true})).toBeVisible()
   await page.getByLabel('Remote command').fill('tail -n 40 /var/log/messages')
   await page.getByLabel('Port',{exact:true}).fill('2222')
+  await page.getByLabel('Timeout (seconds)').fill('120')
   await page.getByRole('button',{name:'Run command',exact:true}).click()
   await expect(page.getByLabel('SSH stdout')).toContainText('fixture-log')
   await expect(page.getByLabel('SSH stderr')).toContainText('fixture-warning')
@@ -83,7 +119,8 @@ test('live SSH displays stdout and stderr and saves a reusable action',async({pa
   await expect(page.getByText('Command saved as a reusable target action.')).toBeVisible()
   expect(submitted.input).toMatchObject({command:'tail -n 40 /var/log/messages',port:2222})
   expect(submitted.idempotency_key).toMatch(/^ui-ssh-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-  expect(saved.steps).toEqual([{capability:'ssh.exec',input:{command:'tail -n 40 /var/log/messages',port:2222}}])
+  // The saved action runs the way the console did, including the chosen timeout.
+  expect(saved.steps).toEqual([{capability:'ssh.exec',input:{command:'tail -n 40 /var/log/messages',timeout_seconds:120,port:2222}}])
   await expect(page.getByLabel('Port',{exact:true})).toBeDisabled()
   await page.getByRole('button',{name:'Disconnect SSH',exact:true}).click()
   await expect(page.getByText('SSH disconnected. You can choose another port.')).toBeVisible()

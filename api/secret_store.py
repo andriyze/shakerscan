@@ -74,7 +74,9 @@ def _load_key_material() -> str:
             generated = Fernet.generate_key().decode()
             tmp_path = f"{key_path}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
             try:
-                with open(tmp_path, "w", encoding="utf-8") as handle:
+                # Owner-only from creation: the key bytes never sit in a file with the umask's mode.
+                fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     handle.write(generated)
                     handle.flush()
                     os.fsync(handle.fileno())

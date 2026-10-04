@@ -102,3 +102,22 @@ def test_compaction_failure_never_fails_the_caller(caplog):
             raise ResponseError("Background append only file rewriting already in progress")
     ai_settings_secrets.compact_history(Restricted({}))
     assert "Could not compact Redis persistence" in caplog.text
+
+def test_secret_fields_are_masked_by_word_and_settings_stay_visible(key):
+    stored = ai_template_secrets.protect({
+        "input": "{{prompt}}", "api_token": "t-canary", "api_secret": "s-canary", "secret_key": "k-canary",
+        "auth": {"bearerToken": "b-canary"}, "max_tokens": 64, "keywords": ["a"], "session_id": "s-1"})
+    shown = ai_template_secrets.public(stored)
+    assert shown == {"input": "{{prompt}}", "api_token": "***", "api_secret": "***", "secret_key": "***",
+                     "auth": {"bearerToken": "***"}, "max_tokens": 64, "keywords": ["a"], "session_id": "s-1"}
+    assert "canary" not in json.dumps(shown)
+
+
+def test_literal_mask_text_is_kept_outside_secret_fields(key):
+    created = ai_template_secrets.protect({"input": "{{prompt}}", "stop": "***", "api_token": "t-canary"})
+    assert ai_template_secrets.reveal(created)["stop"] == "***"
+    # An edit sends back what it was shown: the secret keeps its value, ordinary text its new value.
+    updated = ai_template_secrets.protect({"input": "{{prompt}} v2", "stop": "***", "api_token": "***"}, created)
+    assert ai_template_secrets.reveal(updated) == {"input": "{{prompt}} v2", "stop": "***", "api_token": "t-canary"}
+    with pytest.raises(ValueError):
+        ai_template_secrets.protect({"input": "{{prompt}}", "api_token": "***"})

@@ -19,6 +19,9 @@ export function TargetActionsEditor({targetId}:{targetId:string}) {
   const [port,setPort] = useState('22')
   const [mode,setMode] = useState<'ssh'|'capabilities'>('ssh')
   const [draft,setDraft] = useState('')
+  // An SSH step's other settings (cwd, timeout_seconds, max_output_bytes, ...) are kept as saved;
+  // the SSH form edits only the command and port.
+  const [sshInput,setSshInput] = useState<Record<string,unknown>>({})
   const [parameters,setParameters] = useState('{}')
   const [capabilities,setCapabilities] = useState<string[]>([])
   useEffect(() => {
@@ -30,12 +33,19 @@ export function TargetActionsEditor({targetId}:{targetId:string}) {
     setError('');setBusy(true)
     try {
       const current = await getTargetActions(targetId);setSaved(current)
+      // Edit what is saved now, not the copy shown before reloading: another writer (a Hunt) may
+      // have changed it, and saving stale content under the fresh revision would overwrite that.
+      const shownId = action?.id
+      const latest = shownId ? current.actions.find(item => item.id === shownId) : undefined
+      if (shownId && !latest) throw new Error('This action was deleted since the list was loaded.')
+      action = latest
       setEditing(action || null);setName(action?.name || '');setInstructions(action?.instructions || '')
       setParameters(JSON.stringify(action?.parameters || {},null,2))
       const ssh = !action || (action.steps.length===1 && action.steps[0].capability==='ssh.exec' && !Object.keys(action.parameters).length)
       setMode(ssh ? 'ssh':'capabilities')
       setCommand(ssh && action ? String(action.steps[0].input.command || ''):'')
       setPort(ssh && action ? String(action.steps[0].input.port || 22):'22')
+      setSshInput(ssh && action ? {...action.steps[0].input} : {})
       setDraft(JSON.stringify(action?.steps || [{capability:'ports.discover',input:{profile:'top_100'}}],null,2))
       setOpen(true)
       const response = await fetch(API_URL+'/hunts/contract')
@@ -51,7 +61,7 @@ export function TargetActionsEditor({targetId}:{targetId:string}) {
     if (!saved) return
     setBusy(true);setError('')
     try {
-      const next = mode==='ssh' ? [{capability:'ssh.exec',input:{command,port:Number(port)}}] : JSON.parse(draft)
+      const next = mode==='ssh' ? [{capability:'ssh.exec',input:{...sshInput,command,port:Number(port)}}] : JSON.parse(draft)
       const current = await saveTargetAction(targetId,saved.revision,{name,instructions,steps:next,parameters:mode==='ssh'?{}:JSON.parse(parameters)},editing?.id)
       setSaved(current);setOpen(false)
     } catch(cause) {setError(cause instanceof Error ? cause.message:'Could not save action')}

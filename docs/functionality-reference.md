@@ -261,8 +261,13 @@ before redaction, because redaction is not injective) is dropped and counted as
 retained as uncertain and reported as `unverified_redirect_observations:N`; a run that carried no
 control claims nothing.
 
-**Family presets and the active default.** `policy.preset` selects the family set: `passive`
-(recon, reviewed passive templates), `standard_active` (passive plus XSS and SQLi) or `custom` (exactly `include_families`). A submission that allows active testing and
+**Family presets and the active default.** The canonical Scan families are `recon`, `nuclei_passive`,
+`nuclei_active`, `xss`, `sqli`, `bola`, `sensitive_exposure`, `nosqli` and `authz_surface`
+(`api/scan/contracts.py`), and only these run. A name outside the check registry is rejected; a
+registry family outside the nine is not run as a Scan family (read `resolved_families` on the
+result), and a `custom` selection with none of the nine is refused. `policy.preset`
+selects the family set: `passive` (recon, reviewed passive templates), `standard_active` (passive plus
+XSS and SQLi) or `custom` (exactly `include_families`, from the nine above). A submission that allows active testing and
 names no preset resolves to `standard_active`; one that does not allow it resolves to `passive`.
 Permission and work are reported separately: the scan page's Testing tile names the active
 families that ran, or warns that active testing was allowed but no active family was selected.
@@ -1555,7 +1560,7 @@ concurrency-limited with per-tool timeouts and a global deadline.
 | `/scans` | Filter, inspect, cancel, and rescan logical scans without exposing internal rows by default |
 | `/scans/{id}` | Live progress/logs, durable Model Intake activity, report, proof/coverage, deployment decision, AI/Model Intake panels, replay, history, and PDF |
 | `/targets` | Hierarchical target inventory, search/filter/sort, scanning, discovery, duplicate merge, and schedule entry points |
-| `/devices` | Separate connected-device inventory, readiness, all-port posture submission, policy assignment, and service/finding summaries |
+| `/devices` | Network view of the same target inventory (a device is a host target; its ID is the target ID): readiness, all-port posture submission, policy assignment, and service/finding summaries |
 | `/devices/{id}` | Device identity, interfaces, listening services, policy decisions, discovered web origins, and scan history |
 | `/devices/policies` | Built-in and custom service allowlists with allow/deny/review/required-control rules and activation lifecycle |
 | `/targets/{id}/graph` | Route/object/principal graph, producer/consumer/auth edges, and graph-derived hypotheses |

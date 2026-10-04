@@ -1,6 +1,7 @@
 """Encrypt complete AI request templates; retain masked secrets on editor updates."""
 from __future__ import annotations
 import json
+import re
 from typing import Any
 from .ai_header_secrets import MASK
 try:
@@ -10,12 +11,22 @@ except ModuleNotFoundError:
 
 SCHEMA = "ai-request-template/encrypted-v1"
 MIGRATION = "v2_ai_request_template_secrets_v1"
-_SECRET_FIELDS = frozenset({
-    "password", "passwd", "secret", "secrets", "clientsecret", "apikey", "xapikey",
-    "accesstoken", "refreshtoken", "idtoken", "token", "authtoken", "bearertoken",
-    "authorization", "auth", "cookie", "cookies", "privatekey", "credentials",
-    "credential", "sessiontoken", "sessionkey",
+# A field is secret when one of its words is a secret word (api_token, secretKey, X-Api-Key) or its
+# run-together name ends in one (accesstoken, apisecret). Plurals and other words stay visible:
+# max_tokens, keywords, session_id and author are template settings, not credentials.
+_SECRET_WORDS = frozenset({
+    "password", "passwd", "pwd", "passphrase", "secret", "secrets", "token", "apikey", "key",
+    "credential", "credentials", "cookie", "cookies", "authorization", "auth", "bearer",
+    "privatekey", "signature",
 })
+_SECRET_SUFFIXES = ("password", "passwd", "passphrase", "secret", "token", "apikey", "privatekey",
+                    "secretkey", "accesskey", "clientkey", "sessionkey", "credential", "credentials")
+
+
+def is_secret_field(name: Any) -> bool:
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", str(name))]
+    joined = "".join(words)
+    return bool(words) and (any(w in _SECRET_WORDS for w in words) or joined.endswith(_SECRET_SUFFIXES))
 
 
 def reveal(value: Any) -> dict:
@@ -27,15 +38,19 @@ def reveal(value: Any) -> dict:
     return value
 
 
-def _restore(value: Any, existing: Any) -> Any:
-    if value == MASK:
+def _restore(value: Any, existing: Any, sensitive: bool = False) -> Any:
+    """``***`` keeps the stored value only where the response masked it: in a secret field.
+    Anywhere else it is ordinary text and is saved as written."""
+    if sensitive and value == MASK:
         if existing is None:
             raise ValueError("Masked template value has no stored value to keep")
         return existing
     if isinstance(value, dict):
-        return {k: _restore(v, existing.get(k) if isinstance(existing, dict) else None) for k, v in value.items()}
+        return {k: _restore(v, existing.get(k) if isinstance(existing, dict) else None,
+                            sensitive or is_secret_field(k)) for k, v in value.items()}
     if isinstance(value, list):
-        return [_restore(v, existing[i] if isinstance(existing, list) and i < len(existing) else None) for i, v in enumerate(value)]
+        return [_restore(v, existing[i] if isinstance(existing, list) and i < len(existing) else None, sensitive)
+                for i, v in enumerate(value)]
     return value
 
 
@@ -54,7 +69,7 @@ def _encrypt(value: dict) -> dict:
 def public(value: Any) -> dict:
     def mask(node: Any, sensitive: bool = False) -> Any:
         if isinstance(node, dict):
-            return {k: mask(v, sensitive or "".join(c for c in str(k).casefold() if c.isalnum()) in _SECRET_FIELDS) for k, v in node.items()}
+            return {k: mask(v, sensitive or is_secret_field(k)) for k, v in node.items()}
         if isinstance(node, list):
             return [mask(v, sensitive) for v in node]
         return MASK if sensitive and node not in (None, "") else node
