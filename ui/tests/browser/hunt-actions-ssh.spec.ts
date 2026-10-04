@@ -76,6 +76,33 @@ test('editing starts from what a Hunt saved since the list loaded and keeps the 
   expect(puts[0].steps).toEqual([step('tail -n 200 messages')])
 })
 
+test('an action that uses the profile port keeps doing so after an edit',async({page})=>{
+  await pinMockApiOrigin(page)
+  let revision=1,puts:Record<string,any>[]=[]
+  let actions:Record<string,unknown>[]=[{id:actionId,target_id:id,revision:1,name:'Uptime',instructions:'',parameters:{},
+    steps:[{capability:'ssh.exec',input:{command:'uptime',timeout_seconds:60}}]}]
+  await page.route(`${MOCK_API_ORIGIN}/**`,async route=>{
+    const request=route.request(),path=new URL(request.url()).pathname
+    if(path.startsWith(`/targets/${id}/actions`)) {
+      if(request.method()==='PUT'){const value=request.postDataJSON();puts.push(value);actions=[{...actions[0],...value,id:actionId,revision:++revision}]}
+      return route.fulfill({json:{target_id:id,revision,actions,max_actions:32,authority_granted:false}})
+    }
+    if(path===`/targets/${id}/asset`)return route.fulfill({json:{target:{id,name:'TV action fixture',locator:'tv.test',url:'host://tv.test',is_active:true,environment:'lab'},origins:[],services:[],credentials:[],request_collections:[],active_findings:{}}})
+    if(path==='/hunts/contract')return route.fulfill({json:{tool_calls:[{name:'ssh.exec'}]}})
+    if(path.endsWith('/history'))return route.fulfill({json:{items:[],total:0,offset:0,limit:25}})
+    return route.fulfill({status:404,json:{detail:'No fixture'}})
+  })
+  await page.goto(`/targets/${id}/asset`)
+  await page.getByRole('button',{name:'Edit Uptime'}).click()
+  const dialog=page.getByRole('dialog')
+  await expect(dialog.getByLabel('SSH port')).toHaveValue('')
+  await dialog.getByLabel('Action name').fill('Uptime check')
+  await dialog.getByRole('button',{name:'Save action',exact:true}).click()
+  await expect(page.getByRole('heading',{name:'Uptime check'})).toBeVisible()
+  // No port was chosen, so none is written: the credential profile's port (or 22) still applies.
+  expect(puts[0].steps).toEqual([{capability:'ssh.exec',input:{command:'uptime',timeout_seconds:60}}])
+})
+
 test.describe('HTTP LAN SSH',()=>{
 test('live SSH displays stdout and stderr and saves a reusable action',async({page})=>{
   await pinMockApiOrigin(page)
