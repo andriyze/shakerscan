@@ -20,7 +20,13 @@ This document records only the current product boundary and genuinely unfinished
 - HTTP request archives provide redacted JSON by default. HAR is offered masked or raw; raw HAR
   (credentials included) is sensitive, requires explicit operator confirmation in the UI, and can be
   turned off for a deployment with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0`. The generic evidence API
-  never serves unmasked captured traffic.
+  never serves unmasked captured traffic. The recorded headers and bodies behind raw HAR are
+  encrypted at rest with the credential key (inline, local and S3-compatible copies alike) and
+  decrypted only when an archive view reads them; a database dump or a backup without the key
+  holds no captured credential. Payloads recorded before this are encrypted at startup, and the
+  step is retried until every copy is sealed. A payload that cannot be archived (no key) or read
+  (a different key) is listed under the call's `payload_unavailable`, and the export reports
+  partial fidelity rather than complete.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and

@@ -979,3 +979,162 @@ def test_ai_header_secrets_are_encrypted_on_an_already_converted_database(monkey
         assert headers['X-Api-Key'].startswith('enc:fernet:') and headers['Accept'] == 'application/json'
         assert secret_store.decrypt_secret(headers['X-Api-Key']) == 'sk-plain'
     run(scenario)
+
+
+def _archive_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    import secret_store
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_store, "_fernet", None)
+    monkeypatch.setattr(secret_store, "_loaded", False)
+    return secret_store
+
+
+def test_raw_traffic_is_encrypted_at_rest_and_revealed_only_for_raw_views(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    from runtime.http_archive import HttpTransaction, archive_http_transactions, _default_store
+    from runtime.http_archive_reader import read_transactions
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        tx = HttpTransaction(plane="scan", method="POST", url="https://example.invalid/login", sequence=1,
+                             scan_id=str(scan), target_id=str(t), status_code=200,
+                             request_headers={"Authorization": "Bearer raw-canary-req"},
+                             request_body=b'{"password":"raw-canary-body"}',
+                             response_headers={"Set-Cookie": "sid=raw-canary-cookie"})
+        async with pool.acquire() as c:
+            assert await archive_http_transactions(c, [tx], store=_default_store(tmp_path), scan_id=str(scan)) == 1
+            at_rest = await c.fetchval("""SELECT string_agg(to_jsonb(e)::text, ' ') FROM evidence_objects e
+                WHERE object_type='http_archive_blob' AND scan_id=$1""", scan)
+            assert at_rest and "raw-canary" not in at_rest
+            rows = await read_transactions(c, scan_id=str(scan))
+        assert "Bearer raw-canary-req" in json.dumps(rows[0]["request_headers"])
+        assert "raw-canary-body" in json.dumps(rows[0]["request_body"])
+        assert "raw-canary-cookie" in json.dumps(rows[0]["response_headers"])
+    run(scenario)
+
+
+def test_archived_plaintext_is_encrypted_once_at_startup_including_local_files(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    from runtime import archive_blob_secrets as blobs
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        async with pool.acquire() as c:
+            await c.execute("DELETE FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
+            inline = await c.fetchval("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile,content) VALUES($1,'http_archive_blob',$2,10,'inline:','none',
+                '{"authorization":"Bearer legacy-canary"}'::jsonb) RETURNING id""", scan, 'a' * 64)
+            uri = "local:evidence_objects/bb/" + "b" * 64 + ".json"
+            path = tmp_path / "evidence-objects" / "bb" / ("b" * 64 + ".json")
+            path.parent.mkdir(parents=True)
+            path.write_text('"Set-Cookie: sid=legacy-file-canary"')
+            await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,$3,'none')""", scan, 'b' * 64, uri)
+            assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 2
+            stored = await c.fetchval("SELECT content::text FROM evidence_objects WHERE id=$1", inline)
+            assert "legacy-canary" not in stored and "legacy-file-canary" not in path.read_text()
+            assert json.loads(blobs.reveal(stored)) == {"authorization": "Bearer legacy-canary"}
+            assert json.loads(blobs.reveal(path.read_text())) == "Set-Cookie: sid=legacy-file-canary"
+            assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 0  # marker: once
+    run(scenario)
+
+
+def _large_tx(scan, target, n, body):
+    from runtime.http_archive import HttpTransaction
+    return HttpTransaction(plane="scan", method="GET", url=f"https://example.invalid/big/{n}", sequence=n,
+                           scan_id=str(scan), target_id=str(target), status_code=200, response_body=body)
+
+
+def test_repeated_large_payloads_leave_one_sealed_file_and_no_orphans(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    monkeypatch.setenv("EVIDENCE_INLINE_MAX_BYTES", "1024")
+    from runtime.http_archive import archive_http_transactions, _default_store
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        body = b"z" * 4096
+        async with pool.acquire() as c:
+            for n in range(3):  # three separate captures of the same payload
+                await archive_http_transactions(c, [_large_tx(scan, t, n + 1, body)], store=_default_store(tmp_path),
+                                                scan_id=str(scan))
+            rows = await c.fetchval("""SELECT count(*) FROM evidence_objects
+                WHERE object_type='http_archive_blob' AND scan_id=$1 AND storage_uri LIKE 'local:%'""", scan)
+        files = [p for p in (tmp_path / "evidence-objects").rglob("*.json")]
+        assert rows == 1 and len(files) == 1, (rows, files)
+        assert "zzzz" not in files[0].read_text()
+    run(scenario)
+
+
+def test_a_failed_backfill_is_retried_and_remote_objects_are_sealed(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    from runtime import archive_blob_secrets as blobs
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        objects = {"s3key": b'{"authorization": "Bearer remote-canary"}'}
+        def s3(method, bucket, key, **kwargs):
+            if method == "GET":
+                return objects["s3key"]
+            objects["s3key"] = kwargs["body"]
+            return b""
+        monkeypatch.setattr(blobs._evidence, "_s3_request", s3)
+        monkeypatch.setattr(blobs._evidence, "_parse_s3_storage_uri", lambda uri: ("bucket", "s3key"))
+        async with pool.acquire() as c:
+            await c.execute("DELETE FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
+            await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,'s3:evidence_objects/bucket/s3key','none')""",
+                scan, 'c' * 64)
+            uri = "local:evidence_objects/dd/" + "d" * 64 + ".json"
+            path = tmp_path / "evidence-objects" / "dd" / ("d" * 64 + ".json")
+            path.parent.mkdir(parents=True)
+            path.write_text('"Cookie: sid=local-canary"')
+            await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,$3,'none')""", scan, 'd' * 64, uri)
+            # A temporary failure on the local file: the remote object is sealed, the step is not marked done.
+            real_seal = blobs._seal_local
+            monkeypatch.setattr(blobs, "_seal_local", lambda p: "failed")
+            await blobs.encrypt_stored_blobs(c, results_dir=tmp_path)
+            assert not await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
+            assert b"remote-canary" not in objects["s3key"]
+            assert json.loads(blobs.reveal(objects["s3key"].decode())) == {"authorization": "Bearer remote-canary"}
+            # Repaired and restarted: the file is sealed and the step completes.
+            monkeypatch.setattr(blobs, "_seal_local", real_seal)
+            assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) >= 1
+            assert "local-canary" not in path.read_text()
+            assert await c.fetchval("SELECT 1 FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
+    run(scenario)
+
+
+def test_unavailable_payloads_are_reported_and_fidelity_is_partial(tmp_path, monkeypatch):
+    secret_store = _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    from cryptography.fernet import Fernet
+    from runtime.http_archive import HttpTransaction, archive_http_transactions, _default_store
+    from runtime.http_archive_reader import export_document, read_transactions
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        def tx(n):
+            return HttpTransaction(plane="scan", method="GET", url=f"https://example.invalid/{n}", sequence=n,
+                                   scan_id=str(scan), target_id=str(t), status_code=200,
+                                   request_headers={"Authorization": f"Bearer fidelity-{n}"})
+        async with pool.acquire() as c:
+            await archive_http_transactions(c, [tx(1)], store=_default_store(tmp_path), scan_id=str(scan))
+            # No key while recording the second call: its headers are not archived.
+            monkeypatch.setattr(secret_store, "_fernet", None)
+            monkeypatch.setattr(secret_store, "_loaded", True)
+            await archive_http_transactions(c, [tx(2)], store=_default_store(tmp_path), scan_id=str(scan))
+            # Restored with a different key: the first call's sealed headers cannot be read.
+            monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", Fernet.generate_key().decode())
+            monkeypatch.setattr(secret_store, "_loaded", False)
+            rows = await read_transactions(c, scan_id=str(scan))
+        assert [r["payload_unavailable"] for r in rows] == [["request_headers"], ["request_headers"]]
+        stats = {"attempted": 2, "stored": 2, "failed": 0, "dropped": 0}
+        document = export_document(rows, export_format="transactions", redaction="raw",
+                                   owner={"scan_id": str(scan)}, total=2, stats=stats)
+        assert document["fidelity"] == "partial" and "unavailable" in document["fidelity_detail"]
+        assert document["transactions"][0]["payload_unavailable"] == ["request_headers"]
+    run(scenario)

@@ -191,5 +191,10 @@ async def run_unified_startup(pool: Any, baseline: Any) -> None:
                 except ModuleNotFoundError:
                     from api.runtime.ai_template_secrets import encrypt_stored_templates
                 await encrypt_stored_templates(conn)
+                try:
+                    from runtime.archive_blob_secrets import encrypt_stored_blobs
+                except ModuleNotFoundError:
+                    from api.runtime.archive_blob_secrets import encrypt_stored_blobs
+                await encrypt_stored_blobs(conn)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(8675309)")

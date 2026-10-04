@@ -153,7 +153,23 @@ async def read_transactions(
         f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
-    return [dict(row) for row in rows]
+    try:
+        from runtime.archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
+    except ModuleNotFoundError:  # package import layout
+        from .archive_blob_secrets import PAYLOAD_FIELDS, reveal_payload
+    revealed = []
+    for row in rows:
+        row = dict(row)
+        metadata = _decoded(row.get("metadata_json")) or {}
+        unavailable = set(metadata.get("payloads_unavailable") or ()) if isinstance(metadata, dict) else set()
+        for key in PAYLOAD_FIELDS:
+            row[key], lost = reveal_payload(row.get(key))
+            if lost:
+                unavailable.add(key)
+        if unavailable:
+            row["payload_unavailable"] = sorted(unavailable)
+        revealed.append(row)
+    return revealed
 
 
 async def count_transactions(
@@ -406,6 +422,8 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
         "error": item.get("error"),
         "truncated": bool(item.get("truncated")),
         "capture": item.get("metadata_json") or {},
+        # Payloads this call recorded but the archive cannot show (see the export fidelity).
+        "payload_unavailable": list(item.get("payload_unavailable") or ()),
     }
 
 
@@ -427,6 +445,15 @@ def export_document(
     fidelity, fidelity_detail = archive_fidelity(
         stats or {}, total=archive_total if archive_total is not None else total,
     )
+    # A recorded call whose headers or body could not be archived or decrypted is shown with its
+    # metadata, but the archive does not claim it holds that call completely.
+    missing = sum(1 for row in rows if row.get("payload_unavailable"))
+    if missing:
+        note = (f"{missing} recorded call(s) have payloads that are unavailable: archived without "
+                "an encryption key, or sealed with a key this install does not have")
+        fidelity, fidelity_detail = (
+            ("partial", note) if fidelity == "complete" else (fidelity, f"{fidelity_detail}; {note}")
+        )
     redaction_detail = (
         "Verbatim captured traffic; headers, cookies, request bodies, response bodies, and "
         "URL credentials may contain secrets. Treat this export as sensitive."

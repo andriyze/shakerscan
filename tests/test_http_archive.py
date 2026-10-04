@@ -716,8 +716,23 @@ def test_scan_capture_preserves_wire_identity_and_truncation_metadata():
     assert item.metadata["response_digest_scope"] == "prefix"
 
 
+def _enable_archive_encryption(monkeypatch):
+    """Raw payloads are sealed with the credential key before storage; the normal install
+    has one. Enable it so this exercises the keyed dedup path, not the no-key drop path."""
+    from cryptography.fernet import Fernet
+    try:
+        import secret_store
+    except ModuleNotFoundError:
+        from api import secret_store
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_store, "_fernet", None)
+    monkeypatch.setattr(secret_store, "_loaded", False)
+
+
 @pytest.mark.asyncio
-async def test_archive_batch_reuses_identical_evidence_blobs():
+async def test_archive_batch_reuses_identical_evidence_blobs(monkeypatch):
+    _enable_archive_encryption(monkeypatch)
+
     class Conn:
         def __init__(self):
             self.blob_inserts = 0
@@ -749,6 +764,40 @@ async def test_archive_batch_reuses_identical_evidence_blobs():
     assert await archive_http_transactions(conn, transactions, store=stored) == 2
     assert conn.blob_inserts == 2, "one shared header object and one shared body object"
     assert conn.blob_insert_statements == 1, "all unique blobs use one DB insert statement"
+
+
+@pytest.mark.asyncio
+async def test_archive_drops_raw_payloads_when_the_encryption_key_is_unavailable(monkeypatch):
+    """Without a key, raw payloads are not written in clear: no blob is stored, and the
+    transaction records which payloads are unavailable so fidelity can report the gap."""
+    try:
+        import secret_store
+    except ModuleNotFoundError:
+        from api import secret_store
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", "")
+    monkeypatch.setattr(secret_store, "_fernet", None)
+    monkeypatch.setattr(secret_store, "_loaded", True)  # unavailable, do not try to persist
+
+    rows = []
+
+    class Conn:
+        async def fetch(self, query, *params):
+            return []
+
+        async def execute(self, query, *params):
+            if "INSERT INTO http_transactions" in query or "INSERT INTO evidence_objects" in query:
+                rows.append((query, params))
+            return "INSERT 0 1"
+
+    conn = Conn()
+    transactions = [HttpTransaction(
+        plane="scan", scan_id="11111111-1111-4111-8111-111111111111", method="GET",
+        url="https://t/x", request_headers={"authorization": "Bearer leak"}, response_body=b"body")]
+    assert await archive_http_transactions(conn, transactions, store=lambda c: {}) == 1
+    assert not any("INSERT INTO evidence_objects" in q for q, _ in rows), "no raw blob stored"
+    tx_params = next(p for q, p in rows if "INSERT INTO http_transactions" in q)
+    serialized = json.dumps(tx_params, default=str)
+    assert "Bearer leak" not in serialized and "payloads_unavailable" in serialized
 
 
 @pytest.mark.asyncio
