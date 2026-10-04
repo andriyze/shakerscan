@@ -35,7 +35,7 @@ try:
     from capabilities.network import NetworkExecutionAdapter, network_capability_adapter
     from capabilities.browser import XSSBrowserProofAdapter
     from capabilities.request_mutation import RequestMutationVerificationAdapter
-    from capabilities.sqli_proof import SQLiProofAdapter
+    from capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
@@ -98,7 +98,7 @@ except (ImportError, ModuleNotFoundError):
     from ..capabilities.network import NetworkExecutionAdapter, network_capability_adapter
     from ..capabilities.browser import XSSBrowserProofAdapter
     from ..capabilities.request_mutation import RequestMutationVerificationAdapter
-    from ..capabilities.sqli_proof import SQLiProofAdapter
+    from ..capabilities.sqli_proof import SQLiProofAdapter, SQLiProofError
     from ..capabilities.nosqli_verify import NoSQLiVerifyAdapter
     from ..capabilities.authz_surface import (
         AUTHZ_SURFACE_PARSER_VERSION,
@@ -1844,14 +1844,44 @@ class DatabaseNeutralScanActionDispatcher:
             if sub_budget.get("http_requests", 0) < 4:
                 break
             specification = CAPABILITY_REGISTRY.require(action.capability_name)
-            adapter = SQLiProofAdapter(
-                specification=specification,
-                target=self.target,
-                request=request,
-                candidate=proof_candidate,
-                transport=PinnedAiohttpReplayTransport(),
-                requested_budget=sub_budget,
-            )
+            # Constructing the adapter validates this candidate's request against the
+            # sub-budget -- a body candidate in a slice whose reservation tier carries
+            # no state_changing_requests cannot be funded, for one example. That is one
+            # candidate's problem, not the slice's: record it as a failed attempt with a
+            # reason and keep proving the rest, instead of letting the raise abort the
+            # whole batch.
+            try:
+                adapter = SQLiProofAdapter(
+                    specification=specification,
+                    target=self.target,
+                    request=request,
+                    candidate=proof_candidate,
+                    transport=PinnedAiohttpReplayTransport(),
+                    requested_budget=sub_budget,
+                )
+            except SQLiProofError as exc:
+                attempt = {
+                    "attempt_id": attempt_id, "candidate_id": candidate_id,
+                    "status": "failed", "timed_out": False,
+                    "budget_consumed": {},
+                    "observations": ({
+                        "kind": "candidate_attempt",
+                        "attempt_id": attempt_id,
+                        "candidate_id": candidate_id,
+                        "family": "sqli_proof",
+                        "status": "failed",
+                        "proof_state": "not_proven",
+                        "budget_consumed": {},
+                    },),
+                    "errors": (f"sqli_proof_unconstructable:{exc}",),
+                    "proof_state": "not_proven",
+                }
+                await checkpoint_attempt(action.action_id, attempt)
+                attempt_statuses.append({"status": "failed", "timed_out": False})
+                attempted += 1
+                observations.extend(attempt["observations"])
+                errors.append(str(attempt["errors"][0]))
+                continue
             result = await CapabilityExecutor().execute(
                 CapabilityExecutionContext(
                     specification=specification,

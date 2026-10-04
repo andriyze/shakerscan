@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import html
 import json
 import math
 import re
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import urllib.parse
 
 try:
@@ -16,6 +17,7 @@ try:
         RequestMutationVerificationError,
         replace_private_request_field,
     )
+    from capabilities.sql_error_signatures import SQL_ERROR_PATTERNS
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
@@ -25,6 +27,7 @@ except ModuleNotFoundError:
         RequestMutationVerificationError,
         replace_private_request_field,
     )
+    from .sql_error_signatures import SQL_ERROR_PATTERNS
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
@@ -37,21 +40,10 @@ except ModuleNotFoundError:
 
 
 SQLI_PROOF_PARSER_VERSION = "sqli-proof/v1"
-_SQL_ERROR_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
-    r"you have an error in your sql syntax",
-    r"warning.{0,40}mysql",
-    r"unclosed quotation mark after the character string",
-    r"postgresql.{0,40}(?:error|exception)",
-    r"pg_query\(\)",
-    # SQLITE_ERROR is the constant SQLite itself emits, and the separator was
-    # not optional: the pattern matched "sqlite3_exception" but not the far more
-    # common "SQLITE_ERROR", so an error-based injection that reproduced its
-    # differential twice was still withheld for want of a signature.
-    r"sqlite(?:3)?[ _-]?(?:error|exception)",
-    r"ora-\d{4,5}",
-    r"sqlstate\[[0-9a-z]+\]",
-    r"syntax error.{0,80}(?:sql|query|database)",
-))
+# The database-error signatures are shared with the upstream request verifier
+# (capabilities/sql_error_signatures) so the set that gates escalation and the
+# set that confirms proof cannot drift apart.
+_SQL_ERROR_PATTERNS = SQL_ERROR_PATTERNS
 _SECRET_RE = re.compile(
     r"(?i)(password|passwd|secret|token|authorization|cookie)\s*[:=]\s*[^\s,;<]{1,200}"
 )
@@ -116,6 +108,40 @@ def _mutate(request: ReplayRequest, field_path: str, replacement: str) -> Replay
     except RequestMutationVerificationError as exc:
         raise SQLiProofError(str(exc)) from exc
     return mutated
+
+
+def _reflection_variants(values: Sequence[str]) -> tuple[str, ...]:
+    """Every wire form a reflected value could take in a response body.
+
+    The raw value plus its URL-encoded, JSON-escaped and HTML-escaped forms, for
+    each supplied value. Longer variants are returned first so that a payload is
+    stripped before the shorter original value it embeds.
+    """
+    variants: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        variants.add(value)
+        variants.add(urllib.parse.quote(value, safe=""))
+        variants.add(urllib.parse.quote_plus(value))
+        variants.add(json.dumps(value)[1:-1])
+        variants.add(html.escape(value))
+    return tuple(sorted(variants, key=len, reverse=True))
+
+
+def _reflection_free_key(
+    result: ReplayTransportResult, variants: Sequence[str],
+) -> tuple[int, str]:
+    """A (status, body) comparison key with every reflected value removed.
+
+    A boolean differential is only meaningful once the input the endpoint merely
+    echoes back is cancelled out: an endpoint returning ``{"q": <input>}`` differs
+    for every distinct payload without any query ever reaching a database.
+    """
+    text = result.response_body[:2_000_000].decode("utf-8", errors="replace")
+    for variant in variants:
+        text = text.replace(variant, "")
+    return (result.status_code, text)
 
 
 def _identity_signal(result: ReplayTransportResult) -> tuple[str, ...]:
@@ -199,11 +225,19 @@ class SQLiProofAdapter:
         attempted = 0
         results: list[ReplayTransportResult] = []
 
+        budget = self.requested_budget["http_requests"]
+
         async def send(request: ReplayRequest) -> ReplayTransportResult:
             nonlocal attempted
             if cancelled():
                 raise SQLiProofError("cancelled")
-            remaining = max(1, self.requested_budget["http_requests"] - attempted)
+            # A stage must never spend past its reservation. Stages are gated on the
+            # remaining budget below; this is the hard ceiling that keeps the actual
+            # usage this adapter reports at or under what the executor reserved even
+            # if that gating were ever wrong.
+            if attempted >= budget:
+                raise SQLiProofError("budget_exhausted")
+            remaining = max(1, budget - attempted)
             wall = max(1, int(self.requested_budget.get("tool_wall_seconds") or 1))
             result = await self.transport.send(
                 request, target=self.target,
@@ -237,9 +271,14 @@ class SQLiProofAdapter:
             ):
                 proof_contract = "sqli_error_differential/v2"
                 technique = "error_based_repeated"
-            elif request_class == "safe_authentication":
+            elif request_class == "safe_authentication" and budget - attempted >= 4:
                 injection = _mutate(self.request, self.field, "' OR 1=1-- ")
                 auth_pairs = [(await send(control_request), await send(injection)) for _ in range(2)]
+                # The identity signal is an asymmetric header/JSON-token test: it must
+                # be absent from the invalid control and present on the bypass payload.
+                # A reflected payload string cannot satisfy that -- the control reflects
+                # its own invalid value just the same -- so this branch does not need
+                # the boolean branch's reflection normalization.
                 if all(
                     not control.error_code and not payload.error_code
                     and not _identity_signal(control)
@@ -253,19 +292,43 @@ class SQLiProofAdapter:
                     proof_contract = "sqli_authentication_bypass/v1"
                     technique = "authentication_bypass_repeated"
                     proof_pairs = auth_pairs
-            else:
-                true_request = _mutate(self.request, self.field, f"{original}' AND '1'='1")
-                false_request = _mutate(self.request, self.field, f"{original}' AND '1'='2")
+            elif request_class != "safe_authentication" and budget - attempted >= 4:
+                true_payload = f"{original}' AND '1'='1"
+                false_payload = f"{original}' AND '1'='2"
+                true_request = _mutate(self.request, self.field, true_payload)
+                false_request = _mutate(self.request, self.field, false_payload)
                 boolean_pairs = [(await send(true_request), await send(false_request)) for _ in range(2)]
-                signatures = [(
-                    item[0].status_code, len(item[0].response_body), _sha256(item[0].response_body),
-                    item[1].status_code, len(item[1].response_body), _sha256(item[1].response_body),
-                ) for item in boolean_pairs]
-                if signatures[0] == signatures[1] and signatures[0][:3] != signatures[0][3:]:
+                # A boolean differential requires the TRUE payload to reproduce the
+                # control (baseline) response and the FALSE payload to diverge from
+                # it, repeated. The comparison first strips every reflected value --
+                # the original and both payloads, in each wire form -- so an endpoint
+                # that only echoes its input back can never satisfy it: once the echo
+                # is removed, TRUE and FALSE both collapse onto the baseline. The
+                # controls were already sent in the error stage, so this needs no
+                # extra requests.
+                variants = _reflection_variants((original, true_payload, false_payload))
+                baseline_keys = [_reflection_free_key(control, variants) for control, _p in pairs]
+                true_keys = [_reflection_free_key(true, variants) for true, _f in boolean_pairs]
+                false_keys = [_reflection_free_key(false, variants) for _t, false in boolean_pairs]
+                no_errors = all(
+                    not left.error_code and not right.error_code
+                    for left, right in (*pairs, *boolean_pairs)
+                )
+                stable = true_keys[0] == true_keys[1] and false_keys[0] == false_keys[1]
+                true_matches_baseline = all(
+                    true_keys[index] == baseline_keys[index] for index in (0, 1)
+                )
+                false_differs_from_baseline = all(
+                    false_keys[index] != baseline_keys[index] for index in (0, 1)
+                )
+                if (
+                    no_errors and stable
+                    and true_matches_baseline and false_differs_from_baseline
+                ):
                     proof_contract = "sqli_boolean_differential/v1"
                     technique = "boolean_pair_repeated"
                     proof_pairs = boolean_pairs
-                elif self.requested_budget["http_requests"] - attempted >= 6:
+                elif budget - attempted >= 6:
                     # Time proof is deliberately last: it is slower, and verification
                     # requires three controls and three payloads rather than one delay.
                     time_payload = str(

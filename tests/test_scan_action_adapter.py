@@ -880,6 +880,108 @@ def test_one_unresolvable_candidate_does_not_fail_the_whole_verify_batch(monkeyp
     )
 
 
+def test_one_unconstructable_sqli_proof_candidate_does_not_fail_the_whole_batch(monkeypatch):
+    """A candidate whose SQLiProofAdapter cannot be constructed fails only its attempt.
+
+    The adapter's constructor validates each candidate's request against its sub-budget
+    (a body candidate in a slice whose reservation tier carries no state_changing
+    dimension, for instance) and raises SQLiProofError. That raise happens outside the
+    executor, in the batch loop, so before the per-candidate guard it aborted the whole
+    sqli.prove_batch action and every other candidate lost its verdict.
+    """
+    scan_id = str(uuid.uuid4())
+    endpoint_manifest = build_endpoint_manifest(
+        scan_id=scan_id,
+        target_binding_digest=TARGET.digest,
+        surface_manifest={
+            "schema_version": "endpoint-manifest/v2",
+            "status": "complete",
+            "reason": None,
+            "endpoints": [
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/one", "concrete_path": "/one",
+                 "query_keys": ["id"], "source": "web.crawl"},
+                {"method": "GET", "scheme": "https", "host": "app.example.test", "port": 443,
+                 "normalized_path": "/two", "concrete_path": "/two",
+                 "query_keys": ["product"], "source": "web.crawl"},
+            ],
+        },
+        source_action_ids=("discover.web_crawl",),
+    )
+    candidates = build_candidate_manifest(
+        endpoint_manifest, source_action_ids=("discover.web_crawl",), maximum=10,
+    )
+    signal_observations = tuple(
+        {"kind": "candidate_attempt", "candidate_id": entry["candidate_id"],
+         "proof_state": "suspected"}
+        for entry in candidates.entries
+    )
+    dependency = _action("verify.sqli.00000", "sqli.verify_batch", 0)
+    action = _action(
+        "prove.sqli.00000", "sqli.prove_batch", 1,
+        capability_args={
+            "candidate_manifest_ref": candidates.reference().canonical_dict(),
+            "endpoint_manifest_ref": endpoint_manifest.reference().canonical_dict(),
+            "slice": {"start": 0, "count": 2},
+        },
+        dependencies=("verify.sqli.00000",),
+    )
+    plan = ScanActionPlan(
+        scan_id=scan_id, execution_plan_digest="a" * 64,
+        target_binding_digest=TARGET.digest, actions=(dependency, action),
+    )
+
+    real_adapter = action_adapter_module.SQLiProofAdapter
+    seen = {"raised": False}
+
+    def flaky_adapter(**kwargs):
+        if not seen["raised"]:
+            seen["raised"] = True
+            raise action_adapter_module.SQLiProofError(
+                "body SQLi proof requires a conservative mutation reservation"
+            )
+        return real_adapter(**kwargs)
+
+    executed = []
+
+    async def execute(_self, context, adapter, **_kwargs):
+        executed.append(adapter)
+        return CapabilityAdapterResult(
+            status="success",
+            actual_budget={name: 1 for name in context.requested_budget},
+            observations=({"kind": "sqli_proof", "proof_state": "not_proven",
+                           "finding_verdict": "not_proven", "proof_contract": None},),
+            execution_started=True, parser_version="sqli-proof/v1",
+        )
+
+    monkeypatch.setattr(action_adapter_module, "SQLiProofAdapter", flaky_adapter)
+    monkeypatch.setattr(action_adapter_module.CapabilityExecutor, "execute", execute)
+    backend = Backend(
+        manifests={
+            endpoint_manifest.manifest_id: endpoint_manifest,
+            candidates.manifest_id: candidates,
+        },
+        observations={"verify.sqli.00000": signal_observations},
+    )
+    dispatcher = _dispatcher(
+        plan, backend,
+        policy=ScanPolicy(active_testing=True, approval_receipt_id="approval-1"),
+    )
+
+    result = asyncio.run(dispatcher(action, _lease(plan, action), _noop))
+
+    assert result.status != "failed", result.status
+    assert len(executed) == 1, "the constructable candidate must still execute"
+    attempts = backend.attempts[action.action_id]
+    assert len(attempts) == 2
+    statuses = sorted(str(item.get("status")) for item in attempts.values())
+    assert statuses == ["failed", "success"], statuses
+    assert any(
+        "sqli_proof_unconstructable" in str(err)
+        for item in attempts.values() for err in (item.get("errors") or ())
+    )
+
+
 def test_browser_proof_attempts_fragment_candidate_without_server_signal(monkeypatch):
     scan_id = str(uuid.uuid4())
     endpoint_manifest = build_endpoint_manifest(
