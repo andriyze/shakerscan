@@ -1138,3 +1138,40 @@ def test_unavailable_payloads_are_reported_and_fidelity_is_partial(tmp_path, mon
         assert document["fidelity"] == "partial" and "unavailable" in document["fidelity_detail"]
         assert document["transactions"][0]["payload_unavailable"] == ["request_headers"]
     run(scenario)
+
+
+def test_externally_stored_payloads_read_back_and_a_lost_file_is_reported(tmp_path, monkeypatch):
+    """A payload above the inline ceiling is written to a file: the reader must load it, and a
+    file that is gone must make the export partial rather than show the body as absent."""
+    _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    monkeypatch.delenv("EVIDENCE_INLINE_MAX_BYTES", raising=False)
+    from runtime.http_archive import archive_recorded_calls
+    from runtime.http_archive_reader import export_document, read_transactions
+
+    body = '{"orders": [' + ",".join(f'{{"id": {n}, "note": "café"}}' for n in range(2000)) + ']}'
+    assert len(body.encode()) > 40 * 1024
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        async with pool.acquire() as c:
+            await archive_recorded_calls(c, [_large_tx(scan, t, 1, body.encode())], results_dir=tmp_path,
+                                         label="external payload", owner_kind="scan", owner_id=str(scan))
+            rows = await read_transactions(c, scan_id=str(scan), results_dir=tmp_path)
+            stats = {"attempted": 1, "stored": 1, "failed": 0, "dropped": 0}
+            files = list((tmp_path / "evidence-objects").rglob("*.json"))
+            assert len(files) == 1 and "orders" not in files[0].read_text()
+            document = export_document(rows, export_format="transactions", redaction="raw",
+                                       owner={"scan_id": str(scan)}, total=1, stats=stats)
+            assert document["fidelity"] == "complete", document["fidelity_detail"]
+            assert document["transactions"][0]["response"]["body"] == body
+            har = export_document(rows, export_format="har", redaction="raw",
+                                  owner={"scan_id": str(scan)}, total=1, stats=stats)
+            assert har["log"]["entries"][0]["response"]["content"]["text"] == body
+            files[0].unlink()
+            rows = await read_transactions(c, scan_id=str(scan), results_dir=tmp_path)
+        assert rows[0]["payload_unavailable"] == ["response_body"] and rows[0]["response_body"] is None
+        document = export_document(rows, export_format="transactions", redaction="raw",
+                                   owner={"scan_id": str(scan)}, total=1, stats=stats)
+        assert document["fidelity"] == "partial"
+    run(scenario)

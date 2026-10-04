@@ -25,8 +25,10 @@ This document records only the current product boundary and genuinely unfinished
   decrypted only when an archive view reads them; a database dump or a backup without the key
   holds no captured credential. Payloads recorded before this are encrypted at startup, and the
   step is retried until every copy is sealed. A payload that cannot be archived (no key) or read
-  (a different key) is listed under the call's `payload_unavailable`, and the export reports
-  partial fidelity rather than complete.
+  (a different key, or an external file or object that is gone) is listed under the call's
+  `payload_unavailable`, and the export reports partial fidelity rather than complete. One read
+  loads a bounded number of externally stored bytes; a payload past that bound is listed under
+  `payload_omitted` and the export is likewise partial.
 - Hunt exposes requests-only export separately from its explicit decision record/debrief. Hidden
   chain-of-thought is never an export product.
 - Content-addressed evidence and external blobs must not be deleted before durable ownership and
