@@ -557,7 +557,17 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "templates.scan",
-            "Reviewed target-bound GET-only Nuclei template scan.",
+            # Target-bound Nuclei template scan. Hunt runs the reviewed GET-only
+            # passive pack through this spec (options swapped server-side); the
+            # deterministic Scan's active batch runs it under an authorization-aware
+            # selection that includes non-GET templates only when state-changing
+            # HTTP is authorized (see scan/nuclei_template_index.py). Mutation
+            # authority and the state-changing budget are declared on the planned
+            # templates.active_batch capability; this per-attempt adapter keeps its
+            # Hunt-passive placement so an active-but-not-state-changing Hunt still
+            # runs the GET-only pack.
+            "Target-bound Nuclei template scan; non-GET templates run only when "
+            "state-changing HTTP is authorized.",
             "external_tool", "active", _HTTP_TARGETS, "nuclei", "1",
             "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
             {
@@ -653,14 +663,26 @@ CAPABILITY_REGISTRY = CapabilityRegistry(
         ),
         CapabilitySpec(
             "templates.active_batch",
-            "Active Nuclei pack over one immutable endpoint slice.",
+            # The active Nuclei family may send state-changing methods: its
+            # authorization-aware selection (scan/nuclei_template_index.py) runs
+            # non-GET templates only when state-changing HTTP is authorized, and
+            # always excludes intrusive/destructive templates. The state-changing
+            # budget is reserved only when that authority is granted and settled to
+            # the requests actually sent when non-GET templates were in the run.
+            "Active Nuclei pack over one immutable endpoint slice; may send "
+            "state-changing methods when authorized.",
             "internal", "active", _HTTP_TARGETS, "nuclei.batch", "1",
-            "active_testing", {"http_requests": 4_000, "tool_wall_seconds": 300},
+            "active_testing", {
+                "http_requests": 4_000,
+                "state_changing_requests": 4_000,
+                "tool_wall_seconds": 300,
+            },
             {
                 "network_reachability": True,
                 "binary": "nuclei",
                 "single_worker_batch": True,
                 "durable_attempt_checkpoints": True,
+                "state_changing_http": True,
             },
             _schema({
                 "target_ref": {"type": "string"},

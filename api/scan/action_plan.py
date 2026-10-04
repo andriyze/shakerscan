@@ -198,6 +198,15 @@ def batch_profile_shape(
             if int(query_floor.get(dimension, 0)) > 0
         ]
         size = min(size, min(mixed_capacities)) if mixed_capacities else size
+    if allow_state_changing_http and capability_name == "templates.active_batch":
+        # Active Nuclei may send non-GET templates once state-changing HTTP is
+        # authorized. Reserve a conservative mutation hold equal to the slice's
+        # request ceiling -- every request could be a mutation. The selection
+        # resolver still restricts the templates actually run, and the adapter
+        # settles this to the requests actually sent only when non-GET templates
+        # were in the run. When the authority is absent this dimension is never
+        # reserved and the slice stays GET-only.
+        budget["state_changing_requests"] = int(budget.get("http_requests", 0))
     return max(1, size), MappingProxyType(budget)
 
 
@@ -1341,7 +1350,7 @@ class ScanActionPlanCompiler:
                         "xss.verify_batch", "sqli.verify_batch",
                         "xss.request_verify_batch", "sqli.request_verify_batch",
                         "sqli.prove_batch", "xss.browser_prove_batch",
-                        "nosqli.verify_batch",
+                        "nosqli.verify_batch", "templates.active_batch",
                     }
                     and not policy.allow_state_changing_http
                 ):
