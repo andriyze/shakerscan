@@ -101,3 +101,43 @@ def test_severity_filter_narrows_the_selection():
     )
     assert selection.skip is True
     assert selection.skip_reason == "no_eligible_nuclei_templates"
+
+
+def _write_template(root, relpath, text):
+    path = root / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def test_unreadable_raw_request_line_counts_as_a_mutation(tmp_path):
+    _write_template(tmp_path, "http/exposures/templated-verb.yaml", """id: templated-verb
+info:
+  name: templated verb
+  severity: high
+  tags: exposure
+http:
+  - raw:
+      - |
+        GET /status HTTP/1.1
+        Host: {{Hostname}}
+      - |
+        {{verb}} /status HTTP/1.1
+        Host: {{Hostname}}
+""")
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    assert record.state_changing
+    selection = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=False)
+    assert selection.skip is True and selection.template_ids == ()
+
+
+def test_shared_template_id_is_classified_by_every_template_that_carries_it(tmp_path):
+    header = "info:\n  name: shared\n  severity: high\n  tags: exposure{extra}\n"
+    _write_template(tmp_path, "http/a/shared.yaml", "id: shared-id\n" + header.format(extra="")
+                    + "http:\n  - method: GET\n    path:\n      - '{{BaseURL}}/a'\n")
+    _write_template(tmp_path, "http/b/shared.yaml", "id: shared-id\n" + header.format(extra=",intrusive")
+                    + "http:\n  - method: PUT\n    path:\n      - '{{BaseURL}}/b'\n")
+    (record,) = build_nuclei_method_index(str(tmp_path)).templates
+    assert record.methods == frozenset({"GET", "PUT"}) and record.intrusive
+    for allowed in (False, True):
+        selection = resolve_active_nuclei_selection(str(tmp_path), allow_state_changing_http=allowed)
+        assert "shared-id" not in selection.template_ids

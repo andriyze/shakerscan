@@ -52,6 +52,7 @@ _RAW_METHOD_RE = re.compile(r"\s*(?:@[^\n]*\n\s*)*([A-Z]+)\s")
 _TEMPLATE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 # Default ignore list, used only when the bundle ships no ``.nuclei-ignore``.
 _DEFAULT_IGNORE_TAGS = frozenset({"dos", "local", "fuzz", "bruteforce", "txt-service"})
+_UNKNOWN_METHOD = "UNKNOWN"
 _DEFAULT_SEVERITIES = ("high", "critical")
 _DEFAULT_TAGS = ("exposure", "misconfig", "auth-bypass", "default-login")
 
@@ -131,8 +132,9 @@ def _template_methods(document: Mapping[str, Any]) -> frozenset[str]:
         if isinstance(raw_requests, list):
             for raw in raw_requests:
                 match = _RAW_METHOD_RE.match(str(raw))
-                if match:
-                    methods.add(match.group(1).upper())
+                # A request line we cannot read (e.g. a templated {{method}}) could send
+                # anything, so it counts as a mutation rather than as a GET.
+                methods.add(match.group(1).upper() if match else _UNKNOWN_METHOD)
         if not method and not request.get("raw"):
             # A bare request with neither an explicit method nor a raw block is a GET.
             methods.add("GET")
@@ -181,8 +183,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
     if not os.path.isdir(root):
         raise FileNotFoundError(f"nuclei http template directory is absent: {root}")
     ignore_tags, ignore_files = _parse_ignore(templates_dir)
-    records: list[_TemplateRecord] = []
-    seen: set[str] = set()
+    records: dict[str, _TemplateRecord] = {}
     parse_errors = 0
     for dirpath, _dirs, files in os.walk(root):
         for filename in files:
@@ -204,7 +205,7 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
             if not isinstance(info, Mapping):
                 continue
             template_id = str(document.get("id") or "").strip().lower()
-            if not template_id or template_id in seen:
+            if not template_id:
                 continue
             tags = _as_tag_set(info.get("tags"))
             if tags & ignore_tags:
@@ -215,16 +216,27 @@ def build_nuclei_method_index(templates_dir: str) -> NucleiMethodIndex:
             if not methods:
                 # No HTTP request block we can classify -- not an executable http template.
                 continue
-            seen.add(template_id)
-            records.append(_TemplateRecord(
+            record = _TemplateRecord(
                 template_id=template_id,
                 severity=str(info.get("severity") or "").strip().lower(),
                 tags=tags,
                 methods=methods,
                 intrusive="intrusive" in tags,
-            ))
+            )
+            prior = records.get(template_id)
+            if prior is not None:
+                # `-id` runs every template carrying the id, so a shared id is classified
+                # by the union of what its templates send and whether any is intrusive.
+                record = _TemplateRecord(
+                    template_id=template_id,
+                    severity=prior.severity,
+                    tags=prior.tags | record.tags,
+                    methods=prior.methods | record.methods,
+                    intrusive=prior.intrusive or record.intrusive,
+                )
+            records[template_id] = record
     return NucleiMethodIndex(
-        templates=tuple(records),
+        templates=tuple(records.values()),
         ignore_tags=ignore_tags,
         ignore_files=ignore_files,
         parse_errors=parse_errors,
