@@ -88,6 +88,23 @@ check_equal "API version" "$(jq -r '.scanner_version' <<<"$api_health")" "$VERSI
 check_equal "UI version" "$(jq -r '.ui_version' <<<"$ui_identity")" "$VERSION"
 check_equal "worker identity" "$(jq -r '.worker_build.fleet_uniform' <<<"$api_health")" "true"
 
+# Only release certification supplies a candidate receipt. Source-build smoke remains a diagnostic
+# run. Digest claims are derived from Docker's running-container and digest-image inspections.
+release_binding_args=()
+if [ -n "${INSTALLED_STACK_SMOKE_CANDIDATE_RECEIPT:-}" ]; then
+    release_binding_args=(
+        --candidate "$INSTALLED_STACK_SMOKE_CANDIDATE_RECEIPT"
+        --project "$PROJECT" --runtime "$RUNTIME" --snapshot "$SMOKE_ROOT/release-images.json"
+    )
+    python3 "$ROOT_DIR/scripts/release_deployment_subject.py" "${release_binding_args[@]}"
+fi
+bind_release_receipt() {
+    if [ "${#release_binding_args[@]}" -gt 0 ]; then
+        python3 "$ROOT_DIR/scripts/release_deployment_subject.py" \
+            "${release_binding_args[@]}" --bind-receipt "$1"
+    fi
+}
+
 session="$(curl -fsS "http://127.0.0.1:$UI_PORT/api/model-intake/operator-credential")"
 check_equal "local session reason" "$(jq -r '.reason' <<<"$session")" "local_session"
 check_equal "local session availability" "$(jq -r '.available' <<<"$session")" "true"
@@ -148,6 +165,7 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
         SHAKERSCAN_E2E_MODEL_INTAKE_OPERATOR_ORIGIN="http://127.0.0.1:$UI_PORT" \
         SHAKERSCAN_RELEASE_DECLARED_DEBT="${SHAKERSCAN_RELEASE_DECLARED_DEBT:-}" \
         python3 "$ROOT_DIR/tests/e2e/run_e2e.py" "${e2e_args[@]}"
+    bind_release_receipt "$scorecard_path"
     check_equal "exact-image E2E gate" "$(jq -r '.gate' "$scorecard_path")" "pass"
     if [ -n "${INSTALLED_STACK_SMOKE_DAST_RECALL_JSON:-}" ]; then
         recall_path="$INSTALLED_STACK_SMOKE_DAST_RECALL_JSON"
@@ -158,6 +176,7 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
             --target-url "juice_shop=http://juice-shop:3000" \
             --auth-target-url "juice_shop=http://127.0.0.1:$JUICE_PORT" || benchmark_status=$?
         cp "$ROOT_DIR/results/benchmark-runs/benchmark-juice_shop.json" "$recall_path"
+        bind_release_receipt "$recall_path"
         # --enforce-quality exits non-zero on a quality-bar shortfall. When the
         # release owner has authorized waiving that shortfall for this version the
         # measured card is still produced (certification records it as declared
@@ -190,6 +209,9 @@ if [ "${INSTALLED_STACK_SMOKE_E2E:-0}" = "1" ]; then
             --env-file "$RUNTIME/.env" -f "$RUNTIME/docker-compose.release.yml" \
             exec -T -w /app api python /tmp/run_scan_action_resume.py --json \
             > "$fault_dir/scan-action-resume.json"
+        for fault_receipt in "$fault_dir"/scan-*.json; do
+            bind_release_receipt "$fault_receipt"
+        done
         check_equal "cancellation race" "$(jq -r '.passed' "$fault_dir/scan-cancellation-race.json")" "true"
         check_equal "reservation identity" "$(jq -r '.passed' "$fault_dir/scan-reservation-identity.json")" "true"
         check_equal "action resume" "$(jq -r '.passed' "$fault_dir/scan-action-resume.json")" "true"

@@ -120,15 +120,11 @@ def _decoded(value: Any) -> Any:
 
 
 def _body_text(value: Any) -> str | None:
-    """The exported body. ``project`` has already decoded the stored JSON once, so a string is
-    the body itself and is kept verbatim: decoding it again re-serialized every JSON response
-    with other spacing and escapes. Only a JSON string is unwrapped once more, for payloads
-    stored double-encoded before the blob writer stopped encoding serialized JSON twice."""
+    """Project already decoded the storage serialization; strings are wire text."""
     if value is None:
         return None
     if isinstance(value, str):
-        decoded = _decoded(value)
-        return decoded if isinstance(decoded, str) else value
+        return value
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).decode("utf-8", errors="replace")
     return json.dumps(value)
@@ -211,6 +207,7 @@ async def read_transactions(
                 value, lost = None, True  # not the payload this row recorded
             if key in _BODY_FIELDS:
                 value = _legacy_bytes_repr(value, recorded_sha256=row.get(f"{key}_sha256"))
+                value = _legacy_json_string(value, recorded_sha256=row.get(f"{key}_sha256"))
             row[key] = value
             if lost:
                 unavailable.add(key)
@@ -227,7 +224,9 @@ def _is_external(storage_uri: Any) -> bool:
     return isinstance(storage_uri, str) and bool(storage_uri) and not storage_uri.startswith("inline:")
 
 
-def _read_external_payloads(storage_uris: Sequence[str], *, results_dir: Path) -> dict[str, str | None]:
+def _read_external_payloads(
+    storage_uris: Sequence[str], *, results_dir: Path, budget: int,
+) -> tuple[dict[str, str | None], set[str]]:
     """The stored text of each externalized payload, None where it cannot be read.
 
     Reads through the evidence store, so local paths stay contained under the results
@@ -236,41 +235,62 @@ def _read_external_payloads(storage_uris: Sequence[str], *, results_dir: Path) -
     checked after decryption instead.
     """
     loaded: dict[str, str | None] = {}
+    omitted: set[str] = set()
+    remaining = max(0, int(budget))
     for storage_uri in storage_uris:
+        if not remaining:
+            omitted.add(storage_uri)
+            continue
         try:
-            content = hydrate_evidence_content(
-                {"storage_uri": storage_uri}, results_dir=results_dir,
-            ).get("content")
+            result = hydrate_evidence_content(
+                {"storage_uri": storage_uri}, results_dir=results_dir, max_stored_bytes=remaining,
+            )
+            remaining -= min(remaining, max(0, int(result.get("storage_bytes_read") or 0)))
+            if result.get("storage_status") == "budget_exceeded":
+                omitted.add(storage_uri)
+                continue
+            content = result.get("content")
         except Exception:  # noqa: BLE001 - one unreadable object must not fail the export
             content = None
         loaded[storage_uri] = content if isinstance(content, str) else None
-    return loaded
+    return loaded, omitted
 
 
 async def _load_external_payloads(
     rows: Sequence[Mapping[str, Any]], fields: Sequence[str], *, results_dir: Path, budget: int,
 ) -> tuple[dict[str, str | None], set[str]]:
     """Load the external payloads these rows reference, each once, within the byte budget."""
-    sizes: dict[str, int] = {}
+    wanted: dict[str, None] = {}
     for row in rows:
         for key in fields:
             storage_uri = row.get(f"{key}_storage_uri")
-            if row.get(key) is None and _is_external(storage_uri) and storage_uri not in sizes:
-                sizes[storage_uri] = max(0, int(row.get(f"{key}_size_bytes") or 0))
-    wanted: list[str] = []
-    omitted: set[str] = set()
-    used = 0
-    for storage_uri, size in sizes.items():
-        if used + size > max(0, int(budget)):
-            omitted.add(storage_uri)
-            continue
-        used += size
-        wanted.append(storage_uri)
+            if row.get(key) is None and _is_external(storage_uri):
+                wanted.setdefault(storage_uri, None)
     if not wanted:
-        return {}, omitted
+        return {}, set()
     # File and S3 reads block; keep them off the event loop.
-    loaded = await asyncio.to_thread(_read_external_payloads, wanted, results_dir=results_dir)
-    return loaded, omitted
+    return await asyncio.to_thread(
+        _read_external_payloads, tuple(wanted), results_dir=results_dir, budget=budget,
+    )
+
+
+def _legacy_json_string(value: Any, *, recorded_sha256: Any) -> Any:
+    """Unwrap an old extra JSON encoding only when the wire digest proves it.
+
+    A valid JSON string body (including its quotes/whitespace) otherwise looks identical
+    to double-encoded legacy text. Missing provenance must not guess away wire bytes.
+    """
+    text = _decoded(value)
+    if not isinstance(text, str) or not recorded_sha256:
+        return value
+    if hmac.compare_digest(hashlib.sha256(text.encode()).hexdigest(), str(recorded_sha256)):
+        return value
+    unwrapped = _decoded(text)
+    if isinstance(unwrapped, str) and hmac.compare_digest(
+        hashlib.sha256(unwrapped.encode()).hexdigest(), str(recorded_sha256),
+    ):
+        return json.dumps(unwrapped)
+    return value
 
 
 def _names_plaintext(value: Any, content_sha256: Any) -> bool:

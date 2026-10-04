@@ -4,6 +4,8 @@ import asyncio
 import json
 import urllib.parse
 
+import pytest
+
 from api.capabilities.nosqli_verify import NoSQLiVerifyAdapter
 from api.check_registry import get_check_family
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
@@ -162,6 +164,38 @@ def test_json_body_operator_authentication_bypass_is_critical_class():
     assert proof["technique"] == "operator_auth_bypass_repeated"
     assert proof["session_state_discarded"] is True
     assert proof["secret_values_visible"] is False
+
+
+@pytest.mark.parametrize(("status", "token"), [(200, False), (403, False), (500, True)])
+def test_authentication_challenge_cookie_is_not_an_operator_bypass(status, token):
+    class ChallengeTransport:
+        async def send(self, request, **_kwargs):
+            password = json.loads(request.body)["password"]
+            operator = isinstance(password, dict)
+            return _result(
+                status if operator else 401,
+                b'{"authentication":{"token":"challenge-secret"}}' if operator and token
+                else b'{"challenge":"complete verification"}' if operator
+                else b'{"error":"invalid credentials"}',
+                {"Content-Type": "application/json", **(
+                    {"Set-Cookie": "challenge=challenge-secret"} if operator else {}
+                )},
+            )
+
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/rest/user/login",
+            body=json.dumps({"email": "a@b.test", "password": "guess"}),
+            content_type="application/json",
+        ),
+        {"candidate_id": "c" * 64, "method": "POST", "field_path": "password",
+         "request_class": "safe_authentication", "request_ref_id": "exact-request"},
+        ChallengeTransport(),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert result.actual_budget["http_requests"] == 4
+    assert "challenge-secret" not in json.dumps(result.observations)
 
 
 def test_json_body_candidate_tests_declared_siblings_after_its_anchor():

@@ -76,9 +76,6 @@ def authz_finding_records(
         identity = templated_finding_identity(finding)
         if not identity:
             continue
-        # The same route on another authorized service of this host is another endpoint:
-        # without the qualifier its proof overwrote the other service's verified row.
-        identity += service_identity_suffix(finding["url"], target_url=target_url)
         proof = finding["proof_contract_v2"]
         evidence.update({
             "schema_version": "hunt-deterministic-finding/v1",

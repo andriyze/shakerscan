@@ -72,6 +72,11 @@ Certification runs the exact-manifest installed-stack E2E, the stateful previous
 rollback (baseline digests read from `RELEASES.md`), the preservation matrix, the DAST recall
 benchmark, and the fault receipts, then seals the promotion-ready receipt.
 
+Release certification requires complete candidate image bindings on E2E, DAST, and fault receipts.
+The installed-stack runner inspects the digest-addressed images and every running application
+container before and after testing, and verifies the baked API release identity. Source-checkout
+diagnostics and caller-supplied digest claims cannot certify a release.
+
 Never deploy by a mutable version or `latest` during acceptance. Use the candidate tag or, for the
 strongest binding, the digests in the receipt. Any application-code change creates a new candidate
 SHA and requires a new candidate build.

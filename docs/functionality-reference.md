@@ -498,6 +498,12 @@ silently rewriting old evidence. The scan also returns:
 (`verification_engine.py`, `verification_phase.py`, `proof_of_exploit.py`) that produces reproducible
 evidence for high-severity findings.
 
+Endpoint finding fingerprints include the normalized service origin (scheme, host, and port),
+HTTP method, templated route, affected parameter names, and vulnerability/check. Scan and Hunt
+share this identity, including XSS client routes. Equivalent default-port spellings collapse;
+different services retain separate rows. Historical keys are adopted only with matching service
+and check provenance, preserving the row ID and its triage and verification history.
+
 **Attack-chain analysis** (`attack_chains.py`): correlates findings into exploitable chains with
 business impact. The nine implemented chain types (`CHAIN_TEMPLATES`) are
 `xss_to_account_takeover`, `sqli_to_privilege_escalation`, `ssrf_to_cloud_breach`,

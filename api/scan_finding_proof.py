@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
+try:
+    from finding_service_identity import finding_provenance_key
+except ModuleNotFoundError:
+    from scanner.finding_service_identity import finding_provenance_key
+
 ProofProjector = Callable[[dict[str, Any]], dict[str, Any]]
 # Every fingerprint a persisted row for a report finding can carry (finding_identity_keys).
 IdentityKeys = Callable[[dict[str, Any]], Iterable[str]]
@@ -69,7 +74,7 @@ def project_scan_finding_proof(
     Matching by any other key misses the row and lets its weaker stored projection win.
     """
     report_findings = report.get("findings") if isinstance(report, dict) else None
-    verified_fingerprints: set[str] = set()
+    verified_fingerprints: set[tuple] = set()
     for finding in report_findings if isinstance(report_findings, list) else []:
         if not isinstance(finding, dict):
             continue
@@ -79,11 +84,11 @@ def project_scan_finding_proof(
             finding["scan_time_proof_state"] = finding["proof_state"]
         finding.update({name: projection[name] for name in _PROOF_KEYS})
         if projection["is_verified"]:
-            verified_fingerprints.update(key for key in keys if key)
+            verified_fingerprints.update((key, finding_provenance_key(finding)) for key in keys if key)
 
     for row in persisted_rows:
         projection = project(row)
-        if not projection["is_verified"] and str(row.get("fingerprint") or "") in verified_fingerprints:
+        if not projection["is_verified"] and (str(row.get("fingerprint") or ""), finding_provenance_key(row)) in verified_fingerprints:
             projection = {"proof_state": "verified", "is_verified": True, "is_suspected": False}
         row.update({name: projection[name] for name in _PROOF_KEYS})
         for name in _PROJECTION_INPUTS:

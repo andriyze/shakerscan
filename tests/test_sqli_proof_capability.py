@@ -4,6 +4,8 @@ import asyncio
 import json
 import urllib.parse
 
+import pytest
+
 from api.capabilities.sqli_proof import SQLiProofAdapter
 from api.runtime.capability_registry import CAPABILITY_REGISTRY
 from api.runtime.models import TargetBinding
@@ -129,6 +131,41 @@ def test_safe_authentication_proof_detects_json_identity_without_leaking_it():
     assert proof["proof_contract"] == "sqli_authentication_bypass/v1"
     assert proof["session_state_discarded"] is True
     assert "worker-secret" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize(("status", "token"), [(200, False), (403, False), (500, True)])
+def test_authentication_challenge_cookies_and_failed_token_responses_are_not_proof(status, token):
+    class ChallengeTransport:
+        async def send(self, request, **_kwargs):
+            injected = "OR 1=1" in json.loads(request.body)["email"]
+            return ReplayTransportResult(
+                status_code=status if injected else 401,
+                connected_address="192.0.2.10", final_url=request.url,
+                response_headers={
+                    "Content-Type": "application/json",
+                    **({"Set-Cookie": "challenge=challenge-secret"} if injected else {}),
+                },
+                response_body=(
+                    b'{"authentication":{"token":"challenge-secret"}}' if injected and token
+                    else b'{"challenge":"complete verification"}' if injected
+                    else b'{"error":"invalid credentials"}'
+                ), elapsed_ms=10,
+            )
+
+    result = _run(
+        _request(
+            method="POST", url="https://app.example.test/login",
+            body='{"email":"nobody@example.test","password":"invalid"}',
+            content_type="application/json",
+        ),
+        {"candidate_id": "c" * 64, "method": "POST", "field_path": "email",
+         "request_class": "safe_authentication"},
+        ChallengeTransport(),
+    )
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert result.actual_budget["http_requests"] == 8
+    assert "challenge-secret" not in json.dumps(result.observations)
 
 
 

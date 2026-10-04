@@ -20,14 +20,18 @@ from typing import Any, Mapping
 import urllib.parse
 
 try:
+    from capabilities.authentication_proof import successful_token_signals
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
+    from runtime.request_shape import resolve_json_field_path
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:
+    from .authentication_proof import successful_token_signals
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
+    from ..runtime.request_shape import resolve_json_field_path
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 
 try:
@@ -134,32 +138,16 @@ def _json_document(request: ReplayRequest) -> Any:
 
 
 def _set_json_path(document: Any, field_path: str, value: Any) -> Any:
-    parts: list[Any] = []
-    for token in field_path.split("."):
-        parts.append(int(token) if token.lstrip("-").isdigit() else token)
-    cursor = document
-    for component in parts[:-1]:
-        # An array of objects is flattened to a dotted name (items, items.id), so a
-        # string segment landing on a list descends into its first element. Any
-        # other mismatch (a missing node, or a scalar where an object is required)
-        # is a malformed body shape, not proof -- fail closed rather than raise an
-        # uncaught TypeError/KeyError that would settle the whole batch as failed.
-        try:
-            if isinstance(cursor, list) and not isinstance(component, int):
-                cursor = cursor[0]
-            cursor = cursor[component]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise NoSQLiVerifyError(
-                "private JSON body shape does not match the candidate field path"
-            ) from exc
     try:
-        if isinstance(cursor, list) and not isinstance(parts[-1], int):
-            cursor = cursor[0]
-        cursor[parts[-1]] = value
-    except (IndexError, TypeError) as exc:
+        parts = resolve_json_field_path(document, field_path)
+    except ValueError as exc:
         raise NoSQLiVerifyError(
             "private JSON body shape does not match the candidate field path"
         ) from exc
+    cursor = document
+    for component in parts[:-1]:
+        cursor = cursor[component]
+    cursor[parts[-1]] = value
     return document
 
 
@@ -172,34 +160,7 @@ def _json_body(request: ReplayRequest, field_path: str, value: Any) -> ReplayReq
 
 
 def _identity_signal(result: ReplayTransportResult) -> bool:
-    for name, value in result.response_headers.items():
-        if str(name).lower() in {"set-cookie", "authorization", "x-auth-token"}:
-            return True
-    content_type = next((
-        str(value).lower() for name, value in result.response_headers.items()
-        if str(name).lower() == "content-type"
-    ), "")
-    if "json" in content_type and result.response_body:
-        try:
-            document = json.loads(result.response_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return False
-
-        def walk(value: Any) -> bool:
-            if isinstance(value, Mapping):
-                for raw_name, child in value.items():
-                    name = str(raw_name).lower()
-                    if name in {"token", "access_token", "id_token", "jwt", "authentication"} \
-                            and isinstance(child, str) and child.strip():
-                        return True
-                    if walk(child):
-                        return True
-            elif isinstance(value, list):
-                return any(walk(child) for child in value[:20])
-            return False
-
-        return walk(document)
-    return False
+    return bool(successful_token_signals(result))
 
 
 def _succeeded(result: ReplayTransportResult) -> bool:

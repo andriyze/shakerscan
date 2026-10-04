@@ -223,7 +223,7 @@ async def test_external_payload_reads_are_bounded_and_the_omission_is_stated(tmp
     assert first_body["storage_uri"].startswith("local:")
     # Room for one of the two externalized bodies, not both.
     rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path,
-                                   external_payload_budget=first_body["size_bytes"] + 64)
+                                   external_payload_budget=(tmp_path / "evidence-objects" / first_body["storage_uri"].split("evidence_objects/", 1)[1]).stat().st_size)
     assert _body(rows[0]) == LARGE_BODY and "payload_omitted" not in rows[0]
     assert rows[1]["response_body"] is None and rows[1]["payload_omitted"] == ["response_body"]
     document = export_document(rows, export_format="transactions", redaction="raw",
@@ -320,3 +320,46 @@ async def test_a_body_that_really_is_a_bytes_literal_is_kept_when_its_digest_say
     _legacy_row(db, text, body_sha256=hashlib.sha256(text.encode()).hexdigest())
     rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path)
     assert _body(rows[0]) == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b'"hello"', b'  "hello" \n', b'"\\u0068ello"', b'"quoted \\"text\\""'])
+async def test_raw_json_and_har_keep_json_string_body_wire_bytes(tmp_path, body):
+    db = ArchiveDB()
+    await _archive(db, tmp_path, _call(body, request_headers=None, response_headers=None, request_body=body))
+    rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path)
+    document = export_document(rows, export_format="transactions", redaction="raw",
+                               owner={"hunt_id": HUNT}, total=1, stats=dict(db.stats))
+    transaction = document["transactions"][0]
+    assert transaction["request"]["body"].encode() == body
+    assert transaction["response"]["body"].encode() == body
+    har = export_document(rows, export_format="har", redaction="raw",
+                          owner={"hunt_id": HUNT}, total=1, stats=dict(db.stats))
+    entry = har["log"]["entries"][0]
+    assert entry["request"]["postData"]["text"].encode() == body
+    assert entry["response"]["content"]["text"].encode() == body
+
+
+@pytest.mark.asyncio
+async def test_legacy_double_encoding_is_unwrapped_only_when_wire_digest_proves_it(tmp_path):
+    db = ArchiveDB()
+    _legacy_row(db, json.dumps("hello"), body_sha256=hashlib.sha256(b"hello").hexdigest())
+    rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path)
+    assert _body(rows[0]) == "hello"
+
+
+@pytest.mark.asyncio
+async def test_encrypted_file_overhead_is_part_of_read_budget_even_if_metadata_lies(tmp_path):
+    db = ArchiveDB()
+    await _archive(db, tmp_path, _call(b"x" * 40000, request_headers=None, response_headers=None))
+    [item] = db.objects.values()
+    path = tmp_path / "evidence-objects" / item["storage_uri"].split("evidence_objects/", 1)[1]
+    assert path.stat().st_size > item["size_bytes"]
+    budget = item["size_bytes"]
+    item["size_bytes"] = 1  # Stored plaintext size is not a trustworthy I/O allowance.
+    rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path, external_payload_budget=budget)
+    assert rows[0]["payload_omitted"] == ["response_body"]
+    assert rows[0]["response_body"] is None
+    rows = await read_transactions(db, hunt_run_id=HUNT, results_dir=tmp_path,
+                                   external_payload_budget=path.stat().st_size)
+    assert _body(rows[0]) == "x" * 40000

@@ -5,6 +5,11 @@ on:
     branches: [main, feat/2.3.0-dast-recall]
     paths:
       - 'api/hunt/**'
+      - 'api/scan/finding*'
+      - 'api/scan_finding_proof.py'
+      - 'scanner/findings.py'
+      - 'scanner/finding_service_identity.py'
+      - 'tests/test_finding*'
       - 'api/exposure/**'
       - 'tests/test_service_intelligence*'
       - 'api/investigation_candidates.py'
@@ -16,6 +21,11 @@ on:
   pull_request:
     paths:
       - 'api/hunt/**'
+      - 'api/scan/finding*'
+      - 'api/scan_finding_proof.py'
+      - 'scanner/findings.py'
+      - 'scanner/finding_service_identity.py'
+      - 'tests/test_finding*'
       - 'api/exposure/**'
       - 'tests/test_service_intelligence*'
       - 'api/investigation_candidates.py'
@@ -89,7 +99,8 @@ jobs:
         run: |
           test -n "$HUNT_TEST_POSTGRES_DSN"
           python -m pytest -q --junitxml=artifacts/hunt-authz-proof.xml \
-            tests/test_hunt_authz_proof_materialization.py
+            tests/test_hunt_authz_proof_materialization.py \
+            tests/test_finding_service_identity.py
       - name: Retain the test result for this exact revision
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

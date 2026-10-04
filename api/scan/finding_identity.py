@@ -12,11 +12,11 @@ import hashlib
 from typing import Any, Mapping
 
 try:
-    from findings import pre_check_templated_finding_identity, templated_finding_identity
+    from findings import pre_check_templated_finding_identity, pre_service_templated_finding_identity, templated_finding_identity
 except ModuleNotFoundError as exc:  # package layout in host-side tests
     if exc.name != "findings":
         raise
-    from scanner.findings import pre_check_templated_finding_identity, templated_finding_identity
+    from scanner.findings import pre_check_templated_finding_identity, pre_service_templated_finding_identity, templated_finding_identity
 
 
 def canonical_finding_fingerprint(finding: Mapping[str, Any]) -> str:
@@ -51,6 +51,9 @@ def finding_identity_keys(finding: Mapping[str, Any]) -> tuple[str, ...]:
     them all, so neither a current row nor an older one is missed.
     """
     keys = [canonical_finding_fingerprint(finding)]
+    pre_service = pre_service_templated_finding_identity(dict(finding))
+    if pre_service:
+        keys.append("t:" + hashlib.sha256(pre_service.encode()).hexdigest()[:16])
     try:
         pre_check = pre_check_templated_finding_identity(dict(finding))
     except Exception:

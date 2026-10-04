@@ -1,0 +1,268 @@
+"""Scan and Hunt identity uses absolute service provenance, with safe legacy adoption."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+import hashlib
+import json
+import os
+import uuid
+
+import pytest
+
+from api.hunt.deterministic_findings import (
+    _verified_xss_fingerprint,
+    _xss_finding_records,
+    materialize_verified_hunt_findings,
+)
+from api.scan.finding_identity import canonical_finding_fingerprint, finding_identity_keys
+from api.scan.finding_reconciliation import reconcile_legacy_finding_row
+from scanner.finding_service_identity import service_origin
+from scanner.findings import pre_service_templated_finding_identity, templated_finding_identity
+from tests.disposable_postgres import require_disposable_database
+
+
+def _finding(url, *, param="q"):
+    return {"url": url, "cwe": "CWE-79", "tool": "dalfox", "title": "Verified cross-site scripting",
+            "evidence": {"method": "GET", "param": param}}
+
+
+@pytest.mark.parametrize("url,origin", [
+    ("https://EXAMPLE.test./path", "https://example.test:443"),
+    ("https://example.test:443/path", "https://example.test:443"),
+    ("http://example.test/path", "http://example.test:80"),
+    ("http://example.test:8080/path", "http://example.test:8080"),
+    ("wss://EXAMPLE.test/socket", "wss://example.test:443"),
+    ("ws://example.test:8080/socket", "ws://example.test:8080"),
+    ("https://[2001:db8::1]:8443/path", "https://[2001:db8::1]:8443"),
+])
+def test_identity_always_names_the_normalized_absolute_service(url, origin):
+    finding = _finding(url)
+    assert service_origin(url) == origin
+    assert templated_finding_identity(finding).endswith("|service=" + origin)
+    previous = pre_service_templated_finding_identity(finding)
+    assert "|service=" not in previous
+    assert "t:" + hashlib.sha256(previous.encode()).hexdigest()[:16] in finding_identity_keys(finding)
+
+
+def test_default_ports_collapse_but_other_ports_schemes_and_params_stay_distinct():
+    implicit = canonical_finding_fingerprint(_finding("https://example.test/orders/1?q=payload"))
+    explicit = canonical_finding_fingerprint(_finding("https://EXAMPLE.test.:443/orders/9?q=other"))
+    assert implicit == explicit
+    variants = [
+        _finding("https://example.test:8443/orders/1?q=payload"),
+        _finding("http://example.test/orders/1?q=payload"),
+        _finding("https://other.test/orders/1?q=payload"),
+        _finding("https://example.test/orders/1?name=payload", param="name"),
+    ]
+    assert len({implicit, *(canonical_finding_fingerprint(f) for f in variants)}) == 5
+
+
+@pytest.mark.parametrize("baseline", [
+    "https://example.test", "https://example.test:443", "https://example.test:8443",
+    "http://example.test:8080",
+])
+@pytest.mark.parametrize("service", ["https://example.test", "https://example.test:8443"])
+def test_reflected_xss_scan_and_hunt_agree_independently_of_hunt_baseline(baseline, service):
+    proof = {"url": service + "/search?q=", "path": "/search", "param": "q"}
+    assert _verified_xss_fingerprint(proof, method="GET", target_url=baseline) == \
+        canonical_finding_fingerprint(_finding(proof["url"]))
+
+
+def test_dom_xss_scan_and_hunt_share_route_identity_without_collapsing_other_client_routes():
+    fingerprints = []
+    for service, route in [
+        ("https://example.test", "/search?q="),
+        ("https://example.test:443", "/search?q=another-value"),
+        ("https://example.test", "/profile?q="),
+        ("https://example.test:8443", "/search?q="),
+    ]:
+        records = _xss_finding_records(
+            uuid.uuid4(), uuid.uuid4(), "https://example.test:8080", "xss.verify", uuid.uuid4(),
+            {}, [{"kind": "xss_alert", "proof_state": "verified", "param": "q",
+                  "url": service + "/", "client_route": route, "payload_sha256": "a" * 64}],
+            allowed_origins=(service,),
+        )
+        assert len(records) == 1
+        record = records[0]
+        assert record["fingerprint"] == canonical_finding_fingerprint(record)
+        fingerprints.append(record["fingerprint"])
+    assert fingerprints[0] == fingerprints[1]
+    assert len(set(fingerprints)) == 3
+
+
+DDL = """
+CREATE TABLE targets(id uuid PRIMARY KEY, active_findings_count int DEFAULT 0, updated_at timestamptz);
+CREATE TABLE device_targets(LIKE targets INCLUDING ALL);
+CREATE TABLE hunt_runs(id uuid PRIMARY KEY);
+CREATE TABLE findings(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), target_id uuid REFERENCES targets(id),
+ device_target_id uuid REFERENCES device_targets(id), hunt_run_id uuid REFERENCES hunt_runs(id),
+ fingerprint text, title text, description text, severity text, cvss_score double precision,
+ tool text, cwe text, url text, evidence jsonb, source text, status text,
+ last_verification_status text, last_verification_verdict text, last_verification_confidence double precision,
+ last_verified_at timestamptz, verification_count int DEFAULT 0, resolved_at timestamptz,
+ resurfaced_count int DEFAULT 0, first_seen_at timestamptz DEFAULT now(),
+ last_seen_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+CREATE UNIQUE INDEX web_finding_key ON findings(target_id,fingerprint) WHERE target_id IS NOT NULL;
+CREATE UNIQUE INDEX device_finding_key ON findings(device_target_id,fingerprint) WHERE device_target_id IS NOT NULL;
+CREATE TABLE finding_verifications(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), finding_id uuid REFERENCES findings(id),
+ target_id uuid, device_target_id uuid, requested_by text, status text, result_status text,
+ verdict text, verdict_reason text, finding_type text, target_url text, original_url text,
+ proof jsonb, confidence double precision, verification_mode text, contract_id text,
+ contract_version text, proof_basis text, started_at timestamptz, completed_at timestamptz, updated_at timestamptz);
+"""
+
+
+@asynccontextmanager
+async def _database():
+    dedicated = os.environ.get("FINDING_SERVICE_TEST_POSTGRES_DSN")
+    dsn = dedicated or os.environ.get("HUNT_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("FINDING_SERVICE_TEST_POSTGRES_DSN is not configured")
+    require_disposable_database(dsn, "shakerscan_finding_service_test" if dedicated else "hunt_records")
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(dsn)
+    schema = "finding_service_" + uuid.uuid4().hex
+    try:
+        await conn.execute(f'CREATE SCHEMA "{schema}"')
+        await conn.execute(f'SET search_path TO "{schema}"')
+        await conn.execute(DDL)
+        yield conn
+    finally:
+        await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        await conn.close()
+
+
+@pytest.mark.parametrize("kind", ["web", "device"])
+def test_postgres_legacy_migration_keeps_id_history_and_separates_services(kind):
+    async def run():
+        async with _database() as conn:
+            target, hunt, action, receipt = (uuid.uuid4() for _ in range(4))
+            table = "device_targets" if kind == "device" else "targets"
+            column = "device_target_id" if kind == "device" else "target_id"
+            await conn.execute(f"INSERT INTO {table}(id) VALUES($1)", target)
+            await conn.execute("INSERT INTO hunt_runs(id) VALUES($1)", hunt)
+            baseline = "https://example.test"
+            service = "https://example.test:8443"
+
+            def observations(origin):
+                return [{"kind": "xss_alert", "proof_state": "verified", "param": "q",
+                         "url": origin + "/search?q=payload", "payload_sha256": "a" * 64}]
+
+            record = _xss_finding_records(
+                hunt, action, baseline, "xss.verify", receipt, {}, observations(service),
+                allowed_origins=(service,),
+            )[0]
+            previous = pre_service_templated_finding_identity(record)
+            old_key = "t:" + hashlib.sha256(previous.encode()).hexdigest()[:16]
+            row_id = await conn.fetchval(
+                f"""INSERT INTO findings({column},fingerprint,title,url,tool,cwe,evidence,status,
+                      verification_count,resurfaced_count,first_seen_at)
+                    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,'accepted_risk',3,2,now()-interval '30 days')
+                    RETURNING id""",
+                target, old_key, record["title"], record["url"], record["tool"], record["cwe"],
+                json.dumps(record["evidence"]),
+            )
+            await conn.execute("INSERT INTO finding_verifications(finding_id,verdict) VALUES($1,'exploited')", row_id)
+            first_seen = await conn.fetchval("SELECT first_seen_at FROM findings WHERE id=$1", row_id)
+            async with conn.transaction():
+                migrated = await reconcile_legacy_finding_row(
+                    conn, target_uuid=target, fingerprint=canonical_finding_fingerprint(record),
+                    finding=record, target_kind=kind,
+                )
+            assert migrated["id"] == row_id and migrated["status"] == "accepted_risk"
+            assert migrated["resurfaced_count"] == 2
+            assert await conn.fetchval("SELECT verification_count FROM findings WHERE id=$1", row_id) == 3
+            assert await conn.fetchval("SELECT count(*) FROM finding_verifications WHERE finding_id=$1", row_id) == 1
+            # Put it back under the historical key to exercise Hunt's real lazy
+            # reconciliation and upsert, rather than only the Scan-style helper.
+            await conn.execute("UPDATE findings SET fingerprint=$1 WHERE id=$2", old_key, row_id)
+            async with conn.transaction():
+                ids = await materialize_verified_hunt_findings(
+                    conn, hunt, action, target, baseline, "xss.verify", receipt, {}, observations(service),
+                    target_kind=kind, allowed_origins=(service,),
+                )
+            assert ids == [str(row_id)]
+            assert await conn.fetchval("SELECT first_seen_at FROM findings WHERE id=$1", row_id) == first_seen
+            assert await conn.fetchval("SELECT count(*) FROM finding_verifications WHERE finding_id=$1", row_id) == 2
+            await conn.execute("UPDATE findings SET status='false_positive' WHERE id=$1", row_id)
+            async with conn.transaction():
+                second = await materialize_verified_hunt_findings(
+                    conn, hunt, action, target, baseline, "xss.verify", receipt, {}, observations(baseline),
+                    target_kind=kind, allowed_origins=(baseline,),
+                )
+            assert second != ids
+            assert await conn.fetchval("SELECT count(*) FROM findings") == 2
+            assert await conn.fetchval("SELECT status FROM findings WHERE id=$1", row_id) == "false_positive"
+            assert await conn.fetchval("SELECT status FROM findings WHERE id=$1", uuid.UUID(second[0])) == "active"
+            assert await conn.fetchval("SELECT count(*) FROM finding_verifications WHERE finding_id=$1", row_id) == 2
+    asyncio.run(run())
+
+
+def test_postgres_concurrent_canonical_insert_does_not_abort_legacy_reconciliation():
+    async def run():
+        async with _database() as conn:
+            import asyncpg
+
+            target = uuid.uuid4()
+            await conn.execute("INSERT INTO targets(id) VALUES($1)", target)
+            finding = _finding("https://example.test/search?q=")
+            canonical = canonical_finding_fingerprint(finding)
+            previous = pre_service_templated_finding_identity(finding)
+            old_key = "t:" + hashlib.sha256(previous.encode()).hexdigest()[:16]
+            legacy_id = await conn.fetchval(
+                """INSERT INTO findings(target_id,fingerprint,title,url,tool,cwe,evidence,status,
+                     verification_count,resurfaced_count)
+                   VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,'accepted_risk',3,2) RETURNING id""",
+                target, old_key, finding["title"], finding["url"], finding["tool"], finding["cwe"],
+                json.dumps(finding["evidence"]),
+            )
+            await conn.execute("INSERT INTO finding_verifications(finding_id,verdict) VALUES($1,'exploited')", legacy_id)
+            concurrent_id = uuid.uuid4()
+            second = await asyncpg.connect(os.environ["FINDING_SERVICE_TEST_POSTGRES_DSN"])
+            schema = await conn.fetchval("SELECT current_schema()")
+            await second.execute(f'SET search_path TO "{schema}"')
+
+            class RacingConnection:
+                inserted = False
+
+                def transaction(self):
+                    return conn.transaction()
+
+                async def execute(self, query, *args):
+                    return await conn.execute(query, *args)
+
+                async def fetchrow(self, query, *args):
+                    row = await conn.fetchrow(query, *args)
+                    if "SELECT id FROM findings" in query and row is None and not self.inserted:
+                        # Force the real race window: canonical absent at the
+                        # guard, another committed writer wins before rekeying.
+                        self.inserted = True
+                        await second.execute(
+                            """INSERT INTO findings(id,target_id,fingerprint,title,url,status)
+                               VALUES($1,$2,$3,$4,$5,'false_positive')""",
+                            concurrent_id, target, canonical, finding["title"], finding["url"],
+                        )
+                    return row
+
+            proxy = RacingConnection()
+            try:
+                async with conn.transaction():
+                    adopted = await reconcile_legacy_finding_row(
+                        proxy, target_uuid=target, fingerprint=canonical, finding=finding,
+                    )
+                    # A unique-key race must not poison the caller's transaction.
+                    assert await conn.fetchval("SELECT 1") == 1
+                assert proxy.inserted
+                assert adopted["id"] == concurrent_id
+                legacy = await conn.fetchrow("SELECT * FROM findings WHERE id=$1", legacy_id)
+                assert legacy["fingerprint"] == old_key and legacy["status"] == "accepted_risk"
+                assert legacy["verification_count"] == 3 and legacy["resurfaced_count"] == 2
+                assert await conn.fetchval("SELECT count(*) FROM finding_verifications WHERE finding_id=$1", legacy_id) == 1
+                assert await conn.fetchval("SELECT count(*) FROM findings") == 2
+            finally:
+                await second.close()
+    asyncio.run(run())

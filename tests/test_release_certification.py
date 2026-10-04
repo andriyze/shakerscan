@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from scripts.certify_release_receipt import CertificationError, certify_receipt
+from scripts.release_deployment_subject import BINDING_SCHEMA, SNAPSHOT_SCHEMA, bind_receipt
+from scripts.release_image_inventory import RELEASE_IMAGES
 from scripts.validate_promotion_receipt import (
     PromotionReceiptError,
     validate_certification_checks,
@@ -25,6 +27,25 @@ def _write(tmp_path: Path, name: str, value: dict) -> Path:
     return path
 
 
+def _deployment_binding(revision: str = SOURCE) -> dict:
+    snapshot = {
+        "schema_version": SNAPSHOT_SCHEMA, "verification": "docker_inspect",
+        "source_revision": revision, "version": "9.9.9", "image_built": True,
+        "images": IMAGES,
+        "image_inspections": {
+            image["key"]: {
+                "image_id": f"sha256:{index + 100:064x}",
+                "repo_digests": [f"{image['repository']}@{IMAGES[image['key']]}"]
+            } for index, image in enumerate(RELEASE_IMAGES)
+        },
+        "containers": [{
+            "service": image["compose_services"][0], "container_id": f"{index + 200:064x}",
+            "image_id": f"sha256:{index + 100:064x}", "running": True,
+        } for index, image in enumerate(RELEASE_IMAGES)],
+    }
+    return {"schema_version": BINDING_SCHEMA, "before": snapshot, "after": snapshot}
+
+
 def _fault_subject(revision: str = SOURCE) -> dict:
     """The identity a fault producer reads from the API image's release manifest."""
     return {
@@ -32,6 +53,8 @@ def _fault_subject(revision: str = SOURCE) -> dict:
         "source_revision": revision,
         "scanner_version": "9.9.9",
         "image_built": True,
+        "images": IMAGES,
+        "deployment_binding": _deployment_binding(revision),
     }
 
 
@@ -77,6 +100,8 @@ def _evidence(tmp_path: Path):
             "schema_version": "shakerscan-e2e-subject/v1",
             "source_revision": SOURCE,
             "images": dict(sorted(IMAGES.items())),
+            "image_built": True,
+            "deployment_binding": _deployment_binding(),
         },
         "areas": [
             {
@@ -106,6 +131,9 @@ def _evidence(tmp_path: Path):
                 "schema_version": "shakerscan-benchmark-subject/v1",
                 "source_revision": SOURCE,
                 "identity_stable": True,
+                "image_built": True,
+                "images": IMAGES,
+                "deployment_binding": _deployment_binding(),
             },
             "fleet_uniform": True,
         },
@@ -371,6 +399,18 @@ def test_an_e2e_scorecard_from_other_images_cannot_certify(tmp_path):
         )
 
 
+@pytest.mark.parametrize("field", ("images", "deployment_binding", "image_built"))
+def test_an_e2e_scorecard_without_verified_image_binding_cannot_certify(tmp_path, field):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    e2e["subject"].pop(field)
+    paths["e2e_path"] = _write(tmp_path, "e2e.json", e2e)
+    with pytest.raises(CertificationError):
+        certify_receipt(
+            candidate=candidate, upgrade=upgrade, preservation=preservation, e2e=e2e,
+            source_sha=SOURCE, **paths,
+        )
+
+
 def test_an_e2e_scorecard_without_real_target_hunt_proof_cannot_certify(tmp_path):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
     hunt = next(item for item in e2e["areas"] if item["area"] == "hunt")
@@ -600,6 +640,8 @@ def test_a_receipt_from_another_revision_cannot_certify(tmp_path, key, revision)
 
 @pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
 @pytest.mark.parametrize("images", (
+    None,
+    {"api": IMAGES["api"]},
     {"api": FOREIGN_DIGEST},
     {**IMAGES, "scanner": FOREIGN_DIGEST},
     {"not_a_release_image": IMAGES["api"]},
@@ -616,7 +658,7 @@ def test_a_receipt_from_other_image_digests_cannot_certify(tmp_path, key, images
 
 
 @pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
-@pytest.mark.parametrize("images", (dict(IMAGES), {"api": IMAGES["api"]}))
+@pytest.mark.parametrize("images", (dict(IMAGES),))
 def test_a_receipt_recording_the_candidate_digests_certifies(tmp_path, key, images):
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
     value = json.loads(json.dumps(paths["external_evidence"][key][0]))
@@ -624,6 +666,37 @@ def test_a_receipt_recording_the_candidate_digests_certifies(tmp_path, key, imag
     _replace_external(tmp_path, paths, key, value)
     receipt = _certify(candidate, upgrade, preservation, e2e, paths)
     assert receipt["certification"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+@pytest.mark.parametrize("field", ("images", "deployment_binding", "image_built"))
+def test_a_source_only_or_uninspected_receipt_cannot_certify(tmp_path, key, field):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    value["subject"].pop(field)
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+def test_environment_revision_without_an_image_built_runtime_cannot_certify(tmp_path, key):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    value["subject"]["image_built"] = False
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError, match="image-built"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+
+@pytest.mark.parametrize("key", ("dast_quality", *FAULT_KEYS))
+def test_a_receipt_with_candidate_digest_claims_but_a_foreign_container_cannot_certify(tmp_path, key):
+    candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    value = json.loads(json.dumps(paths["external_evidence"][key][0]))
+    value["subject"]["deployment_binding"]["after"]["containers"][0]["image_id"] = FOREIGN_DIGEST
+    _replace_external(tmp_path, paths, key, value)
+    with pytest.raises(CertificationError, match="running container"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
 
 
 @pytest.mark.parametrize("fleet_uniform", (False, None))
@@ -680,7 +753,8 @@ def _produce_dast_receipt(tmp_path, monkeypatch, revisions):
         "quality_passed": True, "quality_enforced_passed": True,
         "quality_release_contract": {"status": "full_bar", "valid": True},
     })
-    monkeypatch.delenv("SHAKERSCAN_RELEASE_IMAGE_DIGESTS", raising=False)
+    # A caller's digest assertion must never be recorded as observed deployment identity.
+    monkeypatch.setenv("SHAKERSCAN_RELEASE_IMAGE_DIGESTS", json.dumps(IMAGES))
     monkeypatch.setattr(sys, "argv", [
         "benchmark_targets.py", "juice_shop", "--api", "http://127.0.0.1:38001", "--auth",
         "--enforce-quality", "--target-url", "juice_shop=http://juice-shop:3000",
@@ -696,7 +770,10 @@ def test_the_benchmark_produces_a_dast_receipt_that_certifies_its_own_candidate(
     dast = _produce_dast_receipt(tmp_path, monkeypatch, [SOURCE, SOURCE])
     assert dast["subject"]["source_revision"] == SOURCE
     assert dast["subject"]["identity_stable"] is True
+    assert "images" not in dast["subject"]
     candidate, upgrade, preservation, e2e, paths = _evidence(tmp_path)
+    binding = _deployment_binding()
+    dast = bind_receipt(dast, binding["before"], binding["after"], candidate)
     _replace_external(tmp_path, paths, "dast_quality", dast)
     assert _certify(candidate, upgrade, preservation, e2e, paths)["certification"]["status"] == "pass"
 
@@ -732,7 +809,12 @@ def test_fault_producers_bind_their_receipts_to_the_runtime_release_manifest(
     monkeypatch.setenv("SHAKERSCAN_RELEASE_MANIFEST", str(manifest))
     subject = module._receipt_subject()
     assert subject["source_revision"] == SOURCE and subject["image_built"] is True
-    _replace_external(tmp_path, paths, key, {"schema_version": schema, "passed": True, "subject": subject})
+    binding = _deployment_binding()
+    value = bind_receipt(
+        {"schema_version": schema, "passed": True, "subject": subject},
+        binding["before"], binding["after"], candidate,
+    )
+    _replace_external(tmp_path, paths, key, value)
     assert _certify(candidate, upgrade, preservation, e2e, paths)["certification"]["status"] == "pass"
 
     # A runtime built from another revision cannot certify this candidate.
@@ -741,6 +823,17 @@ def test_fault_producers_bind_their_receipts_to_the_runtime_release_manifest(
         "schema_version": schema, "passed": True, "subject": module._receipt_subject(),
     })
     with pytest.raises(CertificationError, match="different source revision"):
+        _certify(candidate, upgrade, preservation, e2e, paths)
+
+    # A source-checkout diagnostic may name GIT_COMMIT but remains ineligible for a release.
+    monkeypatch.setenv("SHAKERSCAN_RELEASE_MANIFEST", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("GIT_COMMIT", SOURCE)
+    diagnostic = module._receipt_subject()
+    assert diagnostic["source_revision"] == SOURCE and diagnostic["image_built"] is False
+    _replace_external(tmp_path, paths, key, {
+        "schema_version": schema, "passed": True, "subject": diagnostic,
+    })
+    with pytest.raises(CertificationError, match="image-built"):
         _certify(candidate, upgrade, preservation, e2e, paths)
 
     # An unidentifiable runtime records no revision and certifies nothing.

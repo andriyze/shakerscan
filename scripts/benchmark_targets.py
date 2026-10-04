@@ -157,8 +157,6 @@ WAIT_POLL_SECONDS = 30
 # covers both without letting the wait run unbounded.
 WAIT_MARGIN_MIN_SECONDS = 900
 WAIT_MARGIN_FRACTION = 0.10
-RELEASE_IMAGE_DIGESTS_ENV = "SHAKERSCAN_RELEASE_IMAGE_DIGESTS"
-_IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _get(url, timeout=30):
@@ -1585,29 +1583,12 @@ def cancel_scan(api, scan_id):
     return record
 
 
-def release_image_digests_from_env(environ=None):
-    """Image digests a release pipeline pinned for this run, recorded only when well formed."""
-    raw = str((environ if environ is not None else os.environ).get(RELEASE_IMAGE_DIGESTS_ENV) or "").strip()
-    if not raw:
-        return None
-    try:
-        images = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(images, dict) or not images or not all(
-        isinstance(key, str) and key and isinstance(value, str) and _IMAGE_DIGEST.fullmatch(value)
-        for key, value in images.items()
-    ):
-        return None
-    return dict(sorted(images.items()))
-
-
 def deployment_subject(api):
     """Identify the deployment this benchmark measured, from the deployment itself.
 
-    Certification binds the DAST receipt to the candidate through this: the revision is read from
-    the live API (an image-built stack reports its immutable release manifest), never from the
-    dispatching environment, so a run against another deployment cannot certify this candidate.
+    The revision comes from the live API. Release certification additionally requires the installed
+    stack runner's before/after Docker inspections; caller-supplied digests are not proof of which
+    images executed. Source-checkout diagnostics remain useful without release image bindings.
     """
     subject = {"schema_version": "shakerscan-benchmark-subject/v1"}
     try:
@@ -1622,9 +1603,6 @@ def deployment_subject(api):
             value = str(health.get(key) or "").strip()
             if value:
                 subject[key] = value
-    images = release_image_digests_from_env()
-    if images:
-        subject["images"] = images
     return subject
 
 

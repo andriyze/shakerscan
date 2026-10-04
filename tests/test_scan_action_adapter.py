@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
 import urllib.parse
 import uuid
 
@@ -2188,6 +2189,10 @@ def test_database_neutral_authz_uses_only_bound_endpoint_manifest(monkeypatch):
 
 
 def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypatch):
+    monkeypatch.setattr(
+        action_adapter_module, "nuclei_templates_directory",
+        lambda: str(Path(__file__).parent / "fixtures" / "nuclei_templates"),
+    )
     scan_id = str(uuid.uuid4())
     template_manifest = build_canonical_nuclei_template_manifest(
         scan_id=scan_id,
@@ -2253,9 +2258,9 @@ def test_database_neutral_nuclei_uses_only_digest_checked_template_pack(monkeypa
 
     assert receipt.status == "success"
     assert captured["scanner_options"]["severity"] == "high,critical"
-    assert captured["scanner_options"]["tags"] == (
-        "exposure,misconfig,auth-bypass,default-login"
-    )
+    assert captured["scanner_options"]["template_ids"] == "squid-analysis-report-generator"
+    assert captured["scanner_options"]["nuclei_active_state_changing"] is False
+    assert "tags" not in captured["scanner_options"]
     assert captured["scanner_options"]["template_pack_digest"] == (
         template_manifest.entries[0]["template_digest"]
     )

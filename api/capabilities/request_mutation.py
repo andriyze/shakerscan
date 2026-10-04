@@ -15,12 +15,14 @@ try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from runtime.capability_registry import CapabilitySpec
     from runtime.models import TargetBinding
+    from runtime.request_shape import resolve_json_field_path
     from runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 except ModuleNotFoundError:  # package imports in host-side tests
     from .sql_error_signatures import sql_error_signatures
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..runtime.capability_registry import CapabilitySpec
     from ..runtime.models import TargetBinding
+    from ..runtime.request_shape import resolve_json_field_path
     from ..runtime.request_replay_executor import ReplayTransport, ReplayTransportResult
 
 try:
@@ -160,10 +162,13 @@ def mutate_private_request(
             _json_paths(document), key=lambda item: _field_rank(item[0], family=family),
         )
         if field_path:
-            fields = [
-                item for item in fields
-                if ".".join(str(part) for part in item[0]) == str(field_path)
-            ]
+            try:
+                selected_path = resolve_json_field_path(document, field_path)
+            except ValueError as exc:
+                raise RequestMutationVerificationError(
+                    "private JSON request lacks the authorized mutation field"
+                ) from exc
+            fields = [item for item in fields if item[0] == selected_path]
         if not fields:
             raise RequestMutationVerificationError(
                 "private JSON request has no scalar mutation field"
@@ -176,7 +181,10 @@ def mutate_private_request(
         body = json.dumps(
             document, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
-        field_path = ".".join(str(item) for item in path)
+        # Keep the manifest's field identifier for proof escalation. An imported
+        # [] path and its resolved numeric path select the same leaf, but only the
+        # former appears in that candidate's public body-field authority.
+        field_path = field_path or ".".join(str(item) for item in path)
         encoding = "json"
     elif content_type == "application/x-www-form-urlencoded":
         try:
@@ -228,12 +236,13 @@ def replace_private_request_field(
             raise RequestMutationVerificationError(
                 "private JSON request body is invalid"
             ) from exc
-        fields = {
-            ".".join(str(part) for part in path): path
-            for path, _value in _json_paths(document)
-        }
-        path = fields.get(str(field_path))
-        if path is None:
+        try:
+            path = resolve_json_field_path(document, field_path)
+        except ValueError as exc:
+            raise RequestMutationVerificationError(
+                "private JSON request lacks the authorized mutation field"
+            ) from exc
+        if path not in {path for path, _value in _json_paths(document)}:
             raise RequestMutationVerificationError(
                 "private JSON request lacks the authorized mutation field"
             )

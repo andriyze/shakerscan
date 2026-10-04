@@ -10,6 +10,7 @@ keys exactly as before, and the same check on another object id or payload still
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import os
 import sys
@@ -77,8 +78,9 @@ def test_findings_whose_key_did_not_change_have_no_earlier_key(finding):
     assert pre_check_templated_finding_identity(finding) is None
 
 
-def test_a_cwe_finding_without_a_check_keeps_its_exact_key():
-    assert templated_finding_identity({"url": "http://h/orders/7", "cwe": "CWE-639"}) == "CWE-639|GET|/orders/{id}|"
+def test_a_cwe_finding_without_a_check_adds_its_service_to_the_route_key():
+    assert templated_finding_identity({"url": "http://h/orders/7", "cwe": "CWE-639"}) == \
+        "CWE-639|GET|/orders/{id}||service=http://h:80"
 
 
 def test_the_finalizer_names_the_check_of_every_tls_issue_and_missing_header(monkeypatch):
@@ -121,6 +123,10 @@ class _Rows:
     async def fetchrow(self, query, target_id, fingerprint):
         return self.rows.get(fingerprint)
 
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
     async def execute(self, query, fingerprint, row_id):
         old = next(key for key, row in self.rows.items() if row["id"] == row_id)
         self.rows[fingerprint] = self.rows.pop(old)
@@ -132,7 +138,8 @@ def test_the_collapsed_row_is_adopted_by_exactly_one_split_finding_with_its_tria
     """The old row carried the title last written to it. That check takes it over with its
     triage; the other check opens its own row instead of inheriting a disposition."""
     collapsed = {"id": uuid.uuid4(), "status": "accepted_risk", "resurfaced_count": 2,
-                 "title": UNTRUSTED["title"], "tool": "tls.inspect", "cwe": "CWE-295", "evidence": None}
+                 "title": UNTRUSTED["title"], "tool": "tls.inspect", "cwe": "CWE-295",
+                 "url": ORIGIN, "evidence": None}
     conn = _Rows({_fingerprint("CWE-295|GET|/|"): collapsed})
     adopted = {}
     for finding in order:
