@@ -45,16 +45,23 @@ class ScannerExecutionAdapter:
             if isinstance(self._process_payload.get("scanner_options"), Mapping)
             else {}
         )
-        self._state_changing = (
+        self._body_state_changing = (
             bool(scanner_options.get("body_field_names"))
             and str(scanner_options.get("method") or "GET").upper()
             not in {"GET", "HEAD", "OPTIONS"}
         )
+        # Active Nuclei runs non-GET templates only when state-changing HTTP is
+        # authorized; the server marks that here. The former "GET-only" settlement
+        # charged zero state-changing units for a run that POSTed credentials.
+        self._nuclei_state_changing = bool(
+            scanner_options.get("nuclei_active_state_changing")
+        )
+        self._state_changing = self._body_state_changing or self._nuclei_state_changing
         if self._state_changing and int(
             self._requested_budget.get("state_changing_requests") or 0
         ) < int(self._requested_budget.get("http_requests") or 0):
             raise ValueError(
-                "body scanner requires a conservative state-changing reservation"
+                "state-changing scanner requires a conservative state-changing reservation"
             )
         self.process_result: dict[str, Any] = {}
 
@@ -188,10 +195,22 @@ class ScannerExecutionAdapter:
                         self._requested_budget["http_requests"]
                     )
             if "state_changing_requests" in self._requested_budget:
-                actual["state_changing_requests"] = (
-                    int(self._requested_budget["state_changing_requests"])
-                    if self._state_changing and execution_started else 0
+                reserved_state_changing = int(
+                    self._requested_budget["state_changing_requests"]
                 )
+                if not (self._state_changing and execution_started):
+                    actual["state_changing_requests"] = 0
+                elif self._nuclei_state_changing and not self._body_state_changing:
+                    # Settle the mutation dimension to the HTTP requests actually
+                    # sent (conservative: the active run's reservation binds the two
+                    # equal), not the whole hold -- when non-GET templates were in
+                    # the run every request is counted as a possible mutation.
+                    actual["state_changing_requests"] = min(
+                        reserved_state_changing,
+                        int(actual.get("http_requests", reserved_state_changing)),
+                    )
+                else:
+                    actual["state_changing_requests"] = reserved_state_changing
             if "browser_actions" in self._requested_budget:
                 # A headless crawl emits no per-action telemetry we parse, so
                 # there is nothing exact to charge. Retain the full hold once

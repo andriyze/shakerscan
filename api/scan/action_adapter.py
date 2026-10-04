@@ -190,6 +190,10 @@ from .capability_execution import (
 )
 from .execution_backend import ActionHeartbeat, ActionLease
 from .finalizer import finalize_scan_report
+from .nuclei_template_index import (
+    nuclei_templates_directory,
+    resolve_active_nuclei_selection,
+)
 from .private_inputs import BrokerPrivateScanInputs
 from .work_manifests import (
     ScanWorkManifest,
@@ -2786,6 +2790,42 @@ class DatabaseNeutralScanActionDispatcher:
                 )
             except ScanWorkManifestError as exc:
                 raise ScanActionAdapterError(str(exc)) from exc
+        # Worker-process options carry the explicit template allowlist and control
+        # flags; the schema-validated capability input stays small (the allowlist
+        # can exceed the input-schema string ceiling and the control flags are not
+        # declared inputs). Default both to the manifest options for passive runs.
+        worker_template_options = dict(template_options)
+        args_template_options = dict(template_options)
+        if tool == "nuclei" and action.capability_name == "templates.active_batch":
+            selection = resolve_active_nuclei_selection(
+                nuclei_templates_directory(),
+                severities=template_options.get("severity"),
+                tags=template_options.get("tags"),
+                allow_state_changing_http=bool(self.policy.allow_state_changing_http),
+            )
+            if selection.skip:
+                # Fail closed: the active selection could not be resolved (index
+                # unavailable, or no permitted template once intrusive/non-GET
+                # exclusions apply). Record a coverage gap, never a clean result.
+                return self._skip(action, selection.skip_reason or "not_applicable")
+            worker_template_options = {
+                "severity": template_options.get("severity", "high,critical"),
+                "template_ids": ",".join(selection.template_ids),
+                "template_profile": "active",
+                "nuclei_active_state_changing": selection.includes_state_changing,
+            }
+            if template_options.get("template_pack_digest"):
+                worker_template_options["template_pack_digest"] = (
+                    template_options["template_pack_digest"]
+                )
+            # Keep only schema-declared, length-bounded fields in the capability
+            # input digest (no big id list, no worker control flags, no tag filter
+            # that the allowlist has already resolved).
+            args_template_options = {
+                key: template_options[key]
+                for key in ("severity", "template_pack_digest")
+                if key in template_options
+            }
         load_attempts = getattr(self.backend, "load_batch_attempts", None)
         checkpoint_attempt = getattr(self.backend, "checkpoint_batch_attempt", None)
         if not callable(load_attempts) or not callable(checkpoint_attempt):
@@ -2976,6 +3016,21 @@ class DatabaseNeutralScanActionDispatcher:
                         sub_budget["http_requests"] = min(
                             int(sub_budget.get("http_requests", 0)), state_changing,
                         )
+                elif tool == "nuclei" and worker_template_options.get(
+                    "nuclei_active_state_changing"
+                ):
+                    # Active Nuclei runs non-GET templates: conservatively every
+                    # request it sends may be a mutation, so bind the state-changing
+                    # reservation to the HTTP reservation exactly as a body attempt
+                    # does, so the adapter can settle it against requests sent.
+                    state_changing = int(sub_budget.get("state_changing_requests", 0))
+                    if state_changing > 0:
+                        sub_budget["http_requests"] = min(
+                            int(sub_budget.get("http_requests", 0)), state_changing,
+                        )
+                        sub_budget["state_changing_requests"] = int(
+                            sub_budget["http_requests"]
+                        )
                 if not sub_budget.get("http_requests") or not sub_budget.get("tool_wall_seconds"):
                     break
                 if retry_round and int(sub_budget["tool_wall_seconds"]) <= empty_timeouts.get(
@@ -2997,8 +3052,8 @@ class DatabaseNeutralScanActionDispatcher:
                 args = dict(primary.capability_args())
                 args.update(body_request)
                 if tool == "nuclei":
-                    scanner_options.update(template_options)
-                    args.update(template_options)
+                    scanner_options.update(worker_template_options)
+                    args.update(args_template_options)
                 elif tool == "dalfox":
                     scanner_options["severity"] = "high"
                     args["severity"] = "high"

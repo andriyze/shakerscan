@@ -2676,7 +2676,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `MODEL_INTAKE_SIGNER_URL` | `api/model_intake/router.py` |
 | `MODEL_INTAKE_TRUSTED_KEY_SHA256` | `scanner/scanner_tools/model_intake.py` |
 | `MODEL_INTAKE_TRUSTED_SIGNING_KEYS` | `scanner/scanner_tools/model_intake.py` |
-| `NUCLEI_TEMPLATES` | `scanner/scanner_tools/nuclei.py` |
+| `NUCLEI_TEMPLATES` | `api/scan/nuclei_template_index.py`, `scanner/scanner_tools/nuclei.py` |
 | `PARALLEL_SHARD_CONCURRENCY_HARD_MAX` | `api/worker.py` |
 | `PARALLEL_SHARD_MAX_PER_PARENT` | `api/worker.py` |
 | `PARALLEL_SHARD_REQUEUE_DELAY_SECONDS` | `api/worker.py` |
