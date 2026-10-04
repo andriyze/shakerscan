@@ -964,7 +964,7 @@ def build_parser() -> argparse.ArgumentParser:
     hunt_list = hunt_commands.add_parser("list", help="List Hunts using bounded server filters")
     hunt_list.add_argument("--target-id")
     hunt_list.add_argument("--status")
-    hunt_list.add_argument("--limit", type=int, choices=range(1, 201), default=50)
+    hunt_list.add_argument("--limit", type=int, choices=range(1, 201), default=50, metavar="N", help="1-200 (default: 50)")
 
     hunt_query = hunt_commands.add_parser("query", help="Query bounded Hunt context")
     hunt_query.add_argument("hunt_id")
@@ -973,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("summary", "endpoints", "findings", "principals", "services", "scans", "collections", "candidates", "notes", "receipts"),
     )
     hunt_query.add_argument("--filter", metavar="FILE", help="JSON object; use - for stdin")
-    hunt_query.add_argument("--limit", type=int, choices=range(1, 501), default=100)
+    hunt_query.add_argument("--limit", type=int, choices=range(1, 501), default=100, metavar="N", help="1-500 (default: 100)")
 
     hunt_call = hunt_commands.add_parser("call", help="Call one server-returned capability")
     hunt_call.add_argument("hunt_id")
