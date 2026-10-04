@@ -3,6 +3,7 @@
   "false_positive_risk": 1.0,
   "gates": {
     "active_execution_ok": true,
+    "bola_blocked_reason_if_single_user": true,
     "completion_telemetry_consistent": true,
     "grade_reliable": false,
     "min_expected_recall": false,

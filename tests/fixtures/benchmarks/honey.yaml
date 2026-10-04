@@ -2,6 +2,16 @@
 # Consumed by scripts/benchmark_targets.py. Honey exercises generic detectors
 # (data exposure, webhook bypass, approval bypass, path traversal, SQLi). The key
 # gate here is precision: broad categories without promoting weak evidence to High.
+#
+# `proof: deterministic` means proven by a deterministic proof contract -- the finding's server
+# `verified` flag, the same requirement as `proof: verified` -- and only proven matches count toward
+# expected_recall or a found category. A match by class, route and severity without that proof is
+# reported as expected_detected_unproven, a diagnostic never counted as found.
+#
+# min_categories_found counts the answer key's families (sensitive_exposure, webhook, approval,
+# path_traversal) with at least one expectation found with its required proof.
+# require_no_unproven_critical fails the run if ANY critical-severity finding in the report is not
+# verified, whether or not it matches an expectation.
 name: honey
 target_url: https://honey.shakerscan.com
 scan_options:

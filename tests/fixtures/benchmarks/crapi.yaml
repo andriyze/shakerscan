@@ -1,6 +1,8 @@
 # Benchmark scorecard fixture — crAPI (BOLA/Authz-focused DAST target).
 # Consumed by scripts/benchmark_targets.py. crAPI's headline class is multi-user
 # BOLA/IDOR, which requires two authenticated principals.
+# Every expectation here is `proof: verified`: only a finding the server marked verified (a
+# deterministic proof contract) counts toward expected_recall.
 name: crapi
 target_url: http://host.docker.internal:8888
 scan_options:
@@ -17,7 +19,9 @@ gates:
   min_expected_recall: 0.67    # 3 of the 4 expected classes
   min_verified_high_critical: 1
   require_verified_bola: true
-  # If only one user is supplied, BOLA must report a clear blocked reason, not a pass.
+  # If only one user is supplied, BOLA must report a clear blocked reason, not a pass: in a run
+  # without two scheduled principal contexts, no BOLA expectation may be found and each one's
+  # followup must be blocked_by missing_second_principal. Not applicable with two principals.
   bola_blocked_reason_if_single_user: true
 
 expected:
