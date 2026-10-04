@@ -20,6 +20,13 @@ RUNTIME_SCRIPTS = {
     "_api_cli": "api_cli.py",
     "_scan_cli": "scan_cli.py",
 }
+# Helpers the runtime scripts import by their own names (``from mcp_stdio import serve``), as
+# they sit side by side in scripts/. The client carries them as ``shakerscan._<name>``.
+RUNTIME_HELPERS = {
+    "_mcp_stdio": "mcp_stdio.py",
+    "_mcp_ssh_stream": "mcp_ssh_stream.py",
+    "_api_stream": "api_stream.py",
+}
 # The agent kit as packaged (`_kit/claude` stands for the repository's `.claude`).
 KIT_PARTS = {"skills": "skills", ".claude": "claude", "AGENTS.md": "AGENTS.md"}
 
@@ -45,6 +52,12 @@ def load(name: str) -> ModuleType:
     """Return the vendored runtime module ``name`` (``_mcp`` or ``_v2_cli``)."""
     if name not in RUNTIME_SCRIPTS:
         raise ValueError(f"unknown runtime module {name!r}")
+    for helper, filename in RUNTIME_HELPERS.items():
+        sys.modules.setdefault(Path(filename).stem, _import(helper, filename))
+    return _import(name, RUNTIME_SCRIPTS[name])
+
+
+def _import(name: str, filename: str) -> ModuleType:
     qualified = f"shakerscan.{name}"
     if qualified in sys.modules:
         return sys.modules[qualified]
@@ -59,7 +72,7 @@ def load(name: str) -> ModuleType:
             f"{qualified} is not part of this installation and no repository checkout is beside it; "
             "reinstall the shakerscan client"
         )
-    path = scripts / RUNTIME_SCRIPTS[name]
+    path = scripts / filename
     spec = importlib.util.spec_from_file_location(qualified, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")

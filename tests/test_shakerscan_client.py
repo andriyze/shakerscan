@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,6 +25,7 @@ sys.path.insert(0, str(CLIENT / "homebrew"))
 import hatch_build  # noqa: E402
 import render_formula  # noqa: E402
 from shakerscan import __version__, cli  # noqa: E402
+from shakerscan import _vendored  # noqa: E402
 from shakerscan._vendored import kit_sources, load  # noqa: E402
 
 ONE_LINER = "curl -fsSL https://install.shakerscan.com | sh"
@@ -85,6 +88,77 @@ def test_the_build_vendors_the_runtime_scripts_and_the_agent_kit(tmp_path):
     (tmp_path / "bare" / "src" / "shakerscan").mkdir(parents=True)
     with pytest.raises(RuntimeError, match="vendored runtime sources not found"):
         hatch_build.plan_force_include("wheel", tmp_path / "bare")
+
+
+def _sibling_imports(script: Path) -> set[str]:
+    """The scripts/ modules ``script`` imports, as bare names (``mcp_stdio``, ``scripts.mcp_stdio``)."""
+    siblings = {path.stem for path in script.parent.glob("*.py")}
+    found = set()
+    for node in ast.walk(ast.parse(script.read_text(encoding="utf-8"))):
+        names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names = [node.module]
+        for name in names:
+            name = name.removeprefix("scripts.")
+            if name in siblings:
+                found.add(name)
+    return found
+
+
+def test_every_helper_a_vendored_script_imports_is_vendored_too():
+    # #297 added scripts/mcp_stdio.py to the MCP adapter but not to the build, so the published
+    # client failed `shakerscan mcp` on its first request while `mcp --help` still passed.
+    scripts = ROOT / "scripts"
+    vendored = {Path(name).stem for name in hatch_build.VENDORED}
+    for name in vendored:
+        missing = _sibling_imports(scripts / f"{name}.py") - vendored
+        assert not missing, f"scripts/{name}.py imports {sorted(missing)}, which the client does not vendor"
+    loader = {**_vendored.RUNTIME_SCRIPTS, **_vendored.RUNTIME_HELPERS}
+    assert {filename: module + ".py" for module, filename in loader.items()} == hatch_build.VENDORED
+
+
+def test_the_installed_client_layout_starts_mcp_and_resolves_its_helpers(tmp_path):
+    """Assemble the wheel's files outside the checkout and run them: no ../scripts to fall back on."""
+    site = tmp_path / "site"
+    shutil.copytree(SRC / "shakerscan", site / "shakerscan", ignore=shutil.ignore_patterns("__pycache__"))
+    for source, target in hatch_build.plan_force_include("wheel", CLIENT).items():
+        if Path(source).is_dir():
+            shutil.copytree(source, site / target)
+        else:
+            shutil.copyfile(source, site / target)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SHAKERSCAN_")}
+    env.update({"PYTHONPATH": str(site), "SHAKERSCAN_CONFIG_DIR": str(tmp_path / "config")})
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}},
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "shakerscan", "mcp"],
+        input=json.dumps(initialize) + "\n",
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout.splitlines()[0])
+    assert response["id"] == 1 and response["result"]["serverInfo"]["name"] == "shakerscan", response
+    # The SSH progress stream and `shakerscan api --stream` import their helpers only when used.
+    helpers = (
+        "from shakerscan._vendored import load\n"
+        "load('_mcp'), load('_api_cli')\n"
+        "from mcp_ssh_stream import ssh_events\n"
+        "from api_stream import stream_response\n"
+        "import shakerscan._mcp_ssh_stream as packaged\n"
+        f"assert packaged.__file__.startswith({str(site)!r}), packaged.__file__\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", helpers], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _fake_engine(home: Path, version: str = "2.3.4") -> Path:

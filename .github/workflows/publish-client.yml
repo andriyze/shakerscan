@@ -75,6 +75,10 @@ jobs:
           /tmp/client-venv/bin/python -m pip install --disable-pip-version-check dist/*.whl
           /tmp/client-venv/bin/shakerscan version | grep -F "shakerscan client ${{ steps.version.outputs.version }}"
           /tmp/client-venv/bin/shakerscan mcp --help >/dev/null
+          # --help never starts the server: answer a real MCP initialize, outside the checkout so
+          # no ../scripts can stand in for a module the wheel forgot (scripts/mcp_stdio.py, #297).
+          initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
+          (cd /tmp && printf '%s\n' "$initialize" | /tmp/client-venv/bin/shakerscan mcp | grep -F '"serverInfo"')
           /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli, shakerscan._api_cli, shakerscan._scan_cli"
           # Every documented command must be reachable with no engine installed.
           for command in connect disconnect agent api scan mcp hunt doctor version; do
@@ -86,6 +90,7 @@ jobs:
           python -m build --wheel --outdir /tmp/from-sdist/dist /tmp/from-sdist/shakerscan-*
           /tmp/client-venv/bin/python -m pip install --disable-pip-version-check --force-reinstall /tmp/from-sdist/dist/*.whl
           /tmp/client-venv/bin/python -c "import shakerscan._mcp, shakerscan._v2_cli"
+          (cd /tmp && printf '%s\n' "$initialize" | /tmp/client-venv/bin/shakerscan mcp | grep -F '"serverInfo"')
           /tmp/client-venv/bin/shakerscan version
       - name: Inventory the built client archives
         env:

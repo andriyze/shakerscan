@@ -27,6 +27,10 @@ VENDORED = {
     "v2_cli.py": "_v2_cli.py",
     "api_cli.py": "_api_cli.py",
     "scan_cli.py": "_scan_cli.py",
+    # Helpers the scripts above import; the client loader makes them importable by these names.
+    "mcp_stdio.py": "_mcp_stdio.py",
+    "mcp_ssh_stream.py": "_mcp_ssh_stream.py",
+    "api_stream.py": "_api_stream.py",
 }
 # The agent kit the launcher runs agents inside (`shakerscan agent …`): materialized into a
 # workspace by the client's `agent` command against the connected instance. `.claude` is
