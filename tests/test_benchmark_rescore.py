@@ -258,7 +258,11 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
         if url.endswith("/credential-profiles"):
             return {"profile": {"id": f"profile-{sum(u.endswith('/credential-profiles') for u, _ in calls)}"}}
         assert url.endswith("/scans")
-        return {"scan_id": "scan-1", "job_id": "job-1", "status": "queued"}
+        return {
+            "scan_id": "scan-1", "job_id": "job-1", "status": "queued",
+            "budget_profile": "thorough",
+            "budget": {"max_duration_seconds": 10_800, "max_http_requests": 60_000},
+        }
 
     monkeypatch.setattr(b, "_post", fake_post)
 
@@ -320,6 +324,10 @@ def test_submit_target_requires_current_workers_and_returns_content_free_receipt
             "authenticated_responses_accepted": None,
         },
         "require_current_workers": True,
+        # The server-resolved ceiling the scan was admitted with: the runner waits for it rather
+        # than a fixed client-side guess. Content-free, like the rest of the receipt.
+        "budget_profile": "thorough",
+        "max_duration_seconds": 10_800,
     }
     assert "secret" not in str(receipt)
 

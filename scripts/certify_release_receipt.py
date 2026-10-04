@@ -58,6 +58,36 @@ def _measured_recall(dast):
             return value
     return None
 
+def _require_candidate_subject(
+    label: str,
+    receipt: Mapping[str, Any],
+    *,
+    source_sha: str,
+    images: Mapping[str, Any],
+) -> None:
+    """Require a receipt to name the deployment it ran against, and that to be the candidate.
+
+    Producers read the identity from the deployment itself (the live API's /health, or the API
+    image's release manifest), never from the dispatching environment, so a receipt produced on
+    another stack cannot certify this candidate. Image digests are checked whenever recorded.
+    """
+    subject = receipt.get("subject")
+    if not isinstance(subject, Mapping):
+        raise CertificationError(f"{label} receipt does not identify the deployment it ran against")
+    if subject.get("source_revision") != source_sha:
+        raise CertificationError(f"{label} receipt ran against a different source revision")
+    recorded = subject.get("images")
+    if recorded is None:
+        return
+    if (
+        not isinstance(recorded, Mapping)
+        or not recorded
+        or not set(recorded).issubset(images)
+        or any(recorded[key] != images[key] for key in recorded)
+    ):
+        raise CertificationError(f"{label} receipt did not run the final release image digests")
+
+
 def _read(path: Path) -> Mapping[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -253,6 +283,16 @@ def certify_receipt(
     ):
         raise CertificationError("candidate certification is missing required external evidence")
     dast = external["dast_quality"][0]
+    # Pass flags alone certified any scorecard: one measured on another deployment or an older
+    # build qualified this candidate as readily as its own. Bind it like the other receipts, and
+    # require the worker fleet it ran on to have been uniformly on that build.
+    _require_candidate_subject(
+        "DAST quality", dast, source_sha=source_sha, images=images,
+    )
+    if dast.get("fleet_uniform") is not True:
+        raise CertificationError(
+            "DAST quality receipt was measured on a stale or mixed worker fleet"
+        )
     # The regression gates (no decay below the shipped floor) and the fact that the
     # complete bar was actually measured (quality_bar_enforced) are required
     # unconditionally -- a waiver may accept a known shortfall, never skip the
@@ -279,6 +319,7 @@ def certify_receipt(
         evidence = external[key][0]
         if evidence.get("schema_version") != schema or evidence.get("passed") is not True:
             raise CertificationError(f"{key} did not pass on the final manifest stack")
+        _require_candidate_subject(key, evidence, source_sha=source_sha, images=images)
     if "real_fleet_parity" in external:
         parity = external["real_fleet_parity"][0]
         if (
