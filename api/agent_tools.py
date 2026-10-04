@@ -28,7 +28,9 @@ import urllib.parse
 from typing import Any, Mapping, Optional
 
 from runtime.capability_registry import CAPABILITY_REGISTRY
-from runtime.request_shape import public_request_body_shape
+from runtime.request_shape import (
+    json_field_leaf_name, nested_json_body, public_request_body_shape,
+)
 from scan.negative_control import is_negative_control_url
 from scan.external_process import (
     BATCH_ATTEMPT_FLOORS,
@@ -465,8 +467,14 @@ def _injection_body(opts: dict[str, Any]) -> tuple[str, str, list[str]] | None:
         raise ValueError("injection body method is invalid")
     content_type = str(opts.get("content_type") or "").strip().lower()
     if "json" in content_type:
-        body = json.dumps({name: _BODY_PLACEHOLDER_VALUE for name in fields},
+        # Dotted names describe a nested body. Literal dotted keys send a schema the target
+        # ignores, so a nested field could never be found. The tools name a JSON value by
+        # its own key, so a nested field is offered under its leaf name.
+        body = json.dumps(nested_json_body(fields, placeholder=_BODY_PLACEHOLDER_VALUE),
                           sort_keys=True, separators=(",", ":"))
+        fields = [
+            name for name in dict.fromkeys(json_field_leaf_name(item) for item in fields) if name
+        ]
     else:
         body = "&".join(
             f"{urllib.parse.quote(name, safe='')}={_BODY_PLACEHOLDER_VALUE}" for name in fields

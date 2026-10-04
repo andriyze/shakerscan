@@ -20,12 +20,14 @@ try:
     from hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from pinned_socks_proxy import PinnedSocksProxy
     from runtime.models import PreparedExecution, TargetBinding
+    from runtime.request_shape import nested_json_body
     from runtime.secret_material import contains_secret_material
     from runtime.target_bound_socket import FrozenTargetSocketFactory
 except ModuleNotFoundError:  # package imports in host-side tests
     from ..hunt.capability_executor import CapabilityAdapterResult, Cancelled, Heartbeat
     from ..pinned_socks_proxy import PinnedSocksProxy
     from ..runtime.models import PreparedExecution, TargetBinding
+    from ..runtime.request_shape import nested_json_body
     from ..runtime.secret_material import contains_secret_material
     from ..runtime.target_bound_socket import FrozenTargetSocketFactory
 
@@ -36,6 +38,8 @@ except ModuleNotFoundError:  # package imports in host-side tests
 
 
 SAFE_BROWSER_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Navigation answers that mean the proof never saw the route under test.
+_AUTH_REFUSAL_STATUSES = frozenset({401, 403, 407})
 MAX_BROWSER_RESPONSE_OBSERVATIONS = 200
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _SAFE_CSS_SELECTOR = re.compile(r"^[A-Za-z0-9_.#\-\[\]=:'\" ()>+~,*^$|]+$")
@@ -164,8 +168,16 @@ class XSSBrowserProofAdapter:
     parser_version = "xss-browser-proof/v1"
     manages_cancellation = True
 
-    def __init__(self, prepared: PreparedXSSBrowserProof):
+    def __init__(
+        self, prepared: PreparedXSSBrowserProof, *,
+        trusted_headers: Mapping[str, str] | None = None,
+    ):
         self.prepared = prepared
+        # The principal the candidate was discovered under. Held only on the adapter (never
+        # in the frozen prepared input, its digest or redacted execution) so header values
+        # cannot reach a receipt; the browser binds cookies to the origin and sends the rest
+        # on same-origin requests only.
+        self._trusted_headers = dict(trusted_headers or {})
 
     @classmethod
     def prepare(
@@ -200,16 +212,25 @@ class XSSBrowserProofAdapter:
                     "XSS proof parameter is absent from body authority"
                 )
             normalized_content_type = str(content_type or "").lower()
-            values = {
-                name: payload if name == parameter_name else "shakerscan"
-                for name in fields
-            }
             if "json" in normalized_content_type:
+                # Dotted names describe a nested body; literal dotted keys would test a
+                # schema the target does not have and could only ever report not proven.
+                document = nested_json_body(
+                    fields, placeholder="shakerscan", values={parameter_name: payload},
+                )
                 body = json.dumps(
-                    values, sort_keys=True, separators=(",", ":"),
+                    document, sort_keys=True, separators=(",", ":"),
                 ).encode("utf-8")
+                if json.dumps(payload).encode("utf-8") not in body:
+                    raise BrowserCapabilityInputError(
+                        "XSS proof parameter names a container, not a body value"
+                    )
                 normalized_content_type = "application/json"
             else:
+                values = {
+                    name: payload if name == parameter_name else "shakerscan"
+                    for name in fields
+                }
                 body = urllib.parse.urlencode(values).encode("utf-8")
                 normalized_content_type = "application/x-www-form-urlencoded"
             url = urllib.parse.urlunsplit((
@@ -307,6 +328,7 @@ class XSSBrowserProofAdapter:
     async def execute(self, *, heartbeat: Heartbeat, cancelled: Cancelled) -> CapabilityAdapterResult:
         return await _execute_browser_action(
             self.prepared, heartbeat=heartbeat, cancelled=cancelled,
+            trusted_headers=self._trusted_headers or None,
         )
 
 
@@ -1012,6 +1034,24 @@ async def _execute_browser_action(
                 "same_origin": True,
                 "secret_values_visible": False,
             }
+            # An authentication or authorization refusal means the payload never reached
+            # the page under test: the browser rendered a 401/403 page, not the route. That
+            # is an inconclusive attempt, not a negative result, so it must not count as
+            # completed coverage (an authenticated candidate replayed without its session
+            # used to read as "examined, not vulnerable").
+            navigation_status = navigation_observation["status_code"]
+            if not proven and navigation_status in _AUTH_REFUSAL_STATUSES:
+                proof_observation["inconclusive_reason"] = "authentication_required"
+                return _browser_result(
+                    prepared,
+                    status="partial",
+                    request_count=request_count,
+                    browser_actions=browser_actions,
+                    started=started,
+                    observations=[navigation_observation, proof_observation, *responses],
+                    blocked=blocked,
+                    errors=(f"authentication_required:{navigation_status}",),
+                )
             # A pinned browser blocks every off-origin subresource by design, so a real
             # single-page app always reports some blocked requests. That is the transport
             # enforcing the frozen origin, not a failed proof: the attempt navigated the

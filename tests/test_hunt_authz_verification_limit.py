@@ -111,7 +111,8 @@ class AdmissionStore:
 
 class Lifecycle:
     def __init__(self, name):
-        executor = "inline" if name == "candidate.verify" else "worker_http"
+        executor = ("inline" if name == "candidate.verify" else
+                    "worker_scanner" if name == "xss.verify" else "worker_http")
         self.placement = executor
         self.specification = SimpleNamespace(hunt_executor=executor, requires_active_approval=True,
             risk_tier="active", output_schema="fixture", budget_cost={"http_requests": 4, "tool_wall_seconds": 60})
@@ -125,7 +126,7 @@ class Lifecycle:
         self.replayed = True
 
 
-def admission(store):
+def admission(store, **overrides):
     source = ROOT / "api/hunt/interaction_router.py"
     module = ast.parse(source.read_text(), filename=str(source))
     function = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef)
@@ -168,16 +169,17 @@ def admission(store):
             redact_http_request_body(values) if name == "http.request" else dict(values)),
         "HuntActionResult": lambda **kwargs: SimpleNamespace(public_dict=lambda: dict(kwargs)),
     }
+    context.update(overrides)
     exec(compile(selected, str(source), "exec"), context)
     return context[function.name]
 
 
-async def call(store, name="authz.verify", key="attempt-0001", values=None):
+async def call(store, name="authz.verify", key="attempt-0001", values=None, **overrides):
     lifecycle = Lifecycle(name)
     inputs = values if values is not None else (
         {"candidate_id": str(uuid.UUID(int=3))} if name == "candidate.verify" else
         {"method": "GET", "path": "/"} if name == "http.request" else {})
-    result = await admission(store)(str(HUNT), name,
+    result = await admission(store, **overrides)(str(HUNT), name,
         SimpleNamespace(input=inputs, idempotency_key=key), lifecycle)
     return result, lifecycle
 
@@ -274,3 +276,25 @@ def test_serialized_concurrent_admissions_cannot_both_spend_the_last_slot():
         assert sum(isinstance(item, HTTPException) for item in outcomes) == 1
         assert store.run["budget_used_json"]["verifications"] == 1 and len(store.actions) == 1
     asyncio.run(scenario())
+
+
+def test_scanner_capability_rejects_a_principal_it_cannot_apply():
+    """Hunt scanner tools run without the managed principal. Accepting as_principal and
+    running anonymously recorded an unauthenticated attempt as if it used that identity."""
+    from agent_tools import normalize_principal_slot
+
+    store = AdmissionStore()
+    overrides = {
+        "agent_tools": SimpleNamespace(
+            normalize_principal_slot=normalize_principal_slot, IDENTITY_HEADERS=set(),
+            canonical_hunt_scanner_budget=lambda _name: {"http_requests": 4, "tool_wall_seconds": 60},
+        ),
+        "_hunt_public": lambda *args, **kwargs: {"capabilities": [{"name": "xss.verify"}]},
+    }
+    with pytest.raises(HTTPException, match="cannot apply as_principal") as error:
+        asyncio.run(call(
+            store, name="xss.verify",
+            values={"path": "/search?q=1", "as_principal": "primary"}, **overrides,
+        ))
+    assert error.value.status_code == 422
+    assert not store.actions

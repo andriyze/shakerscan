@@ -13,8 +13,10 @@ import uuid
 
 try:
     from runtime.budgets import BUDGET_DIMENSIONS
+    from runtime.request_shape import nested_json_body
 except ModuleNotFoundError:  # package import in host-side tests
     from ..runtime.budgets import BUDGET_DIMENSIONS
+    from ..runtime.request_shape import nested_json_body
 
 from .action_plan import ScanAction, ScanActionPlan, ScanActionPlanError
 from .capability_result import CapabilityResultReference
@@ -764,29 +766,7 @@ def endpoint_worklist_from_manifest_entries(entries: Any) -> list[str]:
         if body_names:
             content_type = str(entry.get("content_type") or "").lower()
             if "json" in content_type or not content_type:
-                body: dict[str, Any] = {}
-                for raw_name in body_names:
-                    parts = [part for part in raw_name.split(".") if part]
-                    if not parts:
-                        continue
-                    cursor = body
-                    for part in parts[:-1]:
-                        child = cursor.get(part)
-                        if isinstance(child, list):
-                            if not child or not isinstance(child[0], dict):
-                                child[:] = [{}]
-                            cursor = child[0]
-                            continue
-                        if isinstance(child, dict):
-                            cursor = child
-                            continue
-                        nested: dict[str, Any] = {}
-                        # A parent name plus child names is the flattened shape
-                        # emitted for an array of objects (items, items.id).
-                        cursor[part] = [nested] if child is not None else nested
-                        cursor = nested
-                    if not isinstance(cursor.get(parts[-1]), (dict, list)):
-                        cursor[parts[-1]] = "test"
+                body = nested_json_body(body_names, placeholder="test")
                 if body:
                     body_spec = " json:" + json.dumps(
                         body, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
