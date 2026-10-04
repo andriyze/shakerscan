@@ -153,7 +153,17 @@ async def read_transactions(
         f" LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
-    return [dict(row) for row in rows]
+    try:
+        from runtime.archive_blob_secrets import reveal
+    except ModuleNotFoundError:  # package import layout
+        from .archive_blob_secrets import reveal
+    revealed = []
+    for row in rows:
+        row = dict(row)
+        for key in ("request_headers", "request_body", "response_headers", "response_body"):
+            row[key] = reveal(row.get(key))
+        revealed.append(row)
+    return revealed
 
 
 async def count_transactions(

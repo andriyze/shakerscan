@@ -423,6 +423,15 @@ def har_document(entries: Sequence[Mapping[str, Any]], *, creator_version: str) 
     }
 
 
+def _sealing(store):
+    """Raw payloads carry credentials; the store only ever receives their encrypted form."""
+    try:
+        from runtime.archive_blob_secrets import encrypting_store
+    except ModuleNotFoundError:  # package import layout
+        from .archive_blob_secrets import encrypting_store
+    return encrypting_store(store)
+
+
 async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) -> str | None:
     """Put one header map or body in the content-addressed store and return its object id.
 
@@ -433,7 +442,7 @@ async def store_archive_blob(conn, content: Any, *, scan_id: str | None, store) 
         return None
     if isinstance(content, (bytes, bytearray)):
         content = bytes(content).decode("utf-8", errors="replace")
-    stored = store(content)
+    stored = _sealing(store)(content)
     if not stored.get("content_sha256"):
         return None
     row = await conn.fetchrow(
@@ -478,6 +487,7 @@ async def store_archive_blobs(
     owned by the same scan (or the shared Hunt owner), and one JSONB insert persists every
     missing object. A large capture therefore does not issue four SQL statements per request.
     """
+    store = _sealing(store)
     stored_by_key: dict[tuple[str | None, str], Mapping[str, Any]] = {}
     canonical_by_input: dict[tuple[str | None, str], tuple[str | None, str]] = {}
     for owner_scan_id, content in contents:

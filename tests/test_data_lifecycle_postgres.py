@@ -979,3 +979,63 @@ def test_ai_header_secrets_are_encrypted_on_an_already_converted_database(monkey
         assert headers['X-Api-Key'].startswith('enc:fernet:') and headers['Accept'] == 'application/json'
         assert secret_store.decrypt_secret(headers['X-Api-Key']) == 'sk-plain'
     run(scenario)
+
+
+def _archive_key(monkeypatch):
+    from cryptography.fernet import Fernet
+    import secret_store
+    monkeypatch.setenv("AI_CREDENTIAL_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(secret_store, "_fernet", None)
+    monkeypatch.setattr(secret_store, "_loaded", False)
+    return secret_store
+
+
+def test_raw_traffic_is_encrypted_at_rest_and_revealed_only_for_raw_views(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE", "full")
+    from runtime.http_archive import HttpTransaction, archive_http_transactions, _default_store
+    from runtime.http_archive_reader import read_transactions
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        tx = HttpTransaction(plane="scan", method="POST", url="https://example.invalid/login", sequence=1,
+                             scan_id=str(scan), target_id=str(t), status_code=200,
+                             request_headers={"Authorization": "Bearer raw-canary-req"},
+                             request_body=b'{"password":"raw-canary-body"}',
+                             response_headers={"Set-Cookie": "sid=raw-canary-cookie"})
+        async with pool.acquire() as c:
+            assert await archive_http_transactions(c, [tx], store=_default_store(tmp_path), scan_id=str(scan)) == 1
+            at_rest = await c.fetchval("""SELECT string_agg(to_jsonb(e)::text, ' ') FROM evidence_objects e
+                WHERE object_type='http_archive_blob' AND scan_id=$1""", scan)
+            assert at_rest and "raw-canary" not in at_rest
+            rows = await read_transactions(c, scan_id=str(scan))
+        assert "Bearer raw-canary-req" in json.dumps(rows[0]["request_headers"])
+        assert "raw-canary-body" in json.dumps(rows[0]["request_body"])
+        assert "raw-canary-cookie" in json.dumps(rows[0]["response_headers"])
+    run(scenario)
+
+
+def test_archived_plaintext_is_encrypted_once_at_startup_including_local_files(tmp_path, monkeypatch):
+    _archive_key(monkeypatch)
+    from runtime import archive_blob_secrets as blobs
+
+    async def scenario(pool):
+        t, sibling, scan, f, other, e = await seeded(pool)
+        async with pool.acquire() as c:
+            await c.execute("DELETE FROM app_schema_migrations WHERE name=$1", blobs.MIGRATION)
+            inline = await c.fetchval("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile,content) VALUES($1,'http_archive_blob',$2,10,'inline:','none',
+                '{"authorization":"Bearer legacy-canary"}'::jsonb) RETURNING id""", scan, 'a' * 64)
+            uri = "local:evidence_objects/bb/" + "b" * 64 + ".json"
+            path = tmp_path / "evidence-objects" / "bb" / ("b" * 64 + ".json")
+            path.parent.mkdir(parents=True)
+            path.write_text('"Set-Cookie: sid=legacy-file-canary"')
+            await c.execute("""INSERT INTO evidence_objects(scan_id,object_type,content_sha256,size_bytes,
+                storage_uri,redaction_profile) VALUES($1,'http_archive_blob',$2,10,$3,'none')""", scan, 'b' * 64, uri)
+            assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 2
+            stored = await c.fetchval("SELECT content::text FROM evidence_objects WHERE id=$1", inline)
+            assert "legacy-canary" not in stored and "legacy-file-canary" not in path.read_text()
+            assert json.loads(blobs.reveal(stored)) == {"authorization": "Bearer legacy-canary"}
+            assert json.loads(blobs.reveal(path.read_text())) == "Set-Cookie: sid=legacy-file-canary"
+            assert await blobs.encrypt_stored_blobs(c, results_dir=tmp_path) == 0  # marker: once
+    run(scenario)
