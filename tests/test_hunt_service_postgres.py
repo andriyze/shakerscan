@@ -26,11 +26,17 @@ from api.runtime.models import TargetBinding
 from api.hunt.authorization_repository import PostgresAuthorizationRepository, PROPOSAL_TYPE
 
 
-@pytest.mark.parametrize("kind", ["web", "network", "device"])
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
 def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
     key = Fernet(Fernet.generate_key())
+    decryptions = []
+
+    def decrypt(value):
+        decryptions.append(value)
+        return key.decrypt(value.removeprefix("enc:fernet:").encode()).decode()
+
     monkeypatch.setattr(sessions, "encrypt_secret", lambda s: "enc:fernet:" + key.encrypt(s.encode()).decode())
-    monkeypatch.setattr(sessions, "decrypt_secret", lambda s: key.decrypt(s.removeprefix("enc:fernet:").encode()).decode())
+    monkeypatch.setattr(sessions, "decrypt_secret", decrypt)
 
     async def scenario():
         conn = await asyncpg.connect(require_disposable_database(DSN, "shakerscan_assurance_test"))
@@ -45,7 +51,7 @@ def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
                 UNIQUE(target_id,node_type,node_key))""")
             await conn.execute("""CREATE TABLE hunt_runs (
                 id UUID PRIMARY KEY,target_id UUID,device_target_id UUID,target_kind TEXT,
-                status TEXT,context_pack JSONB,policy_json JSONB)""")
+                status TEXT,completed_at TIMESTAMPTZ,context_pack JSONB,policy_json JSONB)""")
             await conn.execute("""CREATE TABLE scope_receipts (
                 id TEXT PRIMARY KEY,target_id UUID,verdict TEXT);
                 CREATE TABLE approval_receipts (
@@ -72,7 +78,9 @@ def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
                        "authorized_target_addresses": list(target.allowed_addresses)}
             policy = {"active_testing": True, "network_discovery": False,
                       "scope_receipt_id": "scope", "approval_receipt_id": str(approval_id)}
-            await conn.execute("INSERT INTO hunt_runs VALUES($1,$2,$3,$4,'active',$5::jsonb,$6::jsonb)",
+            await conn.execute("""INSERT INTO hunt_runs (
+                id,target_id,device_target_id,target_kind,status,context_pack,policy_json
+                ) VALUES($1,$2,$3,$4,'active',$5::jsonb,$6::jsonb)""",
                                owner, None if kind == "device" else target_id, target_id if kind == "device" else None,
                                kind, json.dumps(context), json.dumps(policy))
             await conn.execute("INSERT INTO scope_receipts VALUES('scope',$1,'allowed')", target_id)
@@ -91,6 +99,30 @@ def test_device_schema_session_roundtrip_and_graph_owner(monkeypatch, kind):
             loaded.close()
             refreshed = await store.load_for_refresh(conn, session_ref=metadata.session_ref, owner_kind="hunt", owner_id=owner, target=alternate)
             assert refreshed.service_origin == "https://fixture.test:8443"
+            # A worker's already-admitted action keeps its service identity when
+            # another action exhausts the unfinished Hunt. No new approval is made.
+            for status in ("awaiting_planner", "budget_exhausted"):
+                await conn.execute("UPDATE hunt_runs SET status=$2,completed_at=NULL WHERE id=$1", owner, status)
+                loaded = await store.load_for_worker(
+                    conn, session_ref=metadata.session_ref, owner_kind="hunt", owner_id=owner,
+                    target=alternate, capability="http.request",
+                )
+                try:
+                    assert loaded.headers() == {"Cookie": "session=synthetic"}
+                    assert loaded.metadata.service_origin == "https://fixture.test:8443"
+                finally:
+                    loaded.close()
+                assert await conn.fetchval("SELECT count(*) FROM approval_receipts") == 1
+            for status in ("completed", "cancelled", "budget_exhausted", "active"):
+                await conn.execute("UPDATE hunt_runs SET status=$2,completed_at=$3 WHERE id=$1", owner, status, now)
+                decrypted_before = len(decryptions)
+                with pytest.raises(sessions.AuthSessionStoreError, match="session Hunt is no longer active"):
+                    await store.load_for_worker(
+                        conn, session_ref=metadata.session_ref, owner_kind="hunt", owner_id=owner,
+                        target=alternate, capability="http.request",
+                    )
+                assert len(decryptions) == decrypted_before
+            await conn.execute("UPDATE hunt_runs SET status='active',completed_at=NULL WHERE id=$1", owner)
             with pytest.raises(sessions.AuthSessionStoreError):
                 await store.load_for_worker(conn, session_ref=metadata.session_ref, owner_kind="hunt", owner_id=owner,
                     target=replace(alternate, allowed_addresses=("127.0.0.2",)), capability="http.request")

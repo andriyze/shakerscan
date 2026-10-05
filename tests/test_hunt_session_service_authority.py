@@ -115,6 +115,52 @@ def test_http_session_can_reuse_another_http_port_with_existing_authority(monkey
     worker.close()
 
 
+@pytest.mark.parametrize("kind", ["web", "api", "network", "device"])
+@pytest.mark.parametrize("destination", ["http://app.example.test:8080", "https://app.example.test:9443"])
+def test_admitted_cross_service_session_survives_unfinished_budget_exhaustion(monkeypatch, kind, destination):
+    fixture.install_fake_crypto(monkeypatch)
+    original = replace(fixture.target(), target_kind=kind)
+    conn = PolicyConn(original)
+    asyncio.run(create(conn, original))
+    # Another admission exhausts a dimension while this action already owns a
+    # reservation. Worker dispatch may finish it without admitting new work.
+    conn.run.update(status="budget_exhausted", completed_at=None)
+    worker = asyncio.run(load(conn, replace(original, allowed_origins=(destination,))))
+    try:
+        assert worker.headers() == {"Authorization": fixture.SECRET}
+        assert conn.reads == ["hunt", "approval"]
+        assert not conn.executed  # Reuse current authority; never create approval.
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("change", [
+    "authorization_revoked", "session_revoked", "completed", "cancelled",
+    "finalized_budget_exhausted",
+])
+def test_budget_exhausted_service_reuse_still_rejects_stopped_or_revoked_authority(monkeypatch, change):
+    fixture.install_fake_crypto(monkeypatch)
+    original = fixture.target()
+    conn = PolicyConn(original)
+    asyncio.run(create(conn, original))
+    conn.run.update(status="budget_exhausted", completed_at=None)
+    if change == "authorization_revoked":
+        conn.approval.update(status="revoked", revoked_at=fixture.NOW)
+    elif change == "session_revoked":
+        conn.row.update(status="revoked", revoked_at=fixture.NOW)
+    elif change == "finalized_budget_exhausted":
+        conn.run["completed_at"] = fixture.NOW
+    else:
+        conn.run.update(status=change, completed_at=fixture.NOW)
+
+    def no_decrypt(_):
+        pytest.fail("stopped or revoked authority reached session decryption")
+
+    monkeypatch.setattr(sessions, "decrypt_secret", no_decrypt)
+    with pytest.raises((sessions.AuthSessionStoreError, CredentialResolutionError)):
+        asyncio.run(load(conn, replace(original, allowed_origins=("http://app.example.test:8080",))))
+
+
 def test_only_selected_service_in_multi_origin_binding_controls_authority(monkeypatch):
     fixture.install_fake_crypto(monkeypatch)
     original = replace(fixture.target(), allowed_origins=("https://app.example.test:8443",))

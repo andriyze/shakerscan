@@ -85,14 +85,19 @@ async def validate_session_service_use(
     if not metadata.service_origin and metadata.target_binding_digest == target.digest:
         return
     row = await conn.fetchrow(
-        "SELECT id, target_id, device_target_id, target_kind, status, context_pack, policy_json "
+        "SELECT id, target_id, device_target_id, target_kind, status, completed_at, context_pack, policy_json "
         "FROM hunt_runs WHERE id=$1", uuid.UUID(str(metadata.owner_id)),
     )
     if not row:
         raise ValueError("session Hunt service authority is unavailable")
     run = dict(row)
     policy = _mapping(run.get("policy_json"))
-    if run.get("status") not in {"active", "awaiting_planner"}:
+    # This worker check follows admission and budget reservation. Another action
+    # exhausting the Hunt must not cancel already-admitted service reuse.
+    if (
+        run.get("status") not in {"active", "awaiting_planner", "budget_exhausted"}
+        or run.get("completed_at") is not None
+    ):
         raise ValueError("session Hunt is no longer active")
     if policy.get("active_testing") is not True:
         raise ValueError("session reuse on another service requires the Hunt's active-testing authority")

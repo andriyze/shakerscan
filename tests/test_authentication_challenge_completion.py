@@ -120,11 +120,55 @@ def test_header_login_keeps_successful_unknown_wrapper_and_unrelated_metadata(fa
 
     result = _run(family, {
         wrapper: {"authenticated": True, "status": "success"},
-        "user": {"email_verification": {"status": "pending"}},
+        "user": {"email_verification": {"status": "pending"},
+                 "verification": {"required": True}},
         "subscription": {"status": "failed", "error": "card declined"},
     }, token_header=True)
     assert result.observations[0]["proof_state"] == "verified"
     assert result.observations[0]["proof_contract"] is not None
+
+
+@pytest.mark.parametrize("wrapper", ["loginResult", "customEnvelope", "vendorReply"])
+@pytest.mark.parametrize("failure", [
+    {"authenticated": False, "status": "failed"},
+    {"requiresMfa": True},
+    {"state": "pending"},
+    {"error": "invalid credentials"},
+])
+@pytest.mark.parametrize("token_header", [False, True])
+def test_top_json_tokens_honor_unknown_failed_verdict_wrappers(wrapper, failure, token_header):
+    result = successful_token_signals(_response(
+        {"access_token": "login-canary", wrapper: failure}, token_header,
+    ))
+    assert result == ()
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("token_header", [False, True])
+def test_top_json_token_never_proves_a_failed_vendor_login(family, token_header):
+    from tests.test_authentication_proof_contract import _run
+
+    result = _run(family, {
+        "access_token": "login-canary",
+        "vendorReply": {"authenticated": False, "status": "failed"},
+    }, token_header=token_header)
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert "canary" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("token_header", [False, True])
+def test_top_json_login_keeps_completed_verdict_and_public_only_signals(token_header):
+    result = successful_token_signals(_response({
+        "access_token": "login-canary",
+        "vendorReply": {"authenticated": True, "status": "success"},
+        "mfa": {"completed": True, "token": "old-challenge-canary"},
+        "user": {"email_verification": {"status": "pending"},
+                 "verification": {"required": True}},
+        "subscription": {"status": "failed", "error": "card declined"},
+    }, token_header))
+    assert result == (("authorization", "json:access_token") if token_header else ("json:access_token",))
+    assert "canary" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("family", ["sql", "nosql"])

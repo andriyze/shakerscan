@@ -16,7 +16,8 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2.6.0 | pending candidate | pending | pending | pending | pending | pending |
+| 2.7.0 | pending candidate | pending | pending | pending | pending | pending |
+| 2.6.0 | superseded candidate (not published) | not published | not published | not published | not published | not published |
 | 2.5.6 | `720db98d8576c5e14927aec6bff3d08b496a25cd` | `shakerscan/shakerscan-scanner:2.5.6` (`sha256:992f4dbc6e76eab99adb0199a176d79cd290e1c59e0be1d4839afa6dd8270600`) | `shakerscan/shakerscan-api:2.5.6` (`sha256:815bb0ac88e2d1e5cacc9035f8add61fc0035f71193e4a3a5fb6bb3006577ac2`) | `shakerscan/shakerscan-ui:2.5.6` (`sha256:9b076fdbbeb0168d1c81ce0edbda09421a6bf304cf029f5378560a8d7736f054`) | `shakerscan/shakerscan-model-intake-signer:2.5.6` (`sha256:690cdd980cef745e75f3573b272eeade04c67fb9bcad7e3dce3e95abd29a82c9`) | `shakerscan/shakerscan-model-intake:2.5.6` (`sha256:c7c01696c2657bb6780e479ba005ed2302eb28d4c18d9ac8b17c0f408570d72f`) |
 | 2.5.5 | `cbf61cbba2983c3c930cfea7a84162ade0e7a2e4` | `shakerscan/shakerscan-scanner:2.5.5` (`sha256:1664d716ae0f9612bd46a9dbfa99bfbb2bcfdfc84142513334bda32fc303be7d`) | `shakerscan/shakerscan-api:2.5.5` (`sha256:388bcf9d811156fbe13b46da30bf84d842b77f1d97ebe08143f6658bcd09be84`) | `shakerscan/shakerscan-ui:2.5.5` (`sha256:ab13b9ce19a0f9e9bd7224c9743b8e36f1071b3ed0ce75918113082b6bd42ac7`) | `shakerscan/shakerscan-model-intake-signer:2.5.5` (`sha256:4ad14151b4e5799b0a0b4b58414ea2501b3d73f2a48f0a6e2648d77286beee5c`) | `shakerscan/shakerscan-model-intake:2.5.5` (`sha256:92870eb001623fca072f34de2c616d4577cb21e8b82871f344f66d983a1a3a2a`) |
 | 2.5.4 | `027c0cef83bf738d7cd42551dc433d369cdf693c` | `shakerscan/shakerscan-scanner:2.5.4` (`sha256:8e1c4e610872c489a9c1d7090c085153b2260fcc3fac674b8856a8c6a9a537c9`) | `shakerscan/shakerscan-api:2.5.4` (`sha256:12e849005481d35e771b17a97981bceebb92c55cca9267574abcd5faaff10f34`) | `shakerscan/shakerscan-ui:2.5.4` (`sha256:cc608e9e8c8981625b0349fa531d41ecd6599a706aafa751070e5c9ce953df69`) | `shakerscan/shakerscan-model-intake-signer:2.5.4` (`sha256:470de8f826014838e7e1f95bae6f8ab5f2254f87f64c4d6ca1a9d61b9e3979ab`) | `shakerscan/shakerscan-model-intake:2.5.4` (`sha256:cbe8332a30f1f9c0c1983d7bb6d9b35cffca29aa498787933707d64cf497a37b`) |
@@ -88,10 +89,11 @@ The release process itself is documented once, in
 checks, one immutable **Release candidate** build per exact SHA, **Promote release** by digest,
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
-Version 2.2.0 is the pending candidate: safe upgrades (ordered secrets, foreign-install refusal, the
-release image lock honored by the launcher itself), the fifth image handled by every lifecycle and
-release path, and the DAST profile ladder, per-attempt calibration, and bounded continuation rounds.
-It has not been published or promoted.
+Version 2.7.0 is the pending candidate. It includes unified targets, saved target instructions and
+actions, direct SSH Hunts, PostgreSQL 18 and the proof, request-fidelity and secret-storage repairs
+since 2.5.6. The unpublished 2.6.0 candidate is superseded; its changes are included in 2.7.0.
+See [`docs/releases/2.7.0.md`](docs/releases/2.7.0.md) for scope and validation state.
+The candidate has not been published or promoted.
 
 Ledger rules:
 

@@ -5,9 +5,13 @@ product vocabulary and support boundary of that release; do not rewrite old note
 current product. For current behavior use `../functionality-reference.md`, and for publication state
 use `../release-process.md` plus `RELEASES.md` at the repository root.
 
+## 2.7 line
+
+- [`2.7.0.md`](2.7.0.md) — candidate prepared 2026-10-04; publication and stable promotion pending.
+
 ## 2.6 line
 
-- [`2.6.0.md`](2.6.0.md) — candidate prepared 2026-10-01; not yet published.
+- [`2.6.0.md`](2.6.0.md) — candidate prepared 2026-10-01; not published, superseded by the 2.7.0 candidate.
 
 ## 2.5 line
 

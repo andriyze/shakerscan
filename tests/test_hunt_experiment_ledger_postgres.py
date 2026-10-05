@@ -32,6 +32,10 @@ def test_concurrent_actions_survive_fresh_service_and_connections():
                 statement = re.search(rf"CREATE TABLE {name} \(.*?\n\);", ddl, re.DOTALL)
                 assert statement is not None
                 await control.execute(statement[0])
+            await control.execute("""CREATE TABLE findings (
+                id UUID PRIMARY KEY,
+                hunt_run_id UUID REFERENCES hunt_runs(id) ON DELETE SET NULL
+            )""")
             target, hunt, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
             await control.execute("INSERT INTO targets VALUES($1)", target)
             for identifier in (hunt, other):
@@ -39,6 +43,9 @@ def test_concurrent_actions_survive_fresh_service_and_connections():
                     "INSERT INTO hunt_runs(id,target_kind,target_id) VALUES($1,'web',$2)",
                     identifier, target,
                 )
+            finding, other_finding = uuid.uuid4(), uuid.uuid4()
+            await control.executemany("INSERT INTO findings(id,hunt_run_id) VALUES($1,$2)",
+                                      [(finding, hunt), (other_finding, other)])
             pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4,
                                             server_settings={"search_path": schema + ",public"})
 
@@ -61,7 +68,12 @@ def test_concurrent_actions_survive_fresh_service_and_connections():
             assert len({action["action_id"] for action in restored["actions"]}) == 10
             assert all(action["experiment_key"] == "a" * 32 for action in restored["actions"])
             assert all(action["status"] == "running" for action in restored["actions"])
-            assert (await service.get(str(other)))["actions"] == []
+            assert restored["outcome_summary"]["finding_ids"] == [str(finding)]
+            assert restored["outcome_summary"]["finding_count"] == 1
+            restored_other = await service.get(str(other))
+            assert restored_other["actions"] == []
+            assert restored_other["outcome_summary"]["finding_ids"] == [str(other_finding)]
+            assert restored_other["outcome_summary"]["finding_count"] == 1
         finally:
             if pool is not None:
                 await pool.close()
