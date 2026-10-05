@@ -22,7 +22,8 @@ async def maintain_ssh_sessions(redis, pool, worker_id, *, transports=SSH_TRANSP
                     identifiers = list({UUID(item.binding[0]) for item in transports.sessions.values()})
                     async with pool.acquire() as conn:
                         rows = await conn.fetch("SELECT id FROM hunt_runs WHERE id=ANY($1::uuid[]) "
-                            "AND status IN ('active','awaiting_planner','budget_exhausted')", identifiers)
+                            "AND status IN ('active','awaiting_planner','budget_exhausted') "
+                            "AND completed_at IS NULL", identifiers)
                     active = {str(row['id']) for row in rows}
                 for identifier in transports.reap(active):
                     redis.delete(session_key(identifier))
