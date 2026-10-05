@@ -78,12 +78,16 @@ Understanding these helps you deploy ShakerScan safely and helps reporters focus
 - **The API container can reach the Docker socket** to stage scanner images and manage workers.
   Reaching the API is therefore equivalent to administrative access on the Docker host. This is
   a further reason to keep the API on loopback or a trusted network.
-- **SSH and saved actions run commands on remote hosts.** A Hunt's `ssh.exec`, the live SSH
-  console and saved SSH actions use the SSH credentials stored for a target. Remote commands
-  need an explicit `ssh.exec` grant on the credential and active testing, host keys are pinned
-  (a changed key is refused), and the connection is bound to the target's authorized address.
-  Because the API has no login, anyone who can reach it can use those grants, so treat a stored
-  SSH credential with exec rights as reachable by every API client.
+- **SSH, saved actions and device scans run commands on remote hosts.** A Hunt's `ssh.exec`,
+  the live SSH console and saved SSH actions use the SSH credentials stored for a target and need
+  an explicit `ssh.exec` grant on the credential and active testing. Device scans also connect
+  with the device's SSH credential, which is granted `device.ssh.propose` when it is saved: an
+  `authenticated_active` scan runs fixed read-only review commands, and a proposed shell plan runs
+  only after an operator confirms its exact commands. Host keys are pinned, either saved by the
+  operator or pinned on the first connection when first-contact trust is authorized, and a changed
+  key is refused; connections are bound to the target's authorized address. Because the API has
+  no login, anyone who can reach it can use those grants, so treat a stored SSH credential as
+  reachable by every API client.
 - **Browser protections.** CORS admits only the deployment's own UI origins, cross-origin
   browser writes are refused, and requests addressed to an unrecognised public host name are
   refused to stop DNS rebinding (see `SHAKERSCAN_ALLOWED_HOSTS` in
@@ -93,12 +97,15 @@ Understanding these helps you deploy ShakerScan safely and helps reporters focus
   is bound to the authorized target: DNS answers are frozen at admission and re-checked, and
   cloud-metadata and link-local addresses are always refused.
 - **Secrets at rest.** Target credentials and SSH keys, request-collection secrets, AI provider
-  keys, AI request-template and header secrets, and the raw headers and bodies recorded in the
-  HTTP archive are encrypted with one key generated on first start and kept as an owner-only file
-  in the results directory on the host. Anyone who can read that file can decrypt them, so protect
-  the host accordingly. Backups leave the key out by default (`backup --include-key` adds it), so
-  keep `results/.credential_enc.key` separately: a backup restored without it keeps its scans and
-  findings but cannot decrypt the stored secrets.
+  keys saved in Settings, AI request-template and header secrets, and the raw headers and bodies
+  recorded in the HTTP archive are encrypted with one key generated on first start and kept as an
+  owner-only file in the results directory on the host. Anyone who can read that file can decrypt
+  them, so protect the host accordingly. Values in `.env` are not encrypted: the datastore
+  passwords and service tokens the launcher generates, and an `AI_API_KEY` written there by hand
+  or by saving Settings to `.env`. Backups leave the key out by default (`backup --include-key`
+  adds it), but they still hold that `.env` content and every finding and piece of evidence, so
+  protect the host and its backups. Keep `results/.credential_enc.key` separately: a backup
+  restored without it keeps its scans and findings but cannot decrypt the stored secrets.
 - **Raw HTTP archive export.** Verbatim HAR (captured credentials included) is available by
   default only while the API is published on loopback; a LAN or tailnet deployment must opt in
   with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1`, and `0` disables it everywhere.

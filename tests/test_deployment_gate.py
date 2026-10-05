@@ -147,9 +147,10 @@ def test_decision_marks_an_incomplete_history_instead_of_claiming_an_all_clear()
     assert decision["carried_over"]["unloaded_active"] == 12
 
 
-def test_a_fingerprint_exception_recorded_before_service_identities_still_applies():
-    """Endpoint findings gained a |service= qualifier and their rows were re-keyed. An exception
-    stored under the earlier fingerprint stopped matching and the gate began blocking it."""
+def test_an_exception_bound_to_its_row_still_applies_after_the_row_is_rekeyed():
+    """Endpoint findings gained a |service= qualifier and their rows were re-keyed. Reconciliation
+    binds the old exception to the row's id; the earlier fingerprint alone is not authority (see the
+    next test), so the row id is what keeps the exception applying."""
     import hashlib
 
     from findings import pre_service_templated_finding_identity
@@ -220,3 +221,18 @@ def test_a_projected_row_never_gains_a_broader_recomputed_fingerprint():
                  "expires_at": "2099-01-01T00:00:00Z"}
     remaining, applied = api._apply_policy_exceptions([projected], [exception])
     assert remaining == [projected] and applied == []
+
+
+def test_an_exception_on_the_canonical_fingerprint_covers_a_finding_reported_without_one():
+    """Rows that never stored a fingerprint (non-DAST producers) are matched by their canonical
+    identity. Comparing the empty stored value could never match, so an approved exception kept
+    blocking the deployment."""
+    finding = {"title": "SQL Injection", "severity": "critical", "tool": "sqlmap", "cwe": "CWE-89",
+               "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    exception = {"id": "exception", "status": "active", "approver": "operator",
+                 "fingerprint": canonical_finding_fingerprint(finding), "expires_at": "2099-01-01T00:00:00Z"}
+    remaining, applied = api._apply_policy_exceptions([finding], [exception])
+    assert remaining == [] and applied == [finding]
+    other_service = {**finding, "url": "https://app.example.test:8443/search?q=1"}
+    remaining, applied = api._apply_policy_exceptions([other_service], [exception])
+    assert remaining == [other_service] and applied == []

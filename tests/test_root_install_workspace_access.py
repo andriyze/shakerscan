@@ -129,7 +129,7 @@ def _prepare_existing_install(tmp_path: Path, install: str, **overrides: str):
     return result, calls
 
 
-@pytest.mark.parametrize("identity", ["0", "00", "10001", "010001", "4294967295", "9" * 30])
+@pytest.mark.parametrize("identity", ["0", "00", "10001", "010001", "2147483648", "4294967295", "9" * 30])
 def test_a_root_install_rejects_reserved_or_out_of_range_numeric_spellings(tmp_path, identity):
     result, calls, _install = _prepare_with_host_accounts(
         tmp_path, {}, SHAKERSCAN_ROOT_API_UID=identity,
@@ -152,19 +152,41 @@ def test_a_root_install_canonicalizes_and_reuses_its_saved_free_identity(tmp_pat
     assert "SHAKERSCAN_API_UID=10050" in (Path(install) / ".env").read_text()
 
 
-def test_a_root_install_reuses_an_older_saved_api_identity_without_root_setting(tmp_path):
+def test_a_saved_non_root_operator_id_never_becomes_the_root_api_identity(tmp_path):
+    """Every start saves SHAKERSCAN_API_UID, so after a normal start it holds the operator's own
+    id. A later `sudo ... start` reused it as the root API identity: on Linux it then refused to
+    start ("id 1000 already belongs to ..."), and without getent it ran the API as the operator."""
+    _result, _calls, install = _prepare_with_host_accounts(
+        tmp_path, {"1000": "operator"}, SHAKERSCAN_ROOT_API_UID="10050",
+    )
+    dotenv = Path(install) / ".env"
+    dotenv.write_text("SHAKERSCAN_API_UID=1000\nSHAKERSCAN_API_GID=1000\n")
+    restarted, calls = _prepare_existing_install(tmp_path, install)
+    assert "already belongs" not in restarted.stderr
+    assert f"chgrp 10002 {install}" in calls
+    assert f"chgrp 1000 {install}" not in calls
+    assert "SHAKERSCAN_ROOT_API_UID=10002" in dotenv.read_text()
+
+
+def test_a_changed_root_api_identity_takes_over_the_previous_ids_files(tmp_path):
+    """A release before the root setting ran the API as 10002 and saved only SHAKERSCAN_API_UID.
+    When 10002 now belongs to a host account and the operator picks a free id, the files the old
+    id owns move with it; otherwise its owner-only payloads stay unreadable to the API."""
     _result, _calls, install = _prepare_with_host_accounts(
         tmp_path, {"10002": "alice"}, SHAKERSCAN_ROOT_API_UID="10050",
     )
+    (Path(install) / "results").mkdir(exist_ok=True)
     dotenv = Path(install) / ".env"
-    dotenv.write_text("\n".join(
-        line for line in dotenv.read_text().splitlines()
-        if not line.startswith("SHAKERSCAN_ROOT_API_UID=")
-    ) + "\n")
-    restarted, calls = _prepare_existing_install(tmp_path, install)
+    dotenv.write_text("SHAKERSCAN_API_UID=10002\nSHAKERSCAN_API_GID=10002\n")
+    find_calls = tmp_path / "find-calls"
+    (tmp_path / "bin" / "find").write_text(f'#!/bin/sh\necho "find $*" >> "{find_calls}"\n', encoding="utf-8")
+    (tmp_path / "bin" / "find").chmod(0o755)
+    restarted, _calls = _prepare_existing_install(tmp_path, install, SHAKERSCAN_ROOT_API_UID="10060")
     assert "already belongs" not in restarted.stderr
-    assert f"chgrp 10050 {install}" in calls
-    assert "SHAKERSCAN_ROOT_API_UID=10050" in dotenv.read_text()
+    recorded = find_calls.read_text(encoding="utf-8")
+    assert f"find {install}/results -xdev -user 10002 -exec chown -h 10060 {{}} +" in recorded
+    assert f"find {install}/results -xdev -group 10002 -exec chgrp -h 10060 {{}} +" in recorded
+    assert "SHAKERSCAN_ROOT_API_UID=10060" in dotenv.read_text()
 
 
 def test_a_root_install_preserves_explicit_override_and_rechecks_collisions(tmp_path):

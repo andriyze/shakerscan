@@ -130,8 +130,11 @@ async def reconcile_legacy_finding_row(
             # Roll back only this re-key, retaining the legacy row and its history.
             async with conn.transaction():
                 await conn.execute(
+                    # The legacy row is already locked above. A second lock here made the
+                    # exception move depend on plan order: when `moved` ran first, the lock
+                    # skipped the row it had just updated and the exception stayed behind.
                     """WITH prior AS MATERIALIZED (
-                        SELECT id, target_id, fingerprint FROM findings WHERE id=$2 FOR UPDATE
+                        SELECT id, target_id, fingerprint FROM findings WHERE id=$2
                     ), moved AS (
                         UPDATE findings SET fingerprint=$1 WHERE id=$2 RETURNING id
                     )
