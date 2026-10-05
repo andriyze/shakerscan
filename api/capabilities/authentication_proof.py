@@ -26,6 +26,10 @@ _REQUIRED_FLAGS = frozenset({
 })
 _AUTH_ENVELOPES = frozenset({"authentication", "auth", "session", "login"})
 _CHALLENGE_ENVELOPES = frozenset({"challenge", "mfa", "captcha", "two_factor", "verification"})
+# Failure and status fields describe the login only at the document root, inside an auth or
+# challenge envelope, or inside a generic response wrapper. Elsewhere (user.email_verification,
+# subscription.state) they describe some other object and must not veto a successful login.
+_LOGIN_SCOPE = _AUTH_ENVELOPES | _CHALLENGE_ENVELOPES | frozenset({"data", "result", "response", "payload", "[]"})
 
 
 def _name(value: Any) -> str:
@@ -84,15 +88,19 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
                 _flag(fields.get(name)) is True
                 for name in {"authenticated", "is_authenticated", "logged_in", "is_logged_in"}
             )
+            login_scoped = all(part in _LOGIN_SCOPE for part in path)
             for name, child in fields.items():
                 child_path = (*path, name)
                 if (
-                    (name in _AUTH_FLAGS and _flag(child) is False)
-                    or (name in _REQUIRED_FLAGS and bool(child) and _flag(child) is not False)
-                    or (name in {"error", "errors", "error_description"} and bool(child))
-                    or (name in {"challenge", "captcha"} and bool(child) and _flag(child) is not False)
-                    or (name in {"status", "state", "code", "error_code", "authentication_status",
-                                 "authentication_state", "login_status", "token_type", "purpose"}
+                    (login_scoped and name in _AUTH_FLAGS and _flag(child) is False)
+                    or (login_scoped and name in _REQUIRED_FLAGS and bool(child) and _flag(child) is not False)
+                    or (login_scoped and name in {"error", "errors", "error_description"} and bool(child))
+                    # A challenge object is judged by its own fields (required, token, status);
+                    # {"challenge": {"required": false}} is not an unfinished challenge.
+                    or (login_scoped and name in {"challenge", "captcha"} and not isinstance(child, Mapping)
+                        and bool(child) and _flag(child) is not False)
+                    or (login_scoped and name in {"status", "state", "code", "error_code", "authentication_status",
+                                                  "authentication_state", "login_status", "token_type", "purpose"}
                         and isinstance(child, str) and _name(child.strip()).replace(" ", "_") in _FAILED_STATES)
                     or (name == "required" and any(part in _CHALLENGE_ENVELOPES for part in path)
                         and _flag(child) is True)

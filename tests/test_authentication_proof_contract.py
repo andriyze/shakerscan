@@ -53,6 +53,9 @@ def _run(family, response, *, token_header=False):
     {"mfa": {"token": "challenge-secret"}},
     {"code": "INVALID_CREDENTIALS"},
     {"purpose": "mfa"},
+    {"data": {"status": "mfa_required"}},
+    {"challenge": {"required": True}},
+    {"challenge": {"status": "pending"}},
 ])
 def test_explicit_incomplete_authentication_vetoes_json_and_header_tokens(family, envelope):
     response = {"authentication": {"token": "operator-token"}, **envelope}
@@ -82,6 +85,12 @@ def test_unvalidated_or_nested_rejected_token_is_an_observation(family, response
     {"token": "operator-token", "authenticated": True, "requires_mfa": False},
     {"access_token": "operator-token", "token_type": "Bearer", "errors": []},
     {"session": {"token": "operator-token"}, "user": {"mfa": {"enabled": True}}},
+    # Status fields that describe other objects do not veto a successful login.
+    {"authentication": {"token": "operator-token"}, "user": {"email_verification": {"status": "pending"}}},
+    {"access_token": "operator-token", "user": {"status": "unverified"}},
+    {"access_token": "operator-token", "subscription": {"state": "failed", "error": "card declined"}},
+    {"authentication": {"token": "operator-token"}, "challenge": {"required": False}},
+    {"data": {"access_token": "operator-token", "token_type": "Bearer"}},
 ])
 def test_successful_authentication_token_responses_still_prove_bypass(family, response):
     result = _run(family, response)
