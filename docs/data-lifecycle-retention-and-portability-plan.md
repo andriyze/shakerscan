@@ -19,7 +19,9 @@ This document records only the current product boundary and genuinely unfinished
   automation.
 - HTTP request archives provide redacted JSON by default. HAR is offered masked or raw; raw HAR
   (credentials included) is sensitive, requires explicit operator confirmation in the UI, and can be
-  turned off for a deployment with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0`. The generic evidence API
+  turned off for a deployment with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0`. It is on by default only while
+  the API is published on loopback; a LAN or tailnet deployment must set
+  `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1` to allow it. The generic evidence API
   never serves unmasked captured traffic. The recorded headers and bodies behind raw HAR are
   encrypted at rest with the credential key (inline, local and S3-compatible copies alike) and
   decrypted only when an archive view reads them; a database dump or a backup without the key

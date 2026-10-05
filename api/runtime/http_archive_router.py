@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -66,15 +67,32 @@ def _require_raw_export_enabled() -> None:
         )
 
 
+def _published_on_loopback_only() -> bool:
+    """Whether the API port is published on loopback only (the default install)."""
+    bind = str(os.environ.get("SHAKERSCAN_BIND_HOST") or "127.0.0.1").strip().strip("[]")
+    if bind.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return False
+
+
 def raw_har_enabled() -> bool:
     """Whether verbatim HAR (credentials included) may be exported.
 
-    On by default: an open-source install has one operator, and replaying a proof in Burp
-    needs the real request. A deployment that must never hand out captured credentials sets
-    SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0 and keeps the masked HAR.
+    An open-source install has one operator, and replaying a proof in Burp needs the real
+    request, so verbatim HAR is on by default while the API is published on loopback only.
+    Once the API is reachable from a LAN or tailnet (which adds no authentication), every
+    peer could pull captured credentials with one GET, so it then needs an explicit
+    SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1. Setting it to 0 always keeps the masked HAR only.
     """
     value = str(os.environ.get("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR") or "").strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    if value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    return _published_on_loopback_only()
 
 
 def _authorize_raw(request: Request) -> None:
@@ -152,8 +170,8 @@ async def _export(
         elif not raw_har_enabled():
             raise HTTPException(
                 status_code=403,
-                detail=("verbatim HAR is disabled on this deployment (SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR); "
-                        "export the masked HAR instead"),
+                detail=("verbatim HAR is disabled on this deployment; export the masked HAR instead. "
+                        "An API published beyond loopback needs SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1"),
             )
     async with _pool().acquire() as conn:
         scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
