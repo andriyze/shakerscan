@@ -270,8 +270,10 @@ async def _purge(request: Request, *, scan_id: str | None, hunt_run_id: str | No
     """
     _require_operator(request)
     async with _pool().acquire() as conn:
+        # Purge exactly what export shows: the visible scan and the child scans it ran.
+        scan_ids = await _scan_archive_ids(conn, scan_id) if scan_id else None
         return await purge_transactions(
-            conn, scan_id=scan_id, hunt_run_id=hunt_run_id,
+            conn, scan_id=scan_id, hunt_run_id=hunt_run_id, scan_ids=scan_ids,
             results_dir=Path(os.environ.get("RESULTS_DIR") or "/results"),
         )
 

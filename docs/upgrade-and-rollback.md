@@ -161,7 +161,11 @@ SHAKERSCAN_ROOT_API_UID=20000 shakerscan start
 ```
 
 The id must be between 1 and 2147483647 and must not be 10001, the Model Intake sandbox. A
-non-root install runs the API as the invoking user and ignores this setting.
+non-root install runs the API as the invoking user and ignores this setting. Starting an existing
+non-root install with `sudo` moves the files your user's API wrote under `results/` to the root
+API id; your own id is never used as the root API identity. Going back to a non-root start
+afterwards needs `sudo chown -R "$(id -u):$(id -g)" ~/.shakerscan/results`, because a non-root
+launcher cannot take files back from another id.
 
 ## PostgreSQL 18
 

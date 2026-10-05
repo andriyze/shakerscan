@@ -75,6 +75,29 @@ def _unfinished_challenge(value: Any) -> bool:
     return not (not_required or completed)
 
 
+_MAX_DEPTH = 8
+_MAX_LIST_ITEMS = 20
+
+
+def _inspection_truncated(value: Any, depth: int = 0) -> bool:
+    """Whether the bounded walkers below would skip part of this document.
+
+    They inspect list items up to the item limit and containers down to the depth limit.
+    A deeper container's fields are never seen, and neither are later list items.
+    """
+    if isinstance(value, Mapping):
+        children = list(value.values())
+    elif isinstance(value, list):
+        if len(value) > _MAX_LIST_ITEMS:
+            return True
+        children = value
+    else:
+        return False
+    if depth >= _MAX_DEPTH and any(isinstance(child, (Mapping, list)) and child for child in children):
+        return True
+    return any(_inspection_truncated(child, depth + 1) for child in children)
+
+
 def authentication_failed_or_incomplete(
     document: Any,
     *,
@@ -95,7 +118,7 @@ def authentication_failed_or_incomplete(
         scopes.update(parent[:i] for i in range(len(parent) + 1))
 
     def collect(value: Any, path: tuple[str, ...] = ()) -> None:
-        if len(path) > 8:
+        if len(path) > _MAX_DEPTH:
             return
         if isinstance(value, Mapping):
             fields = {_name(k): v for k, v in value.items()}
@@ -119,7 +142,7 @@ def authentication_failed_or_incomplete(
             for name, child in fields.items():
                 collect(child, (*path, name))
         elif isinstance(value, list):
-            for child in value[:20]:
+            for child in value[:_MAX_LIST_ITEMS]:
                 collect(child, (*path, "[]"))
 
     collect(document)
@@ -162,16 +185,21 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
                          if str(k).lower() == "content-type"), "")
     if "json" not in content_type or not result.response_body:
         return tuple(sorted(signals))
+    # Proof must see the whole verdict. The transport already bounds the body; a JSON body
+    # that cannot be parsed, or one larger than the bounded walk below inspects, may hide an
+    # explicit rejection, so it yields no token signal (the candidate stays an observation).
     try:
-        document = json.loads(result.response_body[:2_000_000].decode("utf-8"))
+        document = json.loads(bytes(result.response_body).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        return tuple(sorted(signals))
+        return ()
+    if _inspection_truncated(document):
+        return ()
 
     token_paths: list[tuple[str, ...]] = []
     token_names = {"token", "access_token", "id_token", "jwt"}
 
     def collect(value: Any, path: tuple[str, ...] = (), authenticated: bool = False) -> None:
-        if len(path) > 8:
+        if len(path) > _MAX_DEPTH:
             return
         if isinstance(value, Mapping):
             fields = {_name(k): v for k, v in value.items()}
@@ -190,7 +218,7 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
                     token_paths.append(child_path)
                 collect(child, child_path, authenticated)
         elif isinstance(value, list):
-            for child in value[:20]:
+            for child in value[:_MAX_LIST_ITEMS]:
                 collect(child, (*path, "[]"), authenticated)
 
     collect(document)

@@ -684,6 +684,7 @@ def export_document(
 
 async def purge_transactions(
     conn, *, scan_id: str | None, hunt_run_id: str | None, results_dir: Path | None = None,
+    scan_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Delete a run's archived calls and the blobs only they referenced.
 
@@ -693,8 +694,17 @@ async def purge_transactions(
     Content-addressed blobs are shared, so an object is removed only once nothing else
     points at it.
     """
-    owner_clause = "scan_id=$1" if scan_id else "hunt_run_id=$1"
-    owner_id = scan_id or hunt_run_id
+    # A visible scan's calls are archived under its worker child scans, and export shows the
+    # whole tree. Purge the same set, or the operator clears the run they are looking at
+    # while its child traffic (credential-bearing payloads included) stays behind.
+    if scan_id:
+        owners = list(dict.fromkeys(str(value) for value in (scan_ids or (scan_id,))))
+        if str(scan_id) not in owners:
+            owners.insert(0, str(scan_id))
+        owner_clause, owner_id = "scan_id = ANY($1::uuid[])", owners
+    else:
+        owners = [str(hunt_run_id)]
+        owner_clause, owner_id = "hunt_run_id=$1", hunt_run_id
     async with conn.transaction():
         objects = await conn.fetch(
             f"""SELECT DISTINCT eo.id AS object_id, eo.storage_uri
@@ -744,8 +754,8 @@ async def purge_transactions(
                 object_ids,
             )
         await conn.execute(
-            "DELETE FROM http_archive_stats WHERE owner_kind=$1 AND owner_id=$2",
-            "scan" if scan_id else "hunt", owner_id,
+            "DELETE FROM http_archive_stats WHERE owner_kind=$1 AND owner_id = ANY($2::uuid[])",
+            "scan" if scan_id else "hunt", owners,
         )
     deleted_files: list[str] = []
     missing_files: list[str] = []
@@ -775,6 +785,8 @@ async def purge_transactions(
                     "error": str(result.get("error") or result.get("status") or "delete_failed"),
                 })
     return {
+        "owner_kind": "scan" if scan_id else "hunt",
+        "owner_ids": owners,
         "transactions_deleted": int(removed or 0),
         "blobs_deleted": len(deleted_objects),
         "blob_files_deleted": deleted_files,

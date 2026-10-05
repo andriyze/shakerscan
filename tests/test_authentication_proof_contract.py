@@ -121,3 +121,63 @@ def test_successful_unknown_wrapper_ignores_unrelated_metadata(family):
     result = _run(family, {"loginResult": {"authentication": {"token": "login-canary"}},
                           "user": {"verification": {"required": True}, "subscription": {"status": "failed"}}})
     assert result.observations[0]["proof_state"] == "verified"
+
+
+# Inspection is bounded, so a verdict the walk cannot see must never count as "no failure".
+# These run the real SQL and NoSQL adapters end to end, as the cases above do.
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_in_a_body_larger_than_the_parse_window_is_not_proof(family):
+    """The helper parsed only the first 2,000,000 bytes while the transport accepts 2 MiB. A
+    larger valid body failed to parse and the header token alone was returned as proof."""
+    response = {"authenticated": False, "padding": "x" * 2_000_000}
+    assert 2_000_000 < len(json.dumps(response)) < 2 * 1024 * 1024
+    result = _run(family, response, token_header=True)
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_past_the_list_limit_is_not_proof(family):
+    """Only the first twenty list items were inspected, so moving a rejection from index 19
+    to index 20 turned an explicit failure into verified bypass."""
+    steps = [{"step": index} for index in range(20)] + [{"status": "mfa_required"}]
+    result = _run(family, {"access_token": "issued", "login_steps": steps})
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_rejection_below_the_depth_limit_is_not_proof(family):
+    nested: dict = {"authenticated": False}
+    for _ in range(10):
+        nested = {"wrapper": nested}
+    result = _run(family, {"access_token": "issued", **nested})
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_malformed_json_with_a_header_token_is_not_proof(family):
+    class Malformed:
+        async def send(self, request, **_kwargs):
+            value = json.loads(request.body)["password"]
+            injected = isinstance(value, dict) if family == "nosql" else "OR 1=1" in value
+            headers = {"Content-Type": "application/json"}
+            if injected:
+                headers["Authorization"] = "Bearer operator-token"
+            return _result(200 if injected else 401,
+                           b'{"authenticated": false' if injected else b'{"error":"invalid"}', headers)
+
+    run = run_sql if family == "sql" else run_nosql
+    result = run(
+        _request(method="POST", url="https://app.example.test/login",
+                 body='{"email":"nobody@example.test","password":"invalid"}', content_type="application/json"),
+        {"candidate_id": "c" * 64, "method": "POST", "field_path": "password",
+         "request_class": "safe_authentication", "request_ref_id": "exact-request"},
+        Malformed(),
+    )
+    assert result.observations[0]["proof_state"] != "verified"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_a_successful_login_with_a_short_list_still_proves_bypass(family):
+    steps = [{"step": index, "status": "complete"} for index in range(5)]
+    result = _run(family, {"access_token": "issued", "authenticated": True, "login_steps": steps})
+    assert result.observations[0]["proof_state"] == "verified"
