@@ -72,7 +72,8 @@ def _historical_hunt_service_suffix(url: Any) -> str:
         port = parsed.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
     except ValueError:
         return ""
-    if scheme not in {"http", "https"} or not parsed.hostname:
+    # Only IPv6 hosts were spelled differently; every other historical suffix equals today's.
+    if scheme not in {"http", "https"} or not parsed.hostname or ":" not in parsed.hostname:
         return ""
     return f"|service={scheme}://{parsed.hostname}:{port}"
 
