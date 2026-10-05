@@ -35,6 +35,10 @@ test('a finding shows the server fix guidance, says when it is general, and keep
   assert.match(detail, /<HowToFix remediation=\{finding\.remediation\} toolSteps=\{evidence\.remediation\} \/>/)
   assert.match(howToFix, /remediation\.matched_by === 'title'/)
   assert.match(howToFix, />General guidance</)
+  // Guidance the check itself wrote, when the knowledge base has none, is labelled as such.
+  assert.match(api, /matched_by: 'exposure_class' \| 'finding_type' \| 'title' \| 'producer'/)
+  assert.match(howToFix, /remediation\.matched_by === 'producer'/)
+  assert.match(howToFix, />From the check</)
   assert.match(howToFix, /remediation\?\.steps\?\.length \? remediation\.steps : toolSteps/)
   assert.match(howToFix, /Check the fix/)
 })

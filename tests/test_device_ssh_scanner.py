@@ -133,6 +133,31 @@ def test_private_key_success_does_not_conceal_password_and_raw_value_errors_are_
     assert "backend secret text" not in str(result)
 
 
+def test_ssh_posture_findings_explain_the_issue_and_carry_the_fix(monkeypatch):
+    # Unit fixture: a fake Paramiko transport, not a live SSH server.
+    monkeypatch.setattr(ssh_scanner, "HAS_PARAMIKO", True)
+    monkeypatch.setattr(ssh_scanner.socket, "create_connection", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        ssh_scanner, "classify_negotiated_ssh_algorithms",
+        lambda *_args, **_kwargs: (["mac_in:hmac-sha1"], "medium"),
+    )
+    monkeypatch.setattr(ssh_scanner, "paramiko", _fake_paramiko(offered=["password", "publickey"]), raising=False)
+    password = asyncio.run(ssh_scanner.ssh_auth_methods("192.0.2.10"))["findings"]
+    monkeypatch.setattr(ssh_scanner, "paramiko", _fake_paramiko(offered=["keyboard-interactive"]))
+    keyboard = asyncio.run(ssh_scanner.ssh_auth_methods("192.0.2.10"))["findings"]
+    by_title = {finding["title"]: finding for finding in password + keyboard}
+    assert set(by_title) == {
+        "SSH Password Authentication Enabled",
+        "SSH Keyboard-Interactive Authentication Enabled",
+        "SSH Negotiated Weak Cryptographic Algorithm",
+    }
+    for title, finding in by_title.items():
+        assert "192.0.2.10:22" in finding["description"], title
+        assert finding["recommendation"] and finding["recommendation"] == finding["evidence"]["recommendation"], title
+    assert "password" in by_title["SSH Password Authentication Enabled"]["description"]
+    assert "mac_in:hmac-sha1" in by_title["SSH Negotiated Weak Cryptographic Algorithm"]["description"]
+
+
 def test_host_key_fingerprint_and_mismatch_block_credentials(monkeypatch):
     class Key:
         def asbytes(self): return b"known-host-key"
