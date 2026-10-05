@@ -307,3 +307,77 @@ def test_postgres_concurrent_canonical_insert_does_not_abort_legacy_reconciliati
             finally:
                 await second.close()
     asyncio.run(run())
+
+
+def test_stored_rows_with_text_evidence_and_path_only_urls_keep_their_service_identity():
+    """Database rows carry evidence as JSON text, and pre-2.3.8 rows stored path-only URLs.
+    Neither may stop a legacy row (and its triage history) being adopted."""
+    from finding_service_identity import finding_provenance_key, finding_service_origin, same_finding_service
+
+    as_dict = {"url": None, "evidence": {"url": "https://a.example.test/x"}}
+    as_text = {"url": None, "evidence": '{"url": "https://a.example.test/x"}'}
+    assert finding_service_origin(as_text) == "https://a.example.test:443"
+    assert same_finding_service(as_text, as_dict)
+    assert finding_provenance_key(as_text) == finding_provenance_key(as_dict)
+    # Unknown on both sides: same finding when the client route matches.
+    assert same_finding_service({"url": "/x"}, {"url": "/x"})
+    # A known service never matches an unknown or different one.
+    assert not same_finding_service({"url": "/x"}, as_dict)
+    assert not same_finding_service(as_dict, {"url": "https://b.example.test/x"})
+    # Malformed text evidence is treated as no evidence, not an error.
+    assert finding_service_origin({"url": None, "evidence": "{not json"}) is None
+
+
+def test_postgres_legacy_row_with_url_only_in_text_evidence_is_adopted():
+    """The url column of older rows can be NULL with the URL only in evidence, which asyncpg
+    returns as JSON text. Adoption must still recognise the service and keep the row's history."""
+    async def run():
+        async with _database() as conn:
+            target = uuid.uuid4()
+            await conn.execute("INSERT INTO targets(id) VALUES($1)", target)
+            finding = _finding("https://example.test/search")
+            finding["evidence"] = {**finding["evidence"], "url": "https://example.test/search"}
+            previous = pre_service_templated_finding_identity(finding)
+            old_key = "t:" + hashlib.sha256(previous.encode()).hexdigest()[:16]
+            row_id = await conn.fetchval(
+                """INSERT INTO findings(target_id,fingerprint,title,url,tool,cwe,evidence,status,
+                      verification_count,resurfaced_count,first_seen_at)
+                    VALUES($1,$2,$3,NULL,$4,$5,$6::jsonb,'false_positive',0,1,now())
+                    RETURNING id""",
+                target, old_key, finding["title"], finding["tool"], finding["cwe"], json.dumps(finding["evidence"]),
+            )
+            async with conn.transaction():
+                migrated = await reconcile_legacy_finding_row(
+                    conn, target_uuid=target, fingerprint=canonical_finding_fingerprint(finding),
+                    finding=finding, target_kind="web",
+                )
+            assert migrated is not None and migrated["id"] == row_id
+            assert migrated["status"] == "false_positive"
+            assert await conn.fetchval("SELECT fingerprint FROM findings WHERE id=$1", row_id) == \
+                canonical_finding_fingerprint(finding)
+    asyncio.run(run())
+
+
+def test_hunt_rows_written_with_unbracketed_ipv6_service_suffixes_are_reconcilable():
+    """Hunt's own suffix wrote https://::1:443; the shared one writes https://[::1]:443."""
+    from api.scan.finding_reconciliation import _legacy_identities, legacy_finding_fingerprint
+
+    finding = _finding("https://[2001:db8::1]:8443/search")
+    pre_service = pre_service_templated_finding_identity(finding)
+    historical = "t:" + hashlib.sha256((pre_service + "|service=https://2001:db8::1:8443").encode()).hexdigest()[:16]
+    candidates = {legacy_finding_fingerprint(identity, canonical_finding_fingerprint(finding))
+                  for identity in _legacy_identities(finding)}
+    assert historical in candidates
+
+
+def test_identity_keys_survive_a_finding_the_pre_service_key_cannot_read(monkeypatch):
+    """Every other legacy key is guarded; this one raised out of finding_identity_keys and broke
+    the scan page's proof projection."""
+    from api.scan import finding_identity
+
+    def unreadable(_finding):
+        raise ValueError("unreadable finding")
+
+    monkeypatch.setattr(finding_identity, "pre_service_templated_finding_identity", unreadable)
+    keys = finding_identity_keys(_finding("https://example.test/search"))
+    assert keys and keys[0] == canonical_finding_fingerprint(_finding("https://example.test/search"))

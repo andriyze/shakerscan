@@ -27,6 +27,7 @@ def _legacy_identities(finding: dict) -> list[str]:
     except ImportError:  # package layout
         from scanner.findings import legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity, template_path
     identities = []
+    pre_service = None
     for previous in (legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity):
         try:
             identity = previous(finding)
@@ -34,6 +35,8 @@ def _legacy_identities(finding: dict) -> list[str]:
             identity = None
         if identity:
             identities.append(identity)
+            if previous is pre_service_templated_finding_identity:
+                pre_service = identity
     evidence = finding.get("evidence") or {}
     if isinstance(evidence, str):
         try:
@@ -49,7 +52,29 @@ def _legacy_identities(finding: dict) -> list[str]:
         identities.append(f"CWE-79|{evidence.get('method') or 'GET'}|"
                           f"{template_path(evidence.get('path') or '/')}#"
                           f"{template_path(route.path or '/')}|{','.join(sorted(params))}")
-    return identities
+    # Hunt qualified findings on a service other than its target with its own suffix, which
+    # wrote IPv6 hosts without brackets (https://::1:443). Reproduce that spelling so those
+    # rows are adopted rather than split.
+    suffix = _historical_hunt_service_suffix(finding.get("url"))
+    if suffix:
+        bases = [pre_service] if pre_service else []
+        if finding.get("cwe") == "CWE-79" and isinstance(evidence, dict) and evidence.get("client_route"):
+            bases.append(identities[-1])
+        identities.extend(base + suffix for base in bases)
+    return list(dict.fromkeys(identities))
+
+
+def _historical_hunt_service_suffix(url: Any) -> str:
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(str(url or ""))
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
+    except ValueError:
+        return ""
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    return f"|service={scheme}://{parsed.hostname}:{port}"
 
 
 async def reconcile_legacy_finding_row(
