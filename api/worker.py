@@ -3779,10 +3779,7 @@ async def prepare_device_candidate_posture_result(
     controls: list[dict[str, Any]] = []
     evidence: dict[str, Any] = {"reexecuted_at_handoff": True}
     subject: dict[str, Any] = {"device_target_id": device_target_id}
-    title = "Connected-device candidate was deterministically verified"
-    description = "A fresh connected-device posture run satisfied the registered proof contract."
     severity = "medium"
-    recommendation = "Review and remediate the verified connected-device control failure."
     url = f"device://{device_target_id}"
     proof_basis = "device_posture_observation"
 

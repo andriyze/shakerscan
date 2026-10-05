@@ -12,6 +12,7 @@ The producer calls here use unit fixtures (synthetic headers, services and reque
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -59,6 +60,7 @@ EMITTED_DEVICE_CHECKS: dict[str, tuple[str, ...]] = {
         "Device SSH cryptographic posture violates policy",
         "Device HTTPS identity verification failed",
         "Device API authentication bypass reproduced",
+        "Device control endpoint accepts unauthenticated state-changing requests",
     ),
     "device_request_dast": (),
     "device_application_dast": (),
@@ -110,6 +112,106 @@ def _emitted_device_tools() -> set[str]:
                 if text and text.startswith("device_"):
                     tools.add(text)
     return tools
+
+
+_VERIFIER = "device_candidate_verifier"
+_VERIFIER_WRITERS = (_ROOT / "api" / "worker.py", _ROOT / "api" / "devices" / "router.py")
+_FINDINGS_INSERT = re.compile(r"\bINSERT\s+INTO\s+findings\s*\(", re.IGNORECASE)
+
+
+def _title_pattern(value: ast.AST) -> str | None:
+    """A literal title as a regex; an f-string's interpolations become ``.+``."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return re.escape(value.value)
+    if isinstance(value, ast.JoinedStr):
+        return "".join(
+            re.escape(part.value) if isinstance(part, ast.Constant) else ".+" for part in value.values
+        )
+    return None
+
+
+def _sql_literal_titles(sql: str) -> list[str]:
+    """A quoted title literal in ``INSERT INTO findings (..., title, ...) VALUES (...)``."""
+    match = re.search(r"INSERT\s+INTO\s+findings\s*\((?P<cols>[^)]*)\)\s*VALUES\s*\((?P<vals>.*)\)", sql, re.I | re.S)
+    if not match:
+        return []
+    columns = [column.strip().lower() for column in match["cols"].split(",")]
+    values = [value.strip() for value in re.findall(r"'(?:[^']|'')*'|[^,]+", match["vals"])]
+    if "title" not in columns or columns.index("title") >= len(values):
+        return []
+    value = values[columns.index("title")]
+    return [re.escape(value[1:-1].replace("''", "'"))] if value.startswith("'") else []
+
+
+def _emits_verifier_finding(function: ast.AST) -> bool:
+    for node in ast.walk(function):
+        if isinstance(node, ast.Dict) and any(
+            isinstance(k, ast.Constant) and k.value == "tool" and isinstance(v, ast.Constant) and v.value == _VERIFIER
+            for k, v in zip(node.keys, node.values)
+        ):
+            return True
+        if (
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and _FINDINGS_INSERT.search(node.value) and f"'{_VERIFIER}'" in node.value
+        ):
+            return True
+    return False
+
+
+def _verifier_titles_in_writers() -> dict[str, str]:
+    """Title pattern -> where it is written, for every device_candidate_verifier finding writer.
+
+    Collects ``title = ...`` assignments and ``"title": ...`` entries in functions that emit the
+    tool (a finding dict or an ``INSERT INTO findings`` naming it), and literal titles in such SQL.
+    """
+    titles: dict[str, str] = {}
+    for path in _VERIFIER_WRITERS:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or not _emits_verifier_finding(function):
+                continue
+            where = f"{path.relative_to(_ROOT)}:{function.name}"
+            for node in ast.walk(function):
+                values: list[ast.AST] = []
+                if isinstance(node, ast.Assign):
+                    values = [node.value] if any(isinstance(t, ast.Name) and t.id == "title" for t in node.targets) else []
+                elif isinstance(node, ast.Dict):
+                    values = [v for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == "title"]
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _FINDINGS_INSERT.search(node.value):
+                    for pattern in _sql_literal_titles(node.value) if f"'{_VERIFIER}'" in node.value else []:
+                        titles.setdefault(pattern, where)
+                for value in values:
+                    pattern = _title_pattern(value)
+                    if pattern:
+                        titles.setdefault(pattern, where)
+    return titles
+
+
+def test_sql_title_literals_are_collected():
+    sql = (
+        "INSERT INTO findings (device_target_id, title, tool) "
+        "VALUES ($1, 'Fixture literal title', 'device_candidate_verifier')"
+    )
+    assert _sql_literal_titles(sql) == [re.escape("Fixture literal title")]
+
+
+def test_every_device_candidate_verifier_title_written_is_listed_and_guided():
+    """Writers outside the scanner producers (worker settlement, the device agent router) also
+    create device_candidate_verifier findings, some by direct SQL that skips evidence triage."""
+    written = _verifier_titles_in_writers()
+    assert len(written) >= 6, f"the AST scan lost its writers: {written}"
+    listed = EMITTED_DEVICE_CHECKS[_VERIFIER]
+    for pattern, where in sorted(written.items()):
+        examples = [title for title in listed if re.fullmatch(pattern, title)]
+        assert examples, (
+            f"{where} writes a {_VERIFIER} finding titled /{pattern}/ that EMITTED_DEVICE_CHECKS does not list"
+        )
+        for title in examples:
+            guidance = finding_remediation({"tool": _VERIFIER, "title": title, "source": "device", "evidence": {}})
+            # device_candidate_verifier is not PRODUCER_GUIDED: its titles need knowledge-base guidance.
+            assert guidance and guidance["steps"] and (
+                guidance["matched_by"] == "finding_type" or _VERIFIER in PRODUCER_GUIDED
+            ), (where, title, guidance)
 
 
 def test_every_device_check_the_code_emits_is_listed():

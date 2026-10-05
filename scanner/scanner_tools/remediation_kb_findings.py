@@ -720,6 +720,7 @@ TOOL_TITLE_REMEDIATION: dict[str, list[tuple[str, str]]] = {
         (r"^device ssh cryptographic posture", "ssh_weak_algorithms"),
         (r"^device https identity verification", "device_tls_trust"),
         (r"^device api authentication bypass", "broken_authorization"),
+        (r"^device control endpoint accepts unauthenticated", "device_control_missing_authentication"),
     ],
 }
 

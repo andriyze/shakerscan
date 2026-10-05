@@ -3870,6 +3870,11 @@ async def _verify_device_control_authorization_candidate(
                         "cleanup_request_id": str(reverse.get("id") or ""),
                         "cleanup_adapter": cleanup_adapter,
                         "cleanup_outcome": cleanup_outcome,
+                        "remediation": (
+                            "Require authentication and authorization on the device control endpoint for "
+                            "every state-changing request, and restrict the management interface to the "
+                            "management network."
+                        ),
                         "proof_contract_v2": proof,
                     }),
                 )

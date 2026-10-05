@@ -1,5 +1,5 @@
 """Remediation entries for the connected-device checks (SSH posture, service policy, TLS trust,
-firmware advisories, management-interface response controls).
+firmware advisories, management-interface response controls, control-endpoint authentication).
 
 remediation_kb_findings.py merges these into its finding-type entries and maps each device check's
 ``tool`` (and title, where one check reports several kinds) to a key here. Plain data only.
@@ -136,6 +136,27 @@ DEVICE_REMEDIATIONS: dict[str, dict[str, Any]] = {
         "code_examples": {},
         "documentation_links": ["https://www.cisa.gov/known-exploited-vulnerabilities-catalog"],
         "verification": "Rescan the device and confirm the advisory no longer matches",
+        "effort": "days",
+    },
+    "device_control_missing_authentication": {
+        "title": "Device Control Endpoint Without Authentication",
+        "severity_base": "high",
+        "cwe": "CWE-862",
+        "owasp": "A01:2021 - Broken Access Control",
+        "description": "A device control endpoint changed the device's state for a request that carried no credentials.",
+        "business_impact": "Anyone who can reach the management interface can change the device's configuration or behaviour without logging in.",
+        "remediation_steps": [
+            "Require authentication on every state-changing management request (POST, PUT, PATCH, DELETE and state-changing GETs)",
+            "Check the caller's role for the specific control operation on the server, and deny by default",
+            "If the firmware cannot enforce authentication on the endpoint, disable it or restrict the management interface to the management network",
+            "Apply vendor firmware that adds authentication to the control API where one exists",
+        ],
+        "code_examples": {},
+        "documentation_links": [
+            "https://cwe.mitre.org/data/definitions/862.html",
+            "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html",
+        ],
+        "verification": "Replay the control request without credentials and confirm it is refused (401/403) and the device state is unchanged",
         "effort": "days",
     },
     "sensitive_response_caching": {
