@@ -702,6 +702,7 @@ download "$REPO_RAW_BASE/api/targets/asset_authority.py" "$INSTALL_DIR/api/targe
 download "$REPO_RAW_BASE/api/targets/hunt_authority.py" "$INSTALL_DIR/api/targets/hunt_authority.py"
 download "$REPO_RAW_BASE/api/capabilities/http.py" "$INSTALL_DIR/api/capabilities/http.py"
 download "$REPO_RAW_BASE/api/capabilities/auth.py" "$INSTALL_DIR/api/capabilities/auth.py"
+download "$REPO_RAW_BASE/api/capabilities/authentication_proof.py" "$INSTALL_DIR/api/capabilities/authentication_proof.py"
 download "$REPO_RAW_BASE/api/capabilities/browser_login.py" "$INSTALL_DIR/api/capabilities/browser_login.py"
 download "$REPO_RAW_BASE/api/capabilities/exposure_probe.py" "$INSTALL_DIR/api/capabilities/exposure_probe.py"
 download "$REPO_RAW_BASE/api/capabilities/ssh.py" "$INSTALL_DIR/api/capabilities/ssh.py"
