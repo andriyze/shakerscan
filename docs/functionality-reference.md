@@ -2765,7 +2765,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_API_URL` | `api/model_intake_admission_webhook.py`, `scripts/shakerscan_mcp.py` |
 | `SHAKERSCAN_ASM_DISPATCH_INTERVAL` | `api/api.py` |
 | `SHAKERSCAN_AUTHENTICATED_ASSURANCE` | `api/authenticated_assurance/router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
-| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/operator_auth.py`, `docker-compose.release.yml`, `docker-compose.yml` |
+| `SHAKERSCAN_BIND_HOST` | `api/authenticated_assurance/router.py`, `api/fleet_routes/router.py`, `api/operator_auth.py`, `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_BROKER_LEASE` | `api/broker_worker.py`, `api/worker.py` |
 | `SHAKERSCAN_BROKER_LEASE_SECONDS` | `api/fleet_routes/router.py` |
 | `SHAKERSCAN_BROKER_MAX_ACTIVE_SCANS` | `api/fleet_routes/router.py` |
@@ -2800,7 +2800,7 @@ Only key names and declaring sources are documented; secret values are never rea
 | `SHAKERSCAN_HOST_PLATFORM` | `api/api.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HTTP_ARCHIVE` | `api/runtime/http_archive.py` |
 | `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` | `api/runtime/http_archive_router.py` |
-| `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py` |
+| `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR` | `api/runtime/http_archive_router.py`, `docker-compose.release.yml`, `docker-compose.yml` |
 | `SHAKERSCAN_HUNT_ACTION_WAIT_SECONDS` | `scripts/v2_cli.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_SERVER` | `api/agent_tools.py` |
 | `SHAKERSCAN_HUNT_INTERACTSH_TOKEN` | `api/agent_tools.py` |

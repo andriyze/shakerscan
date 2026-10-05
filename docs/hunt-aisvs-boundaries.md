@@ -2,8 +2,8 @@
 
 **Status:** Instruction CRUD and automatic learning implemented; scoped ingress is opt-in.
 
-This follow-up builds on #296 without reversing default-on metadata editing,
-operator opt-outs, standing authorization or same-asset service reuse. It is not
+These controls keep default-on metadata editing, operator opt-outs, standing
+authorization and same-asset service reuse. It is not
 an AISVS compliance claim.
 
 ## Effective instruction changes, not hidden drafts

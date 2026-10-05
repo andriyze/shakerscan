@@ -20,7 +20,7 @@ or the SBOM, or open an issue and we will provide it.
 | Component | Author / maintainer | Upstream | Licence | How ShakerScan uses it |
 |---|---|---|---|---|
 | nuclei | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/nuclei | MIT | Built from source; template-based checks |
-| nuclei-templates | ProjectDiscovery, Inc. and community contributors | https://github.com/projectdiscovery/nuclei-templates | MIT | Pinned snapshot bundled |
+| nuclei-templates | ProjectDiscovery, Inc. and community contributors | https://github.com/projectdiscovery/nuclei-templates | MIT | Pinned snapshot bundled; a few templates copied, with their authors, as test fixtures in `tests/fixtures/nuclei_templates/` |
 | httpx | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/httpx | MIT | Built from source; HTTP probing |
 | katana | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/katana | MIT | Built from source; crawling |
 | subfinder | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/subfinder | MIT | Built from source; passive subdomain discovery |
@@ -80,7 +80,8 @@ This product uses data from the NVD API but is not endorsed or certified by the 
 Python dependencies are pinned with hashes in `scanner/requirements.lock` (and the Model Intake
 locks under `scanner/model_intake_tools/` and `runner/guest/`). JavaScript dependencies are pinned
 in `ui/package-lock.json` and `posture/package-lock.json`. Notable non-permissive licences among
-them: paramiko (LGPL-2.1), certifi (MPL-2.0), and the optional `@img/sharp-libvips-*` binaries
+them: paramiko (LGPL-2.1), certifi (MPL-2.0), the UI build tool lightningcss (MPL-2.0, used
+through Tailwind CSS at build time only), and the optional `@img/sharp-libvips-*` binaries
 used by Next.js image handling (LGPL-3.0-or-later). All other direct dependencies are under MIT,
 BSD, ISC or Apache-2.0 licences; the exact set is recorded in each release SBOM.
 

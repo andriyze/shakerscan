@@ -151,11 +151,25 @@ the [LAN access guide](https://github.com/andriyze/shakerscan/blob/main/docs/lan
   trusted network.
 - Targets need explicit authorization before active testing; scope, budgets, and approvals are
   enforced server-side, not by the UI or the agent.
-- Stored credentials, including secret headers in an AI target's header template, are encrypted at
-  rest and never returned by the API or sent to planners.
+- Stored credentials, including secret headers in an AI target's header template, and the raw
+  headers and bodies recorded in the HTTP archive are encrypted at rest and never returned by the
+  API or sent to planners. Verbatim HAR export is on by default only for a loopback install.
+- Remote commands over SSH (Hunt `ssh.exec`, the live console, saved actions) need an explicit
+  grant on the SSH credential and a pinned host key.
 - Release images are digest-pinned, scanned, and published with SBOMs and build attestations.
 
 Read [SECURITY.md](SECURITY.md) for the full trust boundaries and how to report a vulnerability.
+
+## Your data
+
+- **Delete** targets, domains, credentials, request collections, scans, Hunts, AI targets and Model
+  Intake submissions from the UI or API. Deletion previews what it removes, asks for confirmation,
+  and removes the stored secrets with the records.
+- **Back up** with `shakerscan backup`, list with `shakerscan backup list`, and remove with
+  `shakerscan backup delete <name|all>`. The newest five backups are kept
+  (`SHAKERSCAN_BACKUP_KEEP`). The encryption key is left out unless you pass `--include-key`, so
+  keep `results/.credential_enc.key` safely elsewhere: without it a restored backup cannot decrypt
+  stored secrets.
 
 ## Troubleshooting
 
