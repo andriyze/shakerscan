@@ -617,3 +617,95 @@ def test_a_real_failed_execution_keeps_its_diagnostic():
     diagnostic = explanation["actions"][0]["receipt"]["diagnostic"]
     assert diagnostic["error_class"] == "external_process_contract"
     assert diagnostic["execution_started"] is True
+
+
+_INJECTION_POLICY = {
+    "include_families": ["headers", "xss", "sqli"],
+    "allow_state_changing_http": False,
+}
+
+
+def test_zero_injection_candidates_name_the_withheld_json_body_endpoints():
+    """An active XSS/SQLi scan of a JSON-only API attempted nothing, and said nothing.
+
+    The body endpoints were deliberately withheld: testing a body needs a state-changing
+    request, which needs allow_state_changing_http and a target-bound approval receipt. The
+    explanation now says so instead of silently showing no injection stage.
+    """
+    from api.scan.explanation import injection_candidate_gap
+
+    gap = injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY,
+        candidate_manifests=[{"entry_count": 0, "status": "complete", "reason_code": None}],
+        withheld_body_endpoints=2,
+    )
+    assert gap["reason_code"] == "no_injection_candidates"
+    assert gap["cause"] == "state_changing_http_not_authorized"
+    assert gap["families"] == ["xss", "sqli"]
+    assert gap["withheld_body_endpoints"] == 2
+    assert "allow_state_changing_http" in gap["message"]
+    assert "approval receipt" in gap["message"]
+
+
+def test_zero_injection_candidates_carry_the_candidate_manifest_reason():
+    from api.scan.explanation import injection_candidate_gap
+
+    gap = injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY,
+        candidate_manifests=[{
+            "entry_count": 0, "status": "partial",
+            "reason_code": "path_operation_not_supported",
+        }],
+        withheld_body_endpoints=0,
+    )
+    assert gap["cause"] == "path_operation_not_supported"
+
+    gap = injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY,
+        candidate_manifests=[{"entry_count": 0, "status": "complete", "reason_code": None}],
+        withheld_body_endpoints=0,
+    )
+    assert gap["cause"] == "no_query_or_path_surface"
+    assert "allow_state_changing_http" in gap["message"]
+    # Unknown withheld count (the manifest could not be read): never claim a withheld body.
+    gap = injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY,
+        candidate_manifests=[{"entry_count": 0, "status": "complete", "reason_code": None}],
+        withheld_body_endpoints=None,
+    )
+    assert gap["cause"] == "no_query_or_path_surface"
+    assert gap["withheld_body_endpoints"] is None
+    # Authority held: a body endpoint was not withheld, whatever the count says.
+    gap = injection_candidate_gap(
+        scan_policy={**_INJECTION_POLICY, "allow_state_changing_http": True},
+        candidate_manifests=[{"entry_count": 0, "status": "complete", "reason_code": None}],
+        withheld_body_endpoints=None,
+    )
+    assert gap["cause"] == "no_injectable_surface"
+
+
+def test_no_injection_gap_when_candidates_exist_or_no_injection_family_was_selected():
+    from api.scan.explanation import injection_candidate_gap
+
+    manifests = [{"entry_count": 0, "status": "complete", "reason_code": None}]
+    assert injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY,
+        candidate_manifests=[{"entry_count": 3, "status": "complete", "reason_code": None}],
+        withheld_body_endpoints=2,
+    ) is None
+    assert injection_candidate_gap(
+        scan_policy={"include_families": ["headers"], "allow_state_changing_http": False},
+        candidate_manifests=manifests, withheld_body_endpoints=2,
+    ) is None
+    # No candidate manifest yet: nothing has been decided, so nothing is claimed.
+    assert injection_candidate_gap(
+        scan_policy=_INJECTION_POLICY, candidate_manifests=[], withheld_body_endpoints=None,
+    ) is None
+
+
+def test_explanation_coverage_has_a_stable_injection_candidate_field():
+    explanation = build_scan_execution_explanation(
+        scan_id=SCAN_ID, scan_status="completed", plan_payload=_plan(), action_rows=_rows(),
+    )
+    assert "injection_candidates" in coverage_response(explanation)
+    assert coverage_response(explanation)["injection_candidates"] is None

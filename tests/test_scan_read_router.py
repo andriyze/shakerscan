@@ -87,3 +87,64 @@ def test_live_scan_projection_explains_credential_interruption_from_action_recor
     explanation = read_router.public_scan_execution_explanation(
         {"id": SCAN_ID, "status": "completed", "scan_action_plan_json": _plan(), "options": {}}, rows)
     assert explanation["authentication_assurance"]["interrupted_action_count"] == 1
+
+
+def test_scan_explanation_says_why_an_injection_scan_had_no_candidates():
+    """The read path loads the executed manifests and names the withheld body endpoints."""
+    import json
+
+    from tests.test_scan_explanation import _plan, _rows
+    from tests.test_scan_work_manifests import SCAN_ID as MANIFEST_SCAN_ID
+    from tests.test_scan_work_manifests import _agent_run_endpoints
+    from api.scan.work_manifests import build_candidate_manifest
+
+    endpoints = _agent_run_endpoints()
+    candidates = build_candidate_manifest(
+        endpoints, source_action_ids=("discover.candidates",), maximum=20,
+    )
+    stored = {
+        manifest.manifest_id: manifest.canonical_dict() for manifest in (endpoints, candidates)
+    }
+
+    class Conn:
+        def __init__(self):
+            self.loaded = []
+
+        async def fetchrow(self, query, manifest_id, scan_id):
+            assert "FROM scan_work_manifests" in query
+            assert str(scan_id) == MANIFEST_SCAN_ID
+            self.loaded.append(str(manifest_id))
+            content = stored.get(str(manifest_id))
+            return None if content is None else {"content_json": json.dumps(content)}
+
+    scan = {
+        "id": MANIFEST_SCAN_ID, "status": "completed", "scan_action_plan_json": _plan(),
+        "options": {"scan_policy": {
+            "include_families": ["xss", "sqli"], "allow_state_changing_http": False,
+        }},
+        "result": {"canonical_action_execution": {"work_manifests": [
+            endpoints.reference().canonical_dict(), candidates.reference().canonical_dict(),
+        ]}},
+    }
+    explanation = read_router.public_scan_execution_explanation(scan, _rows())
+    assert explanation["coverage"]["injection_candidates"] is None
+    conn = Conn()
+    asyncio.run(read_router.explain_injection_candidates(conn, scan, explanation))
+    gap = explanation["coverage"]["injection_candidates"]
+    assert gap["cause"] == "state_changing_http_not_authorized"
+    assert gap["withheld_body_endpoints"] == 1
+    assert set(conn.loaded) == {endpoints.manifest_id, candidates.manifest_id}
+
+    # Mutation authority held: nothing was withheld and the endpoint manifest is not read.
+    scan["options"]["scan_policy"]["allow_state_changing_http"] = True
+    explanation = read_router.public_scan_execution_explanation(scan, _rows())
+    conn = Conn()
+    asyncio.run(read_router.explain_injection_candidates(conn, scan, explanation))
+    assert explanation["coverage"]["injection_candidates"]["cause"] == "no_injectable_surface"
+    assert conn.loaded == [candidates.manifest_id]
+
+
+def test_scan_detail_explains_injection_candidates_through_the_router():
+    source = api_tree_source()
+    assert "explain_injection_candidates as _explain_injection_candidates" in source
+    assert "await _explain_injection_candidates(conn, scan, execution_explanation)" in source

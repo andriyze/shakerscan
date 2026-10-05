@@ -450,6 +450,7 @@ function ScanRunLimitsPanel({ scan }: { scan: any }) {
                   • Selected check families with no testable candidates recorded:{' '}
                   <span className="font-medium text-amber-100">{resultPresentation.candidateGapFamilies.join(', ')}</span>.
                   Their absence of findings does not establish that those vulnerability classes were tested.
+                  {resultPresentation.injectionCandidateGap ? ` ${resultPresentation.injectionCandidateGap}` : ''}
                 </li>
               )}
               {assuranceGaps.length > 0 && <li>• What was not established: {assuranceGaps.join('; ')}.</li>}

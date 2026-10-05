@@ -443,6 +443,22 @@ def _directory_listing_child_url(directory_url: str, link: str) -> str:
     return urllib.parse.urljoin(base, link)
 
 
+def _spec_ingest_partial_reason(issues: Sequence[str]) -> CapabilityResultReason:
+    """The honest reason a spec/hint ingestion is partial, most severe first.
+
+    A ``*_limit`` / ``*_limit_reached`` issue is a real bound: routes beyond it were dropped,
+    so the output was truncated. A hint file the target answered with its HTML shell was never
+    published -- nothing was dropped or misparsed. Anything else is a document the parser could
+    only partly model (an unsupported media type, an unresolvable reference, a hint parse error).
+    """
+    tokens = [str(issue or "").split(":", 1)[0] for issue in issues]
+    if any(token.endswith(("_limit", "_limit_reached")) for token in tokens):
+        return CapabilityResultReason.OUTPUT_TRUNCATED
+    if tokens and all(token == "hint_document_is_markup" for token in tokens):
+        return CapabilityResultReason.SOURCE_NOT_PUBLISHED
+    return CapabilityResultReason.PARSER_FAILED
+
+
 class DatabaseNeutralScanActionDispatcher:
     """Execute canonical actions without Redis or PostgreSQL credentials."""
 
@@ -2079,6 +2095,11 @@ class DatabaseNeutralScanActionDispatcher:
             ingestion_issues.append(
                 f"hint_ingestion_failed:{type(hint_error).__name__}"
             )
+        if ingestion_issues:
+            # State why the action is partial. Without a stated reason the backend falls back to
+            # output_truncated, which told the operator a bounded limit was reached when the
+            # target had only answered robots.txt with its HTML shell.
+            errors.insert(0, _spec_ingest_partial_reason(ingestion_issues).value)
         errors.extend(ingestion_issues)
         # Value-free: the observation carries the route shape and field names, never a spec value.
         observations = tuple(dict(route) for route in routes)
