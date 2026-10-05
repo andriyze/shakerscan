@@ -145,3 +145,25 @@ def test_decision_marks_an_incomplete_history_instead_of_claiming_an_all_clear()
     decision = api.build_deployment_decision(_scan([]), target_active_findings=[], target_history=history)
     assert decision["carried_over"]["complete"] is False
     assert decision["carried_over"]["unloaded_active"] == 12
+
+
+def test_a_fingerprint_exception_recorded_before_service_identities_still_applies():
+    """Endpoint findings gained a |service= qualifier and their rows were re-keyed. An exception
+    stored under the earlier fingerprint stopped matching and the gate began blocking it."""
+    import hashlib
+
+    from findings import pre_service_templated_finding_identity
+
+    finding = {"id": "r1", "title": "SQL Injection", "severity": "critical", "tool": "sqlmap",
+               "cwe": "CWE-89", "url": "https://app.example.test/search?q=1",
+               "evidence": {"method": "GET", "param": "q"}}
+    finding["fingerprint"] = canonical_finding_fingerprint(finding)
+    earlier = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+    assert earlier != finding["fingerprint"]
+    exception = {"id": "e1", "fingerprint": earlier, "status": "active", "approver": "a",
+                 "expires_at": "2099-01-01T00:00:00+00:00"}
+    remaining, applied = api._apply_policy_exceptions([finding], [exception])
+    assert remaining == [] and [item["id"] for item in applied] == ["r1"]
+    unrelated = {**exception, "fingerprint": "t:0000000000000000"}
+    remaining, applied = api._apply_policy_exceptions([finding], [unrelated])
+    assert [item["id"] for item in remaining] == ["r1"] and applied == []
