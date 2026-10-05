@@ -102,6 +102,9 @@ Understanding these helps you deploy ShakerScan safely and helps reporters focus
 - **Raw HTTP archive export.** Verbatim HAR (captured credentials included) is available by
   default only while the API is published on loopback; a LAN or tailnet deployment must opt in
   with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1`, and `0` disables it everywhere.
+  Loopback describes the listener, not access through a reverse proxy or tunnel; the HAR gate
+  cannot detect that forwarding. Set `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0` when forwarding the API
+  beyond the local host, and authenticate and restrict access at the proxy or tunnel.
 - **Datastores** (PostgreSQL, Redis, optional MinIO) bind to loopback and use generated passwords.
 
 Hardening ideas, and reports that help us narrow these boundaries (for example a scoped Docker

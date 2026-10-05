@@ -29,7 +29,12 @@ _CHALLENGE_ENVELOPES = frozenset({"challenge", "mfa", "captcha", "two_factor", "
 # Failure and status fields describe the login only at the document root, inside an auth or
 # challenge envelope, or inside a generic response wrapper. Elsewhere (user.email_verification,
 # subscription.state) they describe some other object and must not veto a successful login.
-_LOGIN_SCOPE = _AUTH_ENVELOPES | _CHALLENGE_ENVELOPES | frozenset({"data", "result", "response", "payload", "[]"})
+_LOGIN_SCOPE = _AUTH_ENVELOPES | _CHALLENGE_ENVELOPES | frozenset({
+    "data", "result", "response", "payload", "meta", "metadata", "[]",
+})
+_COMPLETED_CHALLENGE_STATES = frozenset({
+    "complete", "completed", "passed", "verified", "satisfied", "not_required",
+})
 
 
 def _name(value: Any) -> str:
@@ -47,6 +52,24 @@ def _flag(value: Any) -> bool | None:
         if value.lower().strip() in {"true", "yes", "1"}:
             return True
     return None
+
+
+def _unfinished_challenge(value: Any) -> bool:
+    """An issued challenge is unfinished unless the response explicitly clears it.
+
+    Provider/type/URL metadata and even an empty object describe no completed
+    authentication. Explicit rejection fields still veto a cleared object below.
+    """
+    if not isinstance(value, Mapping):
+        return bool(value) and _flag(value) is not False
+    fields = {_name(k): v for k, v in value.items()}
+    not_required = _flag(fields.get("required")) is False
+    completed = any(_flag(fields.get(k)) is True for k in ("complete", "completed")) or any(
+        isinstance(fields.get(k), str)
+        and _name(fields[k].strip()).replace(" ", "_") in _COMPLETED_CHALLENGE_STATES
+        for k in ("status", "state")
+    )
+    return not (not_required or completed)
 
 
 def successful_token_signals(result: Any) -> tuple[str, ...]:
@@ -111,8 +134,7 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
                 (name in _AUTH_FLAGS and _flag(child) is False)
                 or (name in _REQUIRED_FLAGS and bool(child) and _flag(child) is not False)
                 or (name in {"error", "errors", "error_description"} and bool(child))
-                or (name in {"challenge", "captcha"} and not isinstance(child, Mapping)
-                    and bool(child) and _flag(child) is not False)
+                or (name in _CHALLENGE_ENVELOPES and _unfinished_challenge(child))
                 or (name in {"status", "state", "code", "error_code", "authentication_status",
                              "authentication_state", "login_status", "token_type", "purpose"}
                     and isinstance(child, str) and _name(child.strip()).replace(" ", "_") in _FAILED_STATES)
