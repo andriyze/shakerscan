@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping
 
 from fleet_tls import FleetTLSConfigurationError, create_fleet_ssl_context, normalize_tls_ca_state
 from runtime.models import ScanPolicy, TargetBinding
+from runtime.nuclei_index import ensure_nuclei_template_index
 from runtime.sealed_inputs import (
     SealedInputError,
     generate_sealed_input_keypair,
@@ -1020,6 +1021,9 @@ def main() -> int:
     os.environ["ARTIFACT_STORAGE_REQUIRED"] = "false"
     state = load_state(Path(args.state))
     os.environ["SHAKERSCAN_NODE_ID"] = str(state["node_id"])
+    # Build nuclei's template index before leasing work, so the first leased scan does
+    # not spend its action wall on the whole-bundle cold start.
+    ensure_nuclei_template_index()
     if args.once:
         private_input_key, private_input_public_key = generate_sealed_input_keypair()
         lease = api_request(
