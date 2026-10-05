@@ -41,7 +41,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
       - name: Apply edits only to the audited source blobs
         run: |
-          python .github/pr323-refine.py
+          python .github/pr323-gate.py
           mkdir -p artifacts
           git diff --binary > artifacts/pr323-repair.patch
       - name: Run behavioral and PostgreSQL migration regressions
@@ -101,7 +101,7 @@ jobs:
             tests/test_backup_secrets_and_retention.py tests/test_deployment_gate.py \
             tests/test_finding_service_identity.py install/MANIFEST.sha256 docs/functionality-reference.md
           git -c user.name=ChatGPT -c user.email=noreply@openai.com commit \
-            -m 'fix: preserve existing secret classifications during masked template edits'
+            -m 'fix: preserve exact exceptions on report projections without historical aliases'
           git -c http.https://github.com/.extraheader="$auth" push origin "HEAD:refs/heads/$branch"
           git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
       - name: Retain verification result
