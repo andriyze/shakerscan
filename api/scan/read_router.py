@@ -159,15 +159,19 @@ async def explain_injection_candidates(
     policy = _json_object(_json_object(scan.get("options")).get("scan_policy"))
     if not {"xss", "sqli"} & {str(item) for item in policy.get("include_families") or ()}:
         return
-    references = [
-        dict(item) for item in (
-            coverage.get("work_manifests")
-            or _json_object(explanation.get("plan_revision")).get("work_manifest_references")
-            or ()
-        ) if isinstance(item, Mapping)
-    ]
+    # The finalizer's work_manifests come from action arguments, so an empty candidate
+    # manifest (which planned no verify action) is named only by the plan revision.
+    references: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in (
+        *(coverage.get("work_manifests") or ()),
+        *(_json_object(explanation.get("plan_revision")).get("work_manifest_references") or ()),
+    ):
+        if isinstance(item, Mapping):
+            key = (str(item.get("kind") or ""), str(item.get("manifest_id") or ""),
+                   str(item.get("manifest_digest") or ""))
+            references.setdefault(key, dict(item))
     candidate_refs = [
-        item for item in references
+        item for item in references.values()
         if item.get("kind") == "candidate" and item.get("status") != "cancelled"
     ]
     if not candidate_refs or any(int(item.get("entry_count") or 0) > 0 for item in candidate_refs):
@@ -184,7 +188,7 @@ async def explain_injection_candidates(
     withheld: int | None = None
     if not policy.get("allow_state_changing_http"):
         withheld = 0
-        for reference in references:
+        for reference in references.values():
             if reference.get("kind") != "endpoint":
                 continue
             manifest = await _load_manifest(conn, scan_id, reference, ScanWorkManifestKind.ENDPOINT)
