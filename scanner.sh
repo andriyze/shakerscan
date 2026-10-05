@@ -2014,13 +2014,27 @@ prepare_runtime_files() {
     api_gid="$(id -g)"
     if [ "$api_uid" = "0" ]; then
         # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
-        api_uid="${SHAKERSCAN_ROOT_API_UID:-10002}"
+        api_uid="${SHAKERSCAN_ROOT_API_UID:-$(read_dotenv_value SHAKERSCAN_ROOT_API_UID)}"
+        # Reuse older launchers' saved choice too; the root-specific setting takes priority.
+        api_uid="${api_uid:-$(read_dotenv_value SHAKERSCAN_API_UID)}"
+        api_uid="${api_uid:-10002}"
         case "$api_uid" in
-            ''|*[!0-9]*|0|10001)
+            ''|*[!0-9]*)
                 echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be a numeric id other than 0 and 10001.${NC}" >&2
                 return 1
                 ;;
         esac
+        # Docker interprets leading zeroes numerically: 010001 is the sandbox's 10001.
+        # Normalize without shell arithmetic, which can overflow or interpret an octal id.
+        while [[ "$api_uid" == 0* ]] && [ "${#api_uid}" -gt 1 ]; do
+            api_uid="${api_uid#0}"
+        done
+        if [ "$api_uid" = "0" ] || [ "$api_uid" = "10001" ] \
+            || [ "${#api_uid}" -gt 10 ] \
+            || { [ "${#api_uid}" -eq 10 ] && [[ "$api_uid" > 4294967294 ]]; }; then
+            echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be between 1 and 4294967294, other than 10001.${NC}" >&2
+            return 1
+        fi
         api_gid="$api_uid"
         # The API owns results/ (the encryption key included) under this id. A host account or
         # group that already uses it could read every stored secret, so refuse instead.
@@ -2030,6 +2044,7 @@ prepare_runtime_files() {
             echo "  SHAKERSCAN_ROOT_API_UID=<free-id> ./scanner.sh start" >&2
             return 1
         fi
+        write_dotenv_value SHAKERSCAN_ROOT_API_UID "$api_uid"
         # The API reads this directory through its read-only /workspace mount. A root install
         # directory is private (the installer builds it in a 0700 staging directory), so the
         # API could not enter it and /health failed. Give the API's group read access only;

@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from scanner.scanner_tools import build_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,3 +115,67 @@ def test_a_root_install_can_choose_a_free_api_id(tmp_path):
     assert "already belongs" not in result.stderr
     assert f"chgrp 10050 {install}" in calls
     assert "SHAKERSCAN_API_UID=10050" in (Path(install) / ".env").read_text()
+
+
+def _prepare_existing_install(tmp_path: Path, install: str, **overrides: str):
+    functions = (ROOT / "scanner.sh").read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
+    script = functions + f'\nSCRIPT_DIR="{install}"; cd "$SCRIPT_DIR" || exit 9; prepare_runtime_files\n'
+    result = subprocess.run(
+        ["bash", "-s"], input=script, cwd=ROOT, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+             "HOME": str(tmp_path), "SHAKERSCAN_ROOT_API_UID": "", **overrides},
+    )
+    calls = (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+    return result, calls
+
+
+@pytest.mark.parametrize("identity", ["0", "00", "10001", "010001", "4294967295", "9" * 30])
+def test_a_root_install_rejects_reserved_or_out_of_range_numeric_spellings(tmp_path, identity):
+    result, calls, _install = _prepare_with_host_accounts(
+        tmp_path, {}, SHAKERSCAN_ROOT_API_UID=identity,
+    )
+    assert result.returncode != 0 and "SHAKERSCAN_ROOT_API_UID must be" in result.stderr
+    assert not any(call.startswith("chgrp") for call in calls)
+
+
+def test_a_root_install_canonicalizes_and_reuses_its_saved_free_identity(tmp_path):
+    result, calls, install = _prepare_with_host_accounts(
+        tmp_path, {"10002": "alice"}, SHAKERSCAN_ROOT_API_UID="010050",
+    )
+    assert "already belongs" not in result.stderr
+    assert f"chgrp 10050 {install}" in calls
+    assert "SHAKERSCAN_ROOT_API_UID=10050" in (Path(install) / ".env").read_text()
+    restarted, calls = _prepare_existing_install(tmp_path, install)
+    assert "already belongs" not in restarted.stderr
+    assert f"chgrp 10050 {install}" in calls
+    assert f"chgrp 10002 {install}" not in calls
+    assert "SHAKERSCAN_API_UID=10050" in (Path(install) / ".env").read_text()
+
+
+def test_a_root_install_reuses_an_older_saved_api_identity_without_root_setting(tmp_path):
+    _result, _calls, install = _prepare_with_host_accounts(
+        tmp_path, {"10002": "alice"}, SHAKERSCAN_ROOT_API_UID="10050",
+    )
+    dotenv = Path(install) / ".env"
+    dotenv.write_text("\n".join(
+        line for line in dotenv.read_text().splitlines()
+        if not line.startswith("SHAKERSCAN_ROOT_API_UID=")
+    ) + "\n")
+    restarted, calls = _prepare_existing_install(tmp_path, install)
+    assert "already belongs" not in restarted.stderr
+    assert f"chgrp 10050 {install}" in calls
+    assert "SHAKERSCAN_ROOT_API_UID=10050" in dotenv.read_text()
+
+
+def test_a_root_install_preserves_explicit_override_and_rechecks_collisions(tmp_path):
+    _result, _calls, install = _prepare_with_host_accounts(
+        tmp_path, {"10002": "alice"}, SHAKERSCAN_ROOT_API_UID="10050",
+    )
+    overridden, calls = _prepare_existing_install(tmp_path, install, SHAKERSCAN_ROOT_API_UID="10051")
+    assert "already belongs" not in overridden.stderr
+    assert f"chgrp 10051 {install}" in calls
+    assert "SHAKERSCAN_ROOT_API_UID=10051" in (Path(install) / ".env").read_text()
+    refused, calls = _prepare_existing_install(tmp_path, install, SHAKERSCAN_ROOT_API_UID="010002")
+    assert "id 10002 already belongs" in refused.stderr
+    assert f"chgrp 10002 {install}" not in calls
+    assert "SHAKERSCAN_ROOT_API_UID=10051" in (Path(install) / ".env").read_text()

@@ -152,8 +152,9 @@ the [LAN access guide](https://github.com/andriyze/shakerscan/blob/main/docs/lan
 - Targets need explicit authorization before active testing; scope, budgets, and approvals are
   enforced server-side, not by the UI or the agent.
 - Stored credentials, including secret headers in an AI target's header template, and the raw
-  headers and bodies recorded in the HTTP archive are encrypted at rest and never returned by the
-  API or sent to planners. Verbatim HAR export is on by default only for a loopback install.
+  headers and bodies recorded in the HTTP archive are encrypted at rest. Normal API and planner
+  responses redact secrets; explicit raw HAR exports include captured credentials. Verbatim HAR
+  export is on by default only for a loopback install.
 - Remote commands over SSH (Hunt `ssh.exec`, the live console, saved actions) need an explicit
   grant on the SSH credential and a pinned host key.
 - Release images are digest-pinned, scanned, and published with SBOMs and build attestations.
