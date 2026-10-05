@@ -972,3 +972,79 @@ def test_hunt_archive_recorder_preserves_workflow_privacy_marker():
         capability_name='http.request', adapter='http', target_url='http://tv.test/')
     record({'method': 'GET', 'workflow_values_private': True})
     assert calls[0].metadata['workflow_values_private'] is True
+
+
+PARENT, CHILD, GRANDCHILD, UNRELATED = (
+    "a0000000-0000-4000-8000-000000000001", "a0000000-0000-4000-8000-000000000002",
+    "a0000000-0000-4000-8000-000000000003", "a0000000-0000-4000-8000-000000000004",
+)
+
+
+class _ArchiveTreeConn:
+    """Stateful stand-in for the archive tables: scans form a parent tree, and each
+    transaction belongs to the scan that executed it (here the workers, not the parent)."""
+
+    def __init__(self):
+        self.scans = {PARENT: None, CHILD: PARENT, GRANDCHILD: CHILD, UNRELATED: None}
+        self.transactions = [{"scan_id": CHILD}, {"scan_id": GRANDCHILD}, {"scan_id": UNRELATED}]
+        self.stats = {("scan", CHILD), ("scan", GRANDCHILD), ("scan", UNRELATED)}
+
+    def transaction(self):
+        class Transaction:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+        return Transaction()
+
+    def _owners(self, query, params):
+        if "ANY($1::uuid[])" in query:
+            return set(params[0])
+        return {params[0]}
+
+    async def fetch(self, query, *params):
+        if "WITH RECURSIVE scan_tree" in query:
+            tree, frontier = [params[0]], [params[0]]
+            while frontier:
+                frontier = [scan for scan, parent in self.scans.items() if parent in frontier]
+                tree.extend(frontier)
+            return [{"id": scan} for scan in tree]
+        if "CROSS JOIN LATERAL" in query:
+            return []
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *params):
+        if "DELETE FROM http_transactions" in query:
+            owners = self._owners(query, params)
+            before = len(self.transactions)
+            self.transactions = [row for row in self.transactions if row["scan_id"] not in owners]
+            return before - len(self.transactions)
+        raise AssertionError(query)
+
+    async def execute(self, query, *params):
+        assert "DELETE FROM http_archive_stats" in query
+        owners = set(params[1]) if isinstance(params[1], list) else {params[1]}
+        self.stats = {item for item in self.stats if not (item[0] == params[0] and item[1] in owners)}
+
+
+def test_purging_a_parent_scan_clears_the_child_scans_its_export_shows(monkeypatch):
+    """Export resolves a visible scan to the child scans that ran its work, but purge
+    deleted only `scan_id=<parent>`: it reported 0 deleted and left the child traffic."""
+    from api.runtime import http_archive_router as router
+
+    conn = _ArchiveTreeConn()
+
+    class Pool:
+        def acquire(self):
+            class Acquire:
+                async def __aenter__(self): return conn
+                async def __aexit__(self, *args): return False
+            return Acquire()
+
+    monkeypatch.setattr(router, "_pool", lambda: Pool())
+    monkeypatch.setattr(router, "_require_operator", lambda request: None)
+    result = asyncio.run(router._purge(None, scan_id=PARENT, hunt_run_id=None))
+    assert result["transactions_deleted"] == 2
+    assert set(result["owner_ids"]) == {PARENT, CHILD, GRANDCHILD}
+    assert conn.transactions == [{"scan_id": UNRELATED}]
+    assert conn.stats == {("scan", UNRELATED)}
+    again = asyncio.run(router._purge(None, scan_id=PARENT, hunt_run_id=None))
+    assert again["transactions_deleted"] == 0 and conn.transactions == [{"scan_id": UNRELATED}]

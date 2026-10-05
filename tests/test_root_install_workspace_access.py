@@ -184,8 +184,9 @@ def test_a_changed_root_api_identity_takes_over_the_previous_ids_files(tmp_path)
     restarted, _calls = _prepare_existing_install(tmp_path, install, SHAKERSCAN_ROOT_API_UID="10060")
     assert "already belongs" not in restarted.stderr
     recorded = find_calls.read_text(encoding="utf-8")
-    assert f"find {install}/results -xdev -user 10002 -exec chown -h 10060 {{}} +" in recorded
-    assert f"find {install}/results -xdev -group 10002 -exec chgrp -h 10060 {{}} +" in recorded
+    sandbox = f"-path {install}/results/model-intake-sandbox -prune -o"
+    assert f"find {install}/results -xdev {sandbox} -user 10002 -exec chown -h 10060 {{}} +" in recorded
+    assert f"find {install}/results -xdev {sandbox} -group 10002 -exec chgrp -h 10060 {{}} +" in recorded
     assert "SHAKERSCAN_ROOT_API_UID=10060" in dotenv.read_text()
 
 
@@ -201,3 +202,26 @@ def test_a_root_install_preserves_explicit_override_and_rechecks_collisions(tmp_
     assert "id 10002 already belongs" in refused.stderr
     assert f"chgrp 10002 {install}" not in calls
     assert "SHAKERSCAN_ROOT_API_UID=10051" in (Path(install) / ".env").read_text()
+
+
+def test_a_root_start_after_a_non_root_install_takes_over_the_operators_files(tmp_path):
+    """The operator's id is never reused as the root API identity, but after a normal start it
+    owns the existing results/ files (archive payloads are written 0640). Root then ran the API
+    as 10002 without moving them, so that history became unreadable to it."""
+    _result, _calls, install = _prepare_with_host_accounts(
+        tmp_path, {"1000": "operator"}, SHAKERSCAN_ROOT_API_UID="10050",
+    )
+    (Path(install) / "results").mkdir(exist_ok=True)
+    dotenv = Path(install) / ".env"
+    dotenv.write_text("SHAKERSCAN_API_UID=1000\nSHAKERSCAN_API_GID=1001\n")
+    find_calls = tmp_path / "find-calls"
+    (tmp_path / "bin" / "find").write_text(f'#!/bin/sh\necho "find $*" >> "{find_calls}"\n', encoding="utf-8")
+    (tmp_path / "bin" / "find").chmod(0o755)
+    restarted, calls = _prepare_existing_install(tmp_path, install)
+    assert "already belongs" not in restarted.stderr
+    assert f"chgrp 10002 {install}" in calls and f"chgrp 1000 {install}" not in calls
+    sandbox = f"-path {install}/results/model-intake-sandbox -prune -o"
+    recorded = find_calls.read_text(encoding="utf-8")
+    assert f"find {install}/results -xdev {sandbox} -user 1000 -exec chown -h 10002 {{}} +" in recorded
+    assert f"find {install}/results -xdev {sandbox} -group 1001 -exec chgrp -h 10002 {{}} +" in recorded
+    assert "SHAKERSCAN_ROOT_API_UID=10002" in dotenv.read_text()

@@ -2022,6 +2022,19 @@ prepare_runtime_files() {
         if [ -z "$previous_root_uid" ] && [ "$(read_dotenv_value SHAKERSCAN_API_UID | tr -d '\r')" = "10002" ]; then
             previous_root_uid=10002
         fi
+        # Which id owns the existing files is a separate question from which id the API runs as
+        # now. After a non-root start the operator's own id wrote them; it is never reused as the
+        # root API identity, but its files still have to move to the one selected below.
+        local previous_file_uid="$previous_root_uid" previous_file_gid="$previous_root_uid" saved_uid saved_gid
+        if [ -z "$previous_file_uid" ]; then
+            saved_uid="$(read_dotenv_value SHAKERSCAN_API_UID | tr -d '\r')"
+            saved_gid="$(read_dotenv_value SHAKERSCAN_API_GID | tr -d '\r')"
+            case "$saved_uid" in
+                ''|*[!0-9]*|0|10001) ;;
+                *) previous_file_uid="$saved_uid"
+                   case "$saved_gid" in ''|*[!0-9]*|0|10001) previous_file_gid="$saved_uid" ;; *) previous_file_gid="$saved_gid" ;; esac ;;
+            esac
+        fi
         api_uid="${SHAKERSCAN_ROOT_API_UID:-$previous_root_uid}"
         api_uid="${api_uid:-10002}"
         case "$api_uid" in
@@ -2055,11 +2068,14 @@ prepare_runtime_files() {
         # A new API identity takes over what the previous one wrote. Storage initialization only
         # re-owns results/ itself and the key, so the previous id's owner-only files (archived
         # payloads, worker output) would otherwise stay unreadable to the API.
-        if [ -n "$previous_root_uid" ] && [ "$previous_root_uid" != "$api_uid" ] && [ -d "$SCRIPT_DIR/results" ]; then
-            echo "Moving results/ files from the previous API id $previous_root_uid to $api_uid..."
-            if ! find "$SCRIPT_DIR/results" -xdev -user "$previous_root_uid" -exec chown -h "$api_uid" {} + \
-                || ! find "$SCRIPT_DIR/results" -xdev -group "$previous_root_uid" -exec chgrp -h "$api_gid" {} +; then
-                echo -e "${YELLOW}Warning: some results/ files still belong to id $previous_root_uid; run: chown -R $api_uid:$api_gid $SCRIPT_DIR/results${NC}" >&2
+        # The Model Intake sandbox tree keeps its own owner; only the API's files move.
+        if [ -n "$previous_file_uid" ] && [ "$previous_file_uid" != "$api_uid" ] && [ -d "$SCRIPT_DIR/results" ]; then
+            echo "Moving results/ files from the previous API id $previous_file_uid to $api_uid..."
+            if ! find "$SCRIPT_DIR/results" -xdev -path "$SCRIPT_DIR/results/model-intake-sandbox" -prune \
+                    -o -user "$previous_file_uid" -exec chown -h "$api_uid" {} + \
+                || ! find "$SCRIPT_DIR/results" -xdev -path "$SCRIPT_DIR/results/model-intake-sandbox" -prune \
+                    -o -group "$previous_file_gid" -exec chgrp -h "$api_gid" {} +; then
+                echo -e "${YELLOW}Warning: some results/ files still belong to id $previous_file_uid; run: chown -R $api_uid:$api_gid $SCRIPT_DIR/results${NC}" >&2
             fi
         fi
         # The API reads this directory through its read-only /workspace mount. A root install
