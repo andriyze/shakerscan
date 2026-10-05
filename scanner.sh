@@ -249,6 +249,19 @@ postgres_data_volume_exists() {
         docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
 }
 
+# Whether a numeric id is unused by host accounts and groups (true when it cannot be checked).
+root_api_identity_is_free() {
+    command -v getent >/dev/null 2>&1 || return 0
+    ! getent passwd "$1" >/dev/null 2>&1 && ! getent group "$1" >/dev/null 2>&1
+}
+
+root_api_identity_owner() {
+    local user group
+    user="$(getent passwd "$1" 2>/dev/null | cut -d: -f1)"
+    group="$(getent group "$1" 2>/dev/null | cut -d: -f1)"
+    printf 'user %s, group %s' "${user:-none}" "${group:-none}"
+}
+
 ensure_runtime_datastore_credentials() {
     local current_postgres current_redis next_postgres next_redis ready_attempt
     local current_minio next_minio
@@ -2001,8 +2014,22 @@ prepare_runtime_files() {
     api_gid="$(id -g)"
     if [ "$api_uid" = "0" ]; then
         # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
-        api_uid=10002
-        api_gid=10002
+        api_uid="${SHAKERSCAN_ROOT_API_UID:-10002}"
+        case "$api_uid" in
+            ''|*[!0-9]*|0|10001)
+                echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be a numeric id other than 0 and 10001.${NC}" >&2
+                return 1
+                ;;
+        esac
+        api_gid="$api_uid"
+        # The API owns results/ (the encryption key included) under this id. A host account or
+        # group that already uses it could read every stored secret, so refuse instead.
+        if ! root_api_identity_is_free "$api_uid"; then
+            echo -e "${RED}Error: id $api_uid already belongs to a host account or group ($(root_api_identity_owner "$api_uid")).${NC}" >&2
+            echo -e "${RED}It would be able to read ShakerScan's results and encryption key. Choose a free id, e.g.:${NC}" >&2
+            echo "  SHAKERSCAN_ROOT_API_UID=<free-id> ./scanner.sh start" >&2
+            return 1
+        fi
         # The API reads this directory through its read-only /workspace mount. A root install
         # directory is private (the installer builds it in a 0700 staging directory), so the
         # API could not enter it and /health failed. Give the API's group read access only;
@@ -3390,13 +3417,27 @@ create_backup() {
     fi
 
     echo "Archiving result artifacts..."
-    local key_file key_rel
+    local key_file key_name
     key_file="$(backup_key_file)"
-    key_rel="${key_file#"$SCRIPT_DIR"/}"
+    key_name="$(basename "$key_file")"
     local -a tar_exclude=()
-    [ "$include_key" = 1 ] || tar_exclude=(--exclude="$key_rel")
+    # Exclude by file name, not by a path spelling: AI_CREDENTIAL_ENC_KEY_FILE may be relative,
+    # symlinked or the container path, and a path that fails to match would ship the key.
+    # The pattern also covers the key's lock and any temporary file left by a rotation.
+    if [ "$include_key" != 1 ]; then
+        tar_exclude=(--exclude='.credential_enc.key*')
+        case "$key_name" in .credential_enc.key*) ;; *) tar_exclude+=(--exclude="$key_name") ;; esac
+    fi
     if ! tar -C "$SCRIPT_DIR" ${tar_exclude[@]+"${tar_exclude[@]}"} -czf "$snapshot_dir/results.tar.gz" results; then
         echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
+        return 1
+    fi
+    local archived_names=""
+    [ "$include_key" = 1 ] || archived_names="$(tar -tzf "$snapshot_dir/results.tar.gz" | awk -F/ '{print $NF}')"
+    if [ "$include_key" != 1 ] && { grep -q '^\.credential_enc\.key' <<< "$archived_names" \
+        || grep -qxF -- "$key_name" <<< "$archived_names"; }; then
+        rm -f "$snapshot_dir/results.tar.gz"
+        echo -e "${RED}Refusing to finish: the encryption key would have been included. Partial files remain at $snapshot_dir${NC}"
         return 1
     fi
 
@@ -3404,7 +3445,8 @@ create_backup() {
         if [ "$include_key" = 1 ]; then
             cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
         else
-            grep -v '^AI_CREDENTIAL_ENC_KEY=' "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
+            grep -vE '^[[:space:]]*(export[[:space:]]+)?AI_CREDENTIAL_ENC_KEY[[:space:]]*=' \
+                "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
         fi
     fi
     [ ! -f "$SCRIPT_DIR/VERSION" ] || cp "$SCRIPT_DIR/VERSION" "$snapshot_dir/VERSION"

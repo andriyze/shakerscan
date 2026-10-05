@@ -79,3 +79,37 @@ def test_an_unreadable_workspace_falls_back_instead_of_raising(tmp_path, monkeyp
     # caller falls back to the API's own /app runtime instead of failing /health.
     assert files
     assert build_fingerprint.hash_source_files(files, require_all=True) is None
+
+
+def _prepare_with_host_accounts(tmp_path: Path, taken: dict[str, str], **env: str):
+    calls = _fake_bin(tmp_path, "0")
+    entries = "\n".join(f'  {uid}) echo "{name}:x:{uid}:{uid}::/home/{name}:/bin/sh"; exit 0;;' for uid, name in taken.items())
+    (tmp_path / "bin" / "getent").write_text(f'#!/bin/sh\ncase "$2" in\n{entries}\nesac\nexit 2\n', encoding="utf-8")
+    (tmp_path / "bin" / "getent").chmod(0o755)
+    install = tmp_path / "install"
+    install.mkdir(mode=0o700)
+    functions = (ROOT / "scanner.sh").read_text(encoding="utf-8").rsplit("# Parse arguments", 1)[0]
+    script = functions + f'\nSCRIPT_DIR="{install}"; cd "$SCRIPT_DIR" || exit 9; prepare_runtime_files\n'
+    result = subprocess.run(
+        ["bash", "-s"], input=script, cwd=ROOT, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "HOME": str(tmp_path), **env},
+    )
+    recorded = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    return result, recorded, str(install)
+
+
+def test_a_root_install_refuses_an_api_id_a_host_account_already_owns(tmp_path):
+    """The API owns results/ and the encryption key; a host account with the same id could read them."""
+    result, calls, install = _prepare_with_host_accounts(tmp_path, {"10002": "alice"})
+    assert result.returncode != 0
+    assert "10002 already belongs" in result.stderr and "alice" in result.stderr
+    assert not any(call.startswith("chgrp") for call in calls)
+
+
+def test_a_root_install_can_choose_a_free_api_id(tmp_path):
+    result, calls, install = _prepare_with_host_accounts(
+        tmp_path, {"10002": "alice"}, SHAKERSCAN_ROOT_API_UID="10050",
+    )
+    assert "already belongs" not in result.stderr
+    assert f"chgrp 10050 {install}" in calls
+    assert "SHAKERSCAN_API_UID=10050" in (Path(install) / ".env").read_text()
