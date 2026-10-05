@@ -121,3 +121,32 @@ def test_literal_mask_text_is_kept_outside_secret_fields(key):
     assert ai_template_secrets.reveal(updated) == {"input": "{{prompt}} v2", "stop": "***", "api_token": "t-canary"}
     with pytest.raises(ValueError):
         ai_template_secrets.protect({"input": "{{prompt}}", "api_token": "***"})
+
+
+def test_name_value_header_lists_mask_the_secret_value_and_keep_it_on_save(key):
+    """{"name": "Authorization", "value": "Bearer ..."} was returned in clear: neither key is a
+    secret word. The secret is the sibling value, judged by the header name."""
+    template = {
+        "headers": [
+            {"name": "Authorization", "value": "Bearer live-canary"},
+            {"name": "X-Session-Token", "value": "session-canary"},
+            {"name": "Content-Type", "value": "application/json"},
+        ],
+        "params": [{"key": "client_assertion", "val": "assertion-canary"}, {"key": "page", "val": "2"}],
+        "auth_jwt": "jwt-canary",
+        "otp": "123456",
+    }
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    text = json.dumps(shown)
+    for canary in ("live-canary", "session-canary", "assertion-canary", "jwt-canary", "123456"):
+        assert canary not in text
+    assert shown["headers"][2] == {"name": "Content-Type", "value": "application/json"}
+    assert shown["params"][1]["val"] == "2"
+    # Saving the masked editor view keeps the stored secrets.
+    shown["headers"][2]["value"] = "text/plain"
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    assert restored["headers"][0]["value"] == "Bearer live-canary"
+    assert restored["headers"][1]["value"] == "session-canary"
+    assert restored["params"][0]["val"] == "assertion-canary"
+    assert restored["headers"][2]["value"] == "text/plain"

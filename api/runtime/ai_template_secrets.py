@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from .ai_header_secrets import MASK
+from .ai_header_secrets import MASK, is_secret_header
 try:
     from secret_store import encrypt_secret, decrypt_secret, encryption_enabled, SecretStoreUnavailable
 except ModuleNotFoundError:
@@ -17,8 +17,13 @@ MIGRATION = "v2_ai_request_template_secrets_v1"
 _SECRET_WORDS = frozenset({
     "password", "passwd", "pwd", "passphrase", "secret", "secrets", "token", "apikey", "key",
     "credential", "credentials", "cookie", "cookies", "authorization", "auth", "bearer",
-    "privatekey", "signature",
+    "privatekey", "signature", "jwt", "otp", "assertion",
 })
+# Header and parameter lists are often written as name/value objects
+# ({"name": "Authorization", "value": "Bearer ..."}). There the secret is the sibling value, so a
+# secret-looking name (judged like a header name) makes these value fields secret too.
+_PAIR_NAME_KEYS = ("name", "key", "header", "field", "param")
+_PAIR_VALUE_KEYS = frozenset({"value", "val", "content"})
 _SECRET_SUFFIXES = ("password", "passwd", "passphrase", "secret", "token", "apikey", "privatekey",
                     "secretkey", "accesskey", "clientkey", "sessionkey", "credential", "credentials")
 
@@ -27,6 +32,17 @@ def is_secret_field(name: Any) -> bool:
     words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", str(name))]
     joined = "".join(words)
     return bool(words) and (any(w in _SECRET_WORDS for w in words) or joined.endswith(_SECRET_SUFFIXES))
+
+
+def _secret_pair_values(*nodes: Any) -> frozenset[str]:
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for name_key in _PAIR_NAME_KEYS:
+            name = node.get(name_key)
+            if isinstance(name, str) and name != MASK and (is_secret_field(name) or is_secret_header(name)):
+                return _PAIR_VALUE_KEYS
+    return frozenset()
 
 
 def reveal(value: Any) -> dict:
@@ -46,8 +62,9 @@ def _restore(value: Any, existing: Any, sensitive: bool = False) -> Any:
             raise ValueError("Masked template value has no stored value to keep")
         return existing
     if isinstance(value, dict):
+        pair_values = _secret_pair_values(value, existing)
         return {k: _restore(v, existing.get(k) if isinstance(existing, dict) else None,
-                            sensitive or is_secret_field(k)) for k, v in value.items()}
+                            sensitive or is_secret_field(k) or k in pair_values) for k, v in value.items()}
     if isinstance(value, list):
         return [_restore(v, existing[i] if isinstance(existing, list) and i < len(existing) else None, sensitive)
                 for i, v in enumerate(value)]
@@ -69,7 +86,8 @@ def _encrypt(value: dict) -> dict:
 def public(value: Any) -> dict:
     def mask(node: Any, sensitive: bool = False) -> Any:
         if isinstance(node, dict):
-            return {k: mask(v, sensitive or is_secret_field(k)) for k, v in node.items()}
+            pair_values = _secret_pair_values(node)
+            return {k: mask(v, sensitive or is_secret_field(k) or k in pair_values) for k, v in node.items()}
         if isinstance(node, list):
             return [mask(v, sensitive) for v in node]
         return MASK if sensitive and node not in (None, "") else node
