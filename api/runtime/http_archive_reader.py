@@ -447,6 +447,9 @@ async def read_archive_stats(
             scan_param,
         )
         missing = [str(item["capability_name"]) for item in missing_rows]
+        external, engine = split_unarchived_capabilities(missing)
+        stats["unarchived_external_tool_capabilities"] = external
+        stats["unarchived_engine_capabilities"] = engine
     else:
         action_rows = await conn.fetch(
             """SELECT DISTINCT action.capability_name
@@ -474,6 +477,30 @@ async def read_archive_stats(
     stats["unarchived_http_capabilities"] = missing
     stats["unarchived_http_capability_count"] = len(missing)
     return stats
+
+
+def _runs_external_scanner(name: str) -> bool:
+    try:
+        spec = CAPABILITY_REGISTRY.require(name)
+    except KeyError:
+        return False
+    return bool(
+        spec.process_tool_name or spec.binary
+        or (spec.placement_requirements or {}).get("binary")
+    )
+
+
+def split_unarchived_capabilities(names: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Separate scanner-process gaps from engine gaps.
+
+    External scanner tools reach the target through a CONNECT-only pinned tunnel, so their
+    HTTPS traffic is ciphertext to the engine and cannot be archived. An engine capability
+    with no rows is a different gap: its calls were in reach and were not recorded. Names
+    the registry no longer knows are reported as engine gaps rather than hidden.
+    """
+    external = [name for name in names if _runs_external_scanner(name)]
+    engine = [name for name in names if not _runs_external_scanner(name)]
+    return external, engine
 
 
 def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]:
@@ -509,13 +536,38 @@ def archive_fidelity(stats: Mapping[str, int], *, total: int) -> tuple[str, str]
                 f"; {capture_limited} calls have adapter-limited wire detail"
                 if capture_limited else ""
             )
-            + (
-                "; HTTP-producing capabilities with no archived calls: "
-                + ", ".join(unarchived[:10])
-                if unarchived else ""
-            )
+            + _unarchived_clauses(stats, unarchived)
         )
     return "complete", f"all {stored} recorded calls were stored"
+
+
+def _unarchived_clauses(stats: Mapping[str, Any], unarchived: list[str]) -> str:
+    if not unarchived:
+        return ""
+    if "unarchived_external_tool_capabilities" not in stats:
+        # Hunt stats, and scan stats computed before the split, carry one list.
+        return (
+            "; HTTP-producing capabilities with no archived calls: "
+            + ", ".join(unarchived[:10])
+        )
+    external = [
+        str(item) for item in stats.get("unarchived_external_tool_capabilities") or []
+        if str(item)
+    ]
+    engine = [
+        str(item) for item in stats.get("unarchived_engine_capabilities") or [] if str(item)
+    ]
+    return (
+        (
+            "; external scanner traffic (relayed as an opaque pinned tunnel, not archived): "
+            + ", ".join(external[:10])
+            if external else ""
+        )
+        + (
+            "; engine capabilities with no archived calls: " + ", ".join(engine[:10])
+            if engine else ""
+        )
+    )
 
 
 def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
@@ -537,7 +589,9 @@ def project(row: Mapping[str, Any], *, redaction: str) -> dict[str, Any]:
             item["request_body_sha256"] = None
         metadata = _decoded(item.get("metadata_json"))
         private_workflow = isinstance(metadata, Mapping) and metadata.get("workflow_values_private") is True
-        if item.get("plane") == "hunt" and (private_workflow or item.get("capability_name") in {
+        # A private-workflow marker binds on every plane: scan mutation verifiers replay
+        # the same private collection requests a Hunt does.
+        if private_workflow or (item.get("plane") == "hunt" and item.get("capability_name") in {
             "collections.replay_safe", "collections.replay_active",
         }):
             # Response captures and arbitrary header bindings can contain PINs or

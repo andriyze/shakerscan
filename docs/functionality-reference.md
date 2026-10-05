@@ -1174,8 +1174,15 @@ read, and record export events. Retention classes are `short`, `standard`, `audi
 is deliberately raw replay evidence and may contain credentials and bodies; raw non-HAR JSON also
 requires `SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW` plus the operator credential. The export's `fidelity`
 and archive stats distinguish complete, partial, unavailable, failed, and dropped capture; absence
-of an archived row is not proof that no request occurred. Operator-authenticated `DELETE` routes
-purge the archive and unreferenced blobs without requiring raw export to be enabled.
+of an archived row is not proof that no request occurred. Scan engine capabilities that send
+in-process (origin selection, baseline, spec ingest, collection replay, exposure, mutation,
+proof and authz-surface batches) are archived under their own capability name; replayed private
+workflow values, authenticated fetches and exposure bodies are withheld from masked views. External
+scanner processes (httpx, katana, ffuf, nuclei, dalfox, sqlmap) reach the target through an opaque
+pinned tunnel and are not archived; the stats list them apart from engine gaps
+(`unarchived_external_tool_capabilities` vs `unarchived_engine_capabilities`).
+Operator-authenticated `DELETE` routes purge the archive and unreferenced blobs without requiring
+raw export to be enabled.
 
 **Mission campaigns and action ledger**: campaigns are durable operating wrappers over Continuous
 ASM, authenticated DAST, API authorization, AI red-team, Model Intake, benchmark, and retest work.

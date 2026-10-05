@@ -45,3 +45,14 @@ test('Hunt archive offers a full explicit decision record separately from reques
   assert.match(source, /\/hunts\/\$\{encodeURIComponent\(ownerId\)\}\/record/)
   assert.match(source, /ownerKind === 'hunt'/)
 })
+
+test('archive header never calls a partial archive the traffic recorded during the run', () => {
+  // External scanner tools reach the target through an opaque pinned tunnel, so their
+  // traffic is absent from the archive. The header must not imply a full capture.
+  assert.doesNotMatch(source, /replay-ready HAR recorded during this/)
+  assert.match(source, /download a HAR of the calls archived for this \{ownerKind\}/)
+  assert.match(source, /archive\.fidelity !== 'complete'/)
+  assert.match(source, /Not a full traffic capture/)
+  assert.match(source, /unarchived_external_tool_capabilities/)
+  assert.match(source, /send their traffic through an opaque tunnel/)
+})

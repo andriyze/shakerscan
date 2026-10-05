@@ -31,6 +31,8 @@ interface ArchiveDocument {
   fidelity_detail: string
   total: number
   archive_total?: number
+  /** Capabilities whose traffic the engine could not archive, split by reason. */
+  capture_stats?: { unarchived_external_tool_capabilities?: string[] }
   transactions: ArchivedTransaction[]
 }
 
@@ -216,14 +218,22 @@ export default function HttpArchiveExport({
     }
   }
 
+  const externalTools = archive?.capture_stats?.unarchived_external_tool_capabilities ?? []
+
   const body = (
     <>
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold text-gray-200">HTTP request archive</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Browse masked JSON or download the raw replay-ready HAR recorded during this {ownerKind}. Fidelity states when capture was partial.
+            Browse masked JSON or download a HAR of the calls archived for this {ownerKind}.
+            {archive && archive.fidelity !== 'complete' ? ' Not a full traffic capture: see the capture note.' : ''}
           </p>
+          {externalTools.length > 0 && (
+            <p className="mt-1 text-xs text-amber-300/80">
+              External scanner tools ({externalTools.join(', ')}) send their traffic through an opaque tunnel; their requests are counted in the action receipts but not archived.
+            </p>
+          )}
           {archive && (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
               <span className={`rounded-sm px-2 py-0.5 ${fidelityClass(archive.fidelity)}`}>{archive.fidelity} capture</span>
