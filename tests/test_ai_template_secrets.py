@@ -179,11 +179,14 @@ def test_renaming_a_masked_entry_never_inherits_the_previous_secret(key, name):
     assert "rename-canary" not in json.dumps(ai_template_secrets.public(stored))
 
 
-def test_duplicate_named_masks_are_ambiguous_but_explicit_values_are_editable(key):
+def test_edited_duplicate_named_masks_are_ambiguous_but_explicit_values_are_editable(key):
     template = {"headers": [{"name": "Authorization", "value": value} for value in ("first-canary", "second-canary")]}
     stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    assert ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored)) == template
+    shown["headers"].pop(0)  # An edited duplicate list no longer identifies a unique prior entry.
     with pytest.raises(ValueError, match="Masked"):
-        ai_template_secrets.protect(ai_template_secrets.public(stored), stored)
+        ai_template_secrets.protect(shown, stored)
     assert ai_template_secrets.reveal(ai_template_secrets.protect(template, stored)) == template
 
 

@@ -86,6 +86,21 @@ def _mask_node(node: Any, sensitive: bool = False) -> Any:
     return MASK if sensitive and node not in (None, "") else node
 
 
+def _same_json_node(left: Any, right: Any) -> bool:
+    """Compare JSON structure without Python's bool/int/float equivalence."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_node(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_node(value, old) for value, old in zip(left, right)
+        )
+    return left == right
+
+
 def _restore(value: Any, existing: Any, sensitive: bool = False, old_sensitive: bool = False) -> Any:
     """Only a previously masked field of the same entry may retain a secret."""
     if sensitive and value == MASK:
@@ -102,13 +117,20 @@ def _restore(value: Any, existing: Any, sensitive: bool = False, old_sensitive: 
                             _field_sensitive(old, k, old_sensitive)) for k, v in value.items()}
     if isinstance(value, list):
         previous = existing if isinstance(existing, list) else []
+        # An unchanged masked view is a no-op, including repeated
+        # secret masks and duplicate named entries. Preserve each original slot;
+        # never infer a reorder from indistinguishable masks. Any list edit must
+        # take the identity-matching path below instead.
+        if isinstance(existing, list) and _same_json_node(value, _mask_node(previous, old_sensitive)):
+            return [_restore(item, old, sensitive, old_sensitive)
+                    for item, old in zip(value, previous)]
         restored = []
         for item in value:
             identity = _pair_identity(item)
             candidates = [old for old in previous if isinstance(old, dict) and
                 _matching_pair_identity(item, old, sensitive, old_sensitive) == _pair_identity(old)] if identity else [
                 old for old in previous if _mask_node(old, old_sensitive) == item]
-            # No positional fallback: duplicate names or indistinguishable masks
+            # No positional fallback for edits: duplicate names or indistinguishable masks
             # cannot establish which prior secret the operator intended to keep.
             old = candidates[0] if len(candidates) == 1 else None
             restored.append(_restore(item, old, sensitive, old_sensitive))
