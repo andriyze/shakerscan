@@ -63,11 +63,19 @@ def _pair_identity(node: Any) -> tuple[tuple[str, str], ...]:
 
 
 def _field_sensitive(node: dict, key: str, inherited: bool) -> bool:
-    # A parameter's `key` is its name, not its credential value. Keeping the label
-    # visible also lets a masked editor round-trip/reorder entries unambiguously.
-    if key in dict(_pair_identity(node)):
-        return False
+    # A field called `key` may contain credential material, not a parameter name.
+    # Entry matching must never lower the existing masking classification.
     return inherited or is_secret_field(key) or key in _secret_pair_values(node)
+
+
+def _matching_pair_identity(value: dict, existing: dict, sensitive: bool, old_sensitive: bool) -> tuple:
+    labels = dict(value)
+    for key in _PAIR_NAME_KEYS:
+        if (value.get(key) == MASK and isinstance(existing.get(key), str)
+                and _field_sensitive(value, key, sensitive)
+                and _field_sensitive(existing, key, old_sensitive)):
+            labels[key] = existing[key]
+    return _pair_identity(labels)
 
 
 def _mask_node(node: Any, sensitive: bool = False) -> Any:
@@ -86,18 +94,19 @@ def _restore(value: Any, existing: Any, sensitive: bool = False, old_sensitive: 
         return existing
     if isinstance(value, dict):
         old = existing if isinstance(existing, dict) else {}
-        if _pair_identity(value) != _pair_identity(old):
+        if _matching_pair_identity(value, old, sensitive, old_sensitive) != _pair_identity(old):
             if any(value.get(k) == MASK for k in _secret_pair_values(old)):
                 raise ValueError("Masked template entry was renamed; provide its value")
             old = {}
-        return {k: _restore(v, old.get(k), _field_sensitive(value, k, sensitive),
+        return {k: _restore(v, old.get(k), _field_sensitive(value, k, sensitive) or k in _secret_pair_values(old),
                             _field_sensitive(old, k, old_sensitive)) for k, v in value.items()}
     if isinstance(value, list):
         previous = existing if isinstance(existing, list) else []
         restored = []
         for item in value:
             identity = _pair_identity(item)
-            candidates = [old for old in previous if _pair_identity(old) == identity] if identity else [
+            candidates = [old for old in previous if isinstance(old, dict) and
+                _matching_pair_identity(item, old, sensitive, old_sensitive) == _pair_identity(old)] if identity else [
                 old for old in previous if _mask_node(old, old_sensitive) == item]
             # No positional fallback: duplicate names or indistinguishable masks
             # cannot establish which prior secret the operator intended to keep.
