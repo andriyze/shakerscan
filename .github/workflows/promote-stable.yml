@@ -100,15 +100,36 @@ jobs:
           VERSION: ${{ inputs.version }}
         shell: bash
         run: |
-          for image in \
-            shakerscan/shakerscan-scanner \
-            shakerscan/shakerscan-api \
-            shakerscan/shakerscan-ui \
-            shakerscan/shakerscan-model-intake-signer \
-            shakerscan/shakerscan-model-intake; do
-            digest="$(docker buildx imagetools inspect "${image}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+          images=()
+          locked_references=()
+          # Check every version tag against the smoke-validated lock before moving any alias.
+          # Retag by the locked digest, so later drift of a mutable version tag cannot change
+          # the deployment that passed acceptance.
+          for binding in \
+            shakerscan/shakerscan-scanner:SCANNER_IMAGE \
+            shakerscan/shakerscan-api:API_IMAGE \
+            shakerscan/shakerscan-ui:UI_IMAGE \
+            shakerscan/shakerscan-model-intake-signer:SIGNER_IMAGE \
+            shakerscan/shakerscan-model-intake:MODEL_INTAKE_IMAGE; do
+            image="${binding%%:*}"
+            variable="${binding#*:}"
+            locked="$(sed -n "s/^${variable}=//p" release-image-lock.env)"
+            digest="${locked##*@}"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            docker buildx imagetools create -t "${image}:latest" "${image}@${digest}"
+            [[ "$locked" == "${image}@${digest}" ]]
+            actual="$(docker buildx imagetools inspect "${image}:${VERSION}" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
+            if [[ "$actual" != "$digest" ]]; then
+              echo "Version tag ${image}:${VERSION} differs from the accepted release lock" >&2
+              exit 1
+            fi
+            images+=("$image")
+            locked_references+=("$locked")
+          done
+          for index in "${!images[@]}"; do
+            image="${images[$index]}"
+            locked="${locked_references[$index]}"
+            digest="${locked##*@}"
+            docker buildx imagetools create -t "${image}:latest" "$locked"
             latest="$(docker buildx imagetools inspect "${image}:latest" | awk '$1 == "Digest:" && !found {print $2; found=1}')"
             [[ "$latest" == "$digest" ]]
           done

@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Mapping
 import urllib.parse
 import uuid
 
+from capabilities.authentication_proof import authentication_failed_or_incomplete
 from capabilities.http import WorkerPrivateHTTPResponse, execute_bound_http_request, _origin_key
 from runtime.credentials import IDENTITY_PAIR_KINDS
 from runtime.models import TargetBinding
@@ -357,8 +358,9 @@ def _session_headers(
         result["Authorization"] = authorization
     try:
         payload = json.loads(response.body().decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         payload = None
+    token_paths: list[tuple[str, ...]] = []
     if isinstance(payload, dict):
         # A JSON login returns the bearer in the response body. Search a bounded set of
         # well-known locations: the OAuth-standard access_token, common top-level aliases,
@@ -368,17 +370,18 @@ def _session_headers(
         token = ""
         token_type = "Bearer"
         token_keys = ("access_token", "token", "jwt", "id_token", "authToken")
-        containers = [payload]
+        containers = [((), payload)]
         for holder in ("authentication", "data", "result", "auth"):
             nested = payload.get(holder)
             if isinstance(nested, dict):
-                containers.append(nested)
-        for scope in containers:
+                containers.append(((holder,), nested))
+        for path, scope in containers:
             for key in token_keys:
                 value = scope.get(key)
                 if isinstance(value, str) and value:
                     token = value
                     token_type = str(scope.get("token_type") or "Bearer")
+                    token_paths = [(*path, key)]
                     break
             if token:
                 break
@@ -412,6 +415,12 @@ def _session_headers(
             result["Cookie"] = cookie_header
         else:
             safe_cookies = {}
+    if authentication_failed_or_incomplete(
+        payload, token_paths=token_paths, response_identity=bool(result),
+    ):
+        raise SessionCredentialContractError(
+            "session exchange reports failed or incomplete authentication"
+        )
     return result, sorted(safe_cookies)
 
 
