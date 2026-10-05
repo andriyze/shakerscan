@@ -40,23 +40,37 @@ jobs:
       - name: Install repository-locked test dependencies
         run: python -m pip install --disable-pip-version-check --require-hashes -r scanner/requirements.lock
       - name: Apply edits only to the audited source blobs
-        run: python .github/pr323-repair.py
+        run: |
+          python .github/pr323-repair.py
+          mkdir -p artifacts
+          git diff --binary > artifacts/pr323-repair.patch
       - name: Run behavioral and PostgreSQL migration regressions
         run: |
           mkdir -p artifacts
-          python -m pytest -q \
-            tests/test_authentication_proof_contract.py \
-            tests/test_ai_template_secrets.py \
-            tests/test_backup_secrets_and_retention.py \
-            tests/test_deployment_gate.py \
-            tests/test_finding_service_identity.py \
-            tests/test_finding_reconciliation.py \
-            tests/test_finding_check_identity.py \
-            tests/test_finding_proof_state.py \
-            tests/test_sqli_proof_capability.py \
-            tests/test_nosqli_verify_capability.py \
-            tests/test_api_helpers.py \
-            --junitxml=artifacts/pr323-repair.xml
+          python - <<'PY_TESTS'
+          from pathlib import Path
+          from scripts.run_complete_python_suite import partition_test_files, _run_group, merge_junit_reports
+          root = Path.cwd()
+          selected = {
+              'test_authentication_proof_contract.py', 'test_ai_template_secrets.py',
+              'test_backup_secrets_and_retention.py', 'test_deployment_gate.py',
+              'test_finding_service_identity.py', 'test_finding_reconciliation.py',
+              'test_finding_check_identity.py', 'test_finding_proof_state.py',
+              'test_sqli_proof_capability.py', 'test_nosqli_verify_capability.py', 'test_api_helpers.py',
+          }
+          reports, statuses = [], []
+          for native, group in zip((True, False), partition_test_files(root)):
+              paths = tuple(p for p in group if p.name in selected)
+              if not paths:
+                  continue
+              report = root / 'artifacts' / ('package.xml' if native else 'compatibility.xml')
+              reports.append(report)
+              statuses.append(_run_group(root, name='package' if native else 'compatibility', paths=paths,
+                  package_native=native, collect_only=False, coverage=False,
+                  coverage_file=root / 'artifacts' / '.coverage', junit_path=report))
+          merge_junit_reports(tuple(reports), root / 'artifacts' / 'pr323-repair.xml')
+          raise SystemExit(1 if any(statuses) else 0)
+          PY_TESTS
       - name: Regenerate and verify shipped contracts
         run: |
           python scripts/generate_capability_inventory.py
@@ -95,6 +109,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pr323-repair-${{ github.sha }}
-          path: artifacts/pr323-repair.xml
+          path: |
+            artifacts/pr323-repair.xml
+            artifacts/pr323-repair.patch
           if-no-files-found: warn
           retention-days: 7
