@@ -16,6 +16,7 @@ generated launcher also pins `SCANNER_IMAGE_TAG` to the downloaded version by de
 
 | Version | Git Commit | Scanner/Worker Image | API Image | UI Image | Model Intake Signer Image | Model Intake Image |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2.7.1 | pending candidate | pending | pending | pending | pending | pending |
 | 2.7.0 | `9f6419e6cd7b233b0a3f2dca6d7b6734c5e696bb` | `shakerscan/shakerscan-scanner:2.7.0` (`sha256:d41b0229d98810bd9cac75a22dd75490839d8e729f3470d65f9818fa4e0c31d5`) | `shakerscan/shakerscan-api:2.7.0` (`sha256:253ac1cfde1995e32ba1bbce1d9e7c21b8131d96a16ba79b1a4ff12fb8835bfe`) | `shakerscan/shakerscan-ui:2.7.0` (`sha256:3763f79668ab70e732d2a02834741b822eb59cedd639fa2726982caae5420f40`) | `shakerscan/shakerscan-model-intake-signer:2.7.0` (`sha256:0b8c829870488933309bcccaea1acc616983084310fb7c38cefa48811ed16213`) | `shakerscan/shakerscan-model-intake:2.7.0` (`sha256:79a5c5cc12ecbaf3f3d6f2fdab51875fda812c726be2c996247c252b2e44c5fd`) |
 | 2.6.0 | superseded candidate (not published) | not published | not published | not published | not published | not published |
 | 2.5.6 | `720db98d8576c5e14927aec6bff3d08b496a25cd` | `shakerscan/shakerscan-scanner:2.5.6` (`sha256:992f4dbc6e76eab99adb0199a176d79cd290e1c59e0be1d4839afa6dd8270600`) | `shakerscan/shakerscan-api:2.5.6` (`sha256:815bb0ac88e2d1e5cacc9035f8add61fc0035f71193e4a3a5fb6bb3006577ac2`) | `shakerscan/shakerscan-ui:2.5.6` (`sha256:9b076fdbbeb0168d1c81ce0edbda09421a6bf304cf029f5378560a8d7736f054`) | `shakerscan/shakerscan-model-intake-signer:2.5.6` (`sha256:690cdd980cef745e75f3573b272eeade04c67fb9bcad7e3dce3e95abd29a82c9`) | `shakerscan/shakerscan-model-intake:2.5.6` (`sha256:c7c01696c2657bb6780e479ba005ed2302eb28d4c18d9ac8b17c0f408570d72f`) |
@@ -89,10 +90,10 @@ The release process itself is documented once, in
 checks, one immutable **Release candidate** build per exact SHA, **Promote release** by digest,
 public smoke, and a separate stable-channel bump. This file is only the provenance ledger.
 
-Version 2.7.0 is the pending candidate. It includes unified targets, saved target instructions and
-actions, direct SSH Hunts, PostgreSQL 18 and the proof, request-fidelity and secret-storage repairs
-since 2.5.6. The unpublished 2.6.0 candidate is superseded; its changes are included in 2.7.0.
-See [`docs/releases/2.7.0.md`](docs/releases/2.7.0.md) for scope and validation state.
+Version 2.7.1 is the pending candidate. It fixes defects found after the 2.7.0 release: authentication
+proof inspection limits, scan-tree archive purge, the non-root to root file move, the nuclei cold
+start, private-network policy for connected devices, Hunt refusal order and finding guidance.
+See [`docs/releases/2.7.1.md`](docs/releases/2.7.1.md) for scope and validation state.
 The candidate has not been published or promoted.
 
 Ledger rules:
