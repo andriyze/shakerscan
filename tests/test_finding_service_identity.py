@@ -107,6 +107,9 @@ CREATE TABLE findings(
  last_seen_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
 CREATE UNIQUE INDEX web_finding_key ON findings(target_id,fingerprint) WHERE target_id IS NOT NULL;
 CREATE UNIQUE INDEX device_finding_key ON findings(device_target_id,fingerprint) WHERE device_target_id IS NOT NULL;
+CREATE TABLE finding_exceptions(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), finding_id text, fingerprint text, target_id uuid,
+ updated_at timestamptz, edit_history jsonb DEFAULT '[]', status text, approver text, expires_at timestamptz);
 CREATE TABLE finding_verifications(
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), finding_id uuid REFERENCES findings(id),
  target_id uuid, device_target_id uuid, requested_by text, status text, result_status text,
@@ -381,3 +384,30 @@ def test_identity_keys_survive_a_finding_the_pre_service_key_cannot_read(monkeyp
     monkeypatch.setattr(finding_identity, "pre_service_templated_finding_identity", unreadable)
     keys = finding_identity_keys(_finding("https://example.test/search"))
     assert keys and keys[0] == canonical_finding_fingerprint(_finding("https://example.test/search"))
+
+
+def test_postgres_rekey_binds_only_the_original_rows_exception_atomically():
+    async def run():
+        async with _database() as conn:
+            target, other_target = uuid.uuid4(), uuid.uuid4()
+            await conn.execute("INSERT INTO targets(id) VALUES($1),($2)", target, other_target)
+            finding = _finding("https://example.test/search?q=1")
+            old_key = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+            canonical = canonical_finding_fingerprint(finding)
+            row_id = await conn.fetchval("""INSERT INTO findings(target_id,fingerprint,title,url,tool,cwe,evidence,status)
+                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,'accepted_risk') RETURNING id""", target, old_key,
+                finding["title"], finding["url"], finding["tool"], finding["cwe"], json.dumps(finding["evidence"]))
+            exception_id = await conn.fetchval("""INSERT INTO finding_exceptions(target_id,fingerprint,status,approver,expires_at)
+                VALUES($1,$2,'active','operator','2099-01-01') RETURNING id""", target, old_key)
+            other_id = await conn.fetchval("""INSERT INTO finding_exceptions(target_id,fingerprint,status,approver,expires_at)
+                VALUES($1,$2,'active','operator','2099-01-01') RETURNING id""", other_target, old_key)
+            async with conn.transaction():
+                adopted = await reconcile_legacy_finding_row(conn, target_uuid=target, fingerprint=canonical, finding=finding)
+            assert adopted["id"] == row_id
+            saved = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", exception_id)
+            assert saved["finding_id"] == str(row_id) and saved["fingerprint"] == canonical
+            assert saved["status"] == "active" and saved["approver"] == "operator" and saved["expires_at"].year == 2099
+            assert json.loads(saved["edit_history"])[0]["fingerprint"] == old_key
+            untouched = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", other_id)
+            assert untouched["fingerprint"] == old_key and untouched["finding_id"] is None
+    asyncio.run(run())

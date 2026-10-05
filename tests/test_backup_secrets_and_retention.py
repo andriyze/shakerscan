@@ -183,3 +183,35 @@ def test_a_custom_key_file_name_inside_results_is_also_left_out(tmp_path):
     with tarfile.open(_only_backup(install) / "results.tar.gz") as archive:
         names = archive.getnames()
     assert "results/custom.fernet" not in names and "results/scan.json" in names
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_symlink_and_hardlink_key_aliases_never_enter_an_excluded_key_backup(tmp_path, custom):
+    install = _install(tmp_path)
+    results = install / "results"
+    original = results / ".credential_enc.key"
+    original.unlink()
+    backing = results / "keys" / "actual.fernet"
+    backing.parent.mkdir()
+    backing.write_text("synthetic-key-canary\n")
+    configured = results / "custom.fernet" if custom else original
+    configured.symlink_to("keys/actual.fernet")
+    (results / "renamed-hardlink").hardlink_to(backing)
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=str(configured))
+    assert result.returncode == 0, result.stderr
+    backup = _only_backup(install)
+    with tarfile.open(backup / "results.tar.gz") as archive:
+        assert "results/scan.json" in archive.getnames()
+        assert not {"results/keys/actual.fernet", "results/renamed-hardlink", "results/custom.fernet", "results/.credential_enc.key"} & set(archive.getnames())
+    assert "encryption_key_included=false" in (backup / "manifest.txt").read_text()
+
+
+def test_custom_key_rotation_files_are_excluded_too(tmp_path):
+    install = _install(tmp_path)
+    key = install / "results" / "custom.fernet"
+    key.write_text("custom-key-canary")
+    key.with_name(key.name + ".tmp.123").write_text("partial-key-canary")
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=str(key))
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(_only_backup(install) / "results.tar.gz") as archive:
+        assert not any("custom.fernet" in name for name in archive.getnames())

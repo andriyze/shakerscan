@@ -130,7 +130,23 @@ async def reconcile_legacy_finding_row(
             # Roll back only this re-key, retaining the legacy row and its history.
             async with conn.transaction():
                 await conn.execute(
-                    "UPDATE findings SET fingerprint = $1 WHERE id = $2",
+                    """WITH prior AS MATERIALIZED (
+                        SELECT id, target_id, fingerprint FROM findings WHERE id=$2 FOR UPDATE
+                    ), moved AS (
+                        UPDATE findings SET fingerprint=$1 WHERE id=$2 RETURNING id
+                    )
+                    UPDATE finding_exceptions AS exception
+                    SET finding_id=prior.id::text, fingerprint=$1, updated_at=NOW(),
+                        edit_history=COALESCE(exception.edit_history, '[]'::jsonb) || jsonb_build_array(
+                            jsonb_build_object('transition', 'finding_identity_rekey',
+                                              'fingerprint', exception.fingerprint,
+                                              'finding_id', exception.finding_id,
+                                              'replaced_at', NOW()))
+                    FROM prior, moved
+                    WHERE moved.id=prior.id AND exception.target_id=prior.target_id
+                      AND exception.fingerprint=prior.fingerprint
+                      AND (NULLIF(exception.finding_id, '') IS NULL OR exception.finding_id=prior.id::text)
+                    """,
                     fingerprint, legacy_row["id"],
                 )
         except Exception as exc:

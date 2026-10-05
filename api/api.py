@@ -8004,7 +8004,7 @@ def _active_exception_keys(exceptions: list[dict[str, Any]]) -> tuple[set[str], 
             continue
         if finding_id:
             active_ids.add(finding_id)
-        if fingerprint:
+        if fingerprint and not item.get("finding_id"):
             active_fingerprints.add(fingerprint)
     return active_ids, active_fingerprints
 
@@ -8020,10 +8020,9 @@ def _apply_policy_exceptions(
     applied: list[dict[str, Any]] = []
     for finding in blocking_findings:
         finding_id = str(finding.get("id") or "")
-        try:  # an exception recorded under an earlier identity of this finding still applies
-            fingerprints = {str(finding.get("fingerprint") or ""), *finding_identity_keys(finding)}
-        except Exception:
-            fingerprints = {str(finding.get("fingerprint") or "")}
+        # Historical hashes omit service/route/check provenance and are not authority.
+        # Reconciliation binds a legacy exception to the actual row during its re-key.
+        fingerprints = {str(finding.get("fingerprint") or ""), canonical_finding_fingerprint(finding)}
         if (finding_id and finding_id in active_ids) or (fingerprints - {""}) & active_fingerprints:
             applied.append(finding)
         else:

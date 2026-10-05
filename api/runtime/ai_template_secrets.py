@@ -54,20 +54,56 @@ def reveal(value: Any) -> dict:
     return value
 
 
-def _restore(value: Any, existing: Any, sensitive: bool = False) -> Any:
-    """``***`` keeps the stored value only where the response masked it: in a secret field.
-    Anywhere else it is ordinary text and is saved as written."""
+def _pair_identity(node: Any) -> tuple[tuple[str, str], ...]:
+    """Structural labels identify a name/value entry; positions do not."""
+    if not isinstance(node, dict) or not any(k in node for k in _PAIR_VALUE_KEYS):
+        return ()
+    return tuple((k, node[k]) for k in _PAIR_NAME_KEYS
+                 if isinstance(node.get(k), str) and node[k] != MASK)
+
+
+def _field_sensitive(node: dict, key: str, inherited: bool) -> bool:
+    # A parameter's `key` is its name, not its credential value. Keeping the label
+    # visible also lets a masked editor round-trip/reorder entries unambiguously.
+    if key in dict(_pair_identity(node)):
+        return False
+    return inherited or is_secret_field(key) or key in _secret_pair_values(node)
+
+
+def _mask_node(node: Any, sensitive: bool = False) -> Any:
+    if isinstance(node, dict):
+        return {k: _mask_node(v, _field_sensitive(node, k, sensitive)) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_mask_node(v, sensitive) for v in node]
+    return MASK if sensitive and node not in (None, "") else node
+
+
+def _restore(value: Any, existing: Any, sensitive: bool = False, old_sensitive: bool = False) -> Any:
+    """Only a previously masked field of the same entry may retain a secret."""
     if sensitive and value == MASK:
-        if existing is None:
+        if existing is None or not old_sensitive:
             raise ValueError("Masked template value has no stored value to keep")
         return existing
     if isinstance(value, dict):
-        pair_values = _secret_pair_values(value, existing)
-        return {k: _restore(v, existing.get(k) if isinstance(existing, dict) else None,
-                            sensitive or is_secret_field(k) or k in pair_values) for k, v in value.items()}
+        old = existing if isinstance(existing, dict) else {}
+        if _pair_identity(value) != _pair_identity(old):
+            if any(value.get(k) == MASK for k in _secret_pair_values(old)):
+                raise ValueError("Masked template entry was renamed; provide its value")
+            old = {}
+        return {k: _restore(v, old.get(k), _field_sensitive(value, k, sensitive),
+                            _field_sensitive(old, k, old_sensitive)) for k, v in value.items()}
     if isinstance(value, list):
-        return [_restore(v, existing[i] if isinstance(existing, list) and i < len(existing) else None, sensitive)
-                for i, v in enumerate(value)]
+        previous = existing if isinstance(existing, list) else []
+        restored = []
+        for item in value:
+            identity = _pair_identity(item)
+            candidates = [old for old in previous if _pair_identity(old) == identity] if identity else [
+                old for old in previous if _mask_node(old, old_sensitive) == item]
+            # No positional fallback: duplicate names or indistinguishable masks
+            # cannot establish which prior secret the operator intended to keep.
+            old = candidates[0] if len(candidates) == 1 else None
+            restored.append(_restore(item, old, sensitive, old_sensitive))
+        return restored
     return value
 
 
@@ -84,14 +120,7 @@ def _encrypt(value: dict) -> dict:
 
 
 def public(value: Any) -> dict:
-    def mask(node: Any, sensitive: bool = False) -> Any:
-        if isinstance(node, dict):
-            pair_values = _secret_pair_values(node)
-            return {k: mask(v, sensitive or is_secret_field(k) or k in pair_values) for k, v in node.items()}
-        if isinstance(node, list):
-            return [mask(v, sensitive) for v in node]
-        return MASK if sensitive and node not in (None, "") else node
-    return mask(reveal(value))
+    return _mask_node(reveal(value))
 
 
 def protect_or_http_error(value: dict, existing: Any = None) -> dict:

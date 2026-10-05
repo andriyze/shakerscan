@@ -50,13 +50,11 @@ def _flag(value: Any) -> bool | None:
 
 
 def successful_token_signals(result: Any) -> tuple[str, ...]:
-    """Return token assertion names, never their values, on a successful response.
+    """Return content-free token assertions, vetoed by their own login state.
 
-    A challenge, CSRF or preference cookie can be issued when login was rejected.
-    Cookie creation and a status change alone cannot establish authenticated state.
-    Explicit failure or an unfinished MFA/challenge overrides any token assertion.
-    Cookie-only and generic token responses remain observations for a later
-    authenticated resource check: a token value alone does not identify its purpose.
+    Candidate ancestors are login scope even when an API uses an unfamiliar
+    wrapper name. Unrelated user/subscription metadata is not a login verdict.
+    Cookies and ambiguous generic tokens remain candidates, not bypass proof.
     """
     if not isinstance(result.status_code, int) or not 200 <= result.status_code < 300:
         return ()
@@ -65,10 +63,8 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
         if str(name).lower() in {"authorization", "x-auth-token"}
         and isinstance(value, str) and value.strip()
     }
-    content_type = next((
-        str(value).lower() for name, value in result.response_headers.items()
-        if str(name).lower() == "content-type"
-    ), "")
+    content_type = next((str(v).lower() for k, v in result.response_headers.items()
+                         if str(k).lower() == "content-type"), "")
     if "json" not in content_type or not result.response_body:
         return tuple(sorted(signals))
     try:
@@ -76,48 +72,53 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return tuple(sorted(signals))
 
-    incomplete = False
+    nodes: list[tuple[tuple[str, ...], dict]] = []
+    scopes: set[tuple[str, ...]] = {()}
+    token_names = {"token", "access_token", "id_token", "jwt"}
 
-    def walk(value: Any, path: tuple[str, ...] = (), authenticated: bool = False) -> None:
-        nonlocal incomplete
+    def collect(value: Any, path: tuple[str, ...] = (), authenticated: bool = False) -> None:
         if len(path) > 8:
             return
         if isinstance(value, Mapping):
-            fields = {_name(raw_name): child for raw_name, child in value.items()}
+            fields = {_name(k): v for k, v in value.items()}
+            nodes.append((path, fields))
+            if path and path[-1] in _AUTH_ENVELOPES:
+                scopes.add(path)  # also handles a header token with a nested auth verdict
             authenticated = authenticated or any(
-                _flag(fields.get(name)) is True
-                for name in {"authenticated", "is_authenticated", "logged_in", "is_logged_in"}
+                _flag(fields.get(k)) is True
+                for k in {"authenticated", "is_authenticated", "logged_in", "is_logged_in"}
             )
-            login_scoped = all(part in _LOGIN_SCOPE for part in path)
             for name, child in fields.items():
                 child_path = (*path, name)
-                if (
-                    (login_scoped and name in _AUTH_FLAGS and _flag(child) is False)
-                    or (login_scoped and name in _REQUIRED_FLAGS and bool(child) and _flag(child) is not False)
-                    or (login_scoped and name in {"error", "errors", "error_description"} and bool(child))
-                    # A challenge object is judged by its own fields (required, token, status);
-                    # {"challenge": {"required": false}} is not an unfinished challenge.
-                    or (login_scoped and name in {"challenge", "captcha"} and not isinstance(child, Mapping)
-                        and bool(child) and _flag(child) is not False)
-                    or (login_scoped and name in {"status", "state", "code", "error_code", "authentication_status",
-                                                  "authentication_state", "login_status", "token_type", "purpose"}
-                        and isinstance(child, str) and _name(child.strip()).replace(" ", "_") in _FAILED_STATES)
-                    or (name == "required" and any(part in _CHALLENGE_ENVELOPES for part in path)
-                        and _flag(child) is True)
-                    or (name in {"token", "access_token", "id_token", "jwt"}
-                        and any(part in _CHALLENGE_ENVELOPES for part in path) and bool(child))
-                ):
-                    incomplete = True
-                if (
-                    name in {"token", "access_token", "id_token", "jwt"}
-                    and isinstance(child, str) and child.strip()
-                    and (name != "token" or authenticated or any(part in _AUTH_ENVELOPES for part in path))
-                ):
+                if (name in token_names and isinstance(child, str) and child.strip()
+                        and not any(p in _CHALLENGE_ENVELOPES for p in path)
+                        and (name != "token" or authenticated or any(p in _AUTH_ENVELOPES for p in path))):
                     signals.add("json:" + ".".join(child_path))
-                walk(child, child_path, authenticated)
+                    scopes.update(path[:i] for i in range(len(path) + 1))
+                collect(child, child_path, authenticated)
         elif isinstance(value, list):
             for child in value[:20]:
-                walk(child, (*path, "[]"), authenticated)
+                collect(child, (*path, "[]"), authenticated)
 
-    walk(document)
-    return () if incomplete else tuple(sorted(signals))
+    collect(document)
+    for path, fields in nodes:
+        login_scoped = any(path[:i] in scopes and all(p in _LOGIN_SCOPE for p in path[i:])
+                           for i in range(len(path) + 1))
+        if not login_scoped:
+            continue
+        for name, child in fields.items():
+            if (
+                (name in _AUTH_FLAGS and _flag(child) is False)
+                or (name in _REQUIRED_FLAGS and bool(child) and _flag(child) is not False)
+                or (name in {"error", "errors", "error_description"} and bool(child))
+                or (name in {"challenge", "captcha"} and not isinstance(child, Mapping)
+                    and bool(child) and _flag(child) is not False)
+                or (name in {"status", "state", "code", "error_code", "authentication_status",
+                             "authentication_state", "login_status", "token_type", "purpose"}
+                    and isinstance(child, str) and _name(child.strip()).replace(" ", "_") in _FAILED_STATES)
+                or (name == "required" and any(p in _CHALLENGE_ENVELOPES for p in path)
+                    and _flag(child) is True)
+                or (name in token_names and any(p in _CHALLENGE_ENVELOPES for p in path) and bool(child))
+            ):
+                return ()
+    return tuple(sorted(signals))

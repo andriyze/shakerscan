@@ -3417,27 +3417,74 @@ create_backup() {
     fi
 
     echo "Archiving result artifacts..."
-    local key_file key_name
+    local key_file
     key_file="$(backup_key_file)"
-    key_name="$(basename "$key_file")"
-    local -a tar_exclude=()
-    # Exclude by file name, not by a path spelling: AI_CREDENTIAL_ENC_KEY_FILE may be relative,
-    # symlinked or the container path, and a path that fails to match would ship the key.
-    # The pattern also covers the key's lock and any temporary file left by a rotation.
-    if [ "$include_key" != 1 ]; then
-        tar_exclude=(--exclude='.credential_enc.key*')
-        case "$key_name" in .credential_enc.key*) ;; *) tar_exclude+=(--exclude="$key_name") ;; esac
-    fi
-    if ! tar -C "$SCRIPT_DIR" ${tar_exclude[@]+"${tar_exclude[@]}"} -czf "$snapshot_dir/results.tar.gz" results; then
+    # Resolve key aliases before archiving, and verify actual member bytes afterwards.
+    # tarfile does not dereference symlinks; inode checks also exclude hard-link aliases.
+    if ! python3 - "$SCRIPT_DIR" "$key_file" "$snapshot_dir/results.tar.gz" "$include_key" <<'PY_BACKUP'
+import hashlib
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+root, configured, output, include = Path(sys.argv[1]).resolve(), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"
+paths = {root / "results" / ".credential_enc.key"}
+paths.add(configured if configured.is_absolute() else root / configured)
+if str(configured).startswith("/results/"):
+    paths.add(root / str(configured).lstrip("/"))
+inodes, key_hashes, key_names = set(), set(), {configured.name, ".credential_enc.key"}
+try:
+    if not include:
+        for path in paths:
+            if not path.exists() and not path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            info = resolved.stat()
+            if not resolved.is_file() or info.st_size > 65536:
+                raise ValueError("invalid credential key file")
+            raw = resolved.read_bytes()
+            inodes.add((info.st_dev, info.st_ino))
+            key_hashes.add((len(raw), hashlib.sha256(raw).digest()))
+            key_names.add(resolved.name)
+
+    def secret_name(name):
+        return name.startswith(".credential_enc.key") or any(
+            name == key or name == key + ".lock" or name.startswith(key + ".tmp")
+            for key in key_names)
+
+    def keep(member):
+        if include:
+            return member
+        if secret_name(Path(member.name).name):
+            return None
+        try:
+            info = (root / member.name).stat()
+        except FileNotFoundError:
+            if member.issym():  # an unrelated broken symlink contains no key bytes
+                return member
+            raise
+        return None if (info.st_dev, info.st_ino) in inodes else member
+
+    with tarfile.open(output, "w:gz", dereference=False) as archive:
+        archive.add(root / "results", arcname="results", filter=keep)
+    if not include:
+        key_sizes = {size for size, _ in key_hashes}
+        with tarfile.open(output, "r:gz") as archive:
+            for member in archive:
+                if secret_name(Path(member.name).name):
+                    raise ValueError("credential key member in backup")
+                if member.isfile() and member.size in key_sizes:
+                    with archive.extractfile(member) as stream:
+                        if (member.size, hashlib.sha256(stream.read()).digest()) in key_hashes:
+                            raise ValueError("credential key bytes in backup")
+except Exception:
+    output.unlink(missing_ok=True)
+    print("Results backup failed or could not exclude the credential encryption key", file=sys.stderr)
+    raise SystemExit(1)
+PY_BACKUP
+    then
         echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
-        return 1
-    fi
-    local archived_names=""
-    [ "$include_key" = 1 ] || archived_names="$(tar -tzf "$snapshot_dir/results.tar.gz" | awk -F/ '{print $NF}')"
-    if [ "$include_key" != 1 ] && { grep -q '^\.credential_enc\.key' <<< "$archived_names" \
-        || grep -qxF -- "$key_name" <<< "$archived_names"; }; then
-        rm -f "$snapshot_dir/results.tar.gz"
-        echo -e "${RED}Refusing to finish: the encryption key would have been included. Partial files remain at $snapshot_dir${NC}"
         return 1
     fi
 

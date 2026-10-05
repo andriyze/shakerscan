@@ -97,3 +97,27 @@ def test_successful_authentication_token_responses_still_prove_bypass(family, re
     assert result.observations[0]["proof_state"] == "verified"
     assert result.observations[0]["proof_contract"] is not None
     assert "operator-token" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("wrapper", ["loginResult", "customEnvelope", "vendorReply"])
+@pytest.mark.parametrize("failure", [{"authenticated": False}, {"status": "mfa_required"}, {"requires_mfa": True}])
+def test_unknown_wrappers_do_not_hide_a_tokens_own_failed_authentication(family, wrapper, failure):
+    response = {wrapper: {"authentication": {"token": "stage-canary", **failure}}}
+    result = _run(family, response, token_header=True)
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert "stage-canary" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_unknown_wrapper_failure_along_the_token_ancestry_vetoes_bypass(family):
+    result = _run(family, {"loginResult": {"requiresMfa": True, "authentication": {"token": "stage-canary"}}})
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_successful_unknown_wrapper_ignores_unrelated_metadata(family):
+    result = _run(family, {"loginResult": {"authentication": {"token": "login-canary"}},
+                          "user": {"verification": {"required": True}, "subscription": {"status": "failed"}}})
+    assert result.observations[0]["proof_state"] == "verified"
