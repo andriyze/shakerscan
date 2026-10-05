@@ -53,6 +53,9 @@ def _run(family, response, *, token_header=False):
     {"mfa": {"token": "challenge-secret"}},
     {"code": "INVALID_CREDENTIALS"},
     {"purpose": "mfa"},
+    {"data": {"status": "mfa_required"}},
+    {"challenge": {"required": True}},
+    {"challenge": {"status": "pending"}},
 ])
 def test_explicit_incomplete_authentication_vetoes_json_and_header_tokens(family, envelope):
     response = {"authentication": {"token": "operator-token"}, **envelope}
@@ -82,9 +85,39 @@ def test_unvalidated_or_nested_rejected_token_is_an_observation(family, response
     {"token": "operator-token", "authenticated": True, "requires_mfa": False},
     {"access_token": "operator-token", "token_type": "Bearer", "errors": []},
     {"session": {"token": "operator-token"}, "user": {"mfa": {"enabled": True}}},
+    # Status fields that describe other objects do not veto a successful login.
+    {"authentication": {"token": "operator-token"}, "user": {"email_verification": {"status": "pending"}}},
+    {"access_token": "operator-token", "user": {"status": "unverified"}},
+    {"access_token": "operator-token", "subscription": {"state": "failed", "error": "card declined"}},
+    {"authentication": {"token": "operator-token"}, "challenge": {"required": False}},
+    {"data": {"access_token": "operator-token", "token_type": "Bearer"}},
 ])
 def test_successful_authentication_token_responses_still_prove_bypass(family, response):
     result = _run(family, response)
     assert result.observations[0]["proof_state"] == "verified"
     assert result.observations[0]["proof_contract"] is not None
     assert "operator-token" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+@pytest.mark.parametrize("wrapper", ["loginResult", "customEnvelope", "vendorReply"])
+@pytest.mark.parametrize("failure", [{"authenticated": False}, {"status": "mfa_required"}, {"requires_mfa": True}])
+def test_unknown_wrappers_do_not_hide_a_tokens_own_failed_authentication(family, wrapper, failure):
+    response = {wrapper: {"authentication": {"token": "stage-canary", **failure}}}
+    result = _run(family, response, token_header=True)
+    assert result.observations[0]["proof_state"] == "not_proven"
+    assert result.observations[0]["proof_contract"] is None
+    assert "stage-canary" not in json.dumps(result.__dict__, default=str)
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_unknown_wrapper_failure_along_the_token_ancestry_vetoes_bypass(family):
+    result = _run(family, {"loginResult": {"requiresMfa": True, "authentication": {"token": "stage-canary"}}})
+    assert result.observations[0]["proof_state"] == "not_proven"
+
+
+@pytest.mark.parametrize("family", ["sql", "nosql"])
+def test_successful_unknown_wrapper_ignores_unrelated_metadata(family):
+    result = _run(family, {"loginResult": {"authentication": {"token": "login-canary"}},
+                          "user": {"verification": {"required": True}, "subscription": {"status": "failed"}}})
+    assert result.observations[0]["proof_state"] == "verified"

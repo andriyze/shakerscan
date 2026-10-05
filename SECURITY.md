@@ -78,6 +78,12 @@ Understanding these helps you deploy ShakerScan safely and helps reporters focus
 - **The API container can reach the Docker socket** to stage scanner images and manage workers.
   Reaching the API is therefore equivalent to administrative access on the Docker host. This is
   a further reason to keep the API on loopback or a trusted network.
+- **SSH and saved actions run commands on remote hosts.** A Hunt's `ssh.exec`, the live SSH
+  console and saved SSH actions use the SSH credentials stored for a target. Remote commands
+  need an explicit `ssh.exec` grant on the credential and active testing, host keys are pinned
+  (a changed key is refused), and the connection is bound to the target's authorized address.
+  Because the API has no login, anyone who can reach it can use those grants, so treat a stored
+  SSH credential with exec rights as reachable by every API client.
 - **Browser protections.** CORS admits only the deployment's own UI origins, cross-origin
   browser writes are refused, and requests addressed to an unrecognised public host name are
   refused to stop DNS rebinding (see `SHAKERSCAN_ALLOWED_HOSTS` in
@@ -86,9 +92,19 @@ Understanding these helps you deploy ShakerScan safely and helps reporters focus
   They run in containers without host mounts beyond the results directory, and outbound traffic
   is bound to the authorized target: DNS answers are frozen at admission and re-checked, and
   cloud-metadata and link-local addresses are always refused.
-- **Stored credentials** in target profiles are encrypted at rest with a key generated on first
-  start and kept as an owner-only file in the results directory on the host. Anyone who can read
-  that file can decrypt them, so protect the host and its backups accordingly.
+- **Secrets at rest.** Target credentials and SSH keys, request-collection secrets, AI provider
+  keys, AI request-template and header secrets, and the raw headers and bodies recorded in the
+  HTTP archive are encrypted with one key generated on first start and kept as an owner-only file
+  in the results directory on the host. Anyone who can read that file can decrypt them, so protect
+  the host accordingly. Backups leave the key out by default (`backup --include-key` adds it), so
+  keep `results/.credential_enc.key` separately: a backup restored without it keeps its scans and
+  findings but cannot decrypt the stored secrets.
+- **Raw HTTP archive export.** Verbatim HAR (captured credentials included) is available by
+  default only while the API is published on loopback; a LAN or tailnet deployment must opt in
+  with `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1`, and `0` disables it everywhere.
+  Loopback describes the listener, not access through a reverse proxy or tunnel; the HAR gate
+  cannot detect that forwarding. Set `SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=0` when forwarding the API
+  beyond the local host, and authenticate and restrict access at the proxy or tunnel.
 - **Datastores** (PostgreSQL, Redis, optional MinIO) bind to loopback and use generated passwords.
 
 Hardening ideas, and reports that help us narrow these boundaries (for example a scoped Docker

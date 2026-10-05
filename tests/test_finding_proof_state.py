@@ -224,7 +224,7 @@ def test_a_persisted_row_is_proven_by_this_runs_proof_and_keeps_a_retest_proof()
 
 def test_the_exposure_row_is_keyed_canonically_not_by_the_old_api_hash():
     raw = _exposure_report_finding()
-    # The audit's example: the persisted row is templated; the old API helper was not.
+    # The persisted row is templated; the old API helper was not.
     assert api_module.finding_identity_keys(raw) == (
         "t:87298f037581f42d", "t:c2f2ffb786643d9c", "b9a1f522b80ef3d9",
     )

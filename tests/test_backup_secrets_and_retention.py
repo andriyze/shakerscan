@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import tarfile
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scanner.sh").read_text()
 
@@ -147,3 +149,69 @@ def test_delete_honours_the_launchers_global_yes_and_reports_a_missing_answer(tm
     missing = _run(tmp_path, "backup_cmd delete shakerscan-20261002T000000Z")
     assert missing.returncode == 1 and "Pass --yes" in missing.stdout
     assert (root / "shakerscan-20261002T000000Z").exists()
+
+
+@pytest.mark.parametrize(
+    "spelling", ["results/.credential_enc.key", "/results/.credential_enc.key", "./results//.credential_enc.key"],
+)
+def test_the_key_stays_out_whatever_spelling_the_key_file_setting_uses(tmp_path, spelling):
+    """The exclusion used to strip "$SCRIPT_DIR/" from the configured path, so a relative or
+    container path matched nothing and the key shipped while the manifest said it did not."""
+    install = _install(tmp_path)
+    (install / "results" / ".credential_enc.key.lock").write_text("")
+    (install / "results" / ".credential_enc.key.tmp-123").write_text("half-written-key\n")
+    (install / ".env").write_text(
+        "AI_API_KEY=provider-key\nexport AI_CREDENTIAL_ENC_KEY=exported-key\n  AI_CREDENTIAL_ENC_KEY = spaced-key\n"
+    )
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=spelling)
+    assert result.returncode == 0, result.stderr
+    backup = _only_backup(install)
+    with tarfile.open(backup / "results.tar.gz") as archive:
+        names = archive.getnames()
+    assert "results/scan.json" in names
+    assert not [name for name in names if ".credential_enc.key" in name], names
+    runtime = (backup / "runtime.env").read_text()
+    assert "AI_CREDENTIAL_ENC_KEY" not in runtime and "AI_API_KEY=provider-key" in runtime
+    assert "encryption_key_included=false" in (backup / "manifest.txt").read_text()
+
+
+def test_a_custom_key_file_name_inside_results_is_also_left_out(tmp_path):
+    install = _install(tmp_path)
+    (install / "results" / "custom.fernet").write_text("custom-key\n")
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=str(install / "results" / "custom.fernet"))
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(_only_backup(install) / "results.tar.gz") as archive:
+        names = archive.getnames()
+    assert "results/custom.fernet" not in names and "results/scan.json" in names
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_symlink_and_hardlink_key_aliases_never_enter_an_excluded_key_backup(tmp_path, custom):
+    install = _install(tmp_path)
+    results = install / "results"
+    original = results / ".credential_enc.key"
+    original.unlink()
+    backing = results / "keys" / "actual.fernet"
+    backing.parent.mkdir()
+    backing.write_text("synthetic-key-canary\n")
+    configured = results / "custom.fernet" if custom else original
+    configured.symlink_to("keys/actual.fernet")
+    (results / "renamed-hardlink").hardlink_to(backing)
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=str(configured))
+    assert result.returncode == 0, result.stderr
+    backup = _only_backup(install)
+    with tarfile.open(backup / "results.tar.gz") as archive:
+        assert "results/scan.json" in archive.getnames()
+        assert not {"results/keys/actual.fernet", "results/renamed-hardlink", "results/custom.fernet", "results/.credential_enc.key"} & set(archive.getnames())
+    assert "encryption_key_included=false" in (backup / "manifest.txt").read_text()
+
+
+def test_custom_key_rotation_files_are_excluded_too(tmp_path):
+    install = _install(tmp_path)
+    key = install / "results" / "custom.fernet"
+    key.write_text("custom-key-canary")
+    key.with_name(key.name + ".tmp.123").write_text("partial-key-canary")
+    result = _run(install, "create_backup", AI_CREDENTIAL_ENC_KEY_FILE=str(key))
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(_only_backup(install) / "results.tar.gz") as archive:
+        assert not any("custom.fernet" in name for name in archive.getnames())

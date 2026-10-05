@@ -1585,7 +1585,7 @@ def test_macos_build_network_can_follow_host_vpn_without_changing_runtime_networ
 
 
 def test_local_cli_wrappers_call_the_bind_address_not_the_public_host(tmp_path):
-    """A cloud host's public address may not hairpin: on EC2 `scanner.sh hunt start`
+    """A cloud host's public address may not hairpin: on a cloud VM `scanner.sh hunt start`
     timed out calling its own public IP. Local CLIs use the bind address; the operator's
     printed links keep the public host."""
     script = (ROOT / "scanner.sh").read_text()
@@ -1608,8 +1608,8 @@ set -eu
 RED='' NC=''
 CONFIRM_ACTIVE=0
 SCRIPT_DIR={shlex.quote(str(tmp_path))}
-SHAKERSCAN_BIND_HOST=172.31.32.215
-SHAKERSCAN_PUBLIC_HOST=54.174.235.115
+SHAKERSCAN_BIND_HOST=10.0.0.5
+SHAKERSCAN_PUBLIC_HOST=203.0.113.10
 {functions}
 run_v2_scan_cli https://t.example
 run_v2_product_cli hunt start
@@ -1620,5 +1620,5 @@ run_v2_product_cli hunt start
     )
     assert result.returncode == 0, result.stderr
     scan_line, hunt_line = result.stdout.strip().splitlines()
-    assert scan_line.startswith("--api-url http://172.31.32.215:8080 --ui-url http://54.174.235.115:3000")
-    assert hunt_line == "--api-url http://172.31.32.215:8080 hunt start"
+    assert scan_line.startswith("--api-url http://10.0.0.5:8080 --ui-url http://203.0.113.10:3000")
+    assert hunt_line == "--api-url http://10.0.0.5:8080 hunt start"

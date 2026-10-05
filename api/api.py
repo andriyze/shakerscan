@@ -2372,7 +2372,7 @@ async def save_findings_from_partial(conn, scan_id: uuid.UUID, target_id: uuid.U
                     scan_id, target_id, fingerprint, title, description,
                     severity, cvss_score, tool, cwe, cwe_name, owasp,
                     url, evidence, ai_verdict, ai_confidence, ai_rationale, ai_recommendations, ai_classification_source
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT (target_id, fingerprint) WHERE target_id IS NOT NULL DO NOTHING
             """,
                 scan_id,
                 target_id,
@@ -8020,10 +8020,10 @@ def _apply_policy_exceptions(
     applied: list[dict[str, Any]] = []
     for finding in blocking_findings:
         finding_id = str(finding.get("id") or "")
-        fingerprint = str(finding.get("fingerprint") or "")
-        if (finding_id and finding_id in active_ids) or (
-            fingerprint and fingerprint in active_fingerprints
-        ):
+        # Historical hashes omit service/route/check provenance and are not authority.
+        # Reconciliation binds a legacy exception to the actual row during its re-key.
+        fingerprints = {str(finding.get("fingerprint") or canonical_finding_fingerprint(finding))}
+        if (finding_id and finding_id in active_ids) or (fingerprints - {""}) & active_fingerprints:
             applied.append(finding)
         else:
             remaining.append(finding)

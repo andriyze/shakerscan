@@ -27,6 +27,7 @@ def _legacy_identities(finding: dict) -> list[str]:
     except ImportError:  # package layout
         from scanner.findings import legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity, template_path
     identities = []
+    pre_service = None
     for previous in (legacy_templated_finding_identity, pre_check_templated_finding_identity, pre_service_templated_finding_identity):
         try:
             identity = previous(finding)
@@ -34,6 +35,8 @@ def _legacy_identities(finding: dict) -> list[str]:
             identity = None
         if identity:
             identities.append(identity)
+            if previous is pre_service_templated_finding_identity:
+                pre_service = identity
     evidence = finding.get("evidence") or {}
     if isinstance(evidence, str):
         try:
@@ -49,7 +52,30 @@ def _legacy_identities(finding: dict) -> list[str]:
         identities.append(f"CWE-79|{evidence.get('method') or 'GET'}|"
                           f"{template_path(evidence.get('path') or '/')}#"
                           f"{template_path(route.path or '/')}|{','.join(sorted(params))}")
-    return identities
+    # Hunt qualified findings on a service other than its target with its own suffix, which
+    # wrote IPv6 hosts without brackets (https://::1:443). Reproduce that spelling so those
+    # rows are adopted rather than split.
+    suffix = _historical_hunt_service_suffix(finding.get("url"))
+    if suffix:
+        bases = [pre_service] if pre_service else []
+        if finding.get("cwe") == "CWE-79" and isinstance(evidence, dict) and evidence.get("client_route"):
+            bases.append(identities[-1])
+        identities.extend(base + suffix for base in bases)
+    return list(dict.fromkeys(identities))
+
+
+def _historical_hunt_service_suffix(url: Any) -> str:
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(str(url or ""))
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
+    except ValueError:
+        return ""
+    # Only IPv6 hosts were spelled differently; every other historical suffix equals today's.
+    if scheme not in {"http", "https"} or not parsed.hostname or ":" not in parsed.hostname:
+        return ""
+    return f"|service={scheme}://{parsed.hostname}:{port}"
 
 
 async def reconcile_legacy_finding_row(
@@ -104,7 +130,23 @@ async def reconcile_legacy_finding_row(
             # Roll back only this re-key, retaining the legacy row and its history.
             async with conn.transaction():
                 await conn.execute(
-                    "UPDATE findings SET fingerprint = $1 WHERE id = $2",
+                    """WITH prior AS MATERIALIZED (
+                        SELECT id, target_id, fingerprint FROM findings WHERE id=$2 FOR UPDATE
+                    ), moved AS (
+                        UPDATE findings SET fingerprint=$1 WHERE id=$2 RETURNING id
+                    )
+                    UPDATE finding_exceptions AS exception
+                    SET finding_id=prior.id::text, fingerprint=$1, updated_at=NOW(),
+                        edit_history=COALESCE(exception.edit_history, '[]'::jsonb) || jsonb_build_array(
+                            jsonb_build_object('transition', 'finding_identity_rekey',
+                                              'fingerprint', exception.fingerprint,
+                                              'finding_id', exception.finding_id,
+                                              'replaced_at', NOW()))
+                    FROM prior, moved
+                    WHERE moved.id=prior.id AND exception.target_id=prior.target_id
+                      AND exception.fingerprint=prior.fingerprint
+                      AND (NULLIF(exception.finding_id, '') IS NULL OR exception.finding_id=prior.id::text)
+                    """,
                     fingerprint, legacy_row["id"],
                 )
         except Exception as exc:

@@ -51,7 +51,10 @@ def finding_identity_keys(finding: Mapping[str, Any]) -> tuple[str, ...]:
     them all, so neither a current row nor an older one is missed.
     """
     keys = [canonical_finding_fingerprint(finding)]
-    pre_service = pre_service_templated_finding_identity(dict(finding))
+    try:
+        pre_service = pre_service_templated_finding_identity(dict(finding))
+    except Exception:
+        pre_service = None
     if pre_service:
         keys.append("t:" + hashlib.sha256(pre_service.encode()).hexdigest()[:16])
     try:

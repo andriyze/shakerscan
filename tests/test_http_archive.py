@@ -219,6 +219,7 @@ def test_raw_har_is_allowed_by_default_without_an_account_and_can_be_turned_off(
     monkeypatch.setattr(archive_router, "_require_operator", _no_account)
     monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", raising=False)
     monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_ALLOW_RAW", raising=False)
+    monkeypatch.delenv("SHAKERSCAN_BIND_HOST", raising=False)
     for redaction in ("raw", "redacted"):
         with pytest.raises(RuntimeError, match="reached the database"):
             _export_har(archive_router, redaction)
@@ -229,6 +230,39 @@ def test_raw_har_is_allowed_by_default_without_an_account_and_can_be_turned_off(
     # Refused before any row is read; the masked HAR stays available.
     with pytest.raises(RuntimeError, match="reached the database"):
         _export_har(archive_router, "redacted")
+
+
+@pytest.mark.parametrize("bind", ["192.168.1.50", "100.100.100.100", "0.0.0.0", "engine.lan"])
+def test_raw_har_needs_an_explicit_opt_in_once_the_api_leaves_loopback(monkeypatch, bind):
+    """LAN and tailnet modes add no authentication, so every peer could pull captured
+    credentials with one GET; verbatim HAR then needs SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1."""
+    from fastapi import HTTPException
+
+    from api.runtime import http_archive_router as archive_router
+
+    def _reached_database():
+        raise RuntimeError("reached the database")
+
+    monkeypatch.setattr(archive_router, "_pool", _reached_database)
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", bind)
+    with pytest.raises(HTTPException) as refused:
+        _export_har(archive_router, "raw")
+    assert refused.value.status_code == 403 and "SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR=1" in str(refused.value.detail)
+    with pytest.raises(RuntimeError, match="reached the database"):
+        _export_har(archive_router, "redacted")
+    monkeypatch.setenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", "1")
+    with pytest.raises(RuntimeError, match="reached the database"):
+        _export_har(archive_router, "raw")
+
+
+@pytest.mark.parametrize("bind", ["127.0.0.1", "::1", "[::1]", "localhost"])
+def test_raw_har_stays_on_by_default_for_a_loopback_install(monkeypatch, bind):
+    from api.runtime import http_archive_router as archive_router
+
+    monkeypatch.delenv("SHAKERSCAN_HTTP_ARCHIVE_RAW_HAR", raising=False)
+    monkeypatch.setenv("SHAKERSCAN_BIND_HOST", bind)
+    assert archive_router.raw_har_enabled() is True
 
 
 def test_the_evidence_surface_withholds_unmasked_captured_traffic(tmp_path):

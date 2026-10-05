@@ -145,3 +145,78 @@ def test_decision_marks_an_incomplete_history_instead_of_claiming_an_all_clear()
     decision = api.build_deployment_decision(_scan([]), target_active_findings=[], target_history=history)
     assert decision["carried_over"]["complete"] is False
     assert decision["carried_over"]["unloaded_active"] == 12
+
+
+def test_a_fingerprint_exception_recorded_before_service_identities_still_applies():
+    """Endpoint findings gained a |service= qualifier and their rows were re-keyed. An exception
+    stored under the earlier fingerprint stopped matching and the gate began blocking it."""
+    import hashlib
+
+    from findings import pre_service_templated_finding_identity
+
+    finding = {"id": "r1", "title": "SQL Injection", "severity": "critical", "tool": "sqlmap",
+               "cwe": "CWE-89", "url": "https://app.example.test/search?q=1",
+               "evidence": {"method": "GET", "param": "q"}}
+    finding["fingerprint"] = canonical_finding_fingerprint(finding)
+    earlier = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+    assert earlier != finding["fingerprint"]
+    exception = {"id": "e1", "finding_id": "r1", "fingerprint": earlier, "status": "active", "approver": "a",
+                 "expires_at": "2099-01-01T00:00:00+00:00"}
+    remaining, applied = api._apply_policy_exceptions([finding], [exception])
+    assert remaining == [] and [item["id"] for item in applied] == ["r1"]
+    unrelated = {**exception, "finding_id": "other-row", "fingerprint": "t:0000000000000000"}
+    remaining, applied = api._apply_policy_exceptions([finding], [unrelated])
+    assert [item["id"] for item in remaining] == ["r1"] and applied == []
+
+
+def test_legacy_exception_aliases_never_expand_across_services_routes_or_checks():
+    import hashlib
+    from findings import pre_service_templated_finding_identity, pre_check_templated_finding_identity
+    base = {"id": "first", "title": "SQL Injection", "severity": "critical", "tool": "sqlmap",
+            "cwe": "CWE-89", "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    dom = {**base, "cwe": "CWE-79", "evidence": {"param": "q", "client_route": "/search?q=1"}}
+    tls = {**base, "cwe": "CWE-295", "url": "https://app.example.test/", "evidence": {"check": "untrusted"}}
+    pairs = [
+        (base, {**base, "id": "second", "url": "https://app.example.test:8443/search?q=1"}, pre_service_templated_finding_identity),
+        (dom, {**dom, "id": "second", "evidence": {"param": "q", "client_route": "/profile?q=1"}}, pre_service_templated_finding_identity),
+        (tls, {**tls, "id": "second", "evidence": {"check": "expired"}}, pre_check_templated_finding_identity),
+    ]
+    for first, second, historical in pairs:
+        first["fingerprint"] = canonical_finding_fingerprint(first)
+        second["fingerprint"] = canonical_finding_fingerprint(second)
+        assert first["fingerprint"] != second["fingerprint"]
+        alias = "t:" + hashlib.sha256(historical(first).encode()).hexdigest()[:16]
+        exception = {"id": "exception", "fingerprint": alias, "status": "active", "approver": "operator",
+                     "expires_at": "2099-01-01T00:00:00Z"}
+        remaining, applied = api._apply_policy_exceptions([first, second], [exception])
+        assert remaining == [first, second] and applied == []
+        remaining, applied = api._apply_policy_exceptions([first, second], [{**exception, "finding_id": "first"}])
+        assert remaining == [second] and applied == [first]
+
+
+def test_migrated_exact_exception_covers_a_report_without_a_database_row_id():
+    finding = {"title": "SQL Injection", "severity": "critical", "tool": "sqlmap", "cwe": "CWE-89",
+               "url": "https://app.example.test/search?q=1", "evidence": {"method": "GET", "param": "q"}}
+    exception = {"id": "exception", "finding_id": "persisted-row", "status": "active", "approver": "operator",
+                 "fingerprint": canonical_finding_fingerprint(finding), "expires_at": "2099-01-01T00:00:00Z"}
+    decision = api.build_deployment_decision(_scan([finding]), db_exceptions=[exception])
+    assert decision["blocking_findings"] == []
+    assert len(decision["applied_exceptions"]) == 1
+    assert decision["decision"] == "needs_approval"
+    other_service = {**finding, "url": "https://app.example.test:8443/search?q=1"}
+    decision = api.build_deployment_decision(_scan([other_service]), db_exceptions=[exception])
+    assert len(decision["blocking_findings"]) == 1
+    assert decision["applied_exceptions"] == []
+
+
+def test_a_projected_row_never_gains_a_broader_recomputed_fingerprint():
+    full = {"title": "Certificate is untrusted", "severity": "high", "tool": "tls.inspect", "cwe": "CWE-295",
+            "url": "https://app.example.test/", "evidence": {"check": "certificate_untrusted"}}
+    projected = {k: v for k, v in full.items() if k != "evidence"}
+    projected["fingerprint"] = canonical_finding_fingerprint(full)
+    broader = canonical_finding_fingerprint(projected)
+    assert broader != projected["fingerprint"]
+    exception = {"id": "exception", "status": "active", "approver": "operator", "fingerprint": broader,
+                 "expires_at": "2099-01-01T00:00:00Z"}
+    remaining, applied = api._apply_policy_exceptions([projected], [exception])
+    assert remaining == [projected] and applied == []

@@ -121,3 +121,114 @@ def test_literal_mask_text_is_kept_outside_secret_fields(key):
     assert ai_template_secrets.reveal(updated) == {"input": "{{prompt}} v2", "stop": "***", "api_token": "t-canary"}
     with pytest.raises(ValueError):
         ai_template_secrets.protect({"input": "{{prompt}}", "api_token": "***"})
+
+
+def test_name_value_header_lists_mask_the_secret_value_and_keep_it_on_save(key):
+    """{"name": "Authorization", "value": "Bearer ..."} was returned in clear: neither key is a
+    secret word. The secret is the sibling value, judged by the header name."""
+    template = {
+        "headers": [
+            {"name": "Authorization", "value": "Bearer live-canary"},
+            {"name": "X-Session-Token", "value": "session-canary"},
+            {"name": "Content-Type", "value": "application/json"},
+        ],
+        "params": [{"key": "client_assertion", "val": "assertion-canary"}, {"key": "page", "val": "2"}],
+        "auth_jwt": "jwt-canary",
+        "otp": "123456",
+    }
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    text = json.dumps(shown)
+    for canary in ("live-canary", "session-canary", "assertion-canary", "jwt-canary", "123456"):
+        assert canary not in text
+    assert shown["headers"][2] == {"name": "Content-Type", "value": "application/json"}
+    assert shown["params"][1]["val"] == "2"
+    # Saving the masked editor view keeps the stored secrets.
+    shown["headers"][2]["value"] = "text/plain"
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    assert restored["headers"][0]["value"] == "Bearer live-canary"
+    assert restored["headers"][1]["value"] == "session-canary"
+    assert restored["params"][0]["val"] == "assertion-canary"
+    assert restored["headers"][2]["value"] == "text/plain"
+
+
+@pytest.mark.parametrize("change", ["reverse", "delete_first"])
+def test_masked_named_entries_keep_their_own_values_after_reorder_or_removal(key, change):
+    template = {"headers": [{"name": "Authorization", "value": "Bearer first-canary"},
+                            {"name": "X-Session-Token", "value": "second-canary"}]}
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    shown["headers"] = list(reversed(shown["headers"])) if change == "reverse" else shown["headers"][1:]
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    values = {item["name"]: item["value"] for item in restored["headers"]}
+    assert values["X-Session-Token"] == "second-canary"
+    if change == "reverse":
+        assert values["Authorization"] == "Bearer first-canary"
+
+
+@pytest.mark.parametrize("name", ["X-Debug", "X-Other-Token"])
+def test_renaming_a_masked_entry_never_inherits_the_previous_secret(key, name):
+    stored = ai_template_secrets.protect({"header": {"name": "Authorization", "value": "Bearer rename-canary"}})
+    shown = ai_template_secrets.public(stored)
+    shown["header"]["name"] = name
+    with pytest.raises(ValueError, match="Masked"):
+        ai_template_secrets.protect(shown, stored)
+    shown["header"]["value"] = "explicit-replacement"
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    assert restored["header"]["value"] == "explicit-replacement"
+    assert "rename-canary" not in json.dumps(ai_template_secrets.public(stored))
+
+
+def test_edited_duplicate_named_masks_are_ambiguous_but_explicit_values_are_editable(key):
+    template = {"headers": [{"name": "Authorization", "value": value} for value in ("first-canary", "second-canary")]}
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    assert ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored)) == template
+    shown["headers"].pop(0)  # An edited duplicate list no longer identifies a unique prior entry.
+    with pytest.raises(ValueError, match="Masked"):
+        ai_template_secrets.protect(shown, stored)
+    assert ai_template_secrets.reveal(ai_template_secrets.protect(template, stored)) == template
+
+
+def test_public_parameter_labels_survive_reordering(key):
+    template = {"params": [{"name": "client_assertion", "val": "assertion-canary"},
+                           {"name": "api_key", "val": "api-canary"}]}
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    assert shown["params"][0]["name"] == "client_assertion"
+    shown["params"].reverse()
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    assert restored["params"] == list(reversed(template["params"]))
+
+
+def test_pair_detection_never_unmasks_previously_secret_fields(key):
+    template = {"credentials": [{"key": "actual-key-canary", "value": "other-canary"}],
+                "pair": {"key": "actual-second-canary", "value": 42}}
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    assert "canary" not in json.dumps(shown)
+    assert ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored)) == template
+
+
+def test_uniquely_masked_parameter_labels_keep_their_values_after_reorder(key):
+    template = {"params": [{"key": "client_assertion", "val": "assertion-canary"},
+                           {"key": "page", "val": "2"}]}
+    stored = ai_template_secrets.protect(template)
+    shown = ai_template_secrets.public(stored)
+    assert shown["params"][0]["key"] == "***"
+    shown["params"].reverse()
+    restored = ai_template_secrets.reveal(ai_template_secrets.protect(shown, stored))
+    assert restored["params"] == list(reversed(template["params"]))
+
+
+@pytest.mark.parametrize("name", ["X-Debug", "X-Other-Token"])
+def test_renamed_masked_list_entries_never_disclose_or_move_a_secret(key, name):
+    stored = ai_template_secrets.protect({"headers": [{"name": "Authorization", "value": "Bearer list-canary"}]})
+    shown = ai_template_secrets.public(stored)
+    shown["headers"][0]["name"] = name
+    try:
+        updated = ai_template_secrets.protect(shown, stored)
+    except ValueError:
+        return
+    assert "list-canary" not in json.dumps(ai_template_secrets.reveal(updated))
+    assert "list-canary" not in json.dumps(ai_template_secrets.public(updated))

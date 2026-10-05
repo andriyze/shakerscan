@@ -249,6 +249,19 @@ postgres_data_volume_exists() {
         docker volume inspect "${project}_postgres-data" > /dev/null 2>&1
 }
 
+# Whether a numeric id is unused by host accounts and groups (true when it cannot be checked).
+root_api_identity_is_free() {
+    command -v getent >/dev/null 2>&1 || return 0
+    ! getent passwd "$1" >/dev/null 2>&1 && ! getent group "$1" >/dev/null 2>&1
+}
+
+root_api_identity_owner() {
+    local user group
+    user="$(getent passwd "$1" 2>/dev/null | cut -d: -f1)"
+    group="$(getent group "$1" 2>/dev/null | cut -d: -f1)"
+    printf 'user %s, group %s' "${user:-none}" "${group:-none}"
+}
+
 ensure_runtime_datastore_credentials() {
     local current_postgres current_redis next_postgres next_redis ready_attempt
     local current_minio next_minio
@@ -2001,8 +2014,37 @@ prepare_runtime_files() {
     api_gid="$(id -g)"
     if [ "$api_uid" = "0" ]; then
         # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
-        api_uid=10002
-        api_gid=10002
+        api_uid="${SHAKERSCAN_ROOT_API_UID:-$(read_dotenv_value SHAKERSCAN_ROOT_API_UID)}"
+        # Reuse older launchers' saved choice too; the root-specific setting takes priority.
+        api_uid="${api_uid:-$(read_dotenv_value SHAKERSCAN_API_UID)}"
+        api_uid="${api_uid:-10002}"
+        case "$api_uid" in
+            ''|*[!0-9]*)
+                echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be a numeric id other than 0 and 10001.${NC}" >&2
+                return 1
+                ;;
+        esac
+        # Docker interprets leading zeroes numerically: 010001 is the sandbox's 10001.
+        # Normalize without shell arithmetic, which can overflow or interpret an octal id.
+        while [[ "$api_uid" == 0* ]] && [ "${#api_uid}" -gt 1 ]; do
+            api_uid="${api_uid#0}"
+        done
+        if [ "$api_uid" = "0" ] || [ "$api_uid" = "10001" ] \
+            || [ "${#api_uid}" -gt 10 ] \
+            || { [ "${#api_uid}" -eq 10 ] && [[ "$api_uid" > 4294967294 ]]; }; then
+            echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be between 1 and 4294967294, other than 10001.${NC}" >&2
+            return 1
+        fi
+        api_gid="$api_uid"
+        # The API owns results/ (the encryption key included) under this id. A host account or
+        # group that already uses it could read every stored secret, so refuse instead.
+        if ! root_api_identity_is_free "$api_uid"; then
+            echo -e "${RED}Error: id $api_uid already belongs to a host account or group ($(root_api_identity_owner "$api_uid")).${NC}" >&2
+            echo -e "${RED}It would be able to read ShakerScan's results and encryption key. Choose a free id, e.g.:${NC}" >&2
+            echo "  SHAKERSCAN_ROOT_API_UID=<free-id> ./scanner.sh start" >&2
+            return 1
+        fi
+        write_dotenv_value SHAKERSCAN_ROOT_API_UID "$api_uid"
         # The API reads this directory through its read-only /workspace mount. A root install
         # directory is private (the installer builds it in a 0700 staging directory), so the
         # API could not enter it and /health failed. Give the API's group read access only;
@@ -3390,12 +3432,73 @@ create_backup() {
     fi
 
     echo "Archiving result artifacts..."
-    local key_file key_rel
+    local key_file
     key_file="$(backup_key_file)"
-    key_rel="${key_file#"$SCRIPT_DIR"/}"
-    local -a tar_exclude=()
-    [ "$include_key" = 1 ] || tar_exclude=(--exclude="$key_rel")
-    if ! tar -C "$SCRIPT_DIR" ${tar_exclude[@]+"${tar_exclude[@]}"} -czf "$snapshot_dir/results.tar.gz" results; then
+    # Resolve key aliases before archiving, and verify actual member bytes afterwards.
+    # tarfile does not dereference symlinks; inode checks also exclude hard-link aliases.
+    if ! python3 - "$SCRIPT_DIR" "$key_file" "$snapshot_dir/results.tar.gz" "$include_key" <<'PY_BACKUP'
+import hashlib
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+root, configured, output, include = Path(sys.argv[1]).resolve(), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"
+paths = {root / "results" / ".credential_enc.key"}
+paths.add(configured if configured.is_absolute() else root / configured)
+if str(configured).startswith("/results/"):
+    paths.add(root / str(configured).lstrip("/"))
+inodes, key_hashes, key_names = set(), set(), {configured.name, ".credential_enc.key"}
+try:
+    if not include:
+        for path in paths:
+            if not path.exists() and not path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            info = resolved.stat()
+            if not resolved.is_file() or info.st_size > 65536:
+                raise ValueError("invalid credential key file")
+            raw = resolved.read_bytes()
+            inodes.add((info.st_dev, info.st_ino))
+            key_hashes.add((len(raw), hashlib.sha256(raw).digest()))
+            key_names.add(resolved.name)
+
+    def secret_name(name):
+        return name.startswith(".credential_enc.key") or any(
+            name == key or name == key + ".lock" or name.startswith(key + ".tmp")
+            for key in key_names)
+
+    def keep(member):
+        if include:
+            return member
+        if secret_name(Path(member.name).name):
+            return None
+        try:
+            info = (root / member.name).stat()
+        except FileNotFoundError:
+            if member.issym():  # an unrelated broken symlink contains no key bytes
+                return member
+            raise
+        return None if (info.st_dev, info.st_ino) in inodes else member
+
+    with tarfile.open(output, "w:gz", dereference=False) as archive:
+        archive.add(root / "results", arcname="results", filter=keep)
+    if not include:
+        key_sizes = {size for size, _ in key_hashes}
+        with tarfile.open(output, "r:gz") as archive:
+            for member in archive:
+                if secret_name(Path(member.name).name):
+                    raise ValueError("credential key member in backup")
+                if member.isfile() and member.size in key_sizes:
+                    with archive.extractfile(member) as stream:
+                        if (member.size, hashlib.sha256(stream.read()).digest()) in key_hashes:
+                            raise ValueError("credential key bytes in backup")
+except Exception:
+    output.unlink(missing_ok=True)
+    print("Results backup failed or could not exclude the credential encryption key", file=sys.stderr)
+    raise SystemExit(1)
+PY_BACKUP
+    then
         echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
         return 1
     fi
@@ -3404,7 +3507,8 @@ create_backup() {
         if [ "$include_key" = 1 ]; then
             cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
         else
-            grep -v '^AI_CREDENTIAL_ENC_KEY=' "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
+            grep -vE '^[[:space:]]*(export[[:space:]]+)?AI_CREDENTIAL_ENC_KEY[[:space:]]*=' \
+                "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
         fi
     fi
     [ ! -f "$SCRIPT_DIR/VERSION" ] || cp "$SCRIPT_DIR/VERSION" "$snapshot_dir/VERSION"

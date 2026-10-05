@@ -22640,3 +22640,51 @@ def test_research_readiness_names_missing_configured_planner_settings(monkeypatc
 
     assert readiness["planner_modes"]["configured_ai"]["missing_settings"] == ["ai_api_key"]
     assert readiness["planner_modes"]["configured_ai"]["autopilot_runner_active"] is True
+
+
+def test_a_concurrent_insert_of_the_same_finding_does_not_abort_the_partial_save():
+    """The existence check and the INSERT are not atomic: a worker can store the same fingerprint
+    in between. The unique index then refused the INSERT and the remaining partial findings were
+    lost. The INSERT now yields to the row already stored."""
+    from contextlib import asynccontextmanager
+
+    first = {"title": "SQL injection", "tool": "sqlmap", "cwe": "CWE-89", "severity": "critical",
+             "url": "https://app.example.test/search?q=1"}
+    second = {"title": "Reflected XSS", "tool": "dalfox", "cwe": "CWE-79", "severity": "high",
+              "url": "https://app.example.test/echo?m=1"}
+    stored: set[str] = set()
+
+    class _UniqueViolation(Exception):
+        sqlstate = "23505"
+
+    class _Conn:
+        """Emulates the partial unique index on findings(target_id, fingerprint)."""
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
+        async def fetchrow(self, query, *args):
+            return None
+
+        async def execute(self, query, *args):
+            if query.split()[0] != "INSERT":
+                return
+            fingerprint = args[2]
+            if fingerprint == api_module.generate_finding_fingerprint(first):
+                stored.add(fingerprint)  # the worker's row lands between our SELECT and INSERT
+            if fingerprint in stored and "ON CONFLICT (target_id, fingerprint)" not in query:
+                raise _UniqueViolation("duplicate key value violates unique constraint")
+            stored.add(fingerprint)
+
+    async def _no_legacy_row(*_args, **_kwargs):
+        return None
+
+    original = api_module.reconcile_legacy_finding_row
+    api_module.reconcile_legacy_finding_row = _no_legacy_row
+    try:
+        saved = asyncio.run(api_module.save_findings_from_partial(_Conn(), uuid.uuid4(), uuid.uuid4(), [first, second]))
+    finally:
+        api_module.reconcile_legacy_finding_row = original
+    assert saved == 2
+    assert api_module.generate_finding_fingerprint(second) in stored

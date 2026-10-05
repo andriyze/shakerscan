@@ -23,9 +23,19 @@ def service_origin(url: Any) -> str | None:
         return None
 
 
-def finding_service_origin(finding: Mapping[str, Any]) -> str | None:
+def _evidence(finding: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Evidence as a mapping. Database rows carry the jsonb column as text (no codec)."""
     evidence = finding.get("evidence")
-    evidence = evidence if isinstance(evidence, Mapping) else {}
+    if isinstance(evidence, (str, bytes)):
+        try:
+            evidence = json.loads(evidence)
+        except ValueError:
+            return {}
+    return evidence if isinstance(evidence, Mapping) else {}
+
+
+def finding_service_origin(finding: Mapping[str, Any]) -> str | None:
+    evidence = _evidence(finding)
     for value in (finding.get("url"), *(evidence.get(key) for key in (
         "url", "endpoint", "affected_url", "target", "path", "consumer_endpoint", "producer_endpoint",
     ))):
@@ -36,13 +46,8 @@ def finding_service_origin(finding: Mapping[str, Any]) -> str | None:
 
 
 def finding_client_route_key(finding: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
-    evidence = finding.get("evidence") or {}
-    if isinstance(evidence, str):
-        try:
-            evidence = json.loads(evidence)
-        except ValueError:
-            return None
-    if not isinstance(evidence, Mapping) or not evidence.get("client_route"):
+    evidence = _evidence(finding)
+    if not evidence.get("client_route"):
         return None
     try:
         from .findings import template_path
@@ -61,9 +66,13 @@ def finding_provenance_key(finding: Mapping[str, Any]) -> tuple:
 
 
 def same_finding_service(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    """Legacy keys alone cannot transfer triage/proof between different services."""
+    """Legacy keys alone cannot transfer triage/proof between different services.
+
+    Two findings whose service is unknown on both sides (path-only URLs, as pre-2.3.8 rows
+    stored them) carry no service suffix in either key, so they are the same finding when the
+    client route matches; a known service never matches an unknown one."""
     first, second = finding_service_origin(left), finding_service_origin(right)
-    return first is not None and first == second and finding_client_route_key(left) == finding_client_route_key(right)
+    return first == second and finding_client_route_key(left) == finding_client_route_key(right)
 
 
 def service_suffix(url: Any) -> str:
