@@ -518,16 +518,16 @@ def test_deleting_a_host_takes_its_linked_services_and_device_findings_do_not_bl
 def test_domain_deletion_selects_its_group_and_linked_services_only():
     async def scenario(pool):
         ids = {name: uuid4() for name in ('apex', 'sub', 'host', 'service', 'lookalike', 'other_tld', 'co_uk')}
-        rows = [('apex', 'https://acme-test.com', None), ('sub', 'https://api.acme-test.com', None),
-                ('host', 'host://db.acme-test.com', None), ('service', 'https://db.acme-test.com:9000', 'host'),
-                ('lookalike', 'https://notacme-test.com', None), ('other_tld', 'https://acme-test.org', None),
+        rows = [('apex', 'https://acme.example', None), ('sub', 'https://api.acme.example', None),
+                ('host', 'host://db.acme.example', None), ('service', 'https://db.acme.example:9000', 'host'),
+                ('lookalike', 'https://notacme.example', None), ('other_tld', 'https://acme.test', None),
                 ('co_uk', 'https://shop.acme-test.co.uk', None)]
         async with pool.acquire() as c:
             for name, url, owner in rows:
                 source = 'host' if url.startswith('host://') else None
                 await c.execute("INSERT INTO targets(id,url,discovery_source,asset_owner_id) VALUES($1,$2,$3,$4)",
                                 ids[name], url, source, ids[owner] if owner else None)
-        preview = await service.preview(pool, {'kind': 'domain', 'domain': 'acme-test.com'})
+        preview = await service.preview(pool, {'kind': 'domain', 'domain': 'acme.example'})
         roots = set(preview['root_ids'])
         assert {str(ids[n]) for n in ('apex', 'sub', 'host', 'service')} <= roots
         assert not {str(ids[n]) for n in ('lookalike', 'other_tld', 'co_uk')} & roots
@@ -536,7 +536,7 @@ def test_domain_deletion_selects_its_group_and_linked_services_only():
             locators = [r['locator'] for r in await c.fetch(
                 'SELECT target_asset_locator(url) AS locator FROM targets WHERE id=ANY($1::uuid[])',
                 [UUID(v) for v in roots])]
-        assert all(l == 'acme-test.com' or l.endswith('.acme-test.com') for l in locators), locators
+        assert all(l == 'acme.example' or l.endswith('.acme.example') for l in locators), locators
         multi_part = await service.preview(pool, {'kind': 'domain', 'domain': 'acme-test.co.uk'})
         assert str(ids['co_uk']) in multi_part['root_ids']
         assert not {str(ids[n]) for n in ('apex', 'lookalike', 'other_tld')} & set(multi_part['root_ids'])
@@ -917,14 +917,14 @@ def test_a_model_intake_submission_and_a_model_intake_target_can_be_deleted():
 def test_a_deleted_domain_takes_its_scope_records_and_discovery_runs_but_not_its_deletion_receipt():
     async def scenario(pool):
         async with pool.acquire() as c:
-            target = await c.fetchval("INSERT INTO targets(url,root_domain) VALUES('https://app.scope-gone.com','scope-gone.com') RETURNING id")
-            other = await c.fetchval("INSERT INTO targets(url,root_domain) VALUES('https://app.scope-kept.com','scope-kept.com') RETURNING id")
+            target = await c.fetchval("INSERT INTO targets(url,root_domain) VALUES('https://app.scope-gone.example','scope-gone.example') RETURNING id")
+            other = await c.fetchval("INSERT INTO targets(url,root_domain) VALUES('https://app.scope-kept.example','scope-kept.example') RETURNING id")
             for owner in (target, other):
                 await c.execute("""INSERT INTO scope_receipts(id,target_id,input_scope,normalized_scope,verdict)
                     VALUES($1,$2,'{"url":"https://app.example.invalid"}'::jsonb,'{}'::jsonb,'allowed')""", str(uuid4()), owner)
-            for domain in ('scope-gone.com', 'scope-kept.com'):
+            for domain in ('scope-gone.example', 'scope-kept.example'):
                 await c.execute("INSERT INTO discovery_runs(id,root_domain,status) VALUES($1,$2,'completed')", uuid4(), domain)
-        preview = await service.preview(pool, {'kind': 'domain', 'domain': 'scope-gone.com'})
+        preview = await service.preview(pool, {'kind': 'domain', 'domain': 'scope-gone.example'})
         assert not preview['blockers'], preview['blockers']
         assert preview['records']['delete']['scope_receipts']['count'] == 1
         assert preview['records']['delete']['discovery_runs']['count'] == 1
@@ -935,8 +935,8 @@ def test_a_deleted_domain_takes_its_scope_records_and_discovery_runs_but_not_its
                 AND COALESCE(normalized_scope->>'kind','')<>'record_deletion'""", target) == 0
             # The deletion's own receipt (IDs only) stays so a retry replays the same result.
             assert await c.fetchval('SELECT COUNT(*) FROM scope_receipts WHERE id=$1', preview['scope_receipt_id']) == 1
-            assert await _count(c, 'discovery_runs', 'root_domain', 'scope-gone.com') == 0
-            assert await _count(c, 'discovery_runs', 'root_domain', 'scope-kept.com') == 1
+            assert await _count(c, 'discovery_runs', 'root_domain', 'scope-gone.example') == 0
+            assert await _count(c, 'discovery_runs', 'root_domain', 'scope-kept.example') == 1
             assert await _count(c, 'scope_receipts', 'target_id', other) == 1
         replay = await service.execute(pool, preview['preview_id'], receipt)
         assert replay['idempotent_replay'] is True
