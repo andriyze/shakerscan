@@ -35,6 +35,9 @@ _LOGIN_SCOPE = _AUTH_ENVELOPES | _CHALLENGE_ENVELOPES | frozenset({
 _COMPLETED_CHALLENGE_STATES = frozenset({
     "complete", "completed", "passed", "verified", "satisfied", "not_required",
 })
+_ACCOUNT_METADATA = frozenset({
+    "user", "profile", "account", "subscription", "billing", "preferences", "settings",
+})
 
 
 def _name(value: Any) -> str:
@@ -86,6 +89,7 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
         if str(name).lower() in {"authorization", "x-auth-token"}
         and isinstance(value, str) and value.strip()
     }
+    header_token = bool(signals)
     content_type = next((str(v).lower() for k, v in result.response_headers.items()
                          if str(k).lower() == "content-type"), "")
     if "json" not in content_type or not result.response_body:
@@ -105,6 +109,18 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
         if isinstance(value, Mapping):
             fields = {_name(k): v for k, v in value.items()}
             nodes.append((path, fields))
+            # A response-header token has no JSON token ancestry to supply scope.
+            # Inspect unfamiliar response wrappers too, while account metadata
+            # remains separate unless it contains an explicit auth envelope below.
+            explicit_login_verdict = bool(fields.keys() & (_REQUIRED_FLAGS | {
+                "authenticated", "is_authenticated", "logged_in", "is_logged_in",
+                "authentication_status", "authentication_state", "login_status",
+            }))
+            auth_start = max((i for i, p in enumerate(path)
+                              if p in _AUTH_ENVELOPES | _CHALLENGE_ENVELOPES), default=-1)
+            metadata_path = path[auth_start + 1:] if auth_start >= 0 else path
+            if header_token and (explicit_login_verdict or not any(p in _ACCOUNT_METADATA for p in metadata_path)):
+                scopes.add(path)
             if path and path[-1] in _AUTH_ENVELOPES:
                 scopes.add(path)  # also handles a header token with a nested auth verdict
             authenticated = authenticated or any(
@@ -113,6 +129,8 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
             )
             for name, child in fields.items():
                 child_path = (*path, name)
+                # Retained challenge tokens are never session evidence. A cleared
+                # challenge may coexist with an independent valid login token.
                 if (name in token_names and isinstance(child, str) and child.strip()
                         and not any(p in _CHALLENGE_ENVELOPES for p in path)
                         and (name != "token" or authenticated or any(p in _AUTH_ENVELOPES for p in path))):
@@ -140,7 +158,6 @@ def successful_token_signals(result: Any) -> tuple[str, ...]:
                     and isinstance(child, str) and _name(child.strip()).replace(" ", "_") in _FAILED_STATES)
                 or (name == "required" and any(p in _CHALLENGE_ENVELOPES for p in path)
                     and _flag(child) is True)
-                or (name in token_names and any(p in _CHALLENGE_ENVELOPES for p in path) and bool(child))
             ):
                 return ()
     return tuple(sorted(signals))
