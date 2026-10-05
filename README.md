@@ -156,7 +156,9 @@ the [LAN access guide](https://github.com/andriyze/shakerscan/blob/main/docs/lan
   responses redact secrets; explicit raw HAR exports include captured credentials. Verbatim HAR
   export is on by default only for a loopback install.
 - Remote commands over SSH (Hunt `ssh.exec`, the live console, saved actions) need an explicit
-  grant on the SSH credential and a pinned host key.
+  grant on the SSH credential and a pinned host key, saved by the operator or pinned on first
+  contact when that is authorized. Device scans run fixed read-only review commands and only
+  operator-confirmed shell plans over the device's SSH credential.
 - Release images are digest-pinned, scanned, and published with SBOMs and build attestations.
 
 Read [SECURITY.md](SECURITY.md) for the full trust boundaries and how to report a vulnerability.
@@ -170,7 +172,8 @@ Read [SECURITY.md](SECURITY.md) for the full trust boundaries and how to report 
   `shakerscan backup delete <name|all>`. The newest five backups are kept
   (`SHAKERSCAN_BACKUP_KEEP`). The encryption key is left out unless you pass `--include-key`, so
   keep `results/.credential_enc.key` safely elsewhere: without it a restored backup cannot decrypt
-  stored secrets.
+  stored secrets. A backup still holds `.env` (generated passwords and tokens) and all evidence;
+  store it as carefully as the host.
 
 ## Troubleshooting
 

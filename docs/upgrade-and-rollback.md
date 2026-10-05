@@ -148,6 +148,21 @@ Re-enable the opt-in CT monitor with `shakerscan gungnir start` if you used it.
 Never use `docker compose down -v`, `shakerscan reset`, `docker system prune --volumes`, or
 `scripts/clean-shakerscan.sh` for this: each deletes the database.
 
+### Root installs: the API's user id
+
+A root install runs the API as the dedicated id 10002, which owns `results/` and the encryption
+key. If a host account or group already uses that id, `start` refuses rather than letting that
+account read the key. Choose a free id once; the launcher saves it as `SHAKERSCAN_ROOT_API_UID`
+in `.env`, moves the files the previous id owned under `results/` to the new one, and reuses it on
+later starts:
+
+```bash
+SHAKERSCAN_ROOT_API_UID=20000 shakerscan start
+```
+
+The id must be between 1 and 2147483647 and must not be 10001, the Model Intake sandbox. A
+non-root install runs the API as the invoking user and ignores this setting.
+
 ## PostgreSQL 18
 
 Releases from this one run PostgreSQL 18; every earlier release ran PostgreSQL 16. A newer PostgreSQL

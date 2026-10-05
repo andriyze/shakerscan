@@ -411,3 +411,40 @@ def test_postgres_rekey_binds_only_the_original_rows_exception_atomically():
             untouched = await conn.fetchrow("SELECT * FROM finding_exceptions WHERE id=$1", other_id)
             assert untouched["fingerprint"] == old_key and untouched["finding_id"] is None
     asyncio.run(run())
+
+
+# The re-key moves the finding and its exceptions in one statement. Data-modifying CTEs share one
+# snapshot and always run, so the exception move must not depend on which sub-statement the plan
+# reads first: a row lock in `prior` skipped the row `moved` had already updated whenever the plan
+# put `moved` first, re-keying the finding but leaving its exception on the old fingerprint.
+@pytest.mark.parametrize("planner_off", [
+    (),
+    ("enable_nestloop",),
+    ("enable_nestloop", "enable_hashjoin"),
+    ("enable_nestloop", "enable_mergejoin"),
+    ("enable_nestloop", "enable_hashjoin", "enable_material"),
+    ("enable_nestloop", "enable_mergejoin", "enable_material"),
+    ("enable_nestloop", "enable_indexscan", "enable_bitmapscan"),
+])
+def test_postgres_rekey_moves_the_exception_whatever_plan_order_postgres_picks(planner_off):
+    async def run():
+        async with _database() as conn:
+            target = uuid.uuid4()
+            await conn.execute("INSERT INTO targets(id) VALUES($1)", target)
+            finding = _finding("https://example.test/search?q=1")
+            old_key = "t:" + hashlib.sha256(pre_service_templated_finding_identity(finding).encode()).hexdigest()[:16]
+            canonical = canonical_finding_fingerprint(finding)
+            row_id = await conn.fetchval("""INSERT INTO findings(target_id,fingerprint,title,url,tool,cwe,evidence,status)
+                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,'accepted_risk') RETURNING id""", target, old_key,
+                finding["title"], finding["url"], finding["tool"], finding["cwe"], json.dumps(finding["evidence"]))
+            exception_id = await conn.fetchval("""INSERT INTO finding_exceptions(target_id,fingerprint,status,approver,expires_at)
+                VALUES($1,$2,'active','operator','2099-01-01') RETURNING id""", target, old_key)
+            async with conn.transaction():
+                for setting in planner_off:
+                    await conn.execute(f"SET LOCAL {setting} = off")
+                adopted = await reconcile_legacy_finding_row(conn, target_uuid=target, fingerprint=canonical, finding=finding)
+            assert adopted["id"] == row_id
+            assert await conn.fetchval("SELECT fingerprint FROM findings WHERE id=$1", row_id) == canonical
+            saved = await conn.fetchrow("SELECT fingerprint, finding_id FROM finding_exceptions WHERE id=$1", exception_id)
+            assert (saved["fingerprint"], saved["finding_id"]) == (canonical, str(row_id))
+    asyncio.run(run())

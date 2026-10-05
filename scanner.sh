@@ -2014,9 +2014,15 @@ prepare_runtime_files() {
     api_gid="$(id -g)"
     if [ "$api_uid" = "0" ]; then
         # The Model Intake sandbox runs as 10001; the web-facing API must not share it.
-        api_uid="${SHAKERSCAN_ROOT_API_UID:-$(read_dotenv_value SHAKERSCAN_ROOT_API_UID)}"
-        # Reuse older launchers' saved choice too; the root-specific setting takes priority.
-        api_uid="${api_uid:-$(read_dotenv_value SHAKERSCAN_API_UID)}"
+        local previous_root_uid
+        previous_root_uid="$(read_dotenv_value SHAKERSCAN_ROOT_API_UID | tr -d '\r')"
+        # Releases before the root setting existed always ran a root install's API as 10002.
+        # SHAKERSCAN_API_UID alone is not a root choice: every non-root start saves the
+        # operator's own id there, which must never become the root API identity.
+        if [ -z "$previous_root_uid" ] && [ "$(read_dotenv_value SHAKERSCAN_API_UID | tr -d '\r')" = "10002" ]; then
+            previous_root_uid=10002
+        fi
+        api_uid="${SHAKERSCAN_ROOT_API_UID:-$previous_root_uid}"
         api_uid="${api_uid:-10002}"
         case "$api_uid" in
             ''|*[!0-9]*)
@@ -2031,8 +2037,9 @@ prepare_runtime_files() {
         done
         if [ "$api_uid" = "0" ] || [ "$api_uid" = "10001" ] \
             || [ "${#api_uid}" -gt 10 ] \
-            || { [ "${#api_uid}" -eq 10 ] && [[ "$api_uid" > 4294967294 ]]; }; then
-            echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be between 1 and 4294967294, other than 10001.${NC}" >&2
+            || { [ "${#api_uid}" -eq 10 ] && [[ "$api_uid" > 2147483647 ]]; }; then
+            # Docker refuses container user ids above 2^31-1.
+            echo -e "${RED}Error: SHAKERSCAN_ROOT_API_UID must be between 1 and 2147483647, other than 10001.${NC}" >&2
             return 1
         fi
         api_gid="$api_uid"
@@ -2045,6 +2052,16 @@ prepare_runtime_files() {
             return 1
         fi
         write_dotenv_value SHAKERSCAN_ROOT_API_UID "$api_uid"
+        # A new API identity takes over what the previous one wrote. Storage initialization only
+        # re-owns results/ itself and the key, so the previous id's owner-only files (archived
+        # payloads, worker output) would otherwise stay unreadable to the API.
+        if [ -n "$previous_root_uid" ] && [ "$previous_root_uid" != "$api_uid" ] && [ -d "$SCRIPT_DIR/results" ]; then
+            echo "Moving results/ files from the previous API id $previous_root_uid to $api_uid..."
+            if ! find "$SCRIPT_DIR/results" -xdev -user "$previous_root_uid" -exec chown -h "$api_uid" {} + \
+                || ! find "$SCRIPT_DIR/results" -xdev -group "$previous_root_uid" -exec chgrp -h "$api_gid" {} +; then
+                echo -e "${YELLOW}Warning: some results/ files still belong to id $previous_root_uid; run: chown -R $api_uid:$api_gid $SCRIPT_DIR/results${NC}" >&2
+            fi
+        fi
         # The API reads this directory through its read-only /workspace mount. A root install
         # directory is private (the installer builds it in a 0700 staging directory), so the
         # API could not enter it and /health failed. Give the API's group read access only;
@@ -3401,6 +3418,164 @@ backup_key_fingerprint() {
     fi
 }
 
+# Every on-host spelling of the configured credential key (relative, absolute, or the
+# container's /results/... path), plus the default location.
+backup_key_paths() {
+    local key_file="$1"
+    printf '%s\n' "$SCRIPT_DIR/results/.credential_enc.key"
+    case "$key_file" in
+        /results/*) printf '%s\n' "$SCRIPT_DIR$key_file" ;;
+        /*) printf '%s\n' "$key_file" ;;
+        *) printf '%s\n' "$SCRIPT_DIR/$key_file" ;;
+    esac
+}
+
+# Archive results/ into $2 without the credential encryption key unless $3 is 1. python3 checks
+# names, inodes and the archived bytes; without it, tar excludes the key by name and leaves out
+# every file whose bytes equal the key (hard links and copies). Upgrades take this backup on
+# hosts that have no python3, so the fallback is a supported path, not an error.
+archive_results_for_backup() {
+    local key_file="$1" output="$2" include_key="$3"
+    if command_exists python3 && python3 -c 'import sys, tarfile; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1; then
+        archive_results_with_python "$key_file" "$output" "$include_key"
+        return $?
+    fi
+    echo "python3 is unavailable; archiving with tar (key excluded by name and by content)."
+    archive_results_with_tar "$key_file" "$output" "$include_key"
+}
+
+archive_results_with_tar() {
+    local key_file="$1" output="$2" include_key="$3"
+    local -a excludes=()
+    local key_path size candidate hops
+    if [ "$include_key" != 1 ]; then
+        excludes+=(--exclude='.credential_enc.key*')
+        while IFS= read -r key_path; do
+            # Resolve a symlinked key to the file that holds the bytes (bounded: a cycle stops).
+            hops=0
+            while [ -L "$key_path" ] && [ "$hops" -lt 40 ]; do
+                candidate="$(readlink "$key_path")"
+                case "$candidate" in
+                    /*) key_path="$candidate" ;;
+                    *) key_path="$(dirname "$key_path")/$candidate" ;;
+                esac
+                hops=$((hops + 1))
+            done
+            [ -f "$key_path" ] || continue
+            if ! size="$(wc -c < "$key_path" 2>/dev/null | tr -d '[:space:]')" || [ -z "$size" ]; then
+                echo -e "${RED}Cannot read the credential key at $key_path to exclude it from the backup.${NC}" >&2
+                return 1
+            fi
+            while IFS= read -r candidate; do
+                if cmp -s "$candidate" "$key_path"; then
+                    # tar reads exclusions as patterns: escape glob characters in the path.
+                    excludes+=(--exclude="$(printf '%s' "${candidate#"$SCRIPT_DIR"/}" | sed 's/[][*?\\]/\\&/g')")
+                fi
+            done < <(find "$SCRIPT_DIR/results" -type f -size "${size}c" 2>/dev/null)
+        done < <(backup_key_paths "$key_file")
+    fi
+    if ! tar -C "$SCRIPT_DIR" ${excludes[@]+"${excludes[@]}"} -czf "$output" results; then
+        rm -f "$output"
+        return 1
+    fi
+    if [ "$include_key" != 1 ] && tar -tzf "$output" | grep -qE '(^|/)\.credential_enc\.key'; then
+        rm -f "$output"
+        echo -e "${RED}The archive still contained the credential key; it was removed.${NC}" >&2
+        return 1
+    fi
+}
+
+archive_results_with_python() {
+    local key_file="$1" output="$2" include_key="$3"
+    # Resolve key aliases before archiving, and verify actual member bytes afterwards.
+    # tarfile does not dereference symlinks; inode checks also exclude hard-link aliases.
+    python3 - "$SCRIPT_DIR" "$key_file" "$output" "$include_key" <<'PY_BACKUP'
+import hashlib
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+root, configured, output, include = Path(sys.argv[1]).resolve(), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"
+paths = {root / "results" / ".credential_enc.key"}
+paths.add(configured if configured.is_absolute() else root / configured)
+if str(configured).startswith("/results/"):
+    paths.add(root / str(configured).lstrip("/"))
+DEFAULT_NAME = ".credential_enc.key"
+inodes, key_hashes, key_members = set(), set(), set()
+
+
+def member_name(path):
+    """The archive name a host path would have, or None outside results/."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    return relative.as_posix() if relative.parts[:1] == ("results",) else None
+
+
+try:
+    if not include:
+        for path in paths:
+            for alias in (path, path.resolve()):
+                name = member_name(alias)
+                if name:
+                    key_members.add(name)
+            if not path.exists() and not path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            info = resolved.stat()
+            if not resolved.is_file() or info.st_size > 65536:
+                raise ValueError("invalid credential key file %s" % resolved)
+            raw = resolved.read_bytes()
+            inodes.add((info.st_dev, info.st_ino))
+            key_hashes.add((len(raw), hashlib.sha256(raw).digest()))
+
+    def secret_name(name):
+        # The default key name is unique to ShakerScan and is excluded anywhere. A custom key
+        # file name (say "key" or "data") is excluded only at its own path, with its lock and
+        # rotation files, so unrelated files that happen to share the name stay in the backup.
+        if Path(name).name.startswith(DEFAULT_NAME):
+            return True
+        return any(name == key or name == key + ".lock" or name.startswith(key + ".tmp")
+                   for key in key_members)
+
+    def keep(member):
+        if include:
+            return member
+        if secret_name(member.name):
+            return None
+        if member.issym():
+            return member  # a symlink records a path, never the key's bytes
+        try:
+            info = os.lstat(str(root / member.name))
+        except OSError:
+            return member
+        return None if (info.st_dev, info.st_ino) in inodes else member
+
+    with tarfile.open(str(output), "w:gz", compresslevel=6, dereference=False) as archive:
+        archive.add(str(root / "results"), arcname="results", filter=keep)
+    if not include:
+        key_sizes = {size for size, _ in key_hashes}
+        with tarfile.open(str(output), "r:gz") as archive:
+            for member in archive:
+                if secret_name(member.name):
+                    raise ValueError("credential key member %s in backup" % member.name)
+                if member.isfile() and member.size in key_sizes:
+                    stream = archive.extractfile(member)
+                    if stream is not None and (member.size, hashlib.sha256(stream.read()).digest()) in key_hashes:
+                        raise ValueError("credential key bytes in backup member %s" % member.name)
+except Exception as exc:  # noqa: BLE001 - report the cause and remove the partial archive
+    try:
+        output.unlink()
+    except FileNotFoundError:
+        pass
+    print("Results backup failed or could not exclude the credential encryption key: %s: %s"
+          % (type(exc).__name__, exc), file=sys.stderr)
+    raise SystemExit(1)
+PY_BACKUP
+}
+
 create_backup() {
     local backup_root="" include_key=0 arg
     for arg in "$@"; do
@@ -3434,71 +3609,7 @@ create_backup() {
     echo "Archiving result artifacts..."
     local key_file
     key_file="$(backup_key_file)"
-    # Resolve key aliases before archiving, and verify actual member bytes afterwards.
-    # tarfile does not dereference symlinks; inode checks also exclude hard-link aliases.
-    if ! python3 - "$SCRIPT_DIR" "$key_file" "$snapshot_dir/results.tar.gz" "$include_key" <<'PY_BACKUP'
-import hashlib
-import os
-from pathlib import Path
-import sys
-import tarfile
-
-root, configured, output, include = Path(sys.argv[1]).resolve(), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"
-paths = {root / "results" / ".credential_enc.key"}
-paths.add(configured if configured.is_absolute() else root / configured)
-if str(configured).startswith("/results/"):
-    paths.add(root / str(configured).lstrip("/"))
-inodes, key_hashes, key_names = set(), set(), {configured.name, ".credential_enc.key"}
-try:
-    if not include:
-        for path in paths:
-            if not path.exists() and not path.is_symlink():
-                continue
-            resolved = path.resolve(strict=True)
-            info = resolved.stat()
-            if not resolved.is_file() or info.st_size > 65536:
-                raise ValueError("invalid credential key file")
-            raw = resolved.read_bytes()
-            inodes.add((info.st_dev, info.st_ino))
-            key_hashes.add((len(raw), hashlib.sha256(raw).digest()))
-            key_names.add(resolved.name)
-
-    def secret_name(name):
-        return name.startswith(".credential_enc.key") or any(
-            name == key or name == key + ".lock" or name.startswith(key + ".tmp")
-            for key in key_names)
-
-    def keep(member):
-        if include:
-            return member
-        if secret_name(Path(member.name).name):
-            return None
-        try:
-            info = (root / member.name).stat()
-        except FileNotFoundError:
-            if member.issym():  # an unrelated broken symlink contains no key bytes
-                return member
-            raise
-        return None if (info.st_dev, info.st_ino) in inodes else member
-
-    with tarfile.open(output, "w:gz", dereference=False) as archive:
-        archive.add(root / "results", arcname="results", filter=keep)
-    if not include:
-        key_sizes = {size for size, _ in key_hashes}
-        with tarfile.open(output, "r:gz") as archive:
-            for member in archive:
-                if secret_name(Path(member.name).name):
-                    raise ValueError("credential key member in backup")
-                if member.isfile() and member.size in key_sizes:
-                    with archive.extractfile(member) as stream:
-                        if (member.size, hashlib.sha256(stream.read()).digest()) in key_hashes:
-                            raise ValueError("credential key bytes in backup")
-except Exception:
-    output.unlink(missing_ok=True)
-    print("Results backup failed or could not exclude the credential encryption key", file=sys.stderr)
-    raise SystemExit(1)
-PY_BACKUP
-    then
+    if ! archive_results_for_backup "$key_file" "$snapshot_dir/results.tar.gz" "$include_key"; then
         echo -e "${RED}Results backup failed. Partial files remain at $snapshot_dir${NC}"
         return 1
     fi
@@ -3507,7 +3618,9 @@ PY_BACKUP
         if [ "$include_key" = 1 ]; then
             cp "$SCRIPT_DIR/.env" "$snapshot_dir/runtime.env"
         else
-            grep -vE '^[[:space:]]*(export[[:space:]]+)?AI_CREDENTIAL_ENC_KEY[[:space:]]*=' \
+            # Any line that assigns the key, however spelled (export, "KEY: value", a leading
+            # byte-order mark, or commented out), stays out. AI_CREDENTIAL_ENC_KEY_FILE is kept.
+            grep -vE '(^|[^A-Za-z0-9_])AI_CREDENTIAL_ENC_KEY[[:space:]]*[=:]' \
                 "$SCRIPT_DIR/.env" > "$snapshot_dir/runtime.env" || true
         fi
     fi

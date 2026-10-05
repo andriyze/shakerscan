@@ -161,8 +161,9 @@ async def _export(
     if redaction not in REDACTION_MODES:
         raise HTTPException(status_code=400, detail=f"unsupported redaction mode {redaction}")
     # Every export, HAR included, honours the requested masking. Verbatim HAR is the replay
-    # workflow (Burp needs the real request) and is allowed unless the deployment turned it
-    # off; raw JSON keeps its stricter operator gate as the privileged diagnostic surface.
+    # workflow (Burp needs the real request): on by default only while the API is published on
+    # loopback (raw_har_enabled); raw JSON keeps its stricter operator gate as the privileged
+    # diagnostic surface.
     effective_redaction = redaction
     if effective_redaction == "raw":
         if export_format != "har":

@@ -20,7 +20,7 @@ or the SBOM, or open an issue and we will provide it.
 | Component | Author / maintainer | Upstream | Licence | How ShakerScan uses it |
 |---|---|---|---|---|
 | nuclei | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/nuclei | MIT | Built from source; template-based checks |
-| nuclei-templates | ProjectDiscovery, Inc. and community contributors | https://github.com/projectdiscovery/nuclei-templates | MIT | Pinned snapshot bundled; a few templates copied, with their authors, as test fixtures in `tests/fixtures/nuclei_templates/` |
+| nuclei-templates | ProjectDiscovery, Inc. and community contributors | https://github.com/projectdiscovery/nuclei-templates | MIT | Pinned snapshot bundled; a few templates copied, with their authors and the upstream MIT licence, as test fixtures in `tests/fixtures/nuclei_templates/` |
 | httpx | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/httpx | MIT | Built from source; HTTP probing |
 | katana | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/katana | MIT | Built from source; crawling |
 | subfinder | ProjectDiscovery, Inc. | https://github.com/projectdiscovery/subfinder | MIT | Built from source; passive subdomain discovery |
